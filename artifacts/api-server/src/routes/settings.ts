@@ -8,10 +8,11 @@ import { broadcastSSE } from "../lib/sse";
 
 const router = Router();
 
-async function getOrCreateSettings() {
-  const existing = await db.select().from(settingsTable).limit(1);
+async function getOrCreateSettings(sessionId: string) {
+  const existing = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, sessionId)).limit(1);
   if (existing.length > 0) return existing[0];
-  const [created] = await db.insert(settingsTable).values({}).returning();
+  const [created] = await db.insert(settingsTable).values({ sessionId }).returning();
   return created;
 }
 
@@ -51,8 +52,8 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
   };
 }
 
-router.get("/", async (_req, res): Promise<void> => {
-  const settings = await getOrCreateSettings();
+router.get("/", async (req, res): Promise<void> => {
+  const settings = await getOrCreateSettings(req.sessionId);
   res.json(formatSettings(settings));
 });
 
@@ -66,7 +67,7 @@ router.put("/", async (req, res): Promise<void> => {
   }
 
   try {
-    const settings = await getOrCreateSettings();
+    const settings = await getOrCreateSettings(req.sessionId);
     const updates = parseResult.data;
 
   const updateData: Partial<typeof settingsTable.$inferInsert> = {
@@ -114,12 +115,11 @@ router.put("/", async (req, res): Promise<void> => {
       .returning();
 
     logger.info({ id: updated.id }, "Settings saved successfully");
-    // Notify all connected dashboard clients so they immediately refresh
-    // market data, engine status, and contract-type displays without a page reload.
+    // Notify only this browser session so another visitor's UI is never affected.
     broadcastSSE("settings_updated", {
       preferredContractTypes: updated.preferredContractTypes.split(",").filter(Boolean),
       ts: Date.now(),
-    });
+    }, req.sessionId);
     res.json(formatSettings(updated));
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -26,6 +26,9 @@ import {
   hasTradingOwnership,
   releaseTradingOwnership,
 } from "./engine-arbiter.ts";
+import { AUTOMATED_DERIV_MARKETS, DERIV_MARKETS, isAutomatedMarket } from "./deriv.ts";
+import { browserSession } from "./session.ts";
+import { getTzOffset, setTzOffset } from "./tz.ts";
 import {
   recordRecoveryOutcome,
   type SpeedRecoveryState,
@@ -33,6 +36,16 @@ import {
 
 const MAX_STEPS = 5;
 const ORIGIN_PAYOUT = 1.4; // 0.70 * 0.4 = 0.28 target profit
+
+function inBrowserSession<T>(sessionId: string, action: () => T): T {
+  let value!: T;
+  browserSession(
+    { cookies: { neurotrade_session: sessionId } } as any,
+    { cookie: () => undefined } as any,
+    () => { value = action(); },
+  );
+  return value;
+}
 
 function emptyFab(baseStake = 0.7): SpeedRecoveryState {
   return {
@@ -449,6 +462,43 @@ describe("incident replay — instant recovery on the single shared ledger", () 
     );
     assert.equal(instant, 0.59); // full (0.75 + 0.09) / 1.43 rounded up
     assert.equal(split, 0.4);    // exact 0.59 capped at one base stake
+  });
+});
+
+describe("browser-session runtime isolation", () => {
+  const sessionA = "11111111-1111-4111-8111-111111111111";
+  const sessionB = "22222222-2222-4222-8222-222222222222";
+
+  it("keeps recovery debt in the browser session that recorded it", () => {
+    inBrowserSession(sessionA, () => {
+      recoveryEngine.resetAll();
+      recoveryEngine.recordOutcome(false, -0.7, 0.7, 3, "DIGITOVER", ORIGIN_PAYOUT);
+    });
+    assert.equal(inBrowserSession(sessionB, () => recoveryEngine.getState().inRecovery), false);
+    assert.equal(inBrowserSession(sessionA, () => recoveryEngine.getState().unrecoveredAmount), 0.7);
+  });
+
+  it("keeps browser timezone offsets independent", () => {
+    inBrowserSession(sessionA, () => setTzOffset(-180));
+    inBrowserSession(sessionB, () => setTzOffset(300));
+    assert.equal(inBrowserSession(sessionA, getTzOffset), -180);
+    assert.equal(inBrowserSession(sessionB, getTzOffset), 300);
+  });
+});
+
+describe("autonomous market universe", () => {
+  it("keeps Jump 100 manual-only while retaining it in the full catalog", () => {
+    assert.equal(DERIV_MARKETS.some((market) => market.symbol === "JD100"), true);
+    assert.equal(isAutomatedMarket("JD100"), false);
+    assert.equal(AUTOMATED_DERIV_MARKETS.some((market) => market.symbol === "JD100"), false);
+  });
+
+  it("includes the three requested 1-second volatility indices", () => {
+    for (const symbol of ["1HZ15V", "1HZ30V", "1HZ90V"]) {
+      assert.equal(isAutomatedMarket(symbol), true, `${symbol} should be automated-eligible`);
+    }
+    assert.equal(DERIV_MARKETS.length, 20);
+    assert.equal(AUTOMATED_DERIV_MARKETS.length, 19);
   });
 });
 

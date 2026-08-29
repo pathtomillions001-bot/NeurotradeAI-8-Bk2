@@ -4,11 +4,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { Checkbox } from "@/components/ui/checkbox";
 import { motion } from "framer-motion";
 import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
 import { Link, useLocation } from "wouter";
-import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, CheckCircle2, Zap, FlaskConical, RefreshCw } from "lucide-react";
+import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, CheckCircle2, Zap, FlaskConical, RefreshCw, AlertTriangle, Activity, LockKeyhole, TrendingDown } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 // ── PKCE utilities ────────────────────────────────────────────────────────────
@@ -57,6 +59,10 @@ export default function Connect() {
   const [showToken, setShowToken] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [oauthPending, setOauthPending] = useState(false);
+  const [riskOpen, setRiskOpen] = useState(false);
+  const [riskChecked, setRiskChecked] = useState(false);
+  const [riskSaving, setRiskSaving] = useState(false);
+  const [connectIntent, setConnectIntent] = useState<"oauth" | "token">("oauth");
   const handledRef = useRef(false);
 
   // ── Handle OAuth2 callback (new: code param; legacy: token1/acct1 params) ──
@@ -149,7 +155,7 @@ export default function Connect() {
   }, []);
 
   // ── Initiate OAuth2 + PKCE login ──────────────────────────────────────────
-  const handleDerivLogin = async () => {
+  const performDerivLogin = async () => {
     try {
       const { codeVerifier, codeChallenge } = await createPkce();
       const state = generateState();
@@ -183,8 +189,7 @@ export default function Connect() {
   };
 
   // ── Manual PAT token connect ───────────────────────────────────────────────
-  const handleConnect = (e: React.FormEvent) => {
-    e.preventDefault();
+  const performTokenConnect = () => {
     if (!token) return;
     connect.mutate({ data: { token } }, {
       onSuccess: () => {
@@ -202,6 +207,38 @@ export default function Connect() {
         toast.error(msg);
       },
     });
+  };
+
+  const requestConnection = (intent: "oauth" | "token") => {
+    if (intent === "token" && !token.trim()) return;
+    setConnectIntent(intent);
+    setRiskChecked(false);
+    setRiskOpen(true);
+  };
+
+  const handleConnect = (event: React.FormEvent) => {
+    event.preventDefault();
+    requestConnection("token");
+  };
+
+  const acceptRiskAndContinue = async () => {
+    if (!riskChecked || riskSaving) return;
+    setRiskSaving(true);
+    try {
+      const base = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
+      const response = await fetch(`${base}/api/auth/risk-acknowledgment`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!response.ok) throw new Error("Could not save risk acknowledgment");
+      setRiskOpen(false);
+      if (connectIntent === "oauth") await performDerivLogin();
+      else performTokenConnect();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not continue");
+    } finally {
+      setRiskSaving(false);
+    }
   };
 
   const handleDisconnect = () => {
@@ -408,6 +445,74 @@ export default function Connect() {
 
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 md:p-8 max-w-2xl mx-auto space-y-6">
+      <Dialog open={riskOpen} onOpenChange={(open) => { if (!riskSaving) setRiskOpen(open); }}>
+        <DialogContent className="max-w-lg overflow-hidden border-cyan-400/25 bg-[#080d18]/95 p-0 shadow-[0_0_80px_rgba(34,211,238,0.16)] backdrop-blur-2xl">
+          <div className="relative">
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-cyan-400/10 to-transparent" />
+            <div className="pointer-events-none absolute -right-20 -top-20 h-48 w-48 rounded-full bg-violet-500/10 blur-3xl" />
+
+            <div className="relative p-6 md:p-7">
+              <DialogHeader className="text-left">
+                <div className="mb-3 flex items-center gap-3">
+                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-amber-300/25 bg-amber-400/10 shadow-[0_0_24px_rgba(251,191,36,0.12)]">
+                    <AlertTriangle className="h-5 w-5 text-amber-300" />
+                  </div>
+                  <div>
+                    <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.28em] text-cyan-300/70">Pre-flight protocol</div>
+                    <DialogTitle className="text-xl font-semibold tracking-tight text-white">Trading risk acknowledgment</DialogTitle>
+                  </div>
+                </div>
+                <DialogDescription className="text-sm leading-relaxed text-slate-400">
+                  Before linking your account, confirm that you understand the risks of manual and automated derivatives trading.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="my-5 grid gap-2.5">
+                {[
+                  { icon: TrendingDown, title: "Capital is at risk", text: "Synthetic options can result in rapid losses, including your full stake." },
+                  { icon: Activity, title: "AI is not a guarantee", text: "Signals, confidence scores, and automated execution cannot guarantee profit." },
+                  { icon: LockKeyhole, title: "You remain in control", text: "Review limits, use a demo account first, and stop an engine whenever needed." },
+                ].map(({ icon: Icon, title, text }) => (
+                  <div key={title} className="flex gap-3 rounded-xl border border-white/[0.07] bg-white/[0.035] p-3.5">
+                    <Icon className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
+                    <div>
+                      <div className="text-xs font-semibold text-slate-100">{title}</div>
+                      <p className="mt-1 text-[11px] leading-relaxed text-slate-400">{text}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-300/15 bg-cyan-300/[0.04] p-4 transition-colors hover:bg-cyan-300/[0.065]">
+                <Checkbox
+                  checked={riskChecked}
+                  onCheckedChange={(checked) => setRiskChecked(checked === true)}
+                  className="mt-0.5 border-cyan-300/50 data-[state=checked]:bg-cyan-300 data-[state=checked]:text-slate-950"
+                />
+                <span className="text-xs leading-relaxed text-slate-300">
+                  I understand that trading involves substantial risk, that past or simulated performance does not predict future results, and that I am solely responsible for every trade placed through my account.
+                </span>
+              </label>
+
+              <div className="mt-5 flex gap-3">
+                <Button type="button" variant="ghost" className="flex-1 text-slate-400" disabled={riskSaving} onClick={() => setRiskOpen(false)}>
+                  Not now
+                </Button>
+                <Button
+                  type="button"
+                  className="flex-[1.65] bg-gradient-to-r from-cyan-300 to-violet-400 font-semibold text-slate-950 shadow-[0_0_24px_rgba(34,211,238,0.2)] hover:opacity-90"
+                  disabled={!riskChecked || riskSaving}
+                  onClick={acceptRiskAndContinue}
+                >
+                  {riskSaving ? <><RefreshCw className="mr-2 h-4 w-4 animate-spin" /> Saving…</> : <><ShieldCheck className="mr-2 h-4 w-4" /> Accept & continue</>}
+                </Button>
+              </div>
+              <p className="mt-4 text-center font-mono text-[9px] uppercase tracking-[0.16em] text-slate-600">Your acknowledgment does not waive any legal rights</p>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+
       <div>
         <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Connect Deriv Account</h1>
         <p className="text-muted-foreground mt-1 text-sm">Sign in with your Deriv account to enable live trading.</p>
@@ -428,7 +533,7 @@ export default function Connect() {
         <CardContent className="space-y-4">
           <Button
             className="w-full h-12 text-base font-semibold bg-primary text-black hover:bg-primary/90 shadow-[0_0_20px_rgba(0,255,255,0.25)] transition-all hover:shadow-[0_0_30px_rgba(0,255,255,0.4)]"
-            onClick={handleDerivLogin}
+            onClick={() => requestConnection("oauth")}
           >
             <svg className="w-5 h-5 mr-2" viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14H9V8h2v8zm4 0h-2V8h2v8z" />
@@ -492,7 +597,7 @@ export default function Connect() {
                 </div>
                 <p className="text-xs text-muted-foreground">
                   For full live trading, use{" "}
-                  <button type="button" onClick={handleDerivLogin} className="text-primary underline">Sign in with Deriv</button>
+                  <button type="button" onClick={() => requestConnection("oauth")} className="text-primary underline">Sign in with Deriv</button>
                   {" "}above to get an OAuth Bearer token automatically.
                 </p>
               </div>

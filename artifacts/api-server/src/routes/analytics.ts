@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { tradesTable, settingsTable, accountsTable } from "@workspace/db";
-import { sql, desc } from "drizzle-orm";
+import { and, eq, sql, desc } from "drizzle-orm";
 import { GetPerformanceAnalyticsQueryParams } from "@workspace/api-zod";
 
 const router = Router();
@@ -13,9 +13,10 @@ router.get("/performance", async (req, res): Promise<void> => {
   const since = new Date();
   since.setDate(since.getDate() - days);
 
-  const trades = await db.select().from(tradesTable).where(
-    sql`${tradesTable.createdAt} >= ${since} AND ${tradesTable.status} IN ('won', 'lost')`
-  );
+  const trades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.createdAt} >= ${since} AND ${tradesTable.status} IN ('won', 'lost')`,
+  ));
 
   // Group by date
   const byDate = new Map<string, typeof trades>();
@@ -66,12 +67,13 @@ router.get("/performance", async (req, res): Promise<void> => {
   });
 });
 
-router.get("/drawdown", async (_req, res): Promise<void> => {
-  const settings = await db.select().from(settingsTable).limit(1);
-  const accounts = await db.select().from(accountsTable).limit(1);
-  const trades = await db.select().from(tradesTable).where(
-    sql`${tradesTable.status} IN ('won', 'lost')`
-  );
+router.get("/drawdown", async (req, res): Promise<void> => {
+  const settings = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
+  const accounts = await db.select().from(accountsTable).where(and(eq(accountsTable.sessionId, req.sessionId), eq(accountsTable.isActive, true))).limit(1);
+  const trades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.status} IN ('won', 'lost')`,
+  ));
 
   const drawdownLimit = settings.length > 0 ? Number(settings[0].maxDrawdown) : 10;
   const consecutiveLossLimit = settings.length > 0 ? settings[0].consecutiveLossLimit : 3;
@@ -112,10 +114,11 @@ router.get("/drawdown", async (_req, res): Promise<void> => {
   });
 });
 
-router.get("/market-breakdown", async (_req, res): Promise<void> => {
-  const trades = await db.select().from(tradesTable).where(
-    sql`${tradesTable.status} IN ('won', 'lost')`
-  );
+router.get("/market-breakdown", async (req, res): Promise<void> => {
+  const trades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.status} IN ('won', 'lost')`,
+  ));
 
   const byMarket = new Map<string, { symbol: string; displayName: string; trades: typeof trades }>();
   for (const t of trades) {
@@ -143,13 +146,14 @@ router.get("/market-breakdown", async (_req, res): Promise<void> => {
   res.json(breakdown);
 });
 
-router.get("/agent-scores", async (_req, res): Promise<void> => {
+router.get("/agent-scores", async (req, res): Promise<void> => {
   const agents = ["marketScanner", "trendAnalysis", "volatilityAnalysis", "patternRecognition",
     "riskManagement", "capitalPreservation", "tradeExecution", "selfLearning"];
 
-  const trades = await db.select().from(tradesTable).where(
-    sql`${tradesTable.status} IN ('won', 'lost')`
-  ).orderBy(desc(tradesTable.createdAt)).limit(50);
+  const trades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.status} IN ('won', 'lost')`,
+  )).orderBy(desc(tradesTable.createdAt)).limit(50);
 
   const records = [];
   for (const t of trades) {

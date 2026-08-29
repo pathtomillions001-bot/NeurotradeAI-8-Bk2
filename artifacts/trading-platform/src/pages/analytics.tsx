@@ -5,11 +5,10 @@ import {
   AreaChart, Area, ReferenceLine, CartesianGrid,
 } from "recharts";
 import {
-  TrendingUp, TrendingDown, Activity, Shield, Zap, Target,
-  CheckCircle2, XCircle, Clock, Flame, AlertTriangle,
+  TrendingUp, TrendingDown, Activity, Zap, Target,
+  CheckCircle2, XCircle, Clock, Flame,
 } from "lucide-react";
 import { useMemo, useEffect } from "react";
-import { useGetDrawdownAnalysis } from "@workspace/api-client-react";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -292,73 +291,12 @@ function TradeTimeline({ trades }: { trades: any[] }) {
   );
 }
 
-// ── Risk snapshot ─────────────────────────────────────────────────────────────
-function RiskSnapshot({ drawdown, consecutiveLosses, consecutiveWins }: { drawdown: any; consecutiveLosses: number; consecutiveWins: number }) {
-  return (
-    <div className="rounded-xl border border-border/60 bg-card/70 p-4 space-y-3">
-      <div className="flex items-center gap-1.5">
-        <Shield className="w-3.5 h-3.5 text-muted-foreground" />
-        <p className="text-xs font-semibold text-foreground">Risk Status</p>
-      </div>
-      {drawdown ? (
-        <>
-          {drawdown.isAtRisk && (
-            <div className="flex items-center gap-2 p-2 rounded-lg bg-red-500/10 border border-red-500/20">
-              <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0" />
-              <span className="text-[10px] text-red-400">Approaching drawdown limit — engine will stop soon</span>
-            </div>
-          )}
-          {[
-            { label: "Drawdown",   value: drawdown.currentDrawdown, limit: drawdown.drawdownLimit, color: "bg-red-500" },
-            { label: "Max today",  value: drawdown.maxDrawdown,     limit: drawdown.drawdownLimit, color: "bg-amber-500" },
-          ].map(item => (
-            <div key={item.label}>
-              <div className="flex justify-between text-[10px] mb-1">
-                <span className="text-muted-foreground">{item.label}</span>
-                <span className="font-mono font-semibold">{item.value.toFixed(2)}%</span>
-              </div>
-              <div className="h-1.5 w-full bg-secondary rounded-full overflow-hidden">
-                <div className={`h-full rounded-full ${item.color} transition-all`}
-                  style={{ width: `${Math.min((item.value / item.limit) * 100, 100)}%` }} />
-              </div>
-            </div>
-          ))}
-        </>
-      ) : (
-        <p className="text-[11px] text-muted-foreground animate-pulse">Loading risk data…</p>
-      )}
-
-      <div className="grid grid-cols-2 gap-2 pt-1">
-        <div className="text-center rounded-lg bg-secondary/40 py-2.5">
-          <p className={`text-xl font-mono font-bold ${consecutiveWins > 2 ? "text-emerald-400" : consecutiveWins > 0 ? "text-emerald-300" : "text-muted-foreground"}`}>
-            {consecutiveWins}
-          </p>
-          <p className="text-[9px] text-muted-foreground flex items-center justify-center gap-1 mt-0.5">
-            {consecutiveWins > 2 && <Flame className="w-2.5 h-2.5 text-amber-400" />}
-            Win streak
-          </p>
-        </div>
-        <div className="text-center rounded-lg bg-secondary/40 py-2.5">
-          <p className={`text-xl font-mono font-bold ${consecutiveLosses >= 3 ? "text-red-500" : consecutiveLosses > 0 ? "text-amber-400" : "text-muted-foreground"}`}>
-            {consecutiveLosses}
-          </p>
-          <p className="text-[9px] text-muted-foreground flex items-center justify-center gap-1 mt-0.5">
-            {consecutiveLosses >= 3 && <AlertTriangle className="w-2.5 h-2.5 text-red-500" />}
-            Loss streak
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function Analytics() {
   const queryClient = useQueryClient();
   const { data, isLoading } = useTodayTrades();
   const trades = data?.todayTrades ?? [];
   const serverStats = data?.todayStats ?? null;
-  const { data: drawdown } = useGetDrawdownAnalysis({ query: { refetchInterval: 15000 } } as any);
 
   // Same SSE-driven invalidation Dashboard/Journal use, on the same "derivJournal"
   // query key — so a trade completing anywhere in the app updates Analytics with
@@ -496,7 +434,7 @@ export default function Analytics() {
             </motion.div>
           </div>
 
-          {/* ── Bottom row: timeline + contract breakdown + risk ─────── */}
+          {/* ── Bottom row: timeline + contract breakdown ───────────── */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}
               className="lg:col-span-2">
@@ -505,11 +443,6 @@ export default function Analytics() {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}
               className="space-y-4">
               <ContractBreakdown trades={trades} />
-              <RiskSnapshot
-                drawdown={drawdown}
-                consecutiveLosses={consecutiveLosses}
-                consecutiveWins={consecutiveWins}
-              />
             </motion.div>
           </div>
         </>

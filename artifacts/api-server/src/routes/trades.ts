@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
-import { tickManager, DERIV_MARKETS, getCachedToken, executeLiveTrade, waitForContractResult, getLiveBalance, journalManager } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getJournalManager, isAutomatedMarket } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
@@ -18,6 +18,18 @@ import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/typ
 const router = Router();
 
 const DEMO_BALANCE = 10000;
+
+async function getActiveAccount(sessionId: string) {
+  let accounts = await db.select().from(accountsTable).where(and(
+    eq(accountsTable.sessionId, sessionId),
+    eq(accountsTable.isActive, true),
+  )).limit(1);
+  if (accounts.length === 0) {
+    accounts = await db.select().from(accountsTable)
+      .where(eq(accountsTable.sessionId, sessionId)).limit(1);
+  }
+  return accounts[0] ?? null;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -72,8 +84,9 @@ export function getTodayStart(): Date {
 }
 
 // ── Helper: get Deriv journal transactions (cache-first, no size cap) ────────
-async function getDerivTransactions(_token: string): Promise<any[]> {
-  // Always use the persistent manager's fully-paginated cache — it holds the
+async function getDerivTransactions(sessionId: string): Promise<any[]> {
+  const journalManager = getJournalManager(sessionId);
+  // Always use this browser session's persistent fully-paginated cache — it holds the
   // COMPLETE result set with no trade-count limit.
   //
   // The old "fallback to fetchDerivProfitTable(500)" when the cache was empty
@@ -104,17 +117,19 @@ const EMPTY_STATS = {
 
 // ── Stats ──────────────────────────────────────────────────────────────────────
 
-router.get("/stats", async (_req, res): Promise<void> => {
-  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
-  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
-  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
+router.get("/stats", async (req, res): Promise<void> => {
+  const account = await getActiveAccount(req.sessionId);
+  const token = account?.bearerToken ?? account?.token ?? null;
+  if (token && account) {
+    getJournalManager(req.sessionId).setCredentials(token, account.derivAccountId ?? account.loginId);
+  }
 
   if (!token) {
     res.json(EMPTY_STATS);
     return;
   }
 
-  const transactions = await getDerivTransactions(token);
+  const transactions = await getDerivTransactions(req.sessionId);
   const mapped = transactions.map((t: any) => {
     const buyPrice = Number(t.buy_price ?? 0);
     const sellPrice = Number(t.sell_price ?? 0);
@@ -138,23 +153,29 @@ router.get("/stats", async (_req, res): Promise<void> => {
   });
 });
 
-router.get("/daily-summary", async (_req, res): Promise<void> => {
+router.get("/daily-summary", async (req, res): Promise<void> => {
   const today = getTodayStart();
 
-  const settings = await db.select().from(settingsTable).limit(1);
-  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
-  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
-  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
+  const account = await getActiveAccount(req.sessionId);
+  const token = account?.bearerToken ?? account?.token ?? null;
+  if (token && account) {
+    getJournalManager(req.sessionId).setCredentials(token, account.derivAccountId ?? account.loginId);
+  }
 
   const dailyTarget = settings.length > 0 ? Number(settings[0].dailyTarget) : 50;
   const dailyLossLimit = settings.length > 0 ? Number(settings[0].dailyLossLimit) : 30;
-  const balance = accounts.length > 0 ? Number(accounts[0].balance) : 0;
+  const balance = account ? Number(account.balance) : 0;
 
   if (!token) {
     // No Deriv connection — use local DB for engine-tracked trades only. Reuse
     // computeJournalStats so this stays numerically identical to /deriv-journal's
     // todayStats if the app is ever queried on the same local-DB fallback path.
-    const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+    const todayTrades = await db.select().from(tradesTable).where(and(
+      eq(tradesTable.sessionId, req.sessionId),
+      sql`${tradesTable.createdAt} >= ${today}`,
+    ));
     const closed = todayTrades
       .filter((t) => t.status === "won" || t.status === "lost")
       .map((t) => ({ won: t.status === "won", profit: Number(t.profit ?? 0), createdAt: t.createdAt }));
@@ -173,7 +194,7 @@ router.get("/daily-summary", async (_req, res): Promise<void> => {
   // Use Deriv journal as source of truth — same computeJournalStats() call the
   // /deriv-journal endpoint uses, so this widget's numbers can never drift from
   // the Dashboard/Journal/Analytics stat cards.
-  const transactions = await getDerivTransactions(token);
+  const transactions = await getDerivTransactions(req.sessionId);
   const allMapped = transactions.map((t: any) => {
     const buyPrice = Number(t.buy_price ?? 0);
     const sellPrice = Number(t.sell_price ?? 0);
@@ -208,7 +229,7 @@ router.get("/", async (req, res): Promise<void> => {
   const params = parseResult.success ? parseResult.data : {};
 
   let query = db.select().from(tradesTable).$dynamic();
-  const conditions = [];
+  const conditions = [eq(tradesTable.sessionId, req.sessionId)];
 
   const p = params as { status?: string; market?: string; limit?: number; offset?: number };
   if (p.status && p.status !== "all") {
@@ -283,13 +304,12 @@ router.post("/", async (req, res): Promise<void> => {
   // barrier is in Zod schema — use it directly
   const requestBarrier = parseResult.data.barrier ?? undefined;
 
-  // Always prefer the active account (respects real vs demo switch)
-  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
-  if (accounts.length === 0) {
-    accounts = await db.select().from(accountsTable).limit(1);
-  }
-  const settings = await db.select().from(settingsTable).limit(1);
-  const balance = accounts.length > 0 ? Number(accounts[0].balance) : DEMO_BALANCE;
+  // Always resolve credentials from this browser's isolated active account.
+  const account = await getActiveAccount(req.sessionId);
+  const accounts = account ? [account] : [];
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
+  const balance = account ? Number(account.balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
 
@@ -304,9 +324,14 @@ router.post("/", async (req, res): Promise<void> => {
 
   const market = DERIV_MARKETS.find((m) => m.symbol === symbol);
   const displayName = market?.displayName ?? symbol;
+  // Defense in depth: Jump 100 remains available only for true manual orders.
+  if (isAutonomous && !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: `${displayName} is manual-only and cannot be executed by an AI engine` });
+    return;
+  }
 
-  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
-  const currency = accounts.length > 0 ? accounts[0].currency : "USD";
+  const token = account?.bearerToken ?? account?.token ?? null;
+  const currency = account?.currency ?? "USD";
   const isLiveTrade = !paperTradeMode && !!token;
 
   // ── Run coordinator for rich AI context ──────────────────────────────────
@@ -315,7 +340,10 @@ router.post("/", async (req, res): Promise<void> => {
 
   // Build daily stats
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+  const todayTrades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.createdAt} >= ${today}`,
+  ));
   const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
   const daily = buildDailyStatsForManual(closedToday);
 
@@ -388,6 +416,7 @@ router.post("/", async (req, res): Promise<void> => {
   if (isLiveTrade) {
     // Insert as "open" immediately so the journal shows it in-progress
     const [openTrade] = await db.insert(tradesTable).values({
+      sessionId: req.sessionId,
       symbol,
       displayName,
       contractType,
@@ -414,11 +443,15 @@ router.post("/", async (req, res): Promise<void> => {
         duration: tradeDuration,
         durationUnit: durationUnit ?? "t",
         currency,
+        accountId: account!.derivAccountId ?? account!.loginId,
         barrier,
       });
 
       // Wait for Deriv to settle the contract — ticks * 1s + 30s safety buffer
-      const contractResult = await waitForContractResult(token!, liveResult.contractId, (tradeDuration + 30) * 1000);
+      const contractResult = await waitForContractResult(
+        token!, account!.derivAccountId ?? account!.loginId,
+        liveResult.contractId, (tradeDuration + 30) * 1000,
+      );
       won = contractResult.won;
       // Use Deriv's exact profit — ground truth for the journal
       profit = contractResult.profit;
@@ -446,6 +479,7 @@ router.post("/", async (req, res): Promise<void> => {
     // recovery state, regardless of which contract type caused the original loss.
     {
       const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
+      recoveryEngine.setPersistenceSession(req.sessionId);
       if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType, payoutMultiplier);
     }
 
@@ -462,7 +496,7 @@ router.post("/", async (req, res): Promise<void> => {
 
     // Sync live balance — update only the active account
     try {
-      const newBalance = await getLiveBalance(token!);
+      const newBalance = await getLiveBalance(token!, account?.derivAccountId ?? account?.loginId);
       if (newBalance !== null && accounts.length > 0) {
         await db.update(accountsTable).set({ balance: String(newBalance), updatedAt: new Date() }).where(eq(accountsTable.id, accounts[0].id));
       }
@@ -478,11 +512,11 @@ router.post("/", async (req, res): Promise<void> => {
         createdAt: new Date().toISOString(), closedAt: new Date().toISOString(),
         aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "live",
       }
-    });
-    // Immediately refresh the Deriv profit_table so journal + streak reflect this trade
-    // Broadcast journal_refreshed once Deriv confirms the updated profit_table
+    }, req.sessionId);
+    // Immediately refresh only this browser session's Deriv profit table.
+    const journalManager = getJournalManager(req.sessionId);
     journalManager.once("refreshed", () => {
-      broadcastSSE("journal_refreshed", { ts: Date.now() });
+      broadcastSSE("journal_refreshed", { ts: Date.now() }, req.sessionId);
     });
     journalManager.forceRefresh();
 
@@ -519,10 +553,12 @@ router.post("/", async (req, res): Promise<void> => {
   // Update recovery engine for paper/demo manual trades too (global state)
   {
     const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
+    recoveryEngine.setPersistenceSession(req.sessionId);
     if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType, payoutMultiplier);
   }
 
   const [trade] = await db.insert(tradesTable).values({
+    sessionId: req.sessionId,
     symbol,
     displayName,
     contractType,
@@ -547,7 +583,9 @@ router.post("/", async (req, res): Promise<void> => {
   try {
     if (accounts.length > 0) {
       const newBalance = Math.max(0, balance + profit);
-      await db.update(accountsTable).set({ balance: String(newBalance.toFixed(2)), updatedAt: new Date() });
+      await db.update(accountsTable)
+        .set({ balance: String(newBalance.toFixed(2)), updatedAt: new Date() })
+        .where(eq(accountsTable.id, accounts[0].id));
     }
   } catch { /* ignore */ }
 
@@ -561,7 +599,7 @@ router.post("/", async (req, res): Promise<void> => {
       createdAt: new Date().toISOString(), closedAt: new Date().toISOString(),
       aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "paper",
     }
-  });
+  }, req.sessionId);
 
   // Fire-and-forget: Trade Intelligence analysis — stores why this trade won/lost in DB
   if (savedCoordinatorOutput) {
@@ -697,10 +735,12 @@ function normalizeDerivContractType(ct: string): string {
 }
 
 // ── Deriv profit_table journal (sole source of truth — no local fallback) ───────
-router.get("/deriv-journal", async (_req, res): Promise<void> => {
-  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
-  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
-  const token = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
+router.get("/deriv-journal", async (req, res): Promise<void> => {
+  const account = await getActiveAccount(req.sessionId);
+  const token = account?.bearerToken ?? account?.token ?? null;
+  if (token && account) {
+    getJournalManager(req.sessionId).setCredentials(token, account.derivAccountId ?? account.loginId);
+  }
 
   const emptyStats = computeJournalStats([]);
   const emptyResponse = { source: "none" as const, trades: [], todayTrades: emptyStats.todayTradesList, stats: emptyStats };
@@ -710,7 +750,7 @@ router.get("/deriv-journal", async (_req, res): Promise<void> => {
     return;
   }
 
-  const transactions = await getDerivTransactions(token);
+  const transactions = await getDerivTransactions(req.sessionId);
 
   if (transactions.length === 0) {
     res.json({ source: "deriv" as const, trades: [], todayTrades: emptyStats.todayTradesList, stats: emptyStats });
@@ -765,7 +805,10 @@ router.get("/:id", async (req, res): Promise<void> => {
     res.status(400).json({ error: "Invalid trade ID" });
     return;
   }
-  const trades = await db.select().from(tradesTable).where(eq(tradesTable.id, parseResult.data.id));
+  const trades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.id, parseResult.data.id),
+    eq(tradesTable.sessionId, req.sessionId),
+  ));
   if (trades.length === 0) {
     res.status(404).json({ error: "Trade not found" });
     return;

@@ -1,9 +1,10 @@
-import { pgTable, serial, text, boolean, numeric, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, boolean, numeric, integer, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 export const settingsTable = pgTable("settings", {
   id: serial("id").primaryKey(),
+  sessionId: text("session_id").notNull().default("legacy"),
   riskProfile: text("risk_profile").notNull().default("moderate"),
   maxRiskPerTrade: numeric("max_risk_per_trade", { precision: 5, scale: 2 }).notNull().default("0.50"),
   dailyTarget: numeric("daily_target", { precision: 20, scale: 2 }).notNull().default("5000"),
@@ -38,7 +39,9 @@ export const settingsTable = pgTable("settings", {
   riskAmountValue: numeric("risk_amount_value", { precision: 20, scale: 2 }).notNull().default("1.00"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
-});
+}, (t) => [
+  uniqueIndex("settings_session_unique").on(t.sessionId),
+]);
 
 export const insertSettingsSchema = createInsertSchema(settingsTable).omit({ id: true });
 export type InsertSettings = z.infer<typeof insertSettingsSchema>;

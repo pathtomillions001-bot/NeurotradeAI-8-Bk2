@@ -11,7 +11,8 @@ const { Pool } = pg;
 const INIT_DDL = `
 CREATE TABLE IF NOT EXISTS accounts (
   id SERIAL PRIMARY KEY,
-  login_id TEXT NOT NULL UNIQUE,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
+  login_id TEXT NOT NULL,
   token TEXT,
   bearer_token TEXT,
   refresh_token TEXT,
@@ -26,6 +27,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   connected_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_login_id_unique;
+CREATE UNIQUE INDEX IF NOT EXISTS accounts_session_login_unique ON accounts (session_id, login_id);
+CREATE INDEX IF NOT EXISTS accounts_session_active_idx ON accounts (session_id, is_active);
 
 CREATE TABLE IF NOT EXISTS ai_insights (
   id SERIAL PRIMARY KEY,
@@ -51,6 +56,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS market_win_rates_key ON market_win_rates (symb
 
 CREATE TABLE IF NOT EXISTS settings (
   id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
   risk_profile TEXT NOT NULL DEFAULT 'moderate',
   max_risk_per_trade NUMERIC(5, 2) NOT NULL DEFAULT '0.50',
   daily_target NUMERIC(20, 2) NOT NULL DEFAULT '5000',
@@ -85,6 +91,11 @@ CREATE TABLE IF NOT EXISTS settings (
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+-- Legacy global rows remain inaccessible and get distinct owners so older
+-- deployments with multiple settings rows can migrate safely.
+UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy';
+CREATE UNIQUE INDEX IF NOT EXISTS settings_session_unique ON settings (session_id);
 
 CREATE TABLE IF NOT EXISTS trade_features (
   id SERIAL PRIMARY KEY,
@@ -178,6 +189,7 @@ CREATE TABLE IF NOT EXISTS adaptive_thresholds (
 
 CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
   symbol TEXT NOT NULL,
   display_name TEXT NOT NULL,
   contract_type TEXT NOT NULL,
@@ -198,6 +210,8 @@ CREATE TABLE IF NOT EXISTS trades (
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   closed_at TIMESTAMP
 );
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+CREATE INDEX IF NOT EXISTS trades_session_created_idx ON trades (session_id, created_at);
 `;
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

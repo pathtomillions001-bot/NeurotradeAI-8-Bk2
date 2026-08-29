@@ -131,7 +131,12 @@ export default function Markets() {
                 <div className="flex items-center gap-2">
                   <TrendIcon trend={market.trend} />
                   <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{market.displayName}</div>
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm font-medium truncate">{market.displayName}</span>
+                      {market.automatedEligible === false && (
+                        <span className="shrink-0 rounded border border-violet-400/30 bg-violet-400/10 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider text-violet-300">Manual only</span>
+                      )}
+                    </div>
                     <div className="flex items-center gap-1.5 mt-0.5">
                       <span className="text-[10px] text-muted-foreground font-mono">{market.symbol}</span>
                       {market.lastPrice && (
@@ -156,7 +161,7 @@ export default function Markets() {
                       : "text-amber-400 border-amber-500/30"
                   }`}
                 >
-                  {market.recommendedContractType ?? "—"}
+                  {market.automatedEligible === false ? "MANUAL" : (market.recommendedContractType ?? "—")}
                 </Badge>
               </div>
 

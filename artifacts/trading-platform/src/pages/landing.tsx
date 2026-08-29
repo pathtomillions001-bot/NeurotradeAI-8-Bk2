@@ -296,7 +296,7 @@ export default function LandingPage({ onEnter }: { onEnter: () => void }) {
             >
               <div className="flex flex-col gap-0.5 flex-1">
                 <span className="text-[10px] font-bold tracking-widest uppercase" style={{ color: "#4CC9FF" }}>
-                  8 AI Agents · 17+ Markets
+                  8 AI Agents · 20 Markets
                 </span>
                 <span className="text-[10px]" style={{ color: "rgba(160,175,210,0.7)" }}>
                   Neural ensemble scoring every tick, every trade.

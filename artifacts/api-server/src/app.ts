@@ -1,5 +1,6 @@
 import express, { type Express } from "express";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import { execSync } from "child_process";
 import { resolve } from "path";
@@ -14,6 +15,7 @@ import { loadRecoveryStateFromDb, resumeEngineIfEnabled, forceDayReset } from ".
 import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { pool, db, marketWinRatesTable } from "@workspace/db";
+import { browserSession } from "./lib/session";
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables or columns are missing. */
 async function bootstrapDb() {
@@ -35,18 +37,36 @@ async function bootstrapDb() {
 
     // Push whenever a required table/column is missing or the legacy NUMERIC(4,2)
     // multiplier column would still reject an unrestricted Manual value.
-    if (settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough) return;
+    if (!(settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough)) {
+      logger.warn("DB schema out of date — running schema push");
+      const root = resolve(import.meta.dirname, "../../../../");
+      execSync("pnpm --filter @workspace/db run push", { cwd: root, stdio: "inherit" });
+      logger.info("DB schema push complete");
+    }
 
-    logger.warn("DB schema out of date — running schema push");
-    const root = resolve(import.meta.dirname, "../../../../");
-    execSync("pnpm --filter @workspace/db run push", { cwd: root, stdio: "inherit" });
-    logger.info("DB schema push complete");
+    // Multi-user safety migration. Existing single-user rows are intentionally
+    // assigned to the inaccessible `legacy` namespace instead of being exposed
+    // to the first visitor after deployment.
+    const sessionMigrations = [
+      `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE settings ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE trades ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy'`,
+      `ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_login_id_unique`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS accounts_session_login_unique ON accounts (session_id, login_id)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS settings_session_unique ON settings (session_id)`,
+      `CREATE INDEX IF NOT EXISTS trades_session_created_idx ON trades (session_id, created_at)`,
+    ];
+    for (const statement of sessionMigrations) await pool.query(statement);
+    logger.info("Browser-session data isolation schema verified");
   } catch (err) {
     logger.error({ err }, "DB bootstrap failed — continuing, routes will surface errors");
   }
 }
 
+const dbReady = bootstrapDb();
 const app: Express = express();
+app.set("trust proxy", 1);
 
 app.use(
   pinoHttp({
@@ -61,15 +81,26 @@ app.use(
     },
   }),
 );
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
+app.use(cookieParser());
+app.use(browserSession);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+// Never let an API request race a production schema migration during startup.
+app.use(async (_req, res, next) => {
+  try {
+    await dbReady;
+    next();
+  } catch {
+    res.status(503).json({ error: "Database initialization is still unavailable" });
+  }
+});
 
 app.use("/api", router);
 
 // ── Startup ──────────────────────────────────────────────────────────────────
 // Ensure DB schema is applied before anything else touches the database
-bootstrapDb().then(() => {
+dbReady.then(() => {
   loadPersistedToken().catch((err) => logger.warn({ err }, "Token load on startup failed"));
   loadWinRatesFromDb().catch((err) => logger.warn({ err }, "Win rate load on startup failed"));
   loadCalibrationCache().catch((err) => logger.warn({ err }, "Calibration load on startup failed"));

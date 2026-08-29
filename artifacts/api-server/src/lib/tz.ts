@@ -11,23 +11,31 @@
  */
 
 import { logger } from "./logger";
+import { getBrowserSessionId } from "./session";
 
 // ── Timezone offset (minutes, browser convention) ─────────────────────────────
-let tzOffsetMin = 0;           // default to UTC until client connects
+let tzOffsetMin = 0; // scheduler fallback; request/engine work uses its session map
+const tzOffsetBySession = new Map<string, number>();
 let midnightTimer: ReturnType<typeof setTimeout> | null = null;
 let _onMidnight: (() => void) | null = null;
 
 export function getTzOffset(): number {
-  return tzOffsetMin;
+  const sessionId = getBrowserSessionId();
+  return sessionId === "legacy" ? tzOffsetMin : (tzOffsetBySession.get(sessionId) ?? 0);
 }
 
 /**
- * Called by the frontend on every page-load.  Updates the offset and
- * immediately reschedules the midnight timer for the new timezone.
+ * Called by the frontend on every page-load. Stores the offset only for that
+ * browser session so one visitor cannot change another engine's day boundary.
  */
 export function setTzOffset(offset: number): void {
-  tzOffsetMin = offset;
-  scheduleNextMidnight();
+  const sessionId = getBrowserSessionId();
+  if (sessionId === "legacy") {
+    tzOffsetMin = offset;
+    scheduleNextMidnight();
+  } else {
+    tzOffsetBySession.set(sessionId, offset);
+  }
 }
 
 /**
@@ -80,7 +88,7 @@ export function scheduleNextMidnight(): void {
 }
 
 /** Convenience helper: local midnight timestamp for a given Date. */
-export function getLocalTodayStart(tz = tzOffsetMin): Date {
+export function getLocalTodayStart(tz = getTzOffset()): Date {
   const now = new Date();
   const localNow = new Date(now.getTime() - tz * 60_000);
   localNow.setUTCHours(0, 0, 0, 0);
@@ -88,7 +96,7 @@ export function getLocalTodayStart(tz = tzOffsetMin): Date {
 }
 
 /** ISO date string (YYYY-MM-DD) in user's local timezone. */
-export function getLocalTodayKey(tz = tzOffsetMin): string {
+export function getLocalTodayKey(tz = getTzOffset()): string {
   const now = new Date();
   const localNow = new Date(now.getTime() - tz * 60_000);
   localNow.setUTCHours(0, 0, 0, 0);

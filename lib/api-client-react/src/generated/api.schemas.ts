@@ -89,6 +89,8 @@ export interface RankedMarket {
   trend: RankedMarketTrend;
   volatility: RankedMarketVolatility;
   rank: number;
+  /** Whether autonomous engines may analyze and trade this market */
+  automatedEligible: boolean;
   /** @nullable */
   recommendedContractType?: string | null;
   /** @nullable */

@@ -130,18 +130,21 @@ const ALL_SCAN_MARKETS: { symbol: string; short: string; name: string; group: st
   { symbol: "R_75",    short: "V75",  name: "Volatility 75 Index",       group: "V"  },
   { symbol: "R_100",   short: "V100", name: "Volatility 100 Index",      group: "V"  },
   { symbol: "1HZ10V",  short: "1s10", name: "Volatility 10 (1s) Index",  group: "1s" },
+  { symbol: "1HZ15V",  short: "1s15", name: "Volatility 15 (1s) Index",  group: "1s" },
   { symbol: "1HZ25V",  short: "1s25", name: "Volatility 25 (1s) Index",  group: "1s" },
+  { symbol: "1HZ30V",  short: "1s30", name: "Volatility 30 (1s) Index",  group: "1s" },
   { symbol: "1HZ50V",  short: "1s50", name: "Volatility 50 (1s) Index",  group: "1s" },
   { symbol: "1HZ75V",  short: "1s75", name: "Volatility 75 (1s) Index",  group: "1s" },
+  { symbol: "1HZ90V",  short: "1s90", name: "Volatility 90 (1s) Index",  group: "1s" },
   { symbol: "1HZ100V", short: "1s1",  name: "Volatility 100 (1s) Index", group: "1s" },
   { symbol: "JD10",    short: "J10",  name: "Jump 10 Index",             group: "J"  },
   { symbol: "JD25",    short: "J25",  name: "Jump 25 Index",             group: "J"  },
   { symbol: "JD50",    short: "J50",  name: "Jump 50 Index",             group: "J"  },
   { symbol: "JD75",    short: "J75",  name: "Jump 75 Index",             group: "J"  },
-  { symbol: "JD100",   short: "J100", name: "Jump 100 Index",            group: "J"  },
   { symbol: "RDBULL",  short: "Bull", name: "Bull Market Index",         group: "I"  },
   { symbol: "RDBEAR",  short: "Bear", name: "Bear Market Index",         group: "I"  },
 ];
+const SCAN_MARKET_COUNT = ALL_SCAN_MARKETS.length;
 
 // ── Contract Families ─────────────────────────────────────────────────────────
 
@@ -316,7 +319,7 @@ export function SpeedAIFab() {
   const [status, setStatus] = useState<SessionStatus | null>(null);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [scanProgress, setScanProgress] = useState<ScanProgress>({
-    scanning: null, scanningSymbol: null, scanned: 0, total: 17, results: [],
+    scanning: null, scanningSymbol: null, scanned: 0, total: SCAN_MARKET_COUNT, results: [],
   });
   const { data: settings } = useGetSettings();
 
@@ -487,7 +490,7 @@ export function SpeedAIFab() {
     setLoading(true);
     setStep("scanning");
     setScanResult(null);
-    setScanProgress({ scanning: null, scanningSymbol: null, scanned: 0, total: 17, results: [] });
+    setScanProgress({ scanning: null, scanningSymbol: null, scanned: 0, total: SCAN_MARKET_COUNT, results: [] });
     try {
       const res = await fetch("/api/speed-ai/scan", {
         method: "POST",
@@ -747,7 +750,7 @@ export function SpeedAIFab() {
                       <span className="text-sm font-bold font-mono text-cyan-400">
                         {scanProgress.scanning !== null ? scanProgress.scanned + 1 : scanProgress.scanned}
                       </span>
-                      <span className="text-xs text-muted-foreground/40 font-mono"> / {scanProgress.total || 17}</span>
+                      <span className="text-xs text-muted-foreground/40 font-mono"> / {scanProgress.total || SCAN_MARKET_COUNT}</span>
                     </div>
                   </div>
 
@@ -756,7 +759,7 @@ export function SpeedAIFab() {
                     <motion.div
                       className="h-full rounded-full"
                       style={{ background: "linear-gradient(90deg, #0891b2, #06b6d4, #67e8f9)" }}
-                      animate={{ width: `${(scanProgress.scanned / (scanProgress.total || 17)) * 100}%` }}
+                      animate={{ width: `${(scanProgress.scanned / (scanProgress.total || SCAN_MARKET_COUNT)) * 100}%` }}
                       transition={{ duration: 0.35, ease: "easeOut" }}
                     />
                   </div>

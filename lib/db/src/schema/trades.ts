@@ -1,9 +1,10 @@
-import { pgTable, serial, text, boolean, numeric, integer, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, boolean, numeric, integer, timestamp, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
 export const tradesTable = pgTable("trades", {
   id: serial("id").primaryKey(),
+  sessionId: text("session_id").notNull().default("legacy"),
   symbol: text("symbol").notNull(),
   displayName: text("display_name").notNull(),
   contractType: text("contract_type").notNull(),
@@ -23,7 +24,9 @@ export const tradesTable = pgTable("trades", {
   durationUnit: text("duration_unit").default("t"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   closedAt: timestamp("closed_at"),
-});
+}, (t) => [
+  index("trades_session_created_idx").on(t.sessionId, t.createdAt),
+]);
 
 export const insertTradeSchema = createInsertSchema(tradesTable).omit({ id: true });
 export type InsertTrade = z.infer<typeof insertTradeSchema>;

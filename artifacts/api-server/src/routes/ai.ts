@@ -1,8 +1,8 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
-import { sql, desc, eq } from "drizzle-orm";
-import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getCachedToken, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, journalManager } from "../lib/deriv";
+import { and, sql, desc, eq } from "drizzle-orm";
+import { tickManager, DERIV_MARKETS, AUTOMATED_DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
 import { runRecoveryConsensus, getBestConsensus } from "../lib/agents/recovery-consensus";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
@@ -35,27 +35,36 @@ const router = Router();
  * Clears:  tradesExecutedToday, sessionLossCount, lastTradeCompletedAt,
  *          recentTradesBySymbol, active cooldown timer + cooldownUntil.
  * Also forces the recovery engine into a new-day state (50%-debt carry logic).
- * Broadcasts `day_reset` SSE so all open browser tabs re-fetch immediately.
+ * Broadcasts `day_reset` SSE only to the owning browser session.
  *
  * Called by:
  *  1. The server-side midnight scheduler (lib/tz) — fires even when the browser is closed.
  *  2. POST /api/ai/day-reset from the frontend — fires at the user's exact local midnight.
  */
-export function forceDayReset(broadcast = true): void {
-  tradesExecutedToday  = 0;
-  sessionLossCount     = 0;
-  lastTradeCompletedAt = null;
-  recentTradesBySymbol.clear();
+export function forceDayReset(broadcast = true, sessionId?: string): void {
+  const resetSessionId = sessionId ?? engineOwnerSessionId ?? undefined;
+  const ownsExecutor = !!resetSessionId && engineOwnerSessionId === resetSessionId;
 
-  if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
-  cooldownUntil = null;
-
-  recoveryEngine.forceNewDay();
-
-  if (broadcast) {
-    broadcastSSE("day_reset", { ts: new Date().toISOString() });
+  // Executor globals belong only to the current owner. A midnight request from
+  // another browser must never clear that owner's cooldown or counters.
+  if (ownsExecutor) {
+    tradesExecutedToday  = 0;
+    sessionLossCount     = 0;
+    lastTradeCompletedAt = null;
+    recentTradesBySymbol.clear();
+    if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+    cooldownUntil = null;
   }
-  logger.info("Midnight day-reset fired — all in-memory daily counters cleared");
+
+  if (resetSessionId) {
+    recoveryEngine.setPersistenceSession(resetSessionId);
+    recoveryEngine.forceNewDay();
+  }
+
+  if (broadcast && resetSessionId) {
+    broadcastSSE("day_reset", { ts: new Date().toISOString() }, resetSessionId);
+  }
+  logger.info({ sessionId: resetSessionId, executorCountersReset: ownsExecutor }, "Session midnight day-reset fired");
 }
 
 /**
@@ -68,54 +77,16 @@ export function forceDayReset(broadcast = true): void {
  * before the first scan fires.
  */
 export async function resumeEngineIfEnabled(): Promise<void> {
-  try {
-    const rows = await db.select().from(settingsTable).limit(1);
-    const s = rows[0];
-    if (!s?.autonomousEnabled) return;
-
-    // Do NOT resume into an active cooldown — the cooldown must have already
-    // expired (we lost the in-memory timer on restart). If the DB shows a
-    // streakLossCount that still equals or exceeds the limit, hold off and
-    // let the user manually restart once they're ready.
-    const limit = s.consecutiveLossLimit ?? 3;
-    const streak = recoveryEngine.getState().streakLossCount;
-    if (streak >= limit) {
-      logger.info({ streak, limit }, "Auto-resume skipped: streak count still at limit — engine will stay paused until manual restart");
-      // Reflect that the engine is stopped in the DB so the UI shows it correctly
-      await db.update(settingsTable).set({ autonomousEnabled: false });
-      return;
-    }
-
-    sessionLossCount = streak;
-    engineRunning    = true;
-    autonomousMode   = "autonomous";
-    stopReasons      = [];
-    nextScanIn       = loopIntervalSec;
-    groupCursors.fill(0);
-    autonomousTimer  = setTimeout(runAutonomousLoop, 3000); // 3s grace for ticks to warm up
-    logger.info({ streak, loopIntervalSec }, "Autonomous engine auto-resumed from DB state after server restart");
-  } catch (err) {
-    logger.warn({ err }, "Auto-resume engine check failed — engine stays in manual mode");
-  }
+  // A server restart has no trustworthy browser owner to bind credentials to.
+  // Fail closed rather than auto-resuming an arbitrary persisted account.
+  await db.update(settingsTable).set({ autonomousEnabled: false });
+  logger.info("Autonomous auto-resume disabled for session isolation; user must restart from their browser");
 }
 
 export async function loadRecoveryStateFromDb(): Promise<void> {
-  try {
-    const rows = await db.select().from(settingsTable).limit(1);
-    const json = (rows[0] as any)?.recoveryStateJson;
-    if (json) {
-      recoveryEngine.loadState(json);
-      const summary = recoveryEngine.getLossStreakSummary();
-      if (summary.active) {
-        logger.info(
-          { totalUnrecovered: summary.totalUnrecovered, streakLosses: summary.totalStreakLosses },
-          "Recovery state restored from DB — engine will resume in recovery mode",
-        );
-      }
-    }
-  } catch (err) {
-    logger.warn({ err }, "Could not load recovery state from DB");
-  }
+  // Recovery is loaded from the starting browser's scoped settings row in the
+  // toggle handler. Never restore a process-global state from an arbitrary user.
+  recoveryEngine.resetAll();
 }
 
 // Persistence of recovery state to DB now happens automatically inside
@@ -147,6 +118,9 @@ export async function loadRecoveryStateFromDb(): Promise<void> {
 
 // ── Engine state ─────────────────────────────────────────────────────────────
 let engineRunning = false;
+// The singleton autonomous executor is pinned to the browser session that
+// started it. Other visitors cannot inspect, stop, or redirect its credentials.
+let engineOwnerSessionId: string | null = null;
 let autonomousMode = "manual";
 let tradesExecutedToday = 0;
 let currentMarket: string | null = null;
@@ -227,13 +201,18 @@ const AGENT_SCORE_KEYS = [
 
 // ── Settings builders ─────────────────────────────────────────────────────────
 
-async function getAccountAndSettings() {
-  // Always prefer the account the user has set as active (real vs demo switch)
-  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
+async function getAccountAndSettings(sessionId: string) {
+  // Always prefer this browser session's active account (real vs demo switch).
+  let accounts = await db.select().from(accountsTable).where(and(
+    eq(accountsTable.sessionId, sessionId),
+    eq(accountsTable.isActive, true),
+  )).limit(1);
   if (accounts.length === 0) {
-    accounts = await db.select().from(accountsTable).limit(1);
+    accounts = await db.select().from(accountsTable)
+      .where(eq(accountsTable.sessionId, sessionId)).limit(1);
   }
-  const settings = await db.select().from(settingsTable).limit(1);
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, sessionId)).limit(1);
   return {
     balance: accounts.length > 0 ? Number(accounts[0].balance) : 10000,
     settings: settings.length > 0 ? settings[0] : null,
@@ -319,11 +298,6 @@ function buildScanContext(
   };
 }
 
-// ── Wire up JournalManager → SSE so dashboard updates instantly on refresh ────
-journalManager.on("refreshed", () => {
-  broadcastSSE("journal_refreshed", { ts: Date.now() });
-});
-
 // ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
 
 // Track the last time each market received a real Deriv tick
@@ -333,7 +307,7 @@ tickManager.on("tick", (tick) => {
   broadcastSSE("tick", tick);
   lastTickTime.set(tick.symbol, Date.now());
   const market = getMarketInfo(tick.symbol);
-  if (market) {
+  if (market && isAutomatedMarket(tick.symbol)) {
     const prices = tickManager.getTicks(tick.symbol, 100);
     const trendStats = analyzeTrend(prices);
     // Get 100 digits for richer even/odd and digit analysis
@@ -353,7 +327,7 @@ tickManager.on("tick", (tick) => {
 let heartbeatIdx = 0;
 setInterval(() => {
   const now = Date.now();
-  const markets = DERIV_MARKETS;
+  const markets = AUTOMATED_DERIV_MARKETS;
   if (markets.length === 0) return;
   heartbeatIdx = (heartbeatIdx + 1) % markets.length;
   const market = markets[heartbeatIdx];
@@ -375,8 +349,14 @@ setInterval(() => {
   });
 }, 200);
 
+function broadcastEngineSSE(event: string, data: unknown): void {
+  if (!engineOwnerSessionId) return;
+  broadcastSSE(event, data, engineOwnerSessionId);
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function stopEngine(reason: string, cooldownMinutes?: number) {
+  const stoppedOwnerSessionId = engineOwnerSessionId;
   engineRunning = false;
   autonomousMode = "manual";
   stopReasons = [reason];
@@ -413,28 +393,36 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
       exploitSymbol = null;
       exploitCount = 0;
       logger.info("Cooldown expired — autonomous engine auto-resuming, session loss count reset");
-      broadcastSSE("engine_started", { reason: "cooldown_expired" });
-      broadcastSSE("loss_streak_reset", { sessionLossCount: 0 });
+      broadcastEngineSSE("engine_started", { reason: "cooldown_expired" });
+      broadcastEngineSSE("loss_streak_reset", { sessionLossCount: 0 });
       autonomousTimer = setTimeout(runAutonomousLoop, 1000);
     }, cooldownMinutes * 60 * 1000);
     logger.info({ reason, cooldownMinutes, cooldownUntil }, "Engine stopped with cooldown");
   } else {
     cooldownUntil = null;
+    engineOwnerSessionId = null;
     logger.info({ reason }, "Autonomous engine stopped");
   }
-  broadcastSSE("engine_stopped", { reason, cooldownUntil: cooldownUntil?.toISOString() ?? null });
+  if (stoppedOwnerSessionId) {
+    broadcastSSE("engine_stopped", { reason, cooldownUntil: cooldownUntil?.toISOString() ?? null }, stoppedOwnerSessionId);
+  }
 }
 
-async function syncLiveBalance(token: string) {
+async function syncLiveBalance(
+  sessionId: string,
+  token: string,
+  derivAccountId: string,
+) {
   try {
-    const balance = await getLiveBalance(token);
-    if (balance !== null) {
-      // Update only the active account — never stomp all rows
-      let activeAccounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
-      if (activeAccounts.length === 0) activeAccounts = await db.select().from(accountsTable).limit(1);
-      if (activeAccounts.length > 0) {
-        await db.update(accountsTable).set({ balance: String(balance), updatedAt: new Date() }).where(eq(accountsTable.id, activeAccounts[0].id));
-      }
+    const balance = await getLiveBalance(token, derivAccountId);
+    if (balance === null) return;
+    const activeAccounts = await db.select().from(accountsTable).where(and(
+      eq(accountsTable.sessionId, sessionId),
+      eq(accountsTable.isActive, true),
+    )).limit(1);
+    if (activeAccounts.length > 0) {
+      await db.update(accountsTable).set({ balance: String(balance), updatedAt: new Date() })
+        .where(eq(accountsTable.id, activeAccounts[0].id));
     }
   } catch { /* ignore */ }
 }
@@ -466,9 +454,17 @@ async function runAutonomousLoop() {
   isLoopRunning = true;
 
   try {
-    const { balance, settings, account } = await getAccountAndSettings();
-    // Prefer module-level cache; fall back to DB bearer token then legacy PAT
-    const token = getCachedToken() ?? account?.bearerToken ?? account?.token ?? null;
+    const sessionId = engineOwnerSessionId;
+    if (!sessionId) {
+      stopEngine("Autonomous engine lost its browser-session owner");
+      return;
+    }
+    recoveryEngine.setPersistenceSession(sessionId);
+    const { balance, settings, account } = await getAccountAndSettings(sessionId);
+    const token = account?.bearerToken ?? account?.token ?? null;
+    const derivAccountId = account?.derivAccountId ?? account?.loginId ?? null;
+    const journalManager = getJournalManager(sessionId);
+    if (token && derivAccountId) journalManager.setCredentials(token, derivAccountId);
 
     const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
     // Normalize: accept both CALL/PUT and RISE/FALL, unify to CALL/PUT
@@ -490,8 +486,8 @@ async function runAutonomousLoop() {
         ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
         : null;
     const availableMarkets = allowedMarketSymbols && allowedMarketSymbols.length > 0
-      ? DERIV_MARKETS.filter((m) => allowedMarketSymbols.includes(m.symbol))
-      : DERIV_MARKETS;
+      ? AUTOMATED_DERIV_MARKETS.filter((m) => allowedMarketSymbols.includes(m.symbol))
+      : AUTOMATED_DERIV_MARKETS;
 
     if (settings?.loopIntervalSec) loopIntervalSec = settings.loopIntervalSec;
 
@@ -499,7 +495,10 @@ async function runAutonomousLoop() {
     // /api/trades/daily-summary so the engine's own hard-stop checks below use
     // the exact same "today" window the dashboards display.
     const today = getTodayStart();
-    const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+    const todayTrades = await db.select().from(tradesTable).where(and(
+      eq(tradesTable.sessionId, sessionId),
+      sql`${tradesTable.createdAt} >= ${today}`,
+    ));
     const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
     tradesExecutedToday = closedToday.length;
 
@@ -607,7 +606,7 @@ async function runAutonomousLoop() {
     // Barriers: user's recoveryOverDigit / recoveryUnderDigit (no overrides).
     if (recoveryEngine.isInRecovery()) {
       // ── Open-trade guard ──────────────────────────────────────────────────────────
-      const recovOpenTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+      const recovOpenTrades = await db.select().from(tradesTable).where(and(eq(tradesTable.sessionId, sessionId), eq(tradesTable.status, "open")));
       if (recovOpenTrades.length > 0) {
         const nowMs = Date.now();
         const stale = recovOpenTrades.filter(t => nowMs - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
@@ -652,7 +651,7 @@ async function runAutonomousLoop() {
         // Fall through to normal tournament
       } else {
         // ── 3-window consensus scan across all eligible markets ───────────────────
-        broadcastSSE("scan_started", { groups: ["Recovery"], ts: Date.now() });
+        broadcastEngineSSE("scan_started", { groups: ["Recovery"], ts: Date.now() });
 
         const consensusInputs = await Promise.all(
           contractCompatibleMarkets.map(async (m) => {
@@ -673,7 +672,7 @@ async function runAutonomousLoop() {
         if (!winner) {
           logger.info({ marketsScanned: contractCompatibleMarkets.length, types: recoveryTypes },
             "Recovery: 3-window consensus not yet reached — rescanning in 3s");
-          broadcastSSE("scan_complete", {
+          broadcastEngineSSE("scan_complete", {
             symbol: null, quality: 0, confidence: 0, agentScores: lastAgentScores,
             marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
             rejectReason: "recovery_no_consensus", sessionLossCount,
@@ -742,7 +741,7 @@ async function runAutonomousLoop() {
           payout: recovPayoutMult, payoutSource: recovPayoutQuote.source, reason: cons.reason,
         }, "Recovery: 3-window consensus reached — executing recovery trade");
 
-        broadcastSSE("scan_complete", {
+        broadcastEngineSSE("scan_complete", {
           symbol: recovSymbol,
           quality: Math.min(99, Math.round(cons.avgStrength * 200 + 60)),
           confidence: Math.round(recovWinP * 100),
@@ -772,6 +771,7 @@ async function runAutonomousLoop() {
           if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
 
           await db.insert(tradesTable).values({
+            sessionId,
             symbol: recovSymbol, displayName: recovMarket.displayName,
             contractType: recovContractType, barrier: recovBarrierToStore,
             stake: String(recovStake), direction: recovDirection,
@@ -785,6 +785,7 @@ async function runAutonomousLoop() {
           });
         } else {
           const [openTrade] = await db.insert(tradesTable).values({
+            sessionId,
             symbol: recovSymbol, displayName: recovMarket.displayName,
             contractType: recovContractType, barrier: recovBarrierToStore,
             stake: String(recovStake), direction: recovDirection, status: "open",
@@ -794,28 +795,32 @@ async function runAutonomousLoop() {
             duration: recovDuration, durationUnit: "t",
           }).returning();
 
-          broadcastSSE("trade_started", {
+          broadcastEngineSSE("trade_started", {
             id: openTrade.id, symbol: recovSymbol, contract: recovContractType,
             barrier: recovBarrierToStore, stake: recovStake, duration: recovDuration,
             confidence: Math.round(recovWinP * 100),
           });
 
           try {
+            if (!isAutomatedMarket(recovSymbol)) {
+              throw new Error(`${recovMarket.displayName} is blocked from autonomous recovery execution`);
+            }
             const liveRes = await executeLiveTrade(token, {
               symbol: recovSymbol, contractType: recovContractType,
               stake: Math.round(recovStake * 100) / 100,
               duration: recovDuration, durationUnit: "t",
               currency: account?.currency ?? "USD",
+              accountId: derivAccountId!,
               barrier: recovContractType.includes("DIGIT") ? (recovBarrier ?? undefined) : undefined,
             });
             rEntryPrice = liveRes.buyPrice;
-            const contractRes = await waitForContractResult(token, liveRes.contractId, (recovDuration + 30) * 1000);
+            const contractRes = await waitForContractResult(token, derivAccountId!, liveRes.contractId, (recovDuration + 30) * 1000);
             rWon = contractRes.won;
             rProfit = contractRes.profit;
             rActualPayout = rWon ? recovStake + rProfit : 0;
             rEntryPrice = contractRes.entrySpot || liveRes.buyPrice;
             rExitPrice  = contractRes.exitSpot  || rEntryPrice;
-            await syncLiveBalance(token);
+            await syncLiveBalance(sessionId, token, derivAccountId!);
           } catch (liveErr) {
             const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
             logger.warn({ errMsg, symbol: recovSymbol }, "Recovery live trade failed — marking as error");
@@ -825,7 +830,7 @@ async function runAutonomousLoop() {
                 agentReasoning: `[RECOVERY] ${cons.reason} [FAILED: ${errMsg}]`,
               }).where(eq(tradesTable.id, openTrade.id));
             } catch { /* ignore */ }
-            broadcastSSE("trade_completed", {
+            broadcastEngineSSE("trade_completed", {
               id: openTrade.id, symbol: recovSymbol, won: false, profit: "0",
               contract: recovContractType, error: errMsg,
             });
@@ -862,7 +867,7 @@ async function runAutonomousLoop() {
         tradesExecutedToday++;
         lastTradeTime = rNow;
 
-        broadcastSSE("trade_completed", {
+        broadcastEngineSSE("trade_completed", {
           symbol: recovSymbol, won: rWon!, profit: rProfit!.toFixed(2),
           contract: recovContractType, barrier: recovBarrierToStore, stake: recovStake,
           live: !!token && !paperTradeMode, paper: paperTradeMode,
@@ -875,7 +880,7 @@ async function runAutonomousLoop() {
         }, "Recovery trade executed");
 
         if (!rWon! && engineRunning) {
-          const freshS = await db.select().from(settingsTable).limit(1);
+          const freshS = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
           const hardLimit   = freshS[0]?.consecutiveLossLimit ?? 3;
           const cooldownMin = freshS[0]?.cooldownMinutes ?? 30;
           if (sessionLossCount >= hardLimit) {
@@ -915,15 +920,15 @@ async function runAutonomousLoop() {
     //    ONLY ONE market per iteration — the one at its cursor position.
     //
     //    Canonical scan order per group (determined by DERIV_MARKETS array):
-    //      Volatility 1s : 1HZ10V → 1HZ25V → 1HZ50V → 1HZ75V → 1HZ100V → wrap
-    //      Volatility    : R_10   → R_25   → R_50   → R_75   → R_100   → wrap
-    //      Jump Indices  : JD10   → JD25   → JD50   → JD75   → JD100   → wrap
+    //      Volatility 1s : 1HZ10V → 1HZ15V → 1HZ25V → 1HZ30V → 1HZ50V → 1HZ75V → 1HZ90V → 1HZ100V → wrap
+    //      Volatility    : R_10    → R_25    → R_50    → R_75    → R_100    → wrap
+    //      Jump Indices  : JD10   → JD25   → JD50   → JD75   → wrap (JD100 is manual-only)
     //      Bull/Bear     : RDBULL → RDBEAR → wrap
     //
     //    No market is revisited until every market in its group has been
     //    scanned once. Cursor advances BEFORE awaiting so groups never
     //    block each other. Only enabled contract families are run per market.
-    broadcastSSE("scan_started", { groups: GROUP_NAMES.filter((_, i) => marketGroups[i].length > 0), ts: Date.now() });
+    broadcastEngineSSE("scan_started", { groups: GROUP_NAMES.filter((_, i) => marketGroups[i].length > 0), ts: Date.now() });
 
     const groupWinners = (await Promise.allSettled(
       marketGroups.map(async (group, gi): Promise<(ScanResult & { groupName: string }) | null> => {
@@ -1051,7 +1056,7 @@ async function runAutonomousLoop() {
           rejectReason: r.output.rejectReason ?? null,
         }));
 
-        broadcastSSE("group_scanned", {
+        broadcastEngineSSE("group_scanned", {
           group: GROUP_NAMES[gi],
           totalInGroup: group.length,
           scanned: allMarketResults.length,
@@ -1134,7 +1139,7 @@ async function runAutonomousLoop() {
     // before the status update — leaving a ghost trade that blocked the engine
     // indefinitely (the engine keeps finding the ghost every 3s and backing off).
     // STALE_OPEN_MS is defined at module scope above
-    const openTrades = await db.select().from(tradesTable).where(eq(tradesTable.status, "open"));
+    const openTrades = await db.select().from(tradesTable).where(and(eq(tradesTable.sessionId, sessionId), eq(tradesTable.status, "open")));
     if (openTrades.length > 0) {
       const now = Date.now();
       const staleTrades = openTrades.filter(t => now - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
@@ -1195,7 +1200,7 @@ async function runAutonomousLoop() {
       AGENT_SCORE_KEYS.map((k) => [k, agentOutputs[k]?.score ?? 65])
     );
 
-    broadcastSSE("scan_complete", {
+    broadcastEngineSSE("scan_complete", {
       symbol: bestMarket.symbol,
       quality: output.qualityScore,
       confidence: output.confidenceScore,
@@ -1371,6 +1376,7 @@ async function runAutonomousLoop() {
       else recordLossForPattern(bestMarket.symbol, effectiveContractType, output.regime ?? "");
 
       const [paperTrade] = await db.insert(tradesTable).values({
+        sessionId,
         symbol: bestMarket.symbol,
         displayName: bestMarket.displayName,
         contractType: effectiveContractType,
@@ -1407,6 +1413,7 @@ async function runAutonomousLoop() {
     } else {
       // ── Live trade: insert "open" FIRST so journal shows it immediately ──
       const [openTrade] = await db.insert(tradesTable).values({
+        sessionId,
         symbol: bestMarket.symbol,
         displayName: bestMarket.displayName,
         contractType: effectiveContractType,
@@ -1423,7 +1430,7 @@ async function runAutonomousLoop() {
       }).returning();
 
       // Broadcast so journal updates immediately
-      broadcastSSE("trade_started", {
+      broadcastEngineSSE("trade_started", {
         id: openTrade.id,
         symbol: bestMarket.symbol,
         contract: effectiveContractType,
@@ -1436,6 +1443,9 @@ async function runAutonomousLoop() {
       });
 
       try {
+        if (!isAutomatedMarket(bestMarket.symbol)) {
+          throw new Error(`${bestMarket.displayName} is blocked from autonomous execution`);
+        }
         // Deriv requires stake with max 2 decimal places
         const liveStake = Math.round(stake * 100) / 100;
         const liveResult = await executeLiveTrade(token, {
@@ -1445,11 +1455,12 @@ async function runAutonomousLoop() {
           duration,
           durationUnit: "t",
           currency: account?.currency ?? "USD",
+          accountId: derivAccountId!,
           barrier: effectiveContractType.includes("DIGIT") ? effectiveBarrier : undefined,
         });
         entryPrice = liveResult.buyPrice;
         // Wait for Deriv to settle the contract — timeout = ticks * 1s + 30s buffer
-        const contractResult = await waitForContractResult(token, liveResult.contractId, (duration + 30) * 1000);
+        const contractResult = await waitForContractResult(token, derivAccountId!, liveResult.contractId, (duration + 30) * 1000);
         won = contractResult.won;
         // Use Deriv's exact profit — this is the ground truth for the journal
         profit = contractResult.profit;
@@ -1458,7 +1469,7 @@ async function runAutonomousLoop() {
         entryPrice = contractResult.entrySpot || liveResult.buyPrice;
         // profit_table doesn't expose tick-level exit spot; fall back to entry price for display
         exitPrice = contractResult.exitSpot || entryPrice;
-        await syncLiveBalance(token);
+        await syncLiveBalance(sessionId, token, derivAccountId!);
       } catch (liveErr) {
         const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
         logger.warn({ liveErrMsg: errMsg, symbol: bestMarket.symbol, contractType: effectiveContractType }, "Live autonomous trade failed — outcome unknown, marking as error");
@@ -1480,7 +1491,7 @@ async function runAutonomousLoop() {
           logger.error({ dbErr, tradeId: openTrade.id },
             "Failed to mark live trade as error in DB — stale-open guard will auto-recover on next iteration");
         }
-        broadcastSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
+        broadcastEngineSSE("trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
           profit: "0", contract: effectiveContractType, error: errMsg });
         // No forceRefresh here — the trade never settled on Deriv so the
         // profit_table has nothing new to fetch. Calling it was contributing
@@ -1561,11 +1572,11 @@ async function runAutonomousLoop() {
     // trade without first knowing if it should enter cooldown. The start-of-
     // loop check is a secondary safety net using the identical counter.
     if (!won && engineRunning) {
-      const freshSettingsForCooldown = await db.select().from(settingsTable).limit(1);
+      const freshSettingsForCooldown = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
       const hardLimit = freshSettingsForCooldown[0]?.consecutiveLossLimit ?? 3;
       const cooldownMins = freshSettingsForCooldown[0]?.cooldownMinutes ?? 30;
       if (sessionLossCount >= hardLimit) {
-        broadcastSSE("trade_completed", {
+        broadcastEngineSSE("trade_completed", {
           symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
           contract: effectiveContractType,
           barrier: barrierToStore,
@@ -1593,7 +1604,7 @@ async function runAutonomousLoop() {
     tradesExecutedToday++;
     lastTradeTime = new Date();
 
-    broadcastSSE("trade_completed", {
+    broadcastEngineSSE("trade_completed", {
       symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
       contract: effectiveContractType,
       barrier: barrierToStore,
@@ -1636,11 +1647,14 @@ function scheduleNext(tradeExecuted = false, overrideDelayMs?: number) {
 }
 
 // ── Helper: build recommendation payload for /recommendation route ─────────────
-async function buildRecommendationPayload(symbol: string, market: ReturnType<typeof getMarketInfo>, balance: number, settings: any, preferredContractTypes: string[], token: string | null, currency: string) {
+async function buildRecommendationPayload(sessionId: string, symbol: string, market: ReturnType<typeof getMarketInfo>, balance: number, settings: any, preferredContractTypes: string[], token: string | null, currency: string) {
   if (!market) return null;
 
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+  const todayTrades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, sessionId),
+    sql`${tradesTable.createdAt} >= ${today}`,
+  ));
   const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
   const sortedByTime = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   let consecutiveLosses = 0;
@@ -1726,10 +1740,9 @@ router.get("/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("Access-Control-Allow-Origin", "*");
   res.flushHeaders();
 
-  addSSEClient(res);
+  addSSEClient(res, req.sessionId);
   res.write(`event: connected\ndata: ${JSON.stringify({ ok: true, liveTickCount: tickManager.getLiveTickCount(), connected: tickManager.getConnectionStatus() })}\n\n`);
 
   const heartbeat = setInterval(() => {
@@ -1739,9 +1752,9 @@ router.get("/events", (req, res) => {
   req.on("close", () => { clearInterval(heartbeat); removeSSEClient(res); });
 });
 
-router.get("/recommendation", async (_req, res): Promise<void> => {
-  const { balance, settings, account } = await getAccountAndSettings();
-  const token = getCachedToken() ?? account?.token ?? null;
+router.get("/recommendation", async (req, res): Promise<void> => {
+  const { balance, settings, account } = await getAccountAndSettings(req.sessionId);
+  const token = account?.bearerToken ?? account?.token ?? null;
   const rawPreferred2 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
   const preferredContractTypes = rawPreferred2.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
 
@@ -1749,11 +1762,11 @@ router.get("/recommendation", async (_req, res): Promise<void> => {
     ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
     : null;
   const marketsToScan = allowedSymbols && allowedSymbols.length > 0
-    ? DERIV_MARKETS.filter((m) => allowedSymbols.includes(m.symbol))
-    : DERIV_MARKETS;
+    ? AUTOMATED_DERIV_MARKETS.filter((m) => allowedSymbols.includes(m.symbol))
+    : AUTOMATED_DERIV_MARKETS;
 
   const results = await Promise.all(
-    marketsToScan.map((m) => buildRecommendationPayload(m.symbol, m, balance, settings, preferredContractTypes, token, account?.currency ?? "USD"))
+    marketsToScan.map((m) => buildRecommendationPayload(req.sessionId, m.symbol, m, balance, settings, preferredContractTypes, token, account?.currency ?? "USD"))
   );
 
   const valid = results.filter(Boolean) as NonNullable<typeof results[0]>[];
@@ -1767,19 +1780,26 @@ router.get("/recommendation/:symbol", async (req, res): Promise<void> => {
   const { symbol } = req.params;
   const market = getMarketInfo(symbol);
   if (!market) { res.status(404).json({ error: "Market not found" }); return; }
+  if (!isAutomatedMarket(symbol)) {
+    res.status(422).json({ error: `${market.displayName} is available for manual trading only` });
+    return;
+  }
 
-  const { balance, settings, account } = await getAccountAndSettings();
-  const token = getCachedToken() ?? account?.token ?? null;
+  const { balance, settings, account } = await getAccountAndSettings(req.sessionId);
+  const token = account?.bearerToken ?? account?.token ?? null;
   const rawPreferred3 = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
   const preferredContractTypes = rawPreferred3.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i);
 
-  const payload = await buildRecommendationPayload(symbol, market, balance, settings, preferredContractTypes, token, account?.currency ?? "USD");
+  const payload = await buildRecommendationPayload(req.sessionId, symbol, market, balance, settings, preferredContractTypes, token, account?.currency ?? "USD");
   if (!payload) { res.status(500).json({ error: "Analysis failed" }); return; }
   res.json(payload);
 });
 
-router.get("/insights", async (_req, res): Promise<void> => {
-  const trades = await db.select().from(tradesTable).where(sql`${tradesTable.status} IN ('won', 'lost')`).orderBy(desc(tradesTable.createdAt)).limit(200);
+router.get("/insights", async (req, res): Promise<void> => {
+  const trades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.status} IN ('won', 'lost')`,
+  )).orderBy(desc(tradesTable.createdAt)).limit(200);
 
   const won = trades.filter((t) => t.status === "won");
   const lost = trades.filter((t) => t.status === "lost");
@@ -1860,7 +1880,15 @@ router.get("/insights", async (_req, res): Promise<void> => {
 // The card only returns to "Normal" once a win FULLY covers unrecoveredAmount
 // — a partial win clears the streak count but leaves the debt (and `active`)
 // in place, per spec.
-function buildRecoveryPayload() {
+function buildRecoveryPayload(visible = true) {
+  if (!visible) {
+    return {
+      active: false, inRecovery: false, recoveryStep: 0, baseStake: 0,
+      targetProfit: 0, remainingTargetProfit: 0, originPayoutMultiplier: 1,
+      unrecoveredAmount: 0, totalUnrecovered: 0, totalStreakLosses: 0,
+      totalStreakAmount: 0, highestStep: 0,
+    };
+  }
   const state = recoveryEngine.getState();
   return {
     active: state.inRecovery,
@@ -1878,19 +1906,20 @@ function buildRecoveryPayload() {
   };
 }
 
-router.get("/engine/status", async (_req, res): Promise<void> => {
-  const settings = await db.select().from(settingsTable).limit(1);
+router.get("/engine/status", async (req, res): Promise<void> => {
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  const todayTrades = await db.select().from(tradesTable).where(sql`${tradesTable.createdAt} >= ${today}`);
+  const todayTrades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.createdAt} >= ${today}`,
+  ));
   const liveScores = await getComputedAgentScores();
-  const recoveryMultiplier = settings.length > 0 ? Number((settings[0] as any).recoveryMultiplier) : 1.2;
-
-  // Recovery is derived directly from the Deriv journal — same source as the Streak card.
-  // No state machine sync needed; the payload function computes it fresh every poll.
-  const derivJournalForStatus = journalManager.getCached();
+  const ownsEngine = engineOwnerSessionId === req.sessionId;
+  const visibleRunning = engineRunning && ownsEngine;
 
   res.json({
-    isRunning: engineRunning, mode: engineRunning ? "autonomous" : "manual",
+    isRunning: visibleRunning, mode: visibleRunning ? "autonomous" : "manual",
     agentStatuses: AGENT_NAMES.map((name, i) => {
       const key = AGENT_SCORE_KEYS[i] ?? "featureEngineering";
       const score = liveScores[key] ?? 65;
@@ -1902,18 +1931,21 @@ router.get("/engine/status", async (_req, res): Promise<void> => {
       };
     }),
     tradesExecutedToday: todayTrades.length,
-    currentMarket, nextScanIn: engineRunning ? nextScanIn : null, stopReasons, loopIntervalSec,
-    lastTradeTime: lastTradeTime?.toISOString() ?? null,
+    currentMarket: ownsEngine ? currentMarket : null,
+    nextScanIn: visibleRunning ? nextScanIn : null,
+    stopReasons: ownsEngine ? stopReasons : [],
+    loopIntervalSec: ownsEngine ? loopIntervalSec : (settings[0]?.loopIntervalSec ?? 5),
+    lastTradeTime: ownsEngine ? (lastTradeTime?.toISOString() ?? null) : null,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
     paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
-    cooldownUntil: cooldownUntil?.toISOString() ?? null,
-    sessionLossCount,
+    cooldownUntil: ownsEngine ? (cooldownUntil?.toISOString() ?? null) : null,
+    sessionLossCount: ownsEngine ? sessionLossCount : 0,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
-    marketsScanned: DERIV_MARKETS.length,
-    recovery: buildRecoveryPayload(),
+    marketsScanned: AUTOMATED_DERIV_MARKETS.length,
+    recovery: buildRecoveryPayload(ownsEngine),
   });
 });
 
@@ -1922,10 +1954,15 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
   if (!parseResult.success) { res.status(400).json({ error: "Invalid request" }); return; }
   const { running } = parseResult.data;
 
-  const settings = await db.select().from(settingsTable).limit(1);
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
   if (settings.length > 0 && settings[0].loopIntervalSec) loopIntervalSec = settings[0].loopIntervalSec;
 
   if (running) {
+    if (engineRunning && engineOwnerSessionId !== req.sessionId) {
+      res.status(409).json({ error: "Another isolated browser session is currently using the autonomous executor. Your account was not touched; try again after that session stops." });
+      return;
+    }
     // ── Single-executor guard — one recovery ledger, one trading engine ──────
     // If a NeuroAI FAB session is currently executing trades, refuse to start:
     // both engines share the same account-level recovery ledger, so concurrent
@@ -1938,6 +1975,11 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       });
       return;
     }
+    engineOwnerSessionId = req.sessionId;
+    recoveryEngine.setPersistenceSession(req.sessionId);
+    recoveryEngine.resetAll();
+    const persistedRecovery = (settings[0] as any)?.recoveryStateJson;
+    if (persistedRecovery) recoveryEngine.loadState(persistedRecovery);
     // Clear any active cooldown timer when manually starting. Note: the global
     // loss-streak counter (recoveryEngine.getState().streakLossCount) is NOT reset
     // here — it is the single source of truth for the cooldown gate and must keep
@@ -1954,18 +1996,27 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
 
     // Reset group cursors → scanning restarts from V10 1s / V10 / JD10 / RDBULL
     groupCursors.fill(0);
-    if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: true });
+    if (settings.length > 0) await db.update(settingsTable)
+      .set({ autonomousEnabled: true })
+      .where(eq(settingsTable.id, settings[0].id));
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
     autonomousTimer = setTimeout(runAutonomousLoop, 2000);
     logger.info({ loopIntervalSec }, "Autonomous engine started");
   } else {
+    if (engineRunning && engineOwnerSessionId !== req.sessionId) {
+      res.status(409).json({ error: "You cannot stop another browser session's autonomous engine." });
+      return;
+    }
     engineRunning = false; autonomousMode = "manual"; currentMarket = null; nextScanIn = null;
     exploitSymbol = null; lastAgentScores = {};
     if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
     if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
     cooldownUntil = null;
     releaseTradingOwnership("autonomous");
-    if (settings.length > 0) await db.update(settingsTable).set({ autonomousEnabled: false });
+    engineOwnerSessionId = null;
+    if (settings.length > 0) await db.update(settingsTable)
+      .set({ autonomousEnabled: false })
+      .where(eq(settingsTable.id, settings[0].id));
   }
 
   const toggleScores = await getComputedAgentScores();
@@ -1986,7 +2037,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     cooldownUntil: null,
     sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
-    marketsScanned: DERIV_MARKETS.length,
+    marketsScanned: AUTOMATED_DERIV_MARKETS.length,
     recovery: buildRecoveryPayload(),
   });
 });
@@ -2052,11 +2103,17 @@ router.get("/intelligence/thresholds", async (_req, res): Promise<void> => {
  * trading. Future losses will accumulate fresh (smaller) debt as usual.
  * This does NOT disable Recovery Mode — it only clears the current balance owed.
  */
-router.post("/recovery/clear-debt", async (_req, res): Promise<void> => {
+router.post("/recovery/clear-debt", async (req, res): Promise<void> => {
   try {
+    if (engineOwnerSessionId && engineOwnerSessionId !== req.sessionId) {
+      res.status(409).json({ error: "You cannot change another browser session's recovery state." });
+      return;
+    }
+    recoveryEngine.setPersistenceSession(req.sessionId);
     recoveryEngine.resetAll();
-    // Persist the cleared state immediately so a server restart won't reload stale debt.
-    const [settings] = await db.select().from(settingsTable).limit(1);
+    // Persist the cleared state only to this browser session.
+    const [settings] = await db.select().from(settingsTable)
+      .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
     if (settings) {
       await db.update(settingsTable)
         .set({ recoveryStateJson: recoveryEngine.serializeState(), updatedAt: new Date() } as any)
@@ -2070,8 +2127,12 @@ router.post("/recovery/clear-debt", async (_req, res): Promise<void> => {
   }
 });
 
-router.get("/recovery/evaluation", async (_req, res): Promise<void> => {
+router.get("/recovery/evaluation", async (req, res): Promise<void> => {
   try {
+    if (engineOwnerSessionId && engineOwnerSessionId !== req.sessionId) {
+      res.json({ inRecovery: false, unrecoveredAmount: 0, streakLosses: 0, message: "No recovery state for this browser session" });
+      return;
+    }
     const state = recoveryEngine.getState();
 
     if (!state.inRecovery) {
@@ -2111,7 +2172,7 @@ router.post("/day-reset", (req, res): void => {
   }
 
   if (reset === true) {
-    forceDayReset(true);               // resets in-memory state + broadcasts SSE day_reset
+    forceDayReset(true, req.sessionId); // resets only this browser's recovery/day state
   }
 
   res.json({ ok: true });

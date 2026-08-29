@@ -17,14 +17,15 @@
 import {
   tickManager,
   DERIV_MARKETS,
+  AUTOMATED_DERIV_MARKETS,
   executeLiveTrade,
   waitForContractResult,
-  getCachedToken,
   getLiveBalance,
+  isAutomatedMarket,
 } from "./deriv";
 import { broadcastSSE } from "./sse";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
 import {
   OVER_PAYOUTS,
@@ -71,6 +72,8 @@ export type SpeedContractType =
   | "CALL" | "PUT";
 
 export interface SpeedAIConfig {
+  /** Opaque browser-session owner; supplied only by the API route. */
+  ownerSessionId?: string;
   normalContractTypes: SpeedContractType[];
   normalBarriers: number[];       // For OVER/UNDER — e.g. [1,2] for OVER, [7,8] for UNDER
   recoveryContractTypes: SpeedContractType[];
@@ -1145,7 +1148,7 @@ export async function analyzeMarketsForStrategy(
   const scored: MarketScore[] = [];
   const { overBarrier, underBarrier } = extractBarriers(barriers);
 
-  for (const market of DERIV_MARKETS) {
+  for (const market of AUTOMATED_DERIV_MARKETS) {
     if (!market.digitEnabled && contractTypes.some(ct => ct.startsWith("DIGIT"))) continue;
 
     const digits100 = tickManager.getDigits(market.symbol, 100);
@@ -1219,21 +1222,21 @@ export async function scoreSingleMarket(
 }
 
 /**
- * Comprehensive Market Scan: scores all 17 markets for normal and recovery modes.
+ * Comprehensive Market Scan: scores every automated-eligible market for normal and recovery modes.
  */
 export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult> {
   const candidatesBySymbol = new Map<string, MarketScore>();
-  const total = DERIV_MARKETS.length;
+  const total = AUTOMATED_DERIV_MARKETS.length;
   let scanned = 0;
 
-  for (const market of DERIV_MARKETS) {
+  for (const market of AUTOMATED_DERIV_MARKETS) {
     broadcastSSE("speed_ai_scan_progress", {
       scanning: market.displayName,
       symbol: market.symbol,
       scanned,
       total,
       results: [...candidatesBySymbol.values()].sort((a, b) => b.score - a.score),
-    });
+    }, config.ownerSessionId);
 
     const normalBest   = await scoreSingleMarket(market.symbol, market.displayName, config.normalContractTypes,   config.normalBarriers);
     const recoveryBest = await scoreSingleMarket(market.symbol, market.displayName, config.recoveryContractTypes, config.recoveryBarriers);
@@ -1264,7 +1267,7 @@ export async function scanBestMarket(config: SpeedAIConfig): Promise<ScanResult>
     scanning: null, symbol: null,
     scanned: total, total,
     results: allScored,
-  });
+  }, config.ownerSessionId);
 
   if (allScored.length === 0) {
     return {
@@ -1319,12 +1322,21 @@ function computeRecoveryStake(
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
 function broadcast() {
-  broadcastSSE("speed_ai_update", getStatus());
+  const ownerSessionId = session.config?.ownerSessionId;
+  if (!ownerSessionId) return;
+  broadcastSSE("speed_ai_update", getStatus(), ownerSessionId);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+export function getOwnerSessionId(): string | null {
+  return session.config?.ownerSessionId ?? null;
+}
+
 export function getStatus(): SpeedAIStatus {
+  const publicConfig = session.config
+    ? Object.fromEntries(Object.entries(session.config).filter(([key]) => key !== "ownerSessionId")) as SpeedAIConfig
+    : undefined;
   // Recovery fields come from the SHARED account ledger — the exact same debt,
   // step and target the dashboard card and the main autonomous engine see.
   const rec = recoveryEngine.getState();
@@ -1346,7 +1358,7 @@ export function getStatus(): SpeedAIStatus {
     currentMarket:             session.currentMarket,
     currentContractType:       session.currentContractType,
     lastResult:                session.lastResult,
-    config:                    session.config ?? undefined,
+    config:                    publicConfig,
     message:                   session.message,
     topMarkets:                session.topMarkets.slice(0, 6),
     entropyBits:               session.lastEntropyBits,
@@ -1429,12 +1441,28 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
 // ── Quantum Execution Loop ────────────────────────────────────────────────────
 
 async function runLoop(config: SpeedAIConfig) {
-  let accounts = await db.select().from(accountsTable).where(eq(accountsTable.isActive, true)).limit(1);
-  if (accounts.length === 0) accounts = await db.select().from(accountsTable).limit(1);
+  const ownerSessionId = config.ownerSessionId;
+  if (!ownerSessionId) {
+    session.running = false;
+    session.message = "Browser session missing — session aborted safely";
+    releaseTradingOwnership("neuroai");
+    broadcast();
+    return;
+  }
+  let accounts = await db.select().from(accountsTable).where(and(
+    eq(accountsTable.sessionId, ownerSessionId),
+    eq(accountsTable.isActive, true),
+  )).limit(1);
+  if (accounts.length === 0) {
+    accounts = await db.select().from(accountsTable)
+      .where(eq(accountsTable.sessionId, ownerSessionId)).limit(1);
+  }
 
-  const settings       = await db.select().from(settingsTable).limit(1);
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
+  recoveryEngine.setPersistenceSession(ownerSessionId);
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
-  const token          = getCachedToken() ?? (accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null);
+  const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLive         = !paperTradeMode && !!token;
   const maxStake       = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
@@ -1444,7 +1472,7 @@ async function runLoop(config: SpeedAIConfig) {
 
   const isLocked = config.marketMode === "locked" || (!!config.lockedSymbol && config.marketMode !== "switching");
   const lockedDerivsMarket = isLocked && config.lockedSymbol
-    ? DERIV_MARKETS.find(m => m.symbol === config.lockedSymbol) ?? null
+    ? AUTOMATED_DERIV_MARKETS.find(m => m.symbol === config.lockedSymbol) ?? null
     : null;
 
   if (isLocked && config.lockedSymbol && !lockedDerivsMarket) {
@@ -1506,7 +1534,7 @@ async function runLoop(config: SpeedAIConfig) {
 
       const freshDigits = lockedDerivsMarket
         ? tickManager.getDigits(lockedDerivsMarket.symbol, 100)
-        : DERIV_MARKETS
+        : AUTOMATED_DERIV_MARKETS
             .filter(m => m.digitEnabled)
             .map(m => tickManager.getDigits(m.symbol, 100))
             .find(d => d.length >= 40);
@@ -1731,6 +1759,7 @@ async function runLoop(config: SpeedAIConfig) {
     const fabDirection = best.contractType === "CALL" ? "up" : best.contractType === "PUT" ? "down" : "hold";
     const actualPayoutForWin = stake * best.payout;
     const [fabTrade] = await db.insert(tradesTable).values({
+      sessionId:    ownerSessionId,
       symbol:       best.symbol,
       displayName:  best.displayName,
       contractType: best.contractType,
@@ -1764,6 +1793,9 @@ async function runLoop(config: SpeedAIConfig) {
           step:         sharedStep,
         }, inRecovery ? "NeuroAI executing sniper recovery trade" : "NeuroAI executing normal trade");
 
+        if (!isAutomatedMarket(best.symbol)) {
+          throw new Error(`${best.displayName} is blocked from NeuroAI execution`);
+        }
         const liveResult = await executeLiveTrade(token!, {
           symbol:       best.symbol,
           contractType: best.contractType,
@@ -1771,9 +1803,13 @@ async function runLoop(config: SpeedAIConfig) {
           duration:     1,
           durationUnit: "t",
           currency,
+          accountId:    accounts[0].derivAccountId ?? accounts[0].loginId,
           barrier:      best.barrier,
         });
-        const result = await waitForContractResult(token!, liveResult.contractId, 30_000);
+        const result = await waitForContractResult(
+          token!, accounts[0].derivAccountId ?? accounts[0].loginId,
+          liveResult.contractId, 30_000,
+        );
         won    = result.won;
         profit = result.profit;
         entryPrice = Number(result.entrySpot) || liveResult.buyPrice;
@@ -1854,7 +1890,9 @@ async function runLoop(config: SpeedAIConfig) {
 
     if (isLive) {
       try {
-        const newBal = await getLiveBalance(token!);
+        const newBal = await getLiveBalance(
+          token!, accounts[0]?.derivAccountId ?? accounts[0]?.loginId,
+        );
         if (newBal !== null && accounts.length > 0) {
           availableBalance = newBal;
           await db.update(accountsTable)

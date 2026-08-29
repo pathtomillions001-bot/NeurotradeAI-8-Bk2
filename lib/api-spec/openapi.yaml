@@ -515,7 +515,7 @@ components:
 
     RankedMarket:
       type: object
-      required: [symbol, displayName, category, qualityScore, confidenceScore, riskScore, trend, volatility, rank]
+      required: [symbol, displayName, category, qualityScore, confidenceScore, riskScore, trend, volatility, rank, automatedEligible]
       properties:
         symbol:
           type: string
@@ -541,6 +541,9 @@ components:
           enum: [low, medium, high, extreme]
         rank:
           type: integer
+        automatedEligible:
+          type: boolean
+          description: Whether autonomous engines may analyze and trade this market
         recommendedContractType:
           type: ["string", "null"]
         lastPrice:

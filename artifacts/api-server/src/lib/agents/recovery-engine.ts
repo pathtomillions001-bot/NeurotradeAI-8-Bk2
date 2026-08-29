@@ -22,6 +22,7 @@
  */
 
 import { getLocalTodayKey } from "../tz";
+import { getBrowserSessionId } from "../session";
 import {
   addMoney,
   applyRecoveryStakeLimits,
@@ -75,7 +76,41 @@ function freshState(): RecoveryState {
   };
 }
 
-let state: RecoveryState = freshState();
+const statesBySession = new Map<string, RecoveryState>();
+let fallbackSessionId = "legacy";
+
+function activeSessionId(): string {
+  const contextual = getBrowserSessionId();
+  return contextual === "legacy" ? fallbackSessionId : contextual;
+}
+
+function activeState(): RecoveryState {
+  const key = activeSessionId();
+  let current = statesBySession.get(key);
+  if (!current) {
+    current = freshState();
+    statesBySession.set(key, current);
+  }
+  return current;
+}
+
+function replaceState(next: RecoveryState): void {
+  statesBySession.set(activeSessionId(), next);
+}
+
+// Proxy preserves the existing state.field implementation while routing every
+// read/write to the AsyncLocalStorage-bound browser session.
+const state = new Proxy({ ...freshState() } as RecoveryState, {
+  get: (_target, property) => Reflect.get(activeState(), property),
+  set: (_target, property, value) => Reflect.set(activeState(), property, value),
+  ownKeys: () => Reflect.ownKeys(activeState()),
+  getOwnPropertyDescriptor: (_target, property) => ({
+    configurable: true,
+    enumerable: true,
+    writable: true,
+    value: Reflect.get(activeState(), property),
+  }),
+});
 
 /**
  * Inner new-day transition: resets state and applies 50%-debt carry-over.
@@ -90,7 +125,7 @@ function applyNewDay(): void {
   const prevOriginPayout     = state.originPayoutMultiplier;
   const hadCarryOver         = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
 
-  state = freshState();
+  replaceState(freshState());
 
   // Carry 50% of any unrecovered debt into the new day (capped at 3× base stake).
   // A hard wipe would silently discard real account losses from late-night trades.
@@ -138,8 +173,12 @@ export function forceNewDay(): void {
 // forgotten by a call site (manual trade route, autonomous loop, etc). Lazily import
 // the db module to avoid a hard circular/startup dependency on the db package for
 // pure in-memory consumers/tests of this module.
-let persistFn: ((snapshot: string) => Promise<void>) | null = null;
-let persistGeneration = 0;
+const persistGenerationBySession = new Map<string, number>();
+
+/** Backward-compatible fallback for non-request startup tasks and tests. */
+export function setPersistenceSession(sessionId: string): void {
+  fallbackSessionId = sessionId;
+}
 
 /**
  * Persist a snapshot taken at call time. A generation counter drops superseded
@@ -148,16 +187,16 @@ let persistGeneration = 0;
  */
 async function persistToDb(): Promise<void> {
   const snapshot = JSON.stringify(state);
-  const generation = ++persistGeneration;
+  const sessionId = activeSessionId();
+  const generation = (persistGenerationBySession.get(sessionId) ?? 0) + 1;
+  persistGenerationBySession.set(sessionId, generation);
   try {
-    if (!persistFn) {
-      const { db, settingsTable } = await import("@workspace/db");
-      persistFn = async (json: string) => {
-        await db.update(settingsTable).set({ recoveryStateJson: json, updatedAt: new Date() });
-      };
-    }
-    if (generation !== persistGeneration) return;
-    await persistFn(snapshot);
+    const { db, settingsTable } = await import("@workspace/db");
+    const { eq } = await import("drizzle-orm");
+    if (generation !== persistGenerationBySession.get(sessionId)) return;
+    await db.update(settingsTable)
+      .set({ recoveryStateJson: snapshot, updatedAt: new Date() })
+      .where(eq(settingsTable.sessionId, sessionId));
   } catch {
     /* best-effort — in-memory state remains authoritative for the running process */
   }
@@ -310,7 +349,7 @@ export function recordOutcome(
       if (settlement.recoveryComplete) {
         // Debt cleared — exit recovery immediately, even if target is $0.01 short.
         const preservedBaseStake = state.baseStake;
-        state = freshState();
+        replaceState(freshState());
         state.baseStake = preservedBaseStake;
       } else {
         state.unrecoveredAmount = settlement.remainingDebt;
@@ -372,17 +411,17 @@ function collapseIfDebtCleared(): void {
   if (!state.inRecovery) return;
   if (toCents(state.unrecoveredAmount) > 0) return;
   const preservedBaseStake = state.baseStake;
-  state = freshState();
+  replaceState(freshState());
   state.baseStake = preservedBaseStake;
 }
 
 export function resetAll(): void {
-  state = freshState();
+  replaceState(freshState());
 }
 
 /** Overwrite the entire recovery state (used when syncing from the Deriv journal). */
 export function seedState(data: RecoveryState): void {
-  state = { ...data };
+  replaceState({ ...data });
   collapseIfDebtCleared();
 }
 
@@ -398,7 +437,7 @@ export function loadState(json: string): void {
     // doesn't crash — sum unrecovered amounts / streaks across all former families.
     if (Array.isArray(parsed)) {
       const inRecovery = parsed.some((s: any) => s?.inRecovery);
-      state = {
+      replaceState({
         inRecovery,
         recoveryStep:      Math.max(0, ...parsed.map((s: any) => Number(s?.recoveryStep) || 0)),
         unrecoveredAmount: parsed.reduce((sum: number, s: any) => sum + (Number(s?.unrecoveredAmount) || 0), 0),
@@ -413,14 +452,14 @@ export function loadState(json: string): void {
         // Legacy per-family rows predate this feature — always treat as "not today".
         resetDate:                "",
         consecutiveMatchLosses:   0,
-      };
-      if (!inRecovery) state = freshState();
+      });
+      if (!inRecovery) replaceState(freshState());
       collapseIfDebtCleared();
       ensureFreshDay();
       return;
     }
 
-    state = {
+    replaceState({
       inRecovery:               !!parsed.inRecovery,
       recoveryStep:             Number(parsed.recoveryStep)       || 0,
       unrecoveredAmount:        Number(parsed.unrecoveredAmount)  || 0,
@@ -436,7 +475,7 @@ export function loadState(json: string): void {
       resetDate:                typeof parsed.resetDate === "string" ? parsed.resetDate : "",
       // New field — default to 0 for rows saved before this feature existed
       consecutiveMatchLosses:   Number(parsed.consecutiveMatchLosses) || 0,
-    };
+    });
   } catch {
     /* ignore malformed state — start fresh */
   }

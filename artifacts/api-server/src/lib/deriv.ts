@@ -155,9 +155,12 @@ export const DERIV_MARKETS = [
   { symbol: "R_75",    displayName: "Volatility 75 Index",       category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "R_100",   displayName: "Volatility 100 Index",      category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ10V",  displayName: "Volatility 10 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ15V",  displayName: "Volatility 15 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ30V",  displayName: "Volatility 30 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ50V",  displayName: "Volatility 50 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ75V",  displayName: "Volatility 75 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ90V",  displayName: "Volatility 90 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ100V", displayName: "Volatility 100 (1s) Index", category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "RDBULL",  displayName: "Bull Market Index",         category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "RDBEAR",  displayName: "Bear Market Index",         category: "synthetic", pipSize: 4, digitEnabled: true },
@@ -167,6 +170,19 @@ export const DERIV_MARKETS = [
   { symbol: "JD75",    displayName: "Jump 75 Index",             category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "JD100",   displayName: "Jump 100 Index",            category: "synthetic", pipSize: 2, digitEnabled: true },
 ];
+
+/** Markets available for manual trading but blocked from every AI scan/executor. */
+export const MANUAL_ONLY_MARKET_SYMBOLS = new Set(["JD100"]);
+
+/** Canonical universe for the main autonomous engine and NeuroAI Quantum FAB. */
+export const AUTOMATED_DERIV_MARKETS = DERIV_MARKETS.filter(
+  (market) => !MANUAL_ONLY_MARKET_SYMBOLS.has(market.symbol),
+);
+
+export function isAutomatedMarket(symbol: string): boolean {
+  return !MANUAL_ONLY_MARKET_SYMBOLS.has(symbol) &&
+    AUTOMATED_DERIV_MARKETS.some((market) => market.symbol === symbol);
+}
 
 export function getMarketInfo(symbol: string) {
   return DERIV_MARKETS.find((m) => m.symbol === symbol);
@@ -536,9 +552,12 @@ const SIM_PARAMS: Record<string, { base: number; vol: number }> = {
   R_75:    { base: 6800.0000, vol: 0.00095 },
   R_100:   { base: 1800.00,   vol: 0.00140 },
   "1HZ10V":  { base: 1000.00, vol: 0.00018 },
+  "1HZ15V":  { base: 1000.00, vol: 0.00024 },
   "1HZ25V":  { base: 1000.00, vol: 0.00035 },
+  "1HZ30V":  { base: 1000.00, vol: 0.00042 },
   "1HZ50V":  { base: 1000.00, vol: 0.00065 },
   "1HZ75V":  { base: 1000.00, vol: 0.00095 },
+  "1HZ90V":  { base: 1000.00, vol: 0.00120 },
   "1HZ100V": { base: 1000.00, vol: 0.00140 },
   RDBULL:  { base: 5000.0000, vol: 0.00080 },
   RDBEAR:  { base: 5000.0000, vol: 0.00080 },
@@ -1124,17 +1143,18 @@ let cachedBearerToken: string | null = null;
 let cachedAccountId: string | null = null;
 let cachedAccountInfo: DerivAccountInfo | null = null;
 
-// Balance cache (REST-based — no WS needed)
+// Legacy single-session cache is retained only for source compatibility. Live
+// request paths use the account-keyed cache below and explicit account ids.
 let cachedBalance: number | null = null;
 let cachedBalanceAt = 0;
 const BALANCE_CACHE_TTL_MS = 60_000;
+const balanceCacheByAccount = new Map<string, { balance: number; cachedAt: number }>();
 
 export function setDerivCredentials(bearerToken: string, accountId: string) {
   cachedBearerToken = bearerToken;
   cachedAccountId = accountId;
   cachedBalance = null;
   cachedBalanceAt = 0;
-  journalManager.setCredentials(bearerToken, accountId);
 }
 
 // Backward-compatible alias — accepts a Bearer token and optionally an accountId.
@@ -1143,9 +1163,6 @@ export function setDerivToken(token: string, accountId?: string) {
   if (accountId) cachedAccountId = accountId;
   cachedBalance = null;
   cachedBalanceAt = 0;
-  if (accountId) {
-    journalManager.setCredentials(token, accountId);
-  }
 }
 
 export function clearDerivToken() {
@@ -1154,7 +1171,6 @@ export function clearDerivToken() {
   cachedAccountInfo = null;
   cachedBalance = null;
   cachedBalanceAt = 0;
-  journalManager.clearCredentials();
 }
 
 export function getCachedAccountInfo() { return cachedAccountInfo; }
@@ -1164,7 +1180,10 @@ export function getCachedToken(): string | null { return cachedBearerToken; }
 export function getCachedBearerToken(): string | null { return cachedBearerToken; }
 export function getCachedAccountId(): string | null { return cachedAccountId; }
 
-export function invalidateBalanceCache() { cachedBalanceAt = 0; }
+export function invalidateBalanceCache() {
+  cachedBalanceAt = 0;
+  balanceCacheByAccount.clear();
+}
 
 // ── Persistent Journal WebSocket Manager ─────────────────────────────────────
 /**
@@ -1487,7 +1506,26 @@ class DerivJournalManager extends EventEmitter {
   }
 }
 
-export const journalManager = new DerivJournalManager();
+// One authenticated journal connection/cache per anonymous browser session.
+// A process-wide singleton leaked one visitor's Deriv history into every browser.
+const journalManagers = new Map<string, DerivJournalManager>();
+
+export function getJournalManager(sessionId: string): DerivJournalManager {
+  let manager = journalManagers.get(sessionId);
+  if (!manager) {
+    manager = new DerivJournalManager();
+    journalManagers.set(sessionId, manager);
+  }
+  return manager;
+}
+
+export function clearJournalManager(sessionId: string): void {
+  const manager = journalManagers.get(sessionId);
+  if (!manager) return;
+  manager.clearCredentials();
+  manager.removeAllListeners();
+  journalManagers.delete(sessionId);
+}
 
 // ── Account authorization via REST ────────────────────────────────────────────
 /**
@@ -1513,29 +1551,25 @@ export async function authorizeWithDeriv(bearerToken: string): Promise<DerivAcco
     is_virtual: account.account_type === "demo" ? 1 : 0,
   };
 
-  cachedAccountInfo = info;
-  cachedAccountId = account.account_id;
   return info;
 }
 
 // ── Live balance via REST ─────────────────────────────────────────────────────
-export async function getLiveBalance(bearerToken: string): Promise<number | null> {
-  const now = Date.now();
-  if (cachedBalance !== null && now - cachedBalanceAt < BALANCE_CACHE_TTL_MS) {
-    return cachedBalance;
-  }
+export async function getLiveBalance(
+  bearerToken: string,
+  accountId?: string | null,
+): Promise<number | null> {
+  const cacheKey = accountId ? `${accountId}:${bearerToken.slice(-12)}` : `token:${bearerToken.slice(-12)}`;
+  const cached = balanceCacheByAccount.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < BALANCE_CACHE_TTL_MS) return cached.balance;
 
   try {
     const accounts = await getDerivAccounts(bearerToken);
     if (accounts.length === 0) return null;
-    // Prefer the currently active account; fall back to real then first
-    const match = cachedAccountId
-      ? accounts.find(a => a.account_id === cachedAccountId)
-      : null;
+    const match = accountId ? accounts.find(a => a.account_id === accountId) : null;
     const real = accounts.find((a) => a.account_type === "real" && a.status === "active");
     const account = match ?? real ?? accounts[0];
-    cachedBalance = account.balance;
-    cachedBalanceAt = Date.now();
+    balanceCacheByAccount.set(cacheKey, { balance: account.balance, cachedAt: Date.now() });
     return account.balance;
   } catch {
     return null;
@@ -1602,7 +1636,7 @@ export async function getContractProposal(
  *  5. On buy confirmation, resolve with contract details
  */
 export async function executeLiveTrade(
-  _token: string,   // kept for API compat; auth comes from module-level cache
+  bearerToken: string,
   params: {
     symbol: string;
     contractType: string;
@@ -1610,11 +1644,11 @@ export async function executeLiveTrade(
     duration: number;
     durationUnit: string;
     currency: string;
+    accountId: string;
     barrier?: number | string;
   },
 ): Promise<LiveTradeResult> {
-  const bearerToken = cachedBearerToken;
-  const accountId = cachedAccountId;
+  const accountId = params.accountId;
 
   if (!bearerToken || !accountId) {
     throw new Error(
@@ -1697,12 +1731,10 @@ export async function executeLiveTrade(
 
 // ── Profit table fetch via OTP WebSocket ──────────────────────────────────────
 export async function fetchDerivProfitTable(
-  _token: string,   // kept for API compat
+  bearerToken: string,
+  accountId: string,
   limit = 50,
 ): Promise<any[]> {
-  const bearerToken = cachedBearerToken;
-  const accountId = cachedAccountId;
-
   if (!bearerToken || !accountId) {
     logger.warn("fetchDerivProfitTable: no Bearer token or accountId — returning empty");
     return [];
@@ -1750,13 +1782,11 @@ export async function fetchDerivProfitTable(
  * (confirms settled buy/sell price) — same strategy as before, now on OTP WS.
  */
 export async function waitForContractResult(
-  _token: string,   // kept for API compat
+  bearerToken: string,
+  accountId: string,
   contractId: number,
   timeoutMs = 30_000,
 ): Promise<ContractResult> {
-  const bearerToken = cachedBearerToken;
-  const accountId = cachedAccountId;
-
   if (!bearerToken || !accountId) {
     throw new Error("No authenticated session for contract result polling");
   }

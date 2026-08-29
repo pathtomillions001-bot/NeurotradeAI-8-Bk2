@@ -1,0 +1,33 @@
+kind = "web"
+previewPath = "/"
+title = "AI Trading Platform"
+version = "1.0.0"
+id = "artifacts/trading-platform"
+router = "path"
+
+[[integratedSkills]]
+name = "react-vite"
+version = "1.0.0"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21210
+autoStart = true
+
+[services.development]
+run = "pnpm --filter @workspace/trading-platform run dev"
+autoStart = true
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/trading-platform", "run", "build" ]
+publicDir = "artifacts/trading-platform/dist/public"
+serve = "static"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21210"
+BASE_PATH = "/"

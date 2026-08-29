@@ -1,0 +1,246 @@
+# Implementation Directive – Modify the Existing Application Without Changing Existing Working Logic
+
+You are a senior software architect and principal software engineer. Your task is **NOT** to redesign, simplify, reinterpret, or partially implement this request.
+
+Your responsibility is to modify the **existing application** by integrating the requested features into the current architecture while preserving all existing functionality that is not explicitly mentioned below.
+
+## Operating Rules
+
+Before making any code changes:
+
+* Study the existing codebase completely.
+* Identify every module, service, state manager, engine, UI component, and helper function involved in trading, recovery logic, cooldown logic, journal synchronization, AI decision making, and settings management.
+* Understand how the current implementation works before modifying anything.
+* Reuse the existing architecture wherever possible.
+* Do not replace working systems with new ones unless absolutely necessary.
+* Preserve backward compatibility.
+* Do not introduce duplicate recovery systems.
+* Do not create temporary fixes or shortcuts.
+* Do not omit any requested functionality.
+* Do not ignore edge cases.
+* Ensure every requested feature is fully wired into the existing application.
+* Produce production-quality code only.
+
+If multiple files require modification, update every required file until the feature is fully functional.
+
+Do not stop after implementing only part of the request.
+
+---
+
+## Mandatory Requirement
+
+Everything below is a required implementation.
+
+Do not summarize it.
+
+Do not reinterpret it.
+
+Implement it exactly as specified.
+
+---
+
+### Over/Under recovery barrier rule
+
+After any OVER/UNDER loss, all recovery trades are placed at OVER 4 or UNDER 5 (whichever side matches the lost direction) — stays there until the cumulative unrecovered amount from that loss streak is fully recovered.
+
+Normal OVER 2 / UNDER 7 resumes only after recovery is complete.
+
+---
+
+### Recovery stake for OVER/UNDER
+
+Each consecutive recovery loss increases stake by recoveryMultiplier ^ recoveryStep (user-configured).
+
+Once cumulative profit from recovery trades covers the unrecovered amount, stake resets to base.
+
+---
+
+### Rise/Fall and Even/Odd recovery
+
+Simply multiply the next trade's stake by the same recoveryMultiplier value.
+
+No barrier change.
+
+Resets after a single recovery win that covers the loss.
+
+---
+
+### Multi-contract mode
+
+When both Over/Under and Rise/Fall (or Even/Odd) are enabled, both recovery modes run in parallel.
+
+The engine picks whichever recovery trade has the highest AI confidence score.
+
+---
+
+### Gradual recovery
+
+If a single recovery trade's profit does not fully cover unrecoveredAmount, the engine stays in recovery mode and continues tracking the remaining deficit across subsequent trades.
+
+Recovery only ends when unrecoveredAmount reaches zero.
+
+---
+
+### Persistent recovery state
+
+On engine start, if recoveryMode is enabled, the engine reads today's completed trades from the Deriv journal using:
+
+* journalManager.getCached()
+* profit_table
+
+It calculates whether there is any open unrecoveredAmount for the current trading day.
+
+If unrecoveredAmount is greater than zero, the engine automatically re-enters recovery mode before placing any new trade.
+
+Recovery must survive:
+
+* page refresh
+* application restart
+* browser restart
+* engine restart
+
+provided today's journal still contains an unrecovered deficit.
+
+---
+
+### Dashboard recovery card
+
+Whenever recovery mode is active, display a compact Dashboard card showing:
+
+* current recovery step
+* remaining amount to recover (USD)
+* next stake multiplier
+* contract families currently in recovery
+
+The card disappears automatically when recovery is complete.
+
+---
+
+### Settings wiring
+
+The existing settings:
+
+* recoveryMultiplier
+* maxRecoverySteps
+
+must govern BOTH:
+
+* Over/Under recovery
+* Rise/Fall recovery
+* Even/Odd recovery
+
+maxRecoverySteps means:
+
+"maximum number of consecutive recovery losses that continue compounding the multiplier."
+
+It does NOT mean:
+
+"maximum number of recovery trades."
+
+Once the maximum step is reached, additional losses continue recovery but stop increasing the multiplier.
+
+---
+
+## Cooldown Requirement
+
+Implement the following exactly.
+
+When the configured Loss Streak Limit is reached:
+
+Example:
+
+Loss Streak Limit = 5
+
+The engine must inspect ONLY the most recent completed trades in today's trading journal.
+
+Do NOT inspect previous loss streaks.
+
+Do NOT inspect historical streaks that were already broken by a winning trade.
+
+Do NOT count older completed streaks.
+
+Only evaluate the current consecutive losing streak ending with the latest completed trade.
+
+If the number of consecutive losses equals the configured limit:
+
+* immediately trigger cooldown
+* prevent any new trades during cooldown
+* display cooldown state exactly as existing cooldown logic expects
+* automatically resume trading after cooldown expires
+
+Cooldown must trigger every time the latest consecutive losing streak reaches the configured limit.
+
+---
+
+## Integration Requirements
+
+Ensure the implementation is fully integrated with:
+
+* AI engine
+* trade engine
+* recovery manager
+* journal manager
+* dashboard
+* settings
+* persistence
+* cooldown manager
+* state management
+* existing trade execution flow
+
+Do not leave any disconnected logic.
+
+Do not create parallel implementations.
+
+Do not create unused code.
+
+---
+
+## Validation
+
+Before considering the task complete, verify that every requirement functions correctly.
+
+Specifically verify:
+
+✓ Over/Under switches to OVER 4 / UNDER 5 during recovery.
+
+✓ Normal OVER 2 / UNDER 7 resumes only after recovery completes.
+
+✓ Recovery stake compounds correctly.
+
+✓ Recovery resets correctly.
+
+✓ Rise/Fall recovery works independently.
+
+✓ Even/Odd recovery works independently.
+
+✓ Multi-contract AI confidence selection works correctly.
+
+✓ Gradual recovery tracks remaining unrecoveredAmount correctly.
+
+✓ Recovery survives engine restart.
+
+✓ Recovery survives application restart.
+
+✓ Dashboard recovery card updates correctly.
+
+✓ Settings affect all recovery systems.
+
+✓ Cooldown activates only from the latest consecutive loss streak.
+
+✓ Cooldown resumes automatically.
+
+✓ No existing functionality has been broken.
+
+---
+
+## Completion Rules
+
+Do NOT stop because one feature works.
+
+Do NOT stop after fixing the first issue encountered.
+
+Continue modifying the application until every requirement above has been implemented and verified.
+
+If one requested feature depends on changes elsewhere in the codebase, make those changes as well.
+
+The task is complete only when every requirement above is fully implemented, integrated into the existing application, and functioning correctly without regressions.

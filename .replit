@@ -1,0 +1,80 @@
+modules = ["nodejs-20", "web", "bash"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "API Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Start application"
+
+[[workflows.workflow]]
+name = "API Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/api-server run dev"
+waitForPort = 8080
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow]]
+name = "Start application"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pnpm --filter @workspace/trading-platform run dev"
+waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[agent]
+stack = "BEST_EFFORT_FALLBACK"
+expertMode = true
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[userenv]
+# DERIV_APP_ID: your NUMERIC app ID from app.deriv.com (e.g. 36544)
+#   - Register at https://app.deriv.com/account/api-token → "Manage account apps"
+#   - This is the WebSocket connection ID, NOT your personal API token
+# VITE_DERIV_APP_ID: same numeric value, exposed to the Vite frontend for OAuth redirects
+# Users connect their personal accounts with a PAT token (pat_xxx) at the /connect page
+
+[userenv.shared]
+DERIV_APP_ID = "33UykfmRmHDK2MSlotlw9"
+API_PORT = "8080"
+VITE_DERIV_APP_ID = "33UykfmRmHDK2MSlotlw9"
+
+[nix]
+channel = "stable-25_05"

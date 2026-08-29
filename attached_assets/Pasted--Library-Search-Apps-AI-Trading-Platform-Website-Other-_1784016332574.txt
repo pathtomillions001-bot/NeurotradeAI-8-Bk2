@@ -1,0 +1,21 @@
+
+Library
+Search
+Apps
+AI Trading Platform
+Website
+Other
+Start application
+Website
+/trades
+The user wants to make specific changes but hasn't described them yet.
+
+What changes would you like me to make to NeuroTrade?
+Describe the changes
+1.we have contradicting information across the app, in the analytics we have profit of 539.94 yet in journal and dashboard we have a profit of 138.99. im sure that the todays profit in the journal and dashboard section is the profit when i started the AI engine later today and did not incude the trades taken earlier today and the actuall profit today is the one in the analytics, ensure that the winrate and todays profit displayed across the app are the actual from all the trades taken on that day only and will refresh at midnight again. include also the actuall winrate in the analytics, best trade and the win streak or loss streak that are current in the journal.
+2. ensure that the trades analzed number is the same in the intelligence section like the one at the top right corner, at top right we have 426 and in the box we have 100, fix that and ensure to include true and actull wins and losses in those analyzed trades.
+3. When trading over and under contract and in the settings you use instant recovery mode, the AI engine will use 2.72 multiplier which exposes the user yet it should be using 1.62 multiplier that is reasonable and does not over expose the user. The multiplier in instant should be the same like we use in split recovery as long as the multiplier will cover the instant loss, other than that the AI engine can adjust the multiplier but still protect user stake by using the most reasonable multiplier that does not use more stake, eg if we lose like 40 usd, we should use a stake and multiplier that will give a profit of like 42 usd enough to cover our loss instead of using a large stake and multiplier.
+4. still our AI engine i incapable of taking any trades in the matches and differs market even when the user enables in the settings, fix the bug to always ensure the AI engine trades only differs in normal mode and matches in recovery mode and having in mind the payout in matches to reduce the stake since matches have high payout but still being aware of the lost amount that need to be recovered.
+5. we recently included the over and under, even and odd and matches and differes market in the bull and bear markets, ensure they are also considered when the AI engine is making the analyses in selecting the best favourable trade to be executed based on what contract the user enabled.
+6. explain in simple way how each trade is taken by the AI engine, the process that takes place before each trade is actually executed.
+we still have an issue, our app data in not in synch especially the winrate, profit and loss and the total trades which gets misrepresented in the dashboards, journal and analysrtics, can you ensure that the winrate , profit and loss and the trades are the actuall numbers and data fetched in deriv based on trades taken in that single day and well replecented in all the sections well and refreshes on everysingle day at midnight.

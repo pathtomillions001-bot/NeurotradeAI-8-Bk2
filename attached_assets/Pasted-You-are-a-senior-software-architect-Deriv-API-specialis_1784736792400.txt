@@ -1,0 +1,601 @@
+You are a senior software architect, Deriv API specialist and full-stack engineer.
+
+
+
+This project was originally built using the OLD Deriv Legacy API.
+
+
+
+Deriv has completely redesigned their API platform.
+
+
+
+This is NOT a simple credential replacement task.
+
+
+
+I want you to migrate the ENTIRE application to the NEW Deriv API architecture.
+
+
+
+The Legacy API is being retired.
+
+
+
+Research and follow the latest official Deriv Developer documentation only.
+
+
+
+Your goal is to make the application production-ready.
+
+
+
+======================================================
+
+IMPORTANT API CHANGES
+
+======================================================
+
+
+
+OLD APP ID
+
+
+
+1089
+
+
+
+NEW APP ID example
+
+
+
+33TQEuMW21nTbCZ7Hfb0q
+
+
+
+The new App IDs are ALPHANUMERIC.
+
+
+
+Do NOT validate App IDs as integers.
+
+
+
+Store them as strings everywhere.
+
+
+
+------------------------------------------------------
+
+
+
+OLD API TOKEN
+
+
+
+9YA5gAUrSOJzm5w
+
+
+
+NEW API TOKEN example
+
+
+
+pat_c8a8ab7063fb60d25c5cced709739b075e04d212e1aa9ed55875a35dc16d4af7
+
+
+
+The new authentication uses Personal Access Tokens (PAT).
+
+
+
+Do NOT assume fixed token lengths.
+
+
+
+Do NOT truncate tokens.
+
+
+
+Do NOT use old validation regex.
+
+
+
+Accept any valid PAT token.
+
+
+
+======================================================
+
+
+
+YOUR TASK
+
+
+
+Perform a COMPLETE migration.
+
+
+
+Do NOT patch code.
+
+
+
+Audit the ENTIRE repository.
+
+
+
+======================================================
+
+
+
+STEP 1
+
+
+
+Locate every file using
+
+
+
+- App IDs
+
+- API Keys
+
+- Authorization
+
+- Login
+
+- WebSocket
+
+- REST calls
+
+- Trading Engine
+
+- AI Engine
+
+- Agent Engine
+
+- Tick Stream
+
+- Buy Contract
+
+- Sell Contract
+
+- Proposal
+
+- Proposal Open Contract
+
+- Active Symbols
+
+- Balance
+
+- Portfolio
+
+- Ping
+
+- Authorization middleware
+
+
+
+======================================================
+
+
+
+STEP 2
+
+
+
+Replace every Legacy implementation with the NEW Deriv implementation.
+
+
+
+======================================================
+
+
+
+STEP 3
+
+
+
+Replace every assumption that:
+
+
+
+App IDs are numeric.
+
+
+
+Tokens are short strings.
+
+
+
+Legacy authorization still works.
+
+
+
+======================================================
+
+
+
+STEP 4
+
+
+
+Update the authentication layer to support:
+
+
+
+✔ Personal Access Tokens (PAT)
+
+
+
+✔ OAuth 2.0 architecture if required
+
+
+
+✔ Bearer authentication
+
+
+
+✔ Automatic authorization after WebSocket connection
+
+
+
+✔ Proper token validation
+
+
+
+✔ Proper reconnect handling
+
+
+
+======================================================
+
+
+
+STEP 5
+
+
+
+Verify every request against the latest official Deriv API documentation.
+
+
+
+If an endpoint has changed
+
+
+
+update it.
+
+
+
+If parameters changed
+
+
+
+update them.
+
+
+
+If field names changed
+
+
+
+update them.
+
+
+
+If payload formats changed
+
+
+
+update them.
+
+
+
+======================================================
+
+
+
+STEP 6
+
+
+
+Ensure ALL live trading uses REAL Deriv data.
+
+
+
+NO
+
+
+
+fake data
+
+
+
+mock data
+
+
+
+placeholder responses
+
+
+
+dummy balances
+
+
+
+sample ticks
+
+
+
+random prices
+
+
+
+offline simulations
+
+
+
+Every AI decision must use live market data received directly from Deriv.
+
+
+
+======================================================
+
+
+
+STEP 7
+
+
+
+Verify that these functions all work correctly.
+
+
+
+✔ Connect
+
+
+
+✔ Authenticate
+
+
+
+✔ Balance
+
+
+
+✔ Active Symbols
+
+
+
+✔ Tick Streaming
+
+
+
+
+
+
+
+✔ Proposal
+
+
+
+✔ contract executions 
+
+
+
+✔ Portfolio
+
+
+
+✔ Open Positions
+
+
+
+✔ Transaction Stream
+
+
+
+✔ Contract Updates
+
+
+
+✔ Reconnection
+
+
+
+✔ Error Recovery
+
+
+
+======================================================
+
+
+
+STEP 8
+
+
+
+Review the AI engine.
+
+
+
+Ensure every trading decision is powered by live Deriv market data.
+
+
+
+No cached prices.
+
+
+
+
+
+
+
+No generated ticks.
+
+
+
+No fake contract responses.
+
+
+
+======================================================
+
+
+
+STEP 9
+
+
+
+Review every TypeScript interface.
+
+
+
+Update all schemas.
+
+
+
+Update request models.
+
+
+
+Update response models.
+
+
+
+Update enums.
+
+
+
+Update validators.
+
+
+
+Update regex patterns.
+
+
+
+Update serializers.
+
+
+
+======================================================
+
+
+
+STEP 10
+
+
+
+Search for every compile error.
+
+
+
+Search for every runtime error.
+
+
+
+Search for every asynchronous bug.
+
+
+
+Search for every WebSocket race condition.
+
+
+
+Search for every broken Promise.
+
+
+
+Search for every authentication failure.
+
+
+
+Search for every API mismatch.
+
+
+
+Fix everything.
+
+
+
+======================================================
+
+
+
+STEP 11
+
+
+
+Before finishing,
+
+
+
+perform a complete self-review.
+
+
+
+Challenge every assumption.
+
+
+
+Question every implementation.
+
+
+
+Verify every API call against the latest documentation.
+
+
+
+Repeat this review until no issues remain.
+
+
+
+======================================================
+
+
+
+OUTPUT
+
+
+
+Do NOT stop after listing problems.
+
+
+
+Actually modify the code.
+
+
+
+Return the updated implementation.
+
+
+
+Ensure the application builds successfully.
+
+
+
+Ensure there are zero compile errors.
+
+
+
+Ensure there are zero runtime errors.
+
+
+
+Ensure all trading uses the NEW Deriv API with live market data only.
+
+
+
+Do not leave TODO comments.
+
+
+
+Do not leave placeholders.
+
+
+
+Finish the migration completely.

@@ -1,0 +1,89 @@
+Design a premium futuristic 3D onboarding flashcard for a Synthetic Markets trading platform powered by Deriv.
+
+The card should appear automatically every time the website is refreshed as a welcome/feature card. It is NOT a popup, modal, carousel, or flip card. It remains static with subtle ambient animations only.
+
+Style:
+
+* Ultra-modern fintech aesthetic.
+* Dark luxury interface (#050816 to #0B1220).
+* Frosted glass (glassmorphism) with soft transparency.
+* Rounded corners (28–32px).
+* Floating 3D appearance with realistic depth.
+* Neon edge lighting using electric blue (#4CC9FF), violet (#8B5CF6), and cyan (#00F5D4).
+* Premium shadows and bloom effects.
+* High-end Apple Vision Pro meets cyberpunk trading terminal.
+* Minimal but visually striking.
+
+Aspect Ratio:
+
+* 3:4 vertical card.
+
+Card Layout:
+
+Top Left
+
+* Futuristic glowing hexagon icon containing an upward trending arrow.
+
+Top Right
+
+* Small glowing status pill:
+  ● MARKET OPEN
+
+Center
+
+* Large bold headline:
+  WELCOME TO
+  SYNTHETIC MARKETS
+
+Subtitle:
+Trade 24/7 on volatility.
+Opportunities never sleep.
+
+Right Side Hero Element
+Create a floating semi-transparent holographic 3D market chart:
+
+* Glass bars
+* Neon line graph
+* Soft glowing data nodes
+* Floating above a circular illuminated platform
+* No realistic candlestick chart
+* Looks like a futuristic hologram.
+
+Feature Section
+Three evenly spaced futuristic icons:
+
+⏰ 24/7
+Markets Never Close
+
+🛡 Secure
+Powered by Deriv
+
+⚡ Fast
+Instant Execution
+
+Bottom Section
+Small glowing callout with icon:
+
+Smart Trades. Smarter You.
+
+Include a subtle neon arrow indicating continuation.
+
+Animation
+
+* Gentle floating motion (2–4px)
+* Slow breathing glow
+* Animated holographic chart shimmer
+* Moving light reflections across glass
+* Soft pulsing neon border
+* Tiny floating particles in the background
+* Absolutely no flipping, rotating, or active scanning lines.
+
+Background
+Dark futuristic trading environment with subtle gradients and faint digital grid patterns.
+
+Overall Feel
+Premium.
+Elegant.
+Minimal.
+Luxury fintech.
+Looks like the onboarding card of a billion-dollar AI trading platform.

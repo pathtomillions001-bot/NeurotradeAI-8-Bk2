@@ -1,0 +1,1184 @@
+openapi: 3.1.0
+info:
+  title: Api
+  version: 0.1.0
+  description: AI Trading Platform API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: auth
+    description: Deriv account authentication
+  - name: markets
+    description: Market scanning and ranking
+  - name: trades
+    description: Trade execution and journal
+  - name: analytics
+    description: Account analytics and performance
+  - name: ai
+    description: AI agent recommendations
+  - name: settings
+    description: User risk profile and configuration
+
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+
+  # Auth
+  /auth/connect:
+    post:
+      operationId: connectDerivAccount
+      tags: [auth]
+      summary: Connect a Deriv account via API token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DerivTokenInput"
+      responses:
+        "200":
+          description: Connected account info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DerivAccount"
+        "400":
+          description: Invalid token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /auth/account:
+    get:
+      operationId: getAccount
+      tags: [auth]
+      summary: Get connected account details
+      responses:
+        "200":
+          description: Account details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DerivAccount"
+        "404":
+          description: No account connected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /auth/disconnect:
+    post:
+      operationId: disconnectAccount
+      tags: [auth]
+      summary: Disconnect Deriv account
+      responses:
+        "200":
+          description: Disconnected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+
+  # Markets
+  /markets:
+    get:
+      operationId: getMarkets
+      tags: [markets]
+      summary: Get all ranked markets with AI quality scores
+      parameters:
+        - name: category
+          in: query
+          schema:
+            type: string
+            enum: [all, synthetic, forex, commodities, derived]
+          description: Filter by market category
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+      responses:
+        "200":
+          description: Ranked market list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RankedMarket"
+
+  /markets/{symbol}:
+    get:
+      operationId: getMarketDetail
+      tags: [markets]
+      summary: Get detailed analysis for a specific market
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Market detail with full agent scores
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketDetail"
+        "404":
+          description: Market not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /markets/top:
+    get:
+      operationId: getTopMarket
+      tags: [markets]
+      summary: Get the single best market opportunity right now
+      responses:
+        "200":
+          description: Top market recommendation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MarketDetail"
+
+  /markets/scan:
+    post:
+      operationId: triggerMarketScan
+      tags: [markets]
+      summary: Trigger a fresh full market scan
+      responses:
+        "200":
+          description: Scan initiated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanStatus"
+
+  # Trades
+  /trades:
+    get:
+      operationId: getTrades
+      tags: [trades]
+      summary: Get trade journal with filters
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [all, won, lost, open]
+        - name: market
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Trade list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Trade"
+
+    post:
+      operationId: executeTrade
+      tags: [trades]
+      summary: Execute a manual or AI-recommended trade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TradeInput"
+      responses:
+        "201":
+          description: Trade executed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trade"
+        "400":
+          description: Trade rejected by risk controls
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /trades/{id}:
+    get:
+      operationId: getTrade
+      tags: [trades]
+      summary: Get a single trade by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Trade detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Trade"
+
+  /trades/stats:
+    get:
+      operationId: getTradeStats
+      tags: [trades]
+      summary: Get win rate, profit/loss, and streak statistics
+      responses:
+        "200":
+          description: Trade statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeStats"
+
+  /trades/daily-summary:
+    get:
+      operationId: getDailySummary
+      tags: [trades]
+      summary: Get today's P&L, target progress, and trade count
+      responses:
+        "200":
+          description: Daily summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DailySummary"
+
+  # Analytics
+  /analytics/performance:
+    get:
+      operationId: getPerformanceAnalytics
+      tags: [analytics]
+      summary: Get performance over time (win rate, profit curve)
+      parameters:
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        "200":
+          description: Performance data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PerformanceAnalytics"
+
+  /analytics/drawdown:
+    get:
+      operationId: getDrawdownAnalysis
+      tags: [analytics]
+      summary: Get drawdown analysis and risk exposure
+      responses:
+        "200":
+          description: Drawdown analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DrawdownAnalysis"
+
+  /analytics/market-breakdown:
+    get:
+      operationId: getMarketBreakdown
+      tags: [analytics]
+      summary: Get win rates and P&L broken down by market
+      responses:
+        "200":
+          description: Market breakdown
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/MarketBreakdown"
+
+  /analytics/agent-scores:
+    get:
+      operationId: getAgentScoreHistory
+      tags: [analytics]
+      summary: Get historical agent confidence score accuracy
+      responses:
+        "200":
+          description: Agent score history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AgentScoreRecord"
+
+  # AI
+  /ai/recommendation:
+    get:
+      operationId: getAiRecommendation
+      tags: [ai]
+      summary: Get AI trade recommendation for the best current opportunity
+      responses:
+        "200":
+          description: Full AI recommendation with agent breakdown
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiRecommendation"
+
+  /ai/recommendation/{symbol}:
+    get:
+      operationId: getAiRecommendationForMarket
+      tags: [ai]
+      summary: Get AI recommendation for a specific market
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: AI recommendation for market
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiRecommendation"
+
+  /ai/insights:
+    get:
+      operationId: getAiInsights
+      tags: [ai]
+      summary: Get AI-generated performance improvement suggestions
+      responses:
+        "200":
+          description: AI insights and suggestions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AiInsight"
+
+  /ai/engine/status:
+    get:
+      operationId: getAiEngineStatus
+      tags: [ai]
+      summary: Get status of all AI agents and autonomous engine
+      responses:
+        "200":
+          description: Engine status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiEngineStatus"
+
+  /ai/engine/toggle:
+    post:
+      operationId: toggleAutonomousEngine
+      tags: [ai]
+      summary: Start or stop the autonomous trading engine
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EngineToggleInput"
+      responses:
+        "200":
+          description: Engine state changed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiEngineStatus"
+
+  # Settings
+  /settings:
+    get:
+      operationId: getSettings
+      tags: [settings]
+      summary: Get user risk profile and trading settings
+      responses:
+        "200":
+          description: User settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingSettings"
+
+    put:
+      operationId: updateSettings
+      tags: [settings]
+      summary: Update risk profile and trading settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TradingSettingsInput"
+      responses:
+        "200":
+          description: Updated settings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradingSettings"
+
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    SuccessResponse:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        message:
+          type: ["string", "null"]
+
+    DerivTokenInput:
+      type: object
+      required: [token]
+      properties:
+        token:
+          type: string
+          minLength: 1
+          description: >
+            Deriv Personal Access Token (PAT). New tokens start with "pat_"
+            (e.g. pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). Create one at
+            app.deriv.com/account/api-token with Read and Trade permissions.
+
+    DerivAccount:
+      type: object
+      required: [id, loginId, currency, balance, isVirtual]
+      properties:
+        id:
+          type: integer
+        loginId:
+          type: string
+        currency:
+          type: string
+        balance:
+          type: number
+        isVirtual:
+          type: boolean
+        email:
+          type: ["string", "null"]
+        fullName:
+          type: ["string", "null"]
+        country:
+          type: ["string", "null"]
+        connectedAt:
+          type: string
+
+    RankedMarket:
+      type: object
+      required: [symbol, displayName, category, qualityScore, confidenceScore, riskScore, trend, volatility, rank]
+      properties:
+        symbol:
+          type: string
+        displayName:
+          type: string
+        category:
+          type: string
+          enum: [synthetic, forex, commodities, derived]
+        qualityScore:
+          type: number
+          description: Composite market quality score 0-100
+        confidenceScore:
+          type: number
+          description: AI confidence that a good trade exists 0-100
+        riskScore:
+          type: number
+          description: Risk level 0-100 (lower is safer)
+        trend:
+          type: string
+          enum: [strong_up, up, sideways, down, strong_down]
+        volatility:
+          type: string
+          enum: [low, medium, high, extreme]
+        rank:
+          type: integer
+        recommendedContractType:
+          type: ["string", "null"]
+        lastPrice:
+          type: ["number", "null"]
+        priceChange24h:
+          type: ["number", "null"]
+
+    MarketDetail:
+      type: object
+      required: [symbol, displayName, category, qualityScore, agentScores, recommendation, priceHistory]
+      properties:
+        symbol:
+          type: string
+        displayName:
+          type: string
+        category:
+          type: string
+        qualityScore:
+          type: number
+        agentScores:
+          $ref: "#/components/schemas/AgentScores"
+        recommendation:
+          $ref: "#/components/schemas/AiRecommendation"
+        priceHistory:
+          type: array
+          items:
+            $ref: "#/components/schemas/PricePoint"
+        lastUpdated:
+          type: string
+
+    AgentScores:
+      type: object
+      required: [marketScanner, trendAnalysis, volatilityAnalysis, patternRecognition, riskManagement, capitalPreservation, tradeExecution, selfLearning]
+      properties:
+        marketScanner:
+          $ref: "#/components/schemas/AgentScore"
+        trendAnalysis:
+          $ref: "#/components/schemas/AgentScore"
+        volatilityAnalysis:
+          $ref: "#/components/schemas/AgentScore"
+        patternRecognition:
+          $ref: "#/components/schemas/AgentScore"
+        riskManagement:
+          $ref: "#/components/schemas/AgentScore"
+        capitalPreservation:
+          $ref: "#/components/schemas/AgentScore"
+        tradeExecution:
+          $ref: "#/components/schemas/AgentScore"
+        selfLearning:
+          $ref: "#/components/schemas/AgentScore"
+
+    AgentScore:
+      type: object
+      required: [score, weight, signal, reasoning]
+      properties:
+        score:
+          type: number
+        weight:
+          type: number
+        signal:
+          type: string
+          enum: [strong_buy, buy, neutral, sell, strong_sell]
+        reasoning:
+          type: string
+
+    PricePoint:
+      type: object
+      required: [timestamp, price]
+      properties:
+        timestamp:
+          type: string
+        price:
+          type: number
+
+    ScanStatus:
+      type: object
+      required: [status, marketsScanned, startedAt]
+      properties:
+        status:
+          type: string
+        marketsScanned:
+          type: integer
+        startedAt:
+          type: string
+
+    Trade:
+      type: object
+      required: [id, symbol, contractType, stake, direction, status, createdAt]
+      properties:
+        id:
+          type: integer
+        symbol:
+          type: string
+        contractType:
+          type: string
+        stake:
+          type: number
+        direction:
+          type: string
+          enum: [up, down]
+        status:
+          type: string
+          enum: [open, won, lost, cancelled]
+        payout:
+          type: ["number", "null"]
+        profit:
+          type: ["number", "null"]
+        entryPrice:
+          type: ["number", "null"]
+        exitPrice:
+          type: ["number", "null"]
+        aiConfidence:
+          type: ["number", "null"]
+        aiRiskScore:
+          type: ["number", "null"]
+        isAutonomous:
+          type: boolean
+        agentReasoning:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+        closedAt:
+          type: ["string", "null"]
+        duration:
+          type: ["integer", "null"]
+
+    TradeInput:
+      type: object
+      required: [symbol, contractType, stake, direction]
+      properties:
+        symbol:
+          type: string
+        contractType:
+          type: string
+        stake:
+          type: number
+        direction:
+          type: string
+          enum: [up, down]
+        barrier:
+          type: number
+          nullable: true
+        isAutonomous:
+          type: boolean
+        duration:
+          type: integer
+        durationUnit:
+          type: string
+          enum: [t, s, m, h, d]
+
+    TradeStats:
+      type: object
+      required: [totalTrades, wonTrades, lostTrades, winRate, totalProfit, avgProfit, bestTrade, worstTrade, currentStreak, longestWinStreak, longestLoseStreak]
+      properties:
+        totalTrades:
+          type: integer
+        wonTrades:
+          type: integer
+        lostTrades:
+          type: integer
+        winRate:
+          type: number
+        totalProfit:
+          type: number
+        avgProfit:
+          type: number
+        bestTrade:
+          type: number
+        worstTrade:
+          type: number
+        currentStreak:
+          type: integer
+        longestWinStreak:
+          type: integer
+        longestLoseStreak:
+          type: integer
+
+    DailySummary:
+      type: object
+      required: [date, tradesCount, wonCount, lostCount, totalProfit, dailyTarget, dailyLossLimit, targetProgress, isTargetMet, isLossLimitHit, balanceStart, balanceNow]
+      properties:
+        date:
+          type: string
+        tradesCount:
+          type: integer
+        wonCount:
+          type: integer
+        lostCount:
+          type: integer
+        totalProfit:
+          type: number
+        dailyTarget:
+          type: number
+        dailyLossLimit:
+          type: number
+        targetProgress:
+          type: number
+        isTargetMet:
+          type: boolean
+        isLossLimitHit:
+          type: boolean
+        balanceStart:
+          type: number
+        balanceNow:
+          type: number
+
+    PerformanceAnalytics:
+      type: object
+      required: [days, winRateHistory, profitCurve, avgConfidenceByOutcome]
+      properties:
+        days:
+          type: integer
+        winRateHistory:
+          type: array
+          items:
+            $ref: "#/components/schemas/WinRatePoint"
+        profitCurve:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProfitPoint"
+        avgConfidenceByOutcome:
+          $ref: "#/components/schemas/ConfidenceByOutcome"
+
+    WinRatePoint:
+      type: object
+      required: [date, winRate, tradeCount]
+      properties:
+        date:
+          type: string
+        winRate:
+          type: number
+        tradeCount:
+          type: integer
+
+    ProfitPoint:
+      type: object
+      required: [date, cumulativeProfit, dailyProfit]
+      properties:
+        date:
+          type: string
+        cumulativeProfit:
+          type: number
+        dailyProfit:
+          type: number
+
+    ConfidenceByOutcome:
+      type: object
+      required: [avgConfidenceWon, avgConfidenceLost]
+      properties:
+        avgConfidenceWon:
+          type: number
+        avgConfidenceLost:
+          type: number
+
+    DrawdownAnalysis:
+      type: object
+      required: [currentDrawdown, maxDrawdown, drawdownLimit, isAtRisk, riskExposure, consecutiveLosses, consecutiveLossLimit]
+      properties:
+        currentDrawdown:
+          type: number
+        maxDrawdown:
+          type: number
+        drawdownLimit:
+          type: number
+        isAtRisk:
+          type: boolean
+        riskExposure:
+          type: number
+        consecutiveLosses:
+          type: integer
+        consecutiveLossLimit:
+          type: integer
+
+    MarketBreakdown:
+      type: object
+      required: [symbol, displayName, tradeCount, winRate, totalProfit, avgStake]
+      properties:
+        symbol:
+          type: string
+        displayName:
+          type: string
+        tradeCount:
+          type: integer
+        winRate:
+          type: number
+        totalProfit:
+          type: number
+        avgStake:
+          type: number
+
+    AgentScoreRecord:
+      type: object
+      required: [date, agentName, predictedScore, actualOutcome, accuracy]
+      properties:
+        date:
+          type: string
+        agentName:
+          type: string
+        predictedScore:
+          type: number
+        actualOutcome:
+          type: string
+        accuracy:
+          type: number
+
+    AiRecommendation:
+      type: object
+      required: [symbol, contractType, direction, stake, confidence, riskScore, profitability, agentScores, shouldTrade, reasoning, warnings]
+      properties:
+        symbol:
+          type: string
+        contractType:
+          type: string
+        direction:
+          type: string
+          enum: [up, down]
+        stake:
+          type: number
+        confidence:
+          type: number
+        riskScore:
+          type: number
+        profitability:
+          type: number
+        agentScores:
+          $ref: "#/components/schemas/AgentScores"
+        shouldTrade:
+          type: boolean
+        reasoning:
+          type: string
+        warnings:
+          type: array
+          items:
+            type: string
+        generatedAt:
+          type: string
+        calibratedConfidence:
+          type: number
+        winProbability:
+          type: number
+        expectedValue:
+          type: number
+        breakevenWinRate:
+          type: number
+        payoutMultiplier:
+          type: number
+        recommendedDuration:
+          type: integer
+        tickWindow:
+          type: ["integer", "null"]
+
+    AiInsight:
+      type: object
+      required: [id, type, title, description, priority, actionable]
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+          enum: [improvement, warning, pattern, milestone]
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+          enum: [low, medium, high, critical]
+        actionable:
+          type: boolean
+        relatedMarket:
+          type: ["string", "null"]
+
+    AiEngineStatus:
+      type: object
+      required: [isRunning, mode, agentStatuses, tradesExecutedToday, currentMarket, nextScanIn, stopReasons]
+      properties:
+        isRunning:
+          type: boolean
+        mode:
+          type: string
+          enum: [manual, autonomous]
+        agentStatuses:
+          type: array
+          items:
+            $ref: "#/components/schemas/AgentStatus"
+        tradesExecutedToday:
+          type: integer
+        currentMarket:
+          type: ["string", "null"]
+        nextScanIn:
+          type: ["integer", "null"]
+        stopReasons:
+          type: array
+          items:
+            type: string
+        cooldownUntil:
+          type: ["string", "null"]
+          description: ISO timestamp when the cooldown ends and engine auto-resumes
+        recovery:
+          $ref: "#/components/schemas/RecoveryStatus"
+
+    RecoveryStatus:
+      type: object
+      properties:
+        active:
+          type: boolean
+          description: True when at least one contract family is currently in Recovery Mode
+        families:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecoveryFamilyState"
+        activeFamilies:
+          type: array
+          items:
+            type: string
+        totalUnrecovered:
+          type: number
+          description: Mandatory accumulated loss debt still to be recovered (USD). Recovery ends when this is zero.
+        targetProfit:
+          type: number
+          description: Optional original expected net profit of the normal trade whose loss started recovery. Used only to size an ideal recovery stake.
+        remainingTargetProfit:
+          type: number
+          description: Remaining optional sizing-target profit. Never keeps recovery active once loss debt is cleared.
+        originPayoutMultiplier:
+          type: number
+          description: Total-return payout multiplier of the normal trade whose loss started recovery
+        highestStep:
+          type: integer
+          description: The highest recovery step among all families currently in recovery
+
+    RecoveryFamilyState:
+      type: object
+      properties:
+        family:
+          type: string
+          enum: [overunder, risefall, evenodd]
+        inRecovery:
+          type: boolean
+        recoveryStep:
+          type: integer
+        unrecoveredAmount:
+          type: number
+          description: Mandatory loss debt still owed before this family returns to normal mode. Optional target profit is not debt.
+        nextStakeMultiplier:
+          type: number
+          description: recoveryMultiplier ^ recoveryStep
+        nextStake:
+          type: ["number", "null"]
+          description: The stake (USD) that will be used on this family's next recovery trade
+
+    AgentStatus:
+      type: object
+      required: [name, isActive, lastRun, confidence]
+      properties:
+        name:
+          type: string
+        isActive:
+          type: boolean
+        lastRun:
+          type: ["string", "null"]
+        confidence:
+          type: number
+
+    EngineToggleInput:
+      type: object
+      required: [running]
+      properties:
+        running:
+          type: boolean
+
+    TradingSettings:
+      type: object
+      required: [id, riskProfile, maxRiskPerTrade, dailyTarget, dailyLossLimit, maxDrawdown, consecutiveLossLimit, minConfidenceThreshold, marketRotationAfter, preferredContractTypes, preferredCategories, autonomousEnabled, loopIntervalSec, recoveryMode, recoveryMultiplier, maxRecoverySteps, scanAllMarkets, tradeDurationSec, maxTradeStake]
+      properties:
+        id:
+          type: integer
+        riskProfile:
+          type: string
+          enum: [conservative, moderate, aggressive]
+        maxRiskPerTrade:
+          type: number
+          description: Max % of balance per trade
+        dailyTarget:
+          type: number
+          description: Daily profit target in account currency
+        dailyLossLimit:
+          type: number
+          description: Max daily loss in account currency
+        maxDrawdown:
+          type: number
+          description: Max drawdown % before stopping
+        consecutiveLossLimit:
+          type: integer
+        minConfidenceThreshold:
+          type: number
+          description: Min AI confidence to allow trade
+        marketRotationAfter:
+          type: integer
+          description: Rotate market after N consecutive trades
+        preferredContractTypes:
+          type: array
+          items:
+            type: string
+        preferredCategories:
+          type: array
+          items:
+            type: string
+        autonomousEnabled:
+          type: boolean
+        loopIntervalSec:
+          type: integer
+          description: Seconds between autonomous scan cycles
+        recoveryMode:
+          type: boolean
+          description: Enable conservative stake recovery after losses
+        recoveryMultiplier:
+          type: number
+          description: User-controlled multiplier used only in Manual recovery mode
+        maxRecoverySteps:
+          type: integer
+          description: Maximum loss step at which a manual multiplier keeps compounding
+        scanAllMarkets:
+          type: boolean
+          description: Scan all available markets in parallel
+        tradeDurationSec:
+          type: integer
+          description: Trade contract duration in ticks
+        maxTradeStake:
+          type: number
+        paperTradeMode:
+          type: boolean
+          description: Log trades without sending live orders to Deriv
+        requirePositiveEv:
+          type: boolean
+          description: Only execute when expected value is positive
+        cooldownMinutes:
+          type: integer
+          description: Minutes to wait before auto-resuming after consecutive loss stop
+        normalOverDigit:
+          type: integer
+          description: Digit barrier used for DIGITOVER trades in normal (non-recovery) mode
+        normalUnderDigit:
+          type: integer
+          description: Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode
+        recoveryOverDigit:
+          type: integer
+          description: Digit barrier used for DIGITOVER trades while in recovery mode
+        recoveryUnderDigit:
+          type: integer
+          description: Digit barrier used for DIGITUNDER trades while in recovery mode
+        recoveryMethod:
+          type: string
+          enum: [split, instant]
+          description: Split caps recovery attempts; Instant targets one-win recovery
+        recoveryAutoMode:
+          type: boolean
+          description: Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit
+        allowedMarkets:
+          type: array
+          items:
+            type: string
+        riskAmountType:
+          type: string
+          enum: [fixed, percentage]
+        riskAmountValue:
+          type: number
+
+    TradingSettingsInput:
+      type: object
+      properties:
+        riskProfile:
+          type: string
+          enum: [conservative, moderate, aggressive]
+        maxRiskPerTrade:
+          type: number
+        dailyTarget:
+          type: number
+        dailyLossLimit:
+          type: number
+        maxDrawdown:
+          type: number
+        consecutiveLossLimit:
+          type: integer
+        minConfidenceThreshold:
+          type: number
+        marketRotationAfter:
+          type: integer
+        preferredContractTypes:
+          type: array
+          items:
+            type: string
+        preferredCategories:
+          type: array
+          items:
+            type: string
+        autonomousEnabled:
+          type: boolean
+        loopIntervalSec:
+          type: integer
+        recoveryMode:
+          type: boolean
+        recoveryMultiplier:
+          type: number
+        maxRecoverySteps:
+          type: integer
+        scanAllMarkets:
+          type: boolean
+        tradeDurationSec:
+          type: integer
+        maxTradeStake:
+          type: number
+        paperTradeMode:
+          type: boolean
+        requirePositiveEv:
+          type: boolean
+        cooldownMinutes:
+          type: integer
+        normalOverDigit:
+          type: integer
+        normalUnderDigit:
+          type: integer
+        recoveryOverDigit:
+          type: integer
+        recoveryUnderDigit:
+          type: integer
+        recoveryMethod:
+          type: string
+          enum: [split, instant]
+        recoveryAutoMode:
+          type: boolean
+          description: Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit
+        allowedMarkets:
+          type: array
+          items:
+            type: string
+        riskAmountType:
+          type: string
+          enum: [fixed, percentage]
+        riskAmountValue:
+          type: number

@@ -633,12 +633,15 @@ export default function MarketDetail() {
 
   // Match the backend DERIV_MARKETS pipSize definitions exactly:
   // R_50, R_75, RDBULL, RDBEAR → pipSize 4 (4 decimal places)
-  // R_10, R_25 → pipSize 3 (3 decimal places — e.g. 4865.826, 2592.726)
-  // R_100, 1HZ*, JD* → pipSize 2 (2 decimal places)
+  // R_10, R_25, 1HZ15V, 1HZ30V, 1HZ90V → pipSize 3 (3 decimal places)
+  // R_100, 1HZ10V, 1HZ25V, 1HZ50V, 1HZ75V, 1HZ100V, JD* → pipSize 2 (2 decimal places)
   const pipSize = (
     symbol?.includes("R_50") || symbol?.includes("R_75") ||
     symbol === "RDBULL" || symbol === "RDBEAR"
-  ) ? 4 : (symbol === "R_10" || symbol === "R_25") ? 3 : 2;
+  ) ? 4 : (
+    symbol === "R_10" || symbol === "R_25" ||
+    symbol === "1HZ15V" || symbol === "1HZ30V" || symbol === "1HZ90V"
+  ) ? 3 : 2;
 
   function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
     setTradeContract(contractType);

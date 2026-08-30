@@ -145,7 +145,10 @@ export const DERIV_MARKETS = [
   // Pip sizes verified from live Deriv prices:
   // R_10  → pip=0.001 (3 d.p.) → pipSize=3   [confirmed: price like 4865.826]
   // R_25  → pip=0.001 (3 d.p.) → pipSize=3   [confirmed: price like 2592.726]
+  // 1HZ15V → pip=0.001 (3 d.p.) → pipSize=3  [confirmed: price like 13222.146]
   // 1HZ25V → pip=0.01  (2 d.p.) → pipSize=2   [confirmed: price like 830197.73]
+  // 1HZ30V → pip=0.001 (3 d.p.) → pipSize=3  [confirmed: price like 6527.120]
+  // 1HZ90V → pip=0.001 (3 d.p.) → pipSize=3  [confirmed: price like 18528.175]
   // R_50/R_75 → pip=0.0001 (4 d.p.) → pipSize=4
   // R_100/1HZ10V/1HZ50V/1HZ75V/1HZ100V → pip=0.01 (2 d.p.) → pipSize=2
   // ALL Jump indices → pip=0.01 (2 d.p.) → pipSize=2
@@ -155,12 +158,12 @@ export const DERIV_MARKETS = [
   { symbol: "R_75",    displayName: "Volatility 75 Index",       category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "R_100",   displayName: "Volatility 100 Index",      category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ10V",  displayName: "Volatility 10 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
-  { symbol: "1HZ15V",  displayName: "Volatility 15 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ15V",  displayName: "Volatility 15 (1s) Index",  category: "synthetic", pipSize: 3, digitEnabled: true },
   { symbol: "1HZ25V",  displayName: "Volatility 25 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
-  { symbol: "1HZ30V",  displayName: "Volatility 30 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ30V",  displayName: "Volatility 30 (1s) Index",  category: "synthetic", pipSize: 3, digitEnabled: true },
   { symbol: "1HZ50V",  displayName: "Volatility 50 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "1HZ75V",  displayName: "Volatility 75 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
-  { symbol: "1HZ90V",  displayName: "Volatility 90 (1s) Index",  category: "synthetic", pipSize: 2, digitEnabled: true },
+  { symbol: "1HZ90V",  displayName: "Volatility 90 (1s) Index",  category: "synthetic", pipSize: 3, digitEnabled: true },
   { symbol: "1HZ100V", displayName: "Volatility 100 (1s) Index", category: "synthetic", pipSize: 2, digitEnabled: true },
   { symbol: "RDBULL",  displayName: "Bull Market Index",         category: "synthetic", pipSize: 4, digitEnabled: true },
   { symbol: "RDBEAR",  displayName: "Bear Market Index",         category: "synthetic", pipSize: 4, digitEnabled: true },

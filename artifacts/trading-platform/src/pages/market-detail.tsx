@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useQueryClient } from "@tanstack/react-query";
 import { MATCH_PAYOUT, DIFF_PAYOUT } from "@/lib/payouts";
+import { pipSizeForSymbol } from "@/lib/pip-size";
 
 // ── AI Trade Panel ────────────────────────────────────────────────────────────
 // Unified recommendation panel synced to all 3 contract types + agent intelligence
@@ -631,17 +632,11 @@ export default function MarketDetail() {
   const startPrice = chartData[0]?.price ?? currentPrice;
   const priceChange = startPrice > 0 ? ((currentPrice - startPrice) / startPrice) * 100 : 0;
 
-  // Match the backend DERIV_MARKETS pipSize definitions exactly:
-  // R_50, R_75, RDBULL, RDBEAR → pipSize 4 (4 decimal places)
-  // R_10, R_25, 1HZ15V, 1HZ30V, 1HZ90V → pipSize 3 (3 decimal places)
-  // R_100, 1HZ10V, 1HZ25V, 1HZ50V, 1HZ75V, 1HZ100V, JD* → pipSize 2 (2 decimal places)
-  const pipSize = (
-    symbol?.includes("R_50") || symbol?.includes("R_75") ||
-    symbol === "RDBULL" || symbol === "RDBEAR"
-  ) ? 4 : (
-    symbol === "R_10" || symbol === "R_25" ||
-    symbol === "1HZ15V" || symbol === "1HZ30V" || symbol === "1HZ90V"
-  ) ? 3 : 2;
+  // Price precision per market — single source of truth in @/lib/pip-size,
+  // mirroring the backend DERIV_MARKETS pipSize (e.g. 1HZ15V/1HZ30V/1HZ90V = 3).
+  // Formatting with the wrong precision rounds away the last digit shown in
+  // digit analysis (e.g. 13222.146 → "13222.15" hides the true digit 6).
+  const pipSize = pipSizeForSymbol(symbol);
 
   function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
     setTradeContract(contractType);

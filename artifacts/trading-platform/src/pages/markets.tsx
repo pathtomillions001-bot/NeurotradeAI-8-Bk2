@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import { Link } from "wouter";
 import { TrendingUp, TrendingDown, Minus, ChevronRight, Zap } from "lucide-react";
+import { pipSizeForSymbol } from "@/lib/pip-size";
 
 type SubCategory = "all" | "volatility_1s" | "volatility" | "jump";
 
@@ -141,15 +142,7 @@ export default function Markets() {
                       <span className="text-[10px] text-muted-foreground font-mono">{market.symbol}</span>
                       {market.lastPrice && (
                         <span className="text-[10px] text-muted-foreground font-mono">
-                          {market.lastPrice.toFixed(
-                            market.symbol.includes("R_50") || market.symbol.includes("R_75") ||
-                            market.symbol === "RDBULL" || market.symbol === "RDBEAR"
-                              ? 4
-                              : market.symbol === "R_10" || market.symbol === "R_25" ||
-                                market.symbol === "1HZ15V" || market.symbol === "1HZ30V" || market.symbol === "1HZ90V"
-                                ? 3
-                                : 2
-                          )}
+                          {market.lastPrice.toFixed(pipSizeForSymbol(market.symbol))}
                         </span>
                       )}
                     </div>

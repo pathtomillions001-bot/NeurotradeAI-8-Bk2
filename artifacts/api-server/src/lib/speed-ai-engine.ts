@@ -38,6 +38,24 @@ import {
 import { resolveRecoveryPayout } from "./recovery-payout";
 import * as recoveryEngine from "./agents/recovery-engine";
 import {
+  quantumWindowEstimate,
+  zEdgeQuality,
+  quantumTimingScore,
+  hazardTimingBonus,
+  entropyOnsetBonus,
+  ciOverlapBonus,
+  ciOverlapWidth,
+  edgeTrendBonus,
+  type QuantumFeatures,
+} from "./quantum-analysis";
+import {
+  metaBonus,
+  recordTradeSignal,
+  resetSignalValue,
+  type DecisionFeatures,
+  type SignalMode,
+} from "./signal-value";
+import {
   acquireTradingOwnership,
   releaseTradingOwnership,
   hasTradingOwnership,
@@ -113,6 +131,10 @@ export interface MarketScore {
   entropyBits: number;
   isStructured: boolean;
   reason: string;
+  /** Quantum statistical read of the scoring window (methods 1–5) */
+  quantum?: QuantumFeatures;
+  /** Decision-time feature vector for self-measured signal value (method 7) */
+  decision?: DecisionFeatures;
 }
 
 
@@ -744,20 +766,41 @@ function precisionScore(
   const stabilityBonus = (stabilityRaw - 0.5) * 10;  // ±5 pts
   const entropyBonus   = entropy.bonus;              // ±15 pts
 
-  // Calculate Net Expected Value
-  const ev = winP * (payout - 1) - (1 - winP);
+  // ── Quantum analysis layer (additive statistical core, methods 1–5) ────────
+  // The engine's edge judgment becomes a two-expert committee:
+  //   50% the original raw-edge voice (unchanged),
+  //   50% the significance-weighted, structure-gated z-edge (z·λ — honest
+  //        about sample size σ and about whether the stream is structured).
+  // The win probability is likewise blended with the confidence-weighted
+  // estimator p̂, and three bounded timing terms are added (probabilistic
+  // entry timing, market-specific streak-break hazard, entropy onset).
+  // Every original term above stays exactly as it was.
+  const q             = quantumWindowEstimate(digits, prices, contractType, barrier);
+  const zQuality      = zEdgeQuality(q);
+  const quantumTiming = quantumTimingScore(q);
+  const hazardQ       = hazardTimingBonus(q);
+  const onsetQ        = entropyOnsetBonus(q);
+  const edgeCommittee = 0.5 * edgeNorm + 0.5 * zQuality;
+  const winPfinal     = Math.max(0.01, Math.min(0.99, winP * 0.5 + q.pHat * 0.5));
+
+  // Calculate Net Expected Value (on the committee win probability)
+  const ev = winPfinal * (payout - 1) - (1 - winPfinal);
   const evBonus = ev >= 0.05 ? 8 : ev >= MIN_NORMAL_EV ? 3 : ev < 0 ? -12 : 0;
 
   const score = Math.min(100, Math.max(0,
-    50 + edgeNorm * 45 + timingBonus + stabilityBonus + signalBonus + entropyBonus + evBonus,
+    50 + edgeCommittee * 45 + timingBonus + (quantumTiming - 50) * 0.15 +
+        stabilityBonus + signalBonus + entropyBonus + evBonus + hazardQ + onsetQ,
   ));
 
   const reason = [
-    `${(winP * 100).toFixed(1)}% win-p`,
+    `${(winPfinal * 100).toFixed(1)}% win-p`,
     `EV ${ev >= 0 ? "+" : ""}${(ev * 100).toFixed(1)}%`,
     `H ${entropy.bits}b`,
     `timing ${timing.toFixed(0)}`,
     signalBonus !== 0 ? `sig${signalBonus >= 0 ? "+" : ""}${signalBonus}` : "",
+    q.neutral ? "" : `z${q.z >= 0 ? "+" : ""}${q.z.toFixed(1)}/λ${q.lambda.toFixed(2)}`,
+    hazardQ !== 0 ? `hz${hazardQ >= 0 ? "+" : ""}${hazardQ}` : "",
+    onsetQ !== 0 ? `onset${onsetQ >= 0 ? "+" : ""}${onsetQ.toFixed(1)}` : "",
   ].filter(Boolean).join(" · ");
 
   return {
@@ -766,12 +809,13 @@ function precisionScore(
     contractType,
     barrier,
     score,
-    winProbability: winP,
+    winProbability: winPfinal,
     payout,
     expectedValue: ev,
     entropyBits: entropy.bits,
     isStructured: entropy.isStructured,
     reason,
+    quantum: q,
   };
 }
 
@@ -999,7 +1043,7 @@ function fastRecoveryGate(
     const r15  = digits15.length >= 15
       ? precisionScore(symbol, displayName, ct, barrier, digits15, prices50, 15)
       : null;
-    if (!r60 || !r30 || !r15) continue;
+    if (!r60 || !r30 || !r15 || !r60.quantum) continue;
 
     const s100 = r100?.score ?? r60.score;
     const s60  = r60.score;
@@ -1016,7 +1060,29 @@ function fastRecoveryGate(
     const sBonus    = deepSniperBonus(ct, barrier, digits60, prices50);
     const penalty   = penaltyMap.get(`${ct}_${barrier ?? ""}`) ?? 0;
 
-    const adjustedScore = baseScore + sBonus - penalty;
+    // ── Quantum layer (methods 4 + 7): temporal stability & self-measurement ─
+    // Each window carries its own (p̂, σ) from precisionScore. The shared-CI
+    // check asks whether ALL time-scales independently see a real edge, and
+    // the trend check asks which direction the edge is heading. Pure
+    // bonus/penalty terms — disagreement never rejects (the thresholds above
+    // and below still decide); it only re-ranks the recovery candidates.
+    const q15  = r15.quantum ?? r60.quantum;
+    const q30  = r30.quantum ?? r60.quantum;
+    const q60  = r60.quantum;
+    const q100 = r100?.quantum ?? q60;
+    const ciB  = ciOverlapBonus([q15, q30, q60, q100]);
+    const trB  = edgeTrendBonus(q60, q100);
+    const decision: DecisionFeatures = {
+      z:              q60.z,
+      lambda:         q60.lambda,
+      timing:         quantumTimingScore(q60),
+      hazardRelative: q60.hazardRelative,
+      entropyDelta:   q100.entropyDelta,
+      ciOverlap:      ciOverlapWidth([q15, q30, q60, q100]),
+    };
+    const meta = metaBonus(decision, "recovery");
+
+    const adjustedScore = baseScore + sBonus - penalty + ciB + trB + meta;
     const { requiredScore, requiredEv } = recoveryGateRequirements(ct, barrier);
     if (adjustedScore < requiredScore || r60.expectedValue < requiredEv) continue;
 
@@ -1025,8 +1091,9 @@ function fastRecoveryGate(
       ...r60,
       barrier,
       score: adjustedScore,
-      reason: `${r60.reason} | 4W ${s15.toFixed(0)}/${s30.toFixed(0)}/${s60.toFixed(0)}/${s100.toFixed(0)} d${sBonus >= 0 ? "+" : ""}${sBonus}${penalty > 0 ? ` p-${penalty}` : ""}`,
+      reason: `${r60.reason} | 4W ${s15.toFixed(0)}/${s30.toFixed(0)}/${s60.toFixed(0)}/${s100.toFixed(0)} d${sBonus >= 0 ? "+" : ""}${sBonus}${penalty > 0 ? ` p-${penalty}` : ""}${ciB !== 0 ? ` ci+${ciB}` : ""}${trB !== 0 ? ` tr${trB >= 0 ? "+" : ""}${trB}` : ""}${meta !== 0 ? ` meta${meta >= 0 ? "+" : ""}${meta}` : ""}`,
       greenLight: gl,
+      decision,
     });
   }
 
@@ -1034,7 +1101,10 @@ function fastRecoveryGate(
 
   candidates.sort((a, b) => {
     if (a.greenLight !== b.greenLight) return a.greenLight ? -1 : 1;
-    return b.score - a.score;
+    if (Math.abs(a.score - b.score) > 2) return b.score - a.score;
+    // Near-ties: rank by the statistical significance of the edge (z vs
+    // break-even) — "best recovery trade" = most significant edge.
+    return (b.decision?.z ?? 0) - (a.decision?.z ?? 0);
   });
 
   const best = candidates[0]!;
@@ -1082,10 +1152,16 @@ export function evaluateManualAssist(
     return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Collecting price data…", greenLight: false, entropyBits: 3.32 };
   }
 
-  const scored = precisionScore(symbol, displayName, contractType, barrier, digits, prices);
-  if (!scored) {
+  const scoredRaw = precisionScore(symbol, displayName, contractType, barrier, digits, prices);
+  if (!scoredRaw) {
     return { ready: false, score: 0, winProbability: 0, expectedValue: -1, reason: "Insufficient data for this contract", greenLight: false, entropyBits: 3.32 };
   }
+
+  // Method 7 — self-measured signal value (normal pool, bounded ±6)
+  const scored = {
+    ...scoredRaw,
+    score: scoredRaw.score + metaBonus(decisionFromWindows([scoredRaw]), "normal"),
+  };
 
   const greenLight = isGreenLight(digits, prices, contractType, barrier);
   const entropy = computeShannonEntropy(digits, 50);
@@ -1144,6 +1220,8 @@ export function evaluateManualAssist(
 export async function analyzeMarketsForStrategy(
   contractTypes: SpeedContractType[],
   barriers: number[],
+  /** Method 7 — which self-measurement pool the meta-bonus draws from. */
+  signalMode: SignalMode = "normal",
 ): Promise<MarketScore[]> {
   const scored: MarketScore[] = [];
   const { overBarrier, underBarrier } = extractBarriers(barriers);
@@ -1172,16 +1250,42 @@ export async function analyzeMarketsForStrategy(
       const r100 = precisionScore(market.symbol, market.displayName, ct, barrier, digits100, prices);
       const r60  = precisionScore(market.symbol, market.displayName, ct, barrier, digits60,  prices);
       const r30  = precisionScore(market.symbol, market.displayName, ct, barrier, digits30,  prices);
-      if (!r60) continue;
+      if (!r60 || !r60.quantum) continue;
 
       const combinedScore = Math.round(
         ((r30?.score ?? r60.score) * 0.25 + r60.score * 0.50 + (r100?.score ?? r60.score) * 0.25) * 10,
       ) / 10;
-      scored.push({ ...r60, score: combinedScore });
+      // Method 7 — self-measured signal value: only features that have
+      // actually predicted wins in this mode so far earn a bounded bonus.
+      const decision: DecisionFeatures = decisionFromWindows([r30, r60, r100]);
+      scored.push({
+        ...r60,
+        score: combinedScore + metaBonus(decision, signalMode),
+        decision,
+      });
     }
   }
 
   return scored.sort((a, b) => b.score - a.score);
+}
+
+/**
+ * Build the method-7 decision-time feature vector from the per-window
+ * quantum reads attached by precisionScore (r30/r60/r100).
+ */
+function decisionFromWindows(windows: (MarketScore | null | undefined)[]): DecisionFeatures {
+  const base = windows.find(w => w?.quantum)?.quantum;
+  const usable = windows
+    .map(w => w?.quantum)
+    .filter((x): x is QuantumFeatures => Boolean(x));
+  return {
+    z:              base?.z ?? 0,
+    lambda:         base?.lambda ?? 0.5,
+    timing:         base ? quantumTimingScore(base) : 50,
+    hazardRelative: base?.hazardRelative ?? 1,
+    entropyDelta:   base?.entropyDelta ?? 0,
+    ciOverlap:      ciOverlapWidth(usable),
+  };
 }
 
 /**
@@ -1192,6 +1296,8 @@ export async function scoreSingleMarket(
   displayName: string,
   contractTypes: SpeedContractType[],
   barriers: number[],
+  /** Method 7 — which self-measurement pool the meta-bonus draws from. */
+  signalMode: SignalMode = "normal",
 ): Promise<MarketScore | null> {
   const digits100 = tickManager.getDigits(symbol, 100);
   const digits60  = digits100.slice(-60);
@@ -1210,12 +1316,18 @@ export async function scoreSingleMarket(
     const r100 = precisionScore(symbol, displayName, ct, barrier, digits100, prices);
     const r60  = precisionScore(symbol, displayName, ct, barrier, digits60,  prices);
     const r30  = precisionScore(symbol, displayName, ct, barrier, digits30,  prices);
-    if (!r60) continue;
+    if (!r60 || !r60.quantum) continue;
 
     const combinedScore = Math.round(
       ((r30?.score ?? r60.score) * 0.25 + r60.score * 0.50 + (r100?.score ?? r60.score) * 0.25) * 10,
     ) / 10;
-    scored.push({ ...r60, score: combinedScore });
+    // Method 7 — self-measured signal value (bounded ±6, evidence only).
+    const decision: DecisionFeatures = decisionFromWindows([r30, r60, r100]);
+    scored.push({
+      ...r60,
+      score: combinedScore + metaBonus(decision, signalMode),
+      decision,
+    });
   }
 
   return scored.sort((a, b) => b.score - a.score)[0] ?? null;
@@ -1403,6 +1515,11 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
   // trading), this session opens on recovery sizing, not the normal stake.
   const sharedRecovery = recoveryEngine.getState();
 
+  // Method 7 — self-measured signal value starts fresh each session: the
+  // engine re-learns which of its own features predict wins on this account's
+  // markets as it trades.
+  resetSignalValue();
+
   session = {
     running:      true,
     sessionId:    `neuro_${Date.now()}`,
@@ -1557,7 +1674,7 @@ async function runLoop(config: SpeedAIConfig) {
       if (cached) {
         best = cached;
       } else {
-        const result = await scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, contractTypes, barriers);
+        const result = await scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, contractTypes, barriers, inRecovery ? "recovery" : "normal");
         if (!result) {
           session.message = "Waiting for tick data on locked market…";
           broadcast();
@@ -1585,7 +1702,7 @@ async function runLoop(config: SpeedAIConfig) {
       } else {
         session.message = inRecovery ? "🎯 Sniper Scanning Recovery Markets…" : "Scanning Strategy Markets…";
         broadcast();
-        const scored = await analyzeMarketsForStrategy(contractTypes, barriers);
+        const scored = await analyzeMarketsForStrategy(contractTypes, barriers, inRecovery ? "recovery" : "normal");
         session.topMarkets = scored;
 
         if (scored.length === 0) {
@@ -1726,6 +1843,32 @@ async function runLoop(config: SpeedAIConfig) {
       continue;
     }
 
+    // ── Method 6 — Execution-Tick Revalidation ────────────────────────────────
+    // Re-read the decision's edge on the CURRENT tick, right before buy. The
+    // green-light wait can hold a setup for up to ~28 ticks on 1-second
+    // markets — an edge that was statistically significant at decision time
+    // may have fully decayed by now. If the edge is gone (z ≤ 0, or less than
+    // half of what it was at decision), the setup is stale: skip this cycle
+    // and re-analyze. This is the analysis itself choosing the execution
+    // moment — one sub-millisecond O(n) pass, no added thresholds on the
+    // system, no extra latency on the execution path.
+    const reDigits = tickManager.getDigits(best.symbol, 60);
+    const rePrices = tickManager.getTicks(best.symbol, 50);
+    const reReady = best.contractType === "CALL" || best.contractType === "PUT"
+      ? rePrices.length >= 30
+      : reDigits.length >= 30;
+    if (reReady) {
+      const fresh = quantumWindowEstimate(reDigits, rePrices, best.contractType, best.barrier);
+      const entryZ = best.decision?.z ?? best.quantum?.z ?? 0;
+      if (fresh.z <= 0 || fresh.z < 0.5 * entryZ) {
+        session.message = `⏱️ Execution-tick revalidation: edge faded (z ${entryZ.toFixed(2)} → ${fresh.z.toFixed(2)}) — re-scanning for a live edge…`;
+        broadcast();
+        preAnalyzedScored = null;
+        await sleep(400);
+        continue;
+      }
+    }
+
     // ── Pre-Warmed Proposal Quoting & Exact Sizing ─────────────────────────────
     const payoutQuote = await resolveRecoveryPayout({
       symbol: best.symbol,
@@ -1856,6 +1999,23 @@ async function runLoop(config: SpeedAIConfig) {
       won, profit, stake, config.maxRecoverySteps, best.contractType, best.payout,
     );
 
+    // ── Method 7 — Self-Measured Signal Value (the engine tunes itself) ──────
+    // The features captured AT DECISION TIME plus this trade's realized
+    // outcome feed the session's own signal valuation. Over the session, each
+    // feature's top-tercile win-rate is compared with its bottom tercile and
+    // only features with demonstrated lift earn bounded score weight. The
+    // system literally measures, on these markets, which of its own signals
+    // predict wins — normal and recovery trades pool separately.
+    const dfRecord: DecisionFeatures = best.decision ?? {
+      z:              best.quantum?.z ?? 0,
+      lambda:         best.quantum?.lambda ?? 0.5,
+      timing:         best.quantum ? quantumTimingScore(best.quantum) : 50,
+      hazardRelative: best.quantum?.hazardRelative ?? 1,
+      entropyDelta:   best.quantum?.entropyDelta ?? 0,
+      ciOverlap:      0,
+    };
+    recordTradeSignal(inRecovery ? "recovery" : "normal", dfRecord, won);
+
     // FAB-local anti-pattern memory (sniper gate penalty decay). Mode/debt are
     // never derived from this — only from the shared ledger above.
     if (inRecovery) {
@@ -1937,9 +2097,9 @@ async function runLoop(config: SpeedAIConfig) {
     }
 
     const preAnalyzePromise = lockedDerivsMarket
-      ? scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, nextContractTypes, nextBarriers)
+      ? scoreSingleMarket(lockedDerivsMarket.symbol, lockedDerivsMarket.displayName, nextContractTypes, nextBarriers, nextInRecovery ? "recovery" : "normal")
           .then(r => r ? [r] : [])
-      : analyzeMarketsForStrategy(nextContractTypes, nextBarriers);
+      : analyzeMarketsForStrategy(nextContractTypes, nextBarriers, nextInRecovery ? "recovery" : "normal");
 
     await sleep(pauseMs);
     if (!session.running || session.stopRequested) break;

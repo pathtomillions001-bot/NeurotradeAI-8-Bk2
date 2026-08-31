@@ -15,8 +15,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, CheckCircle2, AlertTriangle, RefreshCw,
-  Lock, Shuffle, ShieldCheck, Hash, Scale, Crosshair, TrendingUp,
-  Sparkles, Activity, Target, ChevronLeft,
+  Lock, Shuffle, ShieldCheck, Sparkles, Activity, Target, ChevronLeft,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -509,44 +508,8 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                 </div>
               )}
 
-              {/* Market mode */}
-              <div className="space-y-2 pt-1 border-t border-white/5">
-                <SectionLabel right="Asset Selection">Market Mode</SectionLabel>
-                <div className="grid grid-cols-2 gap-1.5">
-                  <button
-                    onClick={() => set("marketMode", "switching")}
-                    className={`flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs border font-medium transition-all ${
-                      config.marketMode === "switching"
-                        ? `${accent.activeBg} ${accent.activeBorder} ${accent.text}`
-                        : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
-                    }`}
-                  >
-                    <Shuffle className="w-3.5 h-3.5" /> Smart Switching
-                  </button>
-                  <button
-                    onClick={() => set("marketMode", "locked")}
-                    className={`flex items-center justify-center gap-1.5 py-2 rounded-lg text-xs border font-medium transition-all ${
-                      config.marketMode === "locked"
-                        ? `${accent.activeBg} ${accent.activeBorder} ${accent.text}`
-                        : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"
-                    }`}
-                  >
-                    <Lock className="w-3.5 h-3.5" /> Lock Market
-                  </button>
-                </div>
-                {config.marketMode === "locked" && (
-                  <Select value={config.lockedSymbol} onValueChange={v => set("lockedSymbol", v)}>
-                    <SelectTrigger className="h-8 text-xs bg-black/30 border-white/10">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {SCAN_MARKETS.map(m => (
-                        <SelectItem key={m.symbol} value={m.symbol}>{m.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                )}
-              </div>
+              {/* Market mode is chosen AFTER analysis — see the scan-result step,
+                  where the user picks "Trade Locked on …" or "Smart Switching". */}
 
               {/* Risk parameters */}
               <div className="space-y-2 pt-1 border-t border-white/5">
@@ -621,16 +584,6 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                   Recovery executes exclusively inside {bot.contractLabel}. A loss puts the shared
                   account ledger into recovery and every recovery trade stays in this bot&apos;s contract.
                 </p>
-              </div>
-
-              {/* Specialist edge */}
-              <div className={`rounded-xl border ${accent.panelBorder} ${accent.panelBg} p-3 space-y-1.5`}>
-                <p className={`text-[10px] uppercase tracking-widest font-semibold ${accent.text}`}>Specialist Advantage</p>
-                {bot.edge.map((e, i) => (
-                  <p key={i} className="text-[10px] text-muted-foreground leading-relaxed flex gap-1.5">
-                    <span className={accent.text}>▸</span><span>{e}</span>
-                  </p>
-                ))}
               </div>
 
               {anyEngineBusy && (
@@ -975,6 +928,3 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
     </Sheet>
   );
 }
-
-/** Icon aliases re-exported so the page can render the same glyphs. */
-export const BOT_ICONS = { Hash, Scale, Crosshair, TrendingUp, ShieldCheck };

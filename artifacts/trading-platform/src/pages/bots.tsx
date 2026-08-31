@@ -10,8 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Bot, Sparkles, Lock, Shuffle, ShieldCheck, StopCircle, Activity,
-  ChevronRight, Cpu, Layers,
+  Bot, Sparkles, Lock, Activity, ChevronRight,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -182,24 +181,8 @@ function BotCard({ bot, isThisRunning, anotherRunning, onOpen, index }: {
             </div>
           </div>
 
-          {/* Specialist advantage */}
-          <div className="space-y-1 flex-1">
-            <p className={`text-[9px] uppercase tracking-widest font-semibold ${a.text} flex items-center gap-1`}>
-              <Cpu className="w-3 h-3" /> Specialist Advantage
-            </p>
-            {bot.edge.slice(0, 2).map((e, i) => (
-              <p key={i} className="text-[10px] text-muted-foreground leading-relaxed flex gap-1.5">
-                <span className={a.text}>▸</span>
-                <span className="line-clamp-2">{e}</span>
-              </p>
-            ))}
-            {bot.edge.length > 2 && (
-              <p className="text-[9px] text-muted-foreground/50">+{bot.edge.length - 2} more in the console</p>
-            )}
-          </div>
-
           {/* Controls */}
-          <div className="pt-1">
+          <div className="pt-1 mt-auto">
             {isThisRunning ? (
               <Button
                 onClick={onOpen}
@@ -298,42 +281,6 @@ export default function Bots() {
           )}
         </div>
       </div>
-
-      {/* ── How it works ───────────────────────────────────────────────── */}
-      <Card className="border-border bg-gradient-to-br from-primary/[0.04] to-card">
-        <CardContent className="p-4 grid gap-3 md:grid-cols-3">
-          <div className="flex gap-2.5">
-            <Layers className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-xs font-semibold text-white">One contract, total focus</p>
-              <p className="text-[11px] text-muted-foreground leading-relaxed mt-0.5">
-                Each bot is hard-wired to a single contract family. It cannot drift into another one —
-                normal and recovery trades both stay inside the contract you armed.
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-2.5">
-            <Sparkles className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-xs font-semibold text-white">Beyond the Quantum FAB</p>
-              <p className="text-[11px] text-muted-foreground leading-relaxed mt-0.5">
-                The Quantum FAB analysis is reproduced in full, then each specialist adds estimators only
-                its own contract can use — plus a dedicated entry gate and side arbitration.
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-2.5">
-            <ShieldCheck className="w-4 h-4 text-primary flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="text-xs font-semibold text-white">One executor, one ledger</p>
-              <p className="text-[11px] text-muted-foreground leading-relaxed mt-0.5">
-                A bot shares the account&apos;s single recovery ledger with the autonomous engine and the
-                Quantum FAB, so only one of them can trade at a time.
-              </p>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
 
       {/* ── Bot grid ───────────────────────────────────────────────────── */}
       {isLoading && (

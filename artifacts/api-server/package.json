@@ -8,7 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test --test-timeout=10000 --test-force-exit src/lib/recovery-completion.test.ts src/lib/quantum-analysis.test.ts src/lib/signal-value.test.ts src/lib/pip-accuracy.test.ts src/lib/specialist-analysis.test.ts"
+    "test": "tsx --test --test-timeout=10000 --test-force-exit src/lib/recovery-completion.test.ts src/lib/quantum-analysis.test.ts src/lib/signal-value.test.ts src/lib/pip-accuracy.test.ts src/lib/specialist-analysis.test.ts src/lib/bot-recovery-parity.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

@@ -1,4 +1,4 @@
-import { addMoney, settleRecoveryWin } from "./recovery-math";
+import { addMoney, recoveryTargetProfitFor, settleRecoveryWin } from "./recovery-math";
 
 export type SpeedRecoveryContractType =
   | "DIGITOVER" | "DIGITUNDER"
@@ -79,7 +79,9 @@ export function recordRecoveryOutcome(
   }
 
   if (!rec.inRecovery) {
-    const target = addMoney(stake * Math.max(0, payoutMultiplier - 1));
+    // Capped at one base stake — see recoveryTargetProfitFor(). Recovery sizing
+    // must depend on the debt, not on the losing contract's payout.
+    const target = recoveryTargetProfitFor(stake, payoutMultiplier);
     return {
       inRecovery: true,
       recoveryStep: 1,

@@ -16,6 +16,7 @@ import Connect from "./pages/connect";
 import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
+import Bots from "./pages/bots";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30000 } },
@@ -135,6 +136,7 @@ function Router() {
         <Route path="/" component={Dashboard} />
         <Route path="/markets" component={Markets} />
         <Route path="/markets/:symbol" component={MarketDetail} />
+        <Route path="/bots" component={Bots} />
         <Route path="/trades" component={Trades} />
         <Route path="/analytics" component={Analytics} />
         <Route path="/intelligence" component={Intelligence} />

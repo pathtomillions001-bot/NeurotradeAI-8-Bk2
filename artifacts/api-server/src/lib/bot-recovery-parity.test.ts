@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import * as recoveryEngine from "./agents/recovery-engine.ts";
 import { recordRecoveryOutcome, type SpeedRecoveryState } from "./speed-recovery-state.ts";
 import { recoveryTargetProfitFor, calculateRecoveryStakeRequest } from "./recovery-math.ts";
+import { getLocalTodayKey } from "./tz.ts";
 import {
   MATCH_PAYOUT, DIFF_PAYOUT, EVEN_ODD_PAYOUT, RISE_FALL_PAYOUT, OVER_PAYOUTS, UNDER_PAYOUTS,
 } from "./payouts.ts";
@@ -106,6 +107,33 @@ describe("bot ↔ main-app recovery parity", () => {
     assert.equal(fab.targetProfit, shared.targetProfit);
     assert.equal(fab.remainingTargetProfit, shared.remainingTargetProfit);
     assert.equal(fab.unrecoveredAmount, shared.unrecoveredAmount);
+  });
+
+  it("a pre-cap persisted target is re-capped on load (no $1.13 Matches stake after a restart)", () => {
+    recoveryEngine.resetAll();
+    // Simulate a row persisted before the one-base-stake cap: a $1 Matches loss
+    // recorded an aspirational target of 1 × (8.93 − 1) = $7.93.
+    const stale = JSON.stringify({
+      inRecovery: true,
+      recoveryStep: 1,
+      unrecoveredAmount: 1,
+      baseStake: 1,
+      streakLossCount: 1,
+      streakStartAmount: 1,
+      targetProfit: 7.93,
+      remainingTargetProfit: 7.93,
+      originPayoutMultiplier: MATCH_PAYOUT,
+      resetDate: getLocalTodayKey(),
+      consecutiveMatchLosses: 0,
+    });
+    recoveryEngine.loadState(stale);
+
+    const state = recoveryEngine.getState();
+    assert.equal(state.targetProfit, 1);
+    assert.equal(state.remainingTargetProfit, 1);
+    // Instant mode is where the uncapped target used to surface as $1.13.
+    assert.equal(nextStake(MATCH_PAYOUT, "instant"), 0.35);
+    assert.equal(nextStake(MATCH_PAYOUT, "split"), 0.35);
   });
 
   it("target profit is capped at one base stake and never negative", () => {

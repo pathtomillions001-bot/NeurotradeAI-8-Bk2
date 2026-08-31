@@ -27,6 +27,7 @@ import {
   addMoney,
   applyRecoveryStakeLimits,
   calculateRecoveryStakeRequest,
+  MAX_TARGET_PROFIT_PER_BASE_STAKE,
   recoveryTargetProfitFor,
   settleRecoveryWin,
   toCents,
@@ -76,6 +77,23 @@ function freshState(): RecoveryState {
     resetDate:                todayKey(),
     consecutiveMatchLosses:   0,
   };
+}
+
+/**
+ * Clamp an aspirational recovery target to the one-base-stake cap.
+ *
+ * The cap is the whole point of `recoveryTargetProfitFor` — recovery sizing
+ * must follow the DEBT, never how generous the losing contract's payout was.
+ * `recordOutcome` applies it when a loss is recorded, but the target can also
+ * be reintroduced from PERSISTED state (`loadState`) or carried across a
+ * midnight rollover (`applyNewDay`). Without this clamp a pre-cap row (e.g.
+ * target $7.93 from an old $1 Matches loss) would resurrect the $1.13 stake
+ * instead of the FAB's $0.35. This keeps every engine — main, FAB and all five
+ * specialist bots — on the identical debt-driven number even after a restart.
+ */
+function capTargetProfit(target: number, baseStake: number): number {
+  const cap = Math.max(0, baseStake) * MAX_TARGET_PROFIT_PER_BASE_STAKE;
+  return Math.min(Math.max(0, target), cap);
 }
 
 const statesBySession = new Map<string, RecoveryState>();
@@ -141,8 +159,10 @@ function applyNewDay(): void {
       state.recoveryStep      = 1;
       state.streakLossCount         = 1;
       state.streakStartAmount       = carryDebt;
-      state.targetProfit            = Math.max(0, prevTargetProfit);
-      state.remainingTargetProfit   = Math.max(0, prevRemainingTarget);
+      // Carry the aspirational target but re-apply the one-base-stake cap so a
+      // pre-cap target can never survive the daily rollover into a bigger stake.
+      state.targetProfit            = capTargetProfit(prevTargetProfit, prevBaseStake);
+      state.remainingTargetProfit   = capTargetProfit(prevRemainingTarget, prevBaseStake);
       state.originPayoutMultiplier  = Math.max(1, prevOriginPayout);
     }
   }
@@ -464,15 +484,24 @@ export function loadState(json: string): void {
       return;
     }
 
+    const parsedBaseStake = Number(parsed.baseStake) || 0;
+    // Re-apply the one-base-stake cap on load: a row persisted before the cap
+    // existed (or by any older build) may carry a payout-inflated target, and
+    // that target must never drive a larger recovery stake after a restart.
+    const loadedTargetProfit = capTargetProfit(Number(parsed.targetProfit) || 0, parsedBaseStake);
+    const loadedRemainingTarget = capTargetProfit(
+      Number(parsed.remainingTargetProfit ?? parsed.targetProfit) || 0,
+      parsedBaseStake,
+    );
     replaceState({
       inRecovery:               !!parsed.inRecovery,
       recoveryStep:             Number(parsed.recoveryStep)       || 0,
       unrecoveredAmount:        Number(parsed.unrecoveredAmount)  || 0,
-      baseStake:                Number(parsed.baseStake)          || 0,
+      baseStake:                parsedBaseStake,
       streakLossCount:          Number(parsed.streakLossCount)    || 0,
       streakStartAmount:        Number(parsed.streakStartAmount)  || 0,
-      targetProfit:             Math.max(0, Number(parsed.targetProfit) || 0),
-      remainingTargetProfit:    Math.max(0, Number(parsed.remainingTargetProfit ?? parsed.targetProfit) || 0),
+      targetProfit:             loadedTargetProfit,
+      remainingTargetProfit:    loadedRemainingTarget,
       originPayoutMultiplier:   Math.max(1, Number(parsed.originPayoutMultiplier) || 1),
       // Older/legacy saved rows never had resetDate — treat as "not today" so a
       // pre-existing carry-over debt from before this feature existed is cleared

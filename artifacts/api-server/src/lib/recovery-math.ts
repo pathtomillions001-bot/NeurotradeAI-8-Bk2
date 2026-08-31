@@ -91,6 +91,39 @@ export function calculateExactRecoveryStake(
   return (Math.max(0, unrecoveredAmount) + Math.max(0, remainingTargetProfit)) / netProfitRate;
 }
 
+/**
+ * Aspirational profit target recorded when a NORMAL trade loses.
+ *
+ * The target is the profit the lost normal trade was expected to earn, and it
+ * is used ONLY to size the next recovery stake (never as a completion
+ * condition). Left uncapped it makes the recovery stake depend on how generous
+ * the LOSING contract's payout was, which is exactly the divergence the
+ * specialist bots exposed:
+ *
+ *   main app  — normal DIFF loss ($1 @ 1.09×) → target $0.09
+ *               recovery in Matches: (1.00 + 0.09) / 7.93 → $0.35
+ *   match bot — normal MATCH loss ($1 @ 8.93×) → target $7.93 (uncapped)
+ *               recovery in Matches: (1.00 + 7.93) / 7.93 → $1.13
+ *
+ * Same formula, wildly different stake — purely because a Matches bot's normal
+ * trade is itself a jackpot-payout contract. Capping the target at ONE base
+ * stake makes recovery debt-driven for every engine and every contract family:
+ * a $1 loss is always recovered with the same $0.35 attempt whether the loss
+ * came from the main autonomous engine, the NeuroAI Quantum FAB or any of the
+ * five specialist bots. The cap only ever binds when the losing contract paid
+ * more than 2×, so all normal-payout families (Rise/Fall, Even/Odd, Differs,
+ * conservative Over/Under) keep exactly the numbers they had before.
+ */
+export const MAX_TARGET_PROFIT_PER_BASE_STAKE = 1;
+
+/** Target profit recorded for a lost normal trade — capped at one base stake. */
+export function recoveryTargetProfitFor(stake: number, payoutMultiplier: number): number {
+  const safeStake = Number.isFinite(stake) && stake > 0 ? stake : 0;
+  const payout = Number.isFinite(payoutMultiplier) && payoutMultiplier > 1 ? payoutMultiplier : 1;
+  const rawTarget = safeStake * (payout - 1);
+  return addMoney(Math.min(rawTarget, safeStake * MAX_TARGET_PROFIT_PER_BASE_STAKE));
+}
+
 export interface RecoveryStakeRequest {
   unrecoveredAmount: number;
   remainingTargetProfit: number;

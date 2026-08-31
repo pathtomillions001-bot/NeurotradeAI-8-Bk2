@@ -27,6 +27,7 @@ import {
   addMoney,
   applyRecoveryStakeLimits,
   calculateRecoveryStakeRequest,
+  recoveryTargetProfitFor,
   settleRecoveryWin,
   toCents,
 } from "../recovery-math";
@@ -35,6 +36,7 @@ export {
   applyRecoveryStakeLimits,
   calculateExactRecoveryStake,
   calculateRecoveryStakeRequest,
+  recoveryTargetProfitFor,
   roundRecoveryStakeUp,
   settleRecoveryWin,
 } from "../recovery-math";
@@ -375,7 +377,10 @@ export function recordOutcome(
         ? payoutMultiplier
         : 1;
       state.originPayoutMultiplier   = originPayout;
-      state.targetProfit             = addMoney(stakeUsed * (originPayout - 1));
+      // Capped at one base stake so the recovery stake is driven by the DEBT,
+      // never by how generous the losing contract's payout was. Keeps the main
+      // engine, the FAB and every specialist bot on identical numbers.
+      state.targetProfit             = recoveryTargetProfitFor(stakeUsed, originPayout);
       state.remainingTargetProfit    = state.targetProfit;
       // If the very first loss was a MATCH trade, start the counter
       state.consecutiveMatchLosses   = isMatch ? 1 : 0;

@@ -15,12 +15,11 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, CheckCircle2, AlertTriangle, RefreshCw,
-  Lock, Shuffle, ShieldCheck, Sparkles, Activity, Target, ChevronLeft,
+  Lock, Shuffle, ShieldCheck, Sparkles, Activity, Target, ChevronLeft, X,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "./ui/sheet";
 import { useGetSettings } from "@workspace/api-client-react";
 import { OVER_PAYOUTS, UNDER_PAYOUTS } from "@/lib/payouts";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
@@ -376,32 +375,55 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
     ? Math.round((session.winCount / session.tradeCount) * 100) : 0;
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent
-        side="right"
-        className="w-full sm:max-w-md p-0 bg-[#080d17] border-l border-white/10 flex flex-col gap-0 overflow-hidden"
-      >
-        {/* ── Header ─────────────────────────────────────────────────────── */}
-        <SheetHeader className={`p-4 border-b border-white/5 bg-gradient-to-r ${accent.headerGrad} text-left space-y-0`}>
-          <div className="flex items-center gap-2.5">
-            <div className={`w-9 h-9 rounded-xl ${accent.iconBg} ${accent.iconBorder} flex items-center justify-center flex-shrink-0`}>
-              <Icon className={`w-4.5 h-4.5 ${accent.text}`} />
-            </div>
-            <div className="min-w-0">
-              <SheetTitle className="text-sm font-bold text-white flex items-center gap-2">
-                {bot.name}
-                <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${accent.badgeBg} ${accent.text} font-normal`}>
-                  {bot.code}
-                </span>
-              </SheetTitle>
-              <SheetDescription className="text-[11px] text-muted-foreground mt-0.5">
-                {bot.contractLabel} specialist · {bot.tagline}
-              </SheetDescription>
-            </div>
-          </div>
-        </SheetHeader>
+    <AnimatePresence>
+      {open && (
+        <>
+          {/* Backdrop — same as the NeuroAI Quantum FAB */}
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-40"
+            onClick={() => onOpenChange(false)}
+          />
 
-        <div className="flex-1 overflow-y-auto">
+          {/* Panel — a self-contained floating card with a visible bottom edge,
+              mirroring the FAB panel instead of an edge-to-edge side sheet. */}
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.97 }}
+            transition={{ type: "spring", stiffness: 400, damping: 35 }}
+            role="dialog"
+            aria-label={`${bot.name} console`}
+            className={`fixed bottom-20 right-4 z-50 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border ${accent.panelBorder} bg-[#080d17] shadow-2xl ${accent.cardGlow}`}
+          >
+            {/* ── Header ─────────────────────────────────────────────────── */}
+            <div className={`flex items-center justify-between gap-2 p-4 border-b border-white/5 bg-gradient-to-r ${accent.headerGrad}`}>
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className={`w-9 h-9 rounded-xl ${accent.iconBg} ${accent.iconBorder} flex items-center justify-center flex-shrink-0`}>
+                  <Icon className={`w-4.5 h-4.5 ${accent.text}`} />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    {bot.name}
+                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${accent.badgeBg} ${accent.text} font-normal`}>
+                      {bot.code}
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
+                    {bot.contractLabel} specialist · {bot.tagline}
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => onOpenChange(false)}
+                aria-label="Close console"
+                className="text-muted-foreground hover:text-white p-1 flex-shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div>
           {/* ── STEP: CONFIG ─────────────────────────────────────────────── */}
           {step === "config" && (
             <div className="p-4 space-y-4">
@@ -923,8 +945,10 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
               </div>
             </div>
           )}
-        </div>
-      </SheetContent>
-    </Sheet>
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
   );
 }

@@ -16,9 +16,15 @@
  * (`lib/agents/recovery-engine.ts`), and this module enforces that exactly one
  * engine may execute against it at any moment. Ownership only blocks TRADE
  * EXECUTION — status endpoints, scanning, and analysis always work.
+ *
+ * Three executors share this lock: the main autonomous engine (`autonomous`),
+ * the NeuroAI Quantum FAB (`neuroai`) and the specialist AI bots (`bots` — one
+ * bot session at a time, see `lib/bot-engine.ts`). All three read and write the
+ * same ledger, so a fourth concurrent executor would recreate exactly the
+ * mix-up described above.
  */
 
-export type TradingOwner = "autonomous" | "neuroai";
+export type TradingOwner = "autonomous" | "neuroai" | "bots";
 
 let activeOwner: TradingOwner | null = null;
 
@@ -51,5 +57,7 @@ export function hasTradingOwnership(owner: TradingOwner): boolean {
 
 /** Human-readable owner label for error messages and UI toasts. */
 export function tradingOwnerLabel(owner: TradingOwner): string {
-  return owner === "autonomous" ? "main autonomous engine" : "NeuroAI FAB session";
+  if (owner === "autonomous") return "main autonomous engine";
+  if (owner === "neuroai") return "NeuroAI FAB session";
+  return "specialist AI bot";
 }

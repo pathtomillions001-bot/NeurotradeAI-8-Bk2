@@ -653,17 +653,16 @@ function computeRecoveryStake(
   availableBalance: number,
 ): number {
   if (!recoveryEngine.isInRecovery()) return config.stake;
-  return recoveryEngine.getDynamicRecoveryStake(
+  // Bot-specific: conservative 10 % markup on debt.
+  // The shared getDynamicRecoveryStake targets debt + aspirational target-profit,
+  // which over-exposes capital for high-payout bot contracts (Matches 8.93×,
+  // Over/Under 2.43×, Even/Odd 1.95×).  getBotRecoveryStake sizes the stake
+  // so a single win recovers all debt + 10 % of debt as profit instead.
+  return recoveryEngine.getBotRecoveryStake(
     config.stake,
     maxStake,
     availableBalance,
     payout,
-    winProbability,
-    "moderate",
-    config.recoveryMultiplier,
-    config.recoveryMethod,
-    config.maxRecoverySteps,
-    config.recoveryAutoMode,
   );
 }
 

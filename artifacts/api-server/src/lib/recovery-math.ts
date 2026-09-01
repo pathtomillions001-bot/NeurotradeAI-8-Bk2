@@ -181,6 +181,36 @@ export function calculateRecoveryStakeRequest(input: RecoveryStakeRequest): numb
     : 0.35;
 }
 
+/**
+ * Bot-specific recovery stake with a conservative 10 % markup on debt.
+ *
+ * Used ONLY by the five specialist AI bots.  The shared recovery formula
+ * (`calculateRecoveryStakeRequest`) sizes the stake to recover debt PLUS an
+ * aspirational target-profit derived from the losing contract's payout.
+ * For bots that target is often large (Matches 8.93×, Over/Under 2.43× …),
+ * which over-exposes the user's capital — a $1 Even/Odd loss would open a
+ * $2.06 recovery trade to win $1.96, even though only $1 was lost.
+ *
+ * This function replaces the target with a flat 10 % of the outstanding debt,
+ * so a $1 loss is recovered by a trade sized to return $1.10 — the original
+ * $1 debt plus $0.10 profit.  Multi-step recovery compounds naturally because
+ * `unrecoveredAmount` accumulates every consecutive loss.
+ *
+ * @param unrecoveredAmount  Total loss debt from the shared recovery ledger.
+ * @param payoutMultiplier   Total-return multiplier (includes original stake).
+ * @returns The raw (uncapped, unrounded) recovery stake.
+ */
+export function calculateBotRecoveryStake(
+  unrecoveredAmount: number,
+  payoutMultiplier: number,
+): number {
+  const netProfitRate = payoutMultiplier - 1;
+  if (!Number.isFinite(netProfitRate) || netProfitRate <= 0) return 0;
+  // 10 % markup: a win should recover all debt and leave 10 % of debt as profit.
+  const targetReturn = Math.max(0, unrecoveredAmount) * 1.10;
+  return targetReturn / netProfitRate;
+}
+
 /** Apply explicit execution limits and round upward without crossing those limits. */
 export function applyRecoveryStakeLimits(
   requestedStake: number,

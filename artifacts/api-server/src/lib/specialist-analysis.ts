@@ -86,6 +86,21 @@ export const MIN_ENTRY_Z_BE = 0.75;
 export const MATCH_ENTRY_Z_BE = 1.5;
 
 /**
+ * Barrier entry margin, scaled by tail size.
+ *
+ * A 1-digit tail (OVER 8 / UNDER 1, 91.7% break-even) is a RARE-EVENT
+ * estimate: far noisier, more biased, and closer to the edge of the
+ * distribution than a 5-digit tail, where the 0.75σ margin is well
+ * calibrated. The margin therefore grows as the tail shrinks:
+ *   tail ≥ 5 digits → 0.75σ,  tail 3 → 1.0σ,  tail 2 → 1.125σ,  tail 1 → 1.25σ.
+ * An extreme tail needs to prove its edge harder before a trade is released.
+ */
+export function barrierEntryMargin(tailSize: number): number {
+  if (tailSize >= 5) return MIN_ENTRY_Z_BE;
+  return MIN_ENTRY_Z_BE + (5 - tailSize) * 0.125;
+}
+
+/**
  * Hysteresis for digit targeting (match / differ bots): a newly selected digit
  * must beat the session's current digit by this many z_be (or z-safety) units
  * before the bot will switch. Prevents scan-to-scan target chasing on noise.
@@ -615,6 +630,15 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
   const z = (blended.p - breakEven) / Math.max(blended.sigma, 0.005);
   const edgeBonus = clamp(z * 3.0, -8, 8);
 
+  // Tail-size-aware entry margin (rare tails must prove their edge harder)
+  // and the market's OWN tail-streak breaking point, so the gate can refuse
+  // a losing streak that is not yet at its natural breaking point.
+  const requiredZBe = barrierEntryMargin(tailCount);
+  const streakAgainst = target.map(t => t === 0);
+  const streakHazard = runHazard(streakAgainst);
+  const hazardBreakProb = streakHazard.hazard.get(streakHazard.kNow) ?? streakHazard.baseline;
+  const hazardRelative = streakHazard.baseline > 1e-9 ? hazardBreakProb / streakHazard.baseline : 1;
+
   const bonus = clamp(edgeBonus + driftBonus + fragilityBonus + adjacencyBonus, -SPECIALIST_BONUS_CAP, SPECIALIST_BONUS_CAP);
   const confidence = clamp(Math.round(Math.min(100, (Math.abs(z) / 2.5) * 55 + Math.min(45, clean.length / 4))), 0, 100);
 
@@ -636,10 +660,13 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
       z: round(z),
       zBe: round(z, 3),
       breakEven: round(breakEven, 4),
+      requiredZBe: round(requiredZBe, 3),
       drift: round(drift, 3),
       ewMean: round(ewMean, 3),
       fragility: round(fragility, 3),
       adjacency: round(adjacency, 3),
+      hazardK: streakHazard.kNow,
+      hazardRelative: round(hazardRelative, 3),
     },
     signals,
   };
@@ -1156,8 +1183,19 @@ export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
       const be = m["breakEven"] ?? 0.5;
       const zBe = m["zBe"] ?? 0;
       if (p <= be) return { pass: false, reason: `conditional p̂ ${(p * 100).toFixed(1)}% ≤ break-even ${(be * 100).toFixed(1)}%` };
-      if (zBe < MIN_ENTRY_Z_BE) {
-        return { pass: false, reason: `edge margin thin (z_be ${zBe.toFixed(2)} < ${MIN_ENTRY_Z_BE})` };
+      // Tail-size-aware margin: a 1-digit tail must clear break-even harder
+      // than a 5-digit tail (rare-event estimates are noisier and more biased).
+      const zBeMin = m["requiredZBe"] ?? MIN_ENTRY_Z_BE;
+      if (zBe < zBeMin) {
+        return { pass: false, reason: `edge margin thin (z_be ${zBe.toFixed(2)} < ${zBeMin})` };
+      }
+      // Don't catch a falling knife: a losing streak that is at least 4 ticks
+      // long AND breaking less often than this market's own baseline is not
+      // at its breaking point yet.
+      const k = m["hazardK"] ?? 0;
+      const hz = m["hazardRelative"] ?? 1;
+      if (k >= 4 && hz < 0.7) {
+        return { pass: false, reason: `tail streak ${k}t unusually persistent (hazard ×${hz.toFixed(2)}) — not at breaking point` };
       }
       return { pass: true, reason: "tail probability above break-even with margin" };
     }

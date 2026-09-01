@@ -28,6 +28,7 @@ import {
   barrierRead,
   matchRead,
   specialistEntryGate,
+  barrierEntryMargin,
   BREAK_EVEN,
   DIGIT_SWITCH_MARGIN,
 } from "./specialist-analysis.ts";
@@ -122,7 +123,7 @@ describe("fair streams (no structure) — gates must filter", () => {
     assert.ok(rate < 0.2, `match gate accepted ${rate.toFixed(1)} of fair ticks — the EV leak is back`);
   });
 
-  it("barrier: p̂ must clear the tail break-even by 0.75σ", () => {
+  it("barrier: p̂ must clear the tail break-even by the margin", () => {
     const digits = fairDigits(2000, 99);
     let passes = 0;
     let total = 0;
@@ -133,6 +134,26 @@ describe("fair streams (no structure) — gates must filter", () => {
     }
     const rate = passes / total;
     assert.ok(rate < 0.3, `barrier gate accepted ${rate.toFixed(1)} of fair ticks — expected a minority`);
+  });
+
+  it("extreme 1-digit tail (OVER 8) is gated strictly harder than a 4-digit tail", () => {
+    const digits = fairDigits(2000, 2024);
+    let mid = 0, extreme = 0;
+    let total = 0;
+    for (let t = 120; t < digits.length; t++) {
+      const window = digits.slice(0, t);
+      total++;
+      if (specialistEntryGate(barrierRead(window, { side: "DIGITOVER", barrier: 5 })).pass) mid++;
+      if (specialistEntryGate(barrierRead(window, { side: "DIGITOVER", barrier: 8 })).pass) extreme++;
+    }
+    // OVER 8 wins only when the next digit is exactly 9 (true rate ≈ 10% vs a
+    // 91.7% hurdle) — on a fair stream this must be blocked far more than
+    // the mid tail, or essentially always.
+    assert.ok(
+      extreme / total <= mid / total,
+      `extreme tail released ${extreme / total} vs mid ${mid / total} — the rare-event margin is not working`,
+    );
+    assert.ok(extreme / total < 0.05, `OVER 8 passed on ${extreme / total} of fair ticks — a 1-digit tail is 91.7% break-even, this must be rare`);
   });
 });
 
@@ -277,5 +298,13 @@ describe("digit selection invariants", () => {
     assert.ok(BREAK_EVEN.parity > 0.51 && BREAK_EVEN.parity < 0.52); // 51.28%
     assert.ok(BREAK_EVEN.momentum > 0.52);    // 52.08%
     assert.ok(BREAK_EVEN.differ > 0.91);      // 91.74%
+    // Barrier margin grows as the tail shrinks (rare-event estimates are
+    // noisier and more biased).
+    assert.ok(barrierEntryMargin(5) === barrierEntryMargin(9));
+    assert.ok(barrierEntryMargin(1) > barrierEntryMargin(2));
+    assert.ok(barrierEntryMargin(2) > barrierEntryMargin(3));
+    assert.ok(barrierEntryMargin(3) > barrierEntryMargin(4));
+    assert.ok(barrierEntryMargin(4) > barrierEntryMargin(5));
+    assert.ok(barrierEntryMargin(1) >= 1.2);
   });
 });

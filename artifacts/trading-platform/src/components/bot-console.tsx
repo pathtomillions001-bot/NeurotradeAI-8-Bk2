@@ -20,7 +20,8 @@ import {
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { useGetSettings } from "@workspace/api-client-react";
+import { useGetSettings, useUpdateSettings, getGetSettingsQueryKey } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { OVER_PAYOUTS, UNDER_PAYOUTS } from "@/lib/payouts";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON, SCAN_MARKETS, SCAN_MARKET_COUNT } from "@/lib/bots";
@@ -41,6 +42,7 @@ interface BotConfigState {
   recoveryMultiplier: number;
   recoveryMethod: "split" | "instant";
   maxRecoverySteps: number;
+  botRecoveryMarkup: number;
   marketMode: MarketMode;
   lockedSymbol: string;
 }
@@ -175,6 +177,8 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
     scanning: null, symbol: null, scanned: 0, total: SCAN_MARKET_COUNT, results: [],
   });
   const { data: settings } = useGetSettings();
+  const updateSettings = useUpdateSettings();
+  const queryClient = useQueryClient();
 
   const [config, setConfig] = useState<BotConfigState>({
     sideMode: "both",
@@ -188,6 +192,7 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
     recoveryMultiplier: 1.62,
     recoveryMethod: "split",
     maxRecoverySteps: 3,
+    botRecoveryMarkup: 10,
     marketMode: "switching",
     lockedSymbol: "1HZ100V",
   });
@@ -209,9 +214,51 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
       recoveryMultiplier: s.recoveryMultiplier ?? prev.recoveryMultiplier,
       recoveryMethod:     (s.recoveryMethod    ?? prev.recoveryMethod) as "split" | "instant",
       maxRecoverySteps:   s.maxRecoverySteps   ?? prev.maxRecoverySteps,
+      botRecoveryMarkup:  Number(s.botRecoveryMarkup ?? 10),
       stake:              s.riskAmountValue    ?? prev.stake,
     }));
   }, [settings]);
+
+  // ── Markup on debt: user-adjustable, persisted to Risk Management settings ──
+  // The markup is an account-level setting (default 10 %): editing it here
+  // saves it to the same botRecoveryMarkup field the Settings page controls,
+  // and the bot engine reads it when sizing every recovery stake. Debounced so
+  // typing doesn't fire a PUT per keystroke.
+  const markupSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (markupSaveTimer.current) clearTimeout(markupSaveTimer.current);
+  }, []);
+
+  const persistMarkup = useCallback((value: number) => {
+    if (markupSaveTimer.current) clearTimeout(markupSaveTimer.current);
+    markupSaveTimer.current = setTimeout(() => {
+      updateSettings.mutate({ data: { botRecoveryMarkup: value } as any }, {
+        onSuccess: (saved: any) => {
+          const settingsKey = getGetSettingsQueryKey();
+          queryClient.setQueryData(settingsKey, saved);
+          queryClient.invalidateQueries({ queryKey: settingsKey });
+        },
+        onError: () => toast.error("Could not save AI Bot Recovery Markup"),
+      });
+    }, 500);
+  }, [updateSettings, queryClient]);
+
+  /** Guarantee the engine sees the user's markup before scan/start fires. */
+  const syncMarkupToSettings = useCallback(async (): Promise<boolean> => {
+    const saved = Number((settings as any)?.botRecoveryMarkup ?? 10);
+    if (saved === config.botRecoveryMarkup) return true;
+    try {
+      const savedSettings = await updateSettings.mutateAsync({
+        data: { botRecoveryMarkup: config.botRecoveryMarkup } as any,
+      });
+      const settingsKey = getGetSettingsQueryKey();
+      queryClient.setQueryData(settingsKey, savedSettings);
+      return true;
+    } catch {
+      toast.error("Could not save AI Bot Recovery Markup — adjust it in Settings and try again");
+      return false;
+    }
+  }, [settings, config.botRecoveryMarkup, updateSettings, queryClient]);
 
   // Reflect an externally-started session (e.g. started from the card).
   useEffect(() => {
@@ -303,6 +350,12 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
     setStep("scanning");
     setScanResult(null);
     setScanProgress({ scanning: null, symbol: null, scanned: 0, total: SCAN_MARKET_COUNT, results: [] });
+    const synced = await syncMarkupToSettings();
+    if (!synced) {
+      setLoading(false);
+      setStep("config");
+      return;
+    }
     try {
       const res = await fetch(`/api/bots/${bot.id}/scan`, {
         method: "POST",
@@ -327,6 +380,11 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
 
   const handleStart = async (symbolToLock?: string, mode?: MarketMode) => {
     setLoading(true);
+    const synced = await syncMarkupToSettings();
+    if (!synced) {
+      setLoading(false);
+      return;
+    }
     try {
       const payload = buildBody(symbolToLock, mode);
       const res = await fetch(`/api/bots/${bot.id}/start`, {
@@ -368,6 +426,8 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
   const armedSide = bot.sides.find(s => s.id === config.sideMode) ?? bot.sides[0]!;
   const armsOver = armedSide.contracts.includes("DIGITOVER");
   const armsUnder = armedSide.contracts.includes("DIGITUNDER");
+  // True once the debounced save lands and the settings cache reflects the value.
+  const markupSaved = Number((settings as any)?.botRecoveryMarkup ?? 10) === config.botRecoveryMarkup;
 
   const profit = session?.totalProfit ?? 0;
   const profitColor = profit >= 0 ? "text-green-400" : "text-red-400";
@@ -601,10 +661,13 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
 
                   <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} max={10} accent={bot.accent} />
 
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs text-muted-foreground flex-1">Markup on debt</span>
-                    <span className="font-mono text-xs text-foreground">
-                      {Number((settings as any)?.botRecoveryMarkup ?? 10)}%
+                  <NumInput label="Markup on debt" value={config.botRecoveryMarkup} onChange={v => { set("botRecoveryMarkup", v); persistMarkup(v); }} min={0} max={100} step={0.5} suffix="%" accent={bot.accent} />
+                  <div className="flex items-center justify-between text-[9px]">
+                    <span className="text-muted-foreground/70">
+                      Used by all five AI bots when sizing a recovery stake.
+                    </span>
+                    <span className={`font-mono ${markupSaved ? "text-green-400/80" : "text-amber-400/80"}`}>
+                      {markupSaved ? "✓ saved to settings" : "saving…"}
                     </span>
                   </div>
                 </div>
@@ -612,7 +675,9 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                 <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
                   Recovery executes exclusively inside {bot.contractLabel}. A loss puts the shared
                   account ledger into recovery and every recovery trade stays in this bot&apos;s contract.
-                  The markup on debt is set in Settings → Risk Management → AI Bot Recovery Markup.
+                  The markup on debt is saved to your Risk Management settings (0–100%) — the same value
+                  the Settings page shows — and the recovery stake targets debt + your markup as profit.
+                  A 10% markup on a $1 loss targets a $1.10 recovery win.
                 </p>
               </div>
 

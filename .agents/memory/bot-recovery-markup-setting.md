@@ -1,12 +1,12 @@
 ---
 name: Bot Recovery Markup Setting
-description: The 10% fixed markup on debt used by the five specialist AI bots' recovery is now a user-adjustable Risk Management setting (botRecoveryMarkup). Default stays 10%.
+description: The markup on debt used by the five specialist AI bots' recovery is a user-adjustable setting (botRecoveryMarkup), editable in Settings AND inline in the Bot Console; the engine re-reads it at recovery-stake time. Default stays 10%.
 ---
 
 # Bot Recovery Markup Setting
 
 ## The rule
-`botRecoveryMarkup` (DB column `bot_recovery_markup NUMERIC(5,2) NOT NULL DEFAULT '10'`) is a percentage the user sets in **Settings → Risk Profile (Risk Management) → AI Bot Recovery Markup**. It controls ONLY the five specialist AI bots' recovery stake sizing:
+`botRecoveryMarkup` (DB column `bot_recovery_markup NUMERIC(5,2) NOT NULL DEFAULT '10'`) is a percentage the user sets in **Settings → Risk Profile → AI Bot Recovery Markup** OR **inline in the Bot Console** (editable "Markup on debt" input in the Recovery Engine section — saves immediately via PUT /api/settings). It controls ONLY the five specialist AI bots' recovery stake sizing:
 
 - stake = `(unrecoveredAmount × (1 + markup/100)) / (payout − 1)`
 - Default 10 % → a $1 loss is recovered by a trade sized to win $1.10.
@@ -18,8 +18,8 @@ description: The 10% fixed markup on debt used by the five specialist AI bots' r
 - Server bootstrap: `artifacts/api-server/src/app.ts` `bootstrapDb()` — column added to the schema-check query and to `sessionMigrations` (guaranteed to run even when drizzle-kit push is unavailable for embedded PGlite; the push is wrapped in its own try/catch).
 - API: `lib/api-spec/openapi.yaml` (TradingSettings + TradingSettingsInput, min 0 max 100), regenerated into `lib/api-zod` and `lib/api-client-react` via `pnpm --filter @workspace/api-spec run codegen`.
 - Route: `artifacts/api-server/src/routes/settings.ts` (formatSettings + PUT mapping).
-- Engine: `recovery-math.ts` `calculateBotRecoveryStake(unrecoveredAmount, payoutMultiplier, markupPercent = 10)` → `recovery-engine.ts` `getBotRecoveryStake(..., markupPercent = 10)` → `bot-engine.ts` `runLoop` reads `settings[0].botRecoveryMarkup` and passes it through `computeRecoveryStake`.
-- UI: `artifacts/trading-platform/src/pages/settings.tsx` (NumInput row, suffix %, 0–100 step 0.5) and read-only display in `bot-console.tsx` Recovery Engine section ("Markup on debt").
+- Engine: `recovery-math.ts` `calculateBotRecoveryStake(unrecoveredAmount, payoutMultiplier, markupPercent = 10)` → `recovery-engine.ts` `getBotRecoveryStake(..., markupPercent = 10)` → `bot-engine.ts` `runLoop` snapshots `settings[0].botRecoveryMarkup` at start AND re-reads it from the DB at fire time while in recovery (so mid-session user edits apply to the very next recovery trade — no redeploy; normal trades skip the re-read since the markup is unused there).
+- UI: `artifacts/trading-platform/src/pages/settings.tsx` (NumInput row, suffix %, 0–100 step 0.5) and an EDITABLE "Markup on debt" input in `bot-console.tsx` Recovery Engine section (string draft committed on blur/Enter, Escape cancels, clamps/rounds 0–100 to 2dp, PUTs `{botRecoveryMarkup}` via `useUpdateSettings`, toast on success/failure, settings query cache updated + invalidated).
 
 ## Gotchas
 - The 10 % markup is used ONLY when `getBotRecoveryStake` is the sizing function — i.e. only the bot-engine path. `getDynamicRecoveryStake` (main engine) intentionally ignores it.

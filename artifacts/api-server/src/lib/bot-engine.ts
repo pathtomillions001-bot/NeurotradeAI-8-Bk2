@@ -733,7 +733,10 @@ async function runLoop(config: BotConfig) {
   const isLive         = !paperTradeMode && !!token;
   const maxStake       = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
   // Profit markup (%) on debt used ONLY by this bot's recovery stake sizing.
-  // User-adjustable from Risk Management settings; defaults to 10 %.
+  // User-adjustable (Settings → Risk Profile, or directly in the Bot Console);
+  // defaults to 10 %.  This is only the loop-start snapshot — the value is
+  // re-read from the DB at recovery-stake time so mid-session user
+  // adjustments apply without redeploying the bot.
   const botRecoveryMarkup = settings.length > 0
     ? Number((settings[0] as any).botRecoveryMarkup ?? 10)
     : 10;
@@ -1021,7 +1024,25 @@ async function runLoop(config: BotConfig) {
         continue;
       }
 
-      const stake = computeRecoveryStake(best.payout, best.winProbability, config, maxStake, availableBalance, botRecoveryMarkup);
+      // Refresh the user-configurable debt markup at stake-sizing time so an
+      // adjustment made (Bot Console or Settings) while this bot is running
+      // takes effect on the very next recovery trade — no redeploy needed.
+      // The extra read only happens while in recovery; normal trades don't
+      // use the markup and skip it entirely.
+      let liveMarkup = botRecoveryMarkup;
+      if (inRecovery) {
+        try {
+          const fresh = await db.select().from(settingsTable)
+            .where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
+          if (fresh.length > 0) {
+            const v = Number((fresh[0] as any).botRecoveryMarkup);
+            if (Number.isFinite(v)) liveMarkup = v;
+          }
+        } catch (e) {
+          logger.warn({ err: e }, "Specialist bot: failed to refresh botRecoveryMarkup — using loop-start value");
+        }
+      }
+      const stake = computeRecoveryStake(best.payout, best.winProbability, config, maxStake, availableBalance, liveMarkup);
       const sharedStep = recoveryEngine.getState().recoveryStep;
 
       session.currentMarket       = best.displayName;

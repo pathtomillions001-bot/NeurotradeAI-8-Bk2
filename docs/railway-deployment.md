@@ -13,8 +13,11 @@ single origin for `/api`, OAuth, HttpOnly session cookies, and SSE.
 - Healthcheck path: `/api/healthz`
 - `PORT`: leave unset; Railway injects it
 
-`railway.json` contains the same build, start, database pre-deploy, healthcheck,
-and restart settings for Railway deployments.
+`railpack.json` supplies the build and start commands directly to Railpack.
+New Railway services should not rely on `railway.json`: Railway's current
+Config as Code flow is deprecated for new services. Configure the pre-deploy
+command, healthcheck, and restart policy in the Railway service settings as
+shown below (the legacy `railway.json` is retained only for older services).
 
 ## PostgreSQL
 

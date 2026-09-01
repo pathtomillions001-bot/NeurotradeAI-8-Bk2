@@ -26,6 +26,7 @@ import { getBrowserSessionId } from "../session";
 import {
   addMoney,
   applyRecoveryStakeLimits,
+  calculateBotRecoveryStake,
   calculateRecoveryStakeRequest,
   MAX_TARGET_PROFIT_PER_BASE_STAKE,
   recoveryTargetProfitFor,
@@ -35,6 +36,7 @@ import {
 
 export {
   applyRecoveryStakeLimits,
+  calculateBotRecoveryStake,
   calculateExactRecoveryStake,
   calculateRecoveryStakeRequest,
   recoveryTargetProfitFor,
@@ -334,6 +336,34 @@ export function getDynamicRecoveryStake(
     recoveryMethod, state.recoveryStep, maxRecoverySteps, recoveryAutoMode,
   );
   return Math.max(0.35, Math.min(raw, maxTradeStake));
+}
+
+/**
+ * Bot-specific recovery stake with a conservative 10 % markup on debt.
+ *
+ * Used ONLY by the five specialist AI bots.  The shared
+ * `getDynamicRecoveryStake` sizes recovery to cover debt plus an aspirational
+ * target-profit derived from the losing contract's payout, which for bots
+ * (Matches 8.93×, Over/Under 2.43×, Even/Odd 1.95×) over-exposes capital.
+ *
+ * This function sizes the stake so a single win recovers all outstanding debt
+ * plus exactly 10 % of that debt as profit.  A $1 loss → win $1.10; two
+ * consecutive $1 losses ($2 debt) → win $2.20.  The manual multiplier,
+ * recovery method, and target-profit fields are intentionally ignored.
+ */
+export function getBotRecoveryStake(
+  baseStake: number,
+  maxTradeStake: number,
+  balance: number,
+  payoutMultiplier: number,
+): number {
+  ensureFreshDay();
+  if (!state.inRecovery) {
+    if (baseStake > 0 && isFinite(baseStake)) state.baseStake = baseStake;
+    return baseStake;
+  }
+  const raw = calculateBotRecoveryStake(state.unrecoveredAmount, payoutMultiplier);
+  return applyRecoveryStakeLimits(raw, maxTradeStake, balance);
 }
 
 // ── Outcome recording ─────────────────────────────────────────────────────────

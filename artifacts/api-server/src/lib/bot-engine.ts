@@ -70,7 +70,14 @@ import {
   type BotContractType,
   type BotMarketScore,
 } from "./bot-scorer";
-import { specialistSideChoice, type DigitCandidate, type SpecialistRead } from "./specialist-analysis";
+import {
+  specialistSideChoice,
+  specialistEntryGate,
+  familyForContract,
+  type DigitCandidate,
+  type SpecialistRead,
+} from "./specialist-analysis";
+import { loadBotCalibration, recordBotOutcome } from "./bot-calibration";
 import { getBotDefinition } from "./bot-catalog";
 
 export type { BotContractType, BotMarketScore } from "./bot-scorer";
@@ -182,6 +189,8 @@ let session: {
   lastDigitCandidates?: DigitCandidate[];
   /** Side traded last — feeds the arbitration hysteresis. */
   lastSide?: BotContractType;
+  /** Digit traded last (match/differ bots) — feeds the digit hysteresis. */
+  lastDigit?: number;
 } = {
   running: false,
   sessionId: null,
@@ -311,7 +320,19 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
       : "Initializing specialist analysis engine…",
     lastEntropyBits: 3.32,
     lastEv: 0,
+    lastDigit: undefined,
   };
+
+  // Self-learning calibration: load this bot's own trade history so its
+  // probabilities are calibrated against its own track record from the very
+  // first trade of the session. Best-effort — a failure must not block start.
+  try {
+    const botName = getBotDefinition(config.botId)?.name ?? config.botId;
+    const n = await loadBotCalibration(db, botName, familyForContract(config.contractTypes[0]!));
+    if (n > 0) logger.info({ botId: config.botId, records: n }, "Bot calibration pool loaded");
+  } catch (err) {
+    logger.warn({ err }, "Bot calibration load skipped (running uncalibrated)");
+  }
 
   logger.info({ config, inheritedRecovery: sharedRecovery.inRecovery }, "Specialist bot session starting");
   broadcast();
@@ -360,7 +381,10 @@ function barrierFor(
   if (ct === "DIGITOVER")  return { barrier: overBarrier };
   if (ct === "DIGITUNDER") return { barrier: underBarrier };
   if (ct === "DIGITMATCH" || ct === "DIGITDIFF") {
-    const resolved = resolveBotBarrier(ct, digits, config.lockedBarrier);
+    // Digit hysteresis: the session's last-traded digit is the preferred
+    // target; a different digit must beat it by DIGIT_SWITCH_MARGIN in its
+    // own significance units (ignored when the user locked a digit).
+    const resolved = resolveBotBarrier(ct, digits, config.lockedBarrier, session.lastDigit);
     return { barrier: resolved.barrier, candidates: resolved.candidates };
   }
   return { barrier: undefined };
@@ -935,10 +959,20 @@ async function runLoop(config: BotConfig) {
           continue;
         }
         // Specialist revalidation: the entry condition must still hold on the
-        // execution tick, not just at decision time.
+        // execution tick, not just at decision time. v2: the specialist gate
+        // itself is re-run — a break-even margin that evaporates between
+        // decision and execution is exactly when a trade should be abandoned.
         const freshSpecialist = specialistReadFor(best.contractType, best.barrier, reDigits, rePrices);
         if (freshSpecialist) {
           session.lastSpecialist = freshSpecialist;
+          const freshGate = specialistEntryGate(freshSpecialist);
+          if (!freshGate.pass) {
+            session.message = `⏱️ Specialist edge lost at execution tick (${freshGate.reason}) — re-scanning…`;
+            broadcast();
+            preAnalyzed = null;
+            await sleep(400);
+            continue;
+          }
         }
       }
 
@@ -952,6 +986,23 @@ async function runLoop(config: BotConfig) {
         currency,
       });
       best = { ...best, payout: payoutQuote.payoutMultiplier };
+
+      // ── Hard EV floor (bot v2) ─────────────────────────────────────────────
+      // Final backstop, applied at the LAST possible moment with the freshest
+      // calibrated probability and the pre-warmed live payout: if expected
+      // value is not positive, the trade does not fire — no matter how high
+      // its score is. Score bonuses (fatigue, timing, entropy) may rank
+      // setups, but none of them may override the math. Recovery trades were
+      // already held to a positive-EV requirement by the sniper gate; this
+      // makes it a law for every bot fire, normal or recovery.
+      const evAtFire = best.winProbability * (best.payout - 1) - (1 - best.winProbability);
+      if (evAtFire < 0) {
+        session.message = `🛡️ EV ${(evAtFire * 100).toFixed(1)}% < 0 at fire time — edge not confirmed, re-scanning…`;
+        broadcast();
+        preAnalyzed = null;
+        await sleep(700);
+        continue;
+      }
 
       const stake = computeRecoveryStake(best.payout, best.winProbability, config, maxStake, availableBalance);
       const sharedStep = recoveryEngine.getState().recoveryStep;
@@ -1052,6 +1103,12 @@ async function runLoop(config: BotConfig) {
         session.lastResult = "lost";
       }
       session.lastSide = best.contractType;
+      session.lastDigit = best.contractType === "DIGITMATCH" || best.contractType === "DIGITDIFF"
+        ? best.barrier
+        : undefined;
+
+      // Self-learning: feed this outcome back into the family's calibration.
+      recordBotOutcome(familyForContract(best.contractType), best.winProbability, won);
 
       recoveryEngine.recordOutcome(
         won, profit, stake, config.maxRecoverySteps, best.contractType, best.payout,

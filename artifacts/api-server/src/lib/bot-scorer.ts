@@ -43,9 +43,14 @@ import {
   differRead,
   momentumRead,
   specialistEntryGate,
+  blendEstimates,
+  familyForContract,
+  DIGIT_SWITCH_MARGIN,
+  BREAK_EVEN,
   type DigitCandidate,
   type SpecialistRead,
 } from "./specialist-analysis";
+import { calibratedWinProbability } from "./bot-calibration";
 
 export type BotContractType =
   | "DIGITOVER" | "DIGITUNDER"
@@ -568,7 +573,28 @@ export function botPrecisionScore(
   const hazardQ       = hazardTimingBonus(q);
   const onsetQ        = entropyOnsetBonus(q);
   const edgeCommittee = 0.5 * edgeNorm + 0.5 * zQuality;
-  const winPfinal     = Math.max(0.01, Math.min(0.99, winP * 0.5 + q.pHat * 0.5));
+
+  // ── Win-probability fusion (bot v2) ────────────────────────────────────────
+  // The FAB's winP (50-digit empirical + Bayesian Markov + 15-tick momentum)
+  // and the quantum window estimate are two estimates of the SAME quantity
+  // with DIFFERENT uncertainties. The old flat 50/50 mix ignored that; the
+  // bots now fuse by inverse variance — the tighter estimate carries more
+  // weight. The FAB component's uncertainty comes from its dominant terms
+  // (50-digit frequency, ≈20-sample Markov row, 15-tick rate) ⇒ effective
+  // n ≈ 40, used conservatively. The FAB formula itself is untouched — this
+  // is final assembly, and the divergence is intentional: a bot's EV gate,
+  // stake sizing and paper simulation all consume this number, so it must be
+  // the honest, minimum-variance estimate, then passed through the family's
+  // self-learning Platt calibration (identity until ≥12 of the bot's own
+  // trades say otherwise).
+  const sigmaFab = Math.sqrt(Math.max(1e-6, winP * (1 - winP) / 40));
+  const fused = q.neutral
+    ? { p: winP, sigma: sigmaFab }
+    : blendEstimates([{ p: winP, sigma: sigmaFab }, { p: q.pHat, sigma: q.sigma }]);
+  const winPfinal = calibratedWinProbability(
+    familyForContract(contractType),
+    Math.max(0.01, Math.min(0.99, fused.p)),
+  );
 
   // ── SPECIALIST LAYER (new — the single-contract advantage) ─────────────────
   const specialist = specialistReadFor(contractType, barrier, digits, prices);
@@ -644,25 +670,49 @@ export function specialistReadFor(
  * A locked digit is respected absolutely. Otherwise the specialist's
  * FDR-gated, hazard-weighted ranking decides — the FAB's argmax picker is the
  * fallback only when the specialist has too little data.
+ *
+ * v2 — digit hysteresis: `preferredBarrier` is the digit the session last
+ * traded (when the user did not lock one). A different digit is only adopted
+ * when it beats the held digit's edge by DIGIT_SWITCH_MARGIN (0.5) in its own
+ * significance units — break-even z for match, worst-case z-safety for differ.
+ * Without this, the target digit could flip scan-to-scan on pure estimation
+ * noise, and the bot's anti-pattern memory would never accumulate.
  */
 export function resolveBotBarrier(
   contractType: BotContractType,
   digits: number[],
   lockedBarrier?: number,
+  preferredBarrier?: number,
 ): { barrier: number; candidates?: DigitCandidate[]; source: "locked" | "specialist" | "fallback" } {
   if (contractType === "DIGITMATCH") {
     if (lockedBarrier !== undefined) {
       return { barrier: lockedBarrier, candidates: matchRead(digits, lockedBarrier).candidates, source: "locked" };
     }
     const read = matchRead(digits);
-    return { barrier: read.barrier, candidates: read.candidates, source: digits.length >= 40 ? "specialist" : "fallback" };
+    let barrier = read.barrier;
+    const zBe = (c: DigitCandidate) => (c.p - BREAK_EVEN.match) / Math.max(c.sigma, 0.004);
+    if (preferredBarrier !== undefined && preferredBarrier !== barrier) {
+      const held = read.candidates[preferredBarrier]!;
+      const fresh = read.candidates[barrier]!;
+      if (zBe(held) >= zBe(fresh) - DIGIT_SWITCH_MARGIN) barrier = preferredBarrier;
+    }
+    return { barrier, candidates: read.candidates, source: digits.length >= 40 ? "specialist" : "fallback" };
   }
   if (contractType === "DIGITDIFF") {
     if (lockedBarrier !== undefined) {
       return { barrier: lockedBarrier, candidates: differRead(digits, lockedBarrier).candidates, source: "locked" };
     }
     const read = differRead(digits);
-    return { barrier: read.barrier, candidates: read.candidates, source: digits.length >= 40 ? "specialist" : "fallback" };
+    let barrier = read.barrier;
+    // For differ the edge is the SAFETY of the loss side: worst-case win rate
+    // above the 91.7% hurdle, in σ units.
+    const zSafety = (c: DigitCandidate) => ((1 - c.upper) - BREAK_EVEN.differ) / Math.max(c.sigma, 0.004);
+    if (preferredBarrier !== undefined && preferredBarrier !== barrier) {
+      const held = read.candidates[preferredBarrier]!;
+      const fresh = read.candidates[barrier]!;
+      if (zSafety(held) >= zSafety(fresh) - DIGIT_SWITCH_MARGIN) barrier = preferredBarrier;
+    }
+    return { barrier, candidates: read.candidates, source: digits.length >= 40 ? "specialist" : "fallback" };
   }
   return { barrier: lockedBarrier ?? 0, source: "locked" };
 }

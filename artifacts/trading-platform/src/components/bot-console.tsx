@@ -15,7 +15,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, CheckCircle2, AlertTriangle, RefreshCw,
-  Lock, Shuffle, ShieldCheck, Sparkles, Activity, Target, ChevronLeft, X,
+  Lock, Shuffle, ShieldCheck, Sparkles, Activity, ChevronLeft, X,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -855,41 +855,12 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                 </div>
               )}
 
-              {/* Live specialist telemetry */}
-              <AnimatePresence>
-                {session?.specialist && (
-                  <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
-                    <SpecialistPanel specialist={session.specialist} accent={bot.accent} />
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Digit candidate table for match / differ bots */}
-              {session?.digitCandidates && session.digitCandidates.length > 0 && (
-                <div className="rounded-xl border border-white/10 bg-white/[0.02] p-3 space-y-2">
-                  <div className="flex items-center gap-1.5">
-                    <Target className={`w-3.5 h-3.5 ${accent.text}`} />
-                    <p className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground">Digit Risk Table</p>
-                  </div>
-                  <div className="grid grid-cols-5 gap-1">
-                    {[...session.digitCandidates].sort((a, b) => a.digit - b.digit).map(c => {
-                      const isTarget = session.currentContractType?.endsWith(` ${c.digit}`);
-                      return (
-                        <div
-                          key={c.digit}
-                          className={`rounded px-1 py-1 text-center border ${
-                            isTarget ? `${accent.activeBg} ${accent.activeBorder}` : "bg-black/25 border-white/5"
-                          }`}
-                        >
-                          <p className={`text-[10px] font-mono font-bold ${isTarget ? accent.text : "text-white/80"}`}>{c.digit}</p>
-                          <p className="text-[8px] font-mono text-muted-foreground/70">{(c.upper * 100).toFixed(0)}%</p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                  <p className="text-[9px] text-muted-foreground/60">Upper-bound appearance rate per digit — the loss side this bot is priced against.</p>
-                </div>
-              )}
+              {/* The bot's specialist telemetry and digit risk table keep
+                  running on the API (session.specialist / session.
+                  digitCandidates) but are intentionally NOT rendered here —
+                  users see the clean operational view only. The specialist
+                  panel still appears once on the scan-result screen where it
+                  supports the pre-deploy decision. */}
 
               {session?.inRecovery && (
                 <div className="rounded-lg px-3 py-2 border text-xs bg-amber-500/[0.08] border-amber-500/30 space-y-1">

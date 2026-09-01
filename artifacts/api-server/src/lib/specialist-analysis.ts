@@ -45,8 +45,76 @@
  */
 
 import { normalCdf } from "./quantum-analysis";
+import { EVEN_ODD_PAYOUT, RISE_FALL_PAYOUT, MATCH_PAYOUT, DIFF_PAYOUT } from "./payouts";
 
 export type SpecialistFamily = "parity" | "barrier" | "match" | "differ" | "momentum";
+
+/**
+ * Map a contract type to its specialist family (used for calibration routing).
+ */
+export function familyForContract(ct: string): SpecialistFamily {
+  if (ct === "DIGITEVEN" || ct === "DIGITODD") return "parity";
+  if (ct === "DIGITOVER" || ct === "DIGITUNDER") return "barrier";
+  if (ct === "DIGITMATCH") return "match";
+  if (ct === "DIGITDIFF") return "differ";
+  return "momentum";
+}
+
+/**
+ * Minimum significance margin above break-even the entry gate accepts.
+ *
+ * z_be ≥ 0.75 means the estimate clears 1/payout by three-quarters of its own
+ * standard error — i.e. every trade the specialist releases is positive
+ * expected value AT THE ESTIMATE LEVEL, not merely plausible. On a truly
+ * random stream this condition fails ~90% of ticks, which is exactly the
+ * behaviour a specialist should show: sit out until the math says yes.
+ */
+export const MIN_ENTRY_Z_BE = 0.75;
+
+/**
+ * The MATCH family needs a larger margin.
+ *
+ * Selection bias: the match bot's p̂ is the ARGMAX of ten noisy per-digit
+ * estimates (the best of ten binomial(≈100, 0.10) estimates), and an argmax
+ * is optimistically biased upward by roughly half a σ of the individual
+ * estimates — the FDR correction fixes digit RANKING but cannot remove the
+ * bias in the winning estimate itself. Requiring z_be ≥ 1.5 (instead of 0.75)
+ * absorbs that selection inflation: on a fair stream the gate then releases
+ * only a small minority of ticks, while a genuinely hot digit (p ≈ 16% vs
+ * an 11.2% hurdle) still clears it comfortably.
+ */
+export const MATCH_ENTRY_Z_BE = 1.5;
+
+/**
+ * Barrier entry margin, scaled by tail size.
+ *
+ * A 1-digit tail (OVER 8 / UNDER 1, 91.7% break-even) is a RARE-EVENT
+ * estimate: far noisier, more biased, and closer to the edge of the
+ * distribution than a 5-digit tail, where the 0.75σ margin is well
+ * calibrated. The margin therefore grows as the tail shrinks:
+ *   tail ≥ 5 digits → 0.75σ,  tail 3 → 1.0σ,  tail 2 → 1.125σ,  tail 1 → 1.25σ.
+ * An extreme tail needs to prove its edge harder before a trade is released.
+ */
+export function barrierEntryMargin(tailSize: number): number {
+  if (tailSize >= 5) return MIN_ENTRY_Z_BE;
+  return MIN_ENTRY_Z_BE + (5 - tailSize) * 0.125;
+}
+
+/**
+ * Hysteresis for digit targeting (match / differ bots): a newly selected digit
+ * must beat the session's current digit by this many z_be (or z-safety) units
+ * before the bot will switch. Prevents scan-to-scan target chasing on noise.
+ */
+export const DIGIT_SWITCH_MARGIN = 0.5;
+
+/** Break-even win rates p* = 1/payout, per family. */
+export const BREAK_EVEN = {
+  parity: 1 / EVEN_ODD_PAYOUT,    // 1.95× ⇒ 51.28%
+  barrier: null,                  // barrier-dependent — resolved at read time
+  match: 1 / MATCH_PAYOUT,        // 8.93× ⇒ 11.20%
+  differ: 1 / DIFF_PAYOUT,        // 1.09× ⇒ 91.74%
+  momentum: 1 / RISE_FALL_PAYOUT, // 1.92× ⇒ 52.08%
+} as const;
 
 export interface SpecialistRead {
   family: SpecialistFamily;
@@ -413,10 +481,14 @@ export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): Sp
     cycleBonus = rho3 > 0 ? 1.5 : -1.5;
   }
 
-  // Bias term: how far the blended estimate sits above the 50% fair rate,
-  // scaled by its own significance (z) so noise cannot fake an edge.
+  // Bias term — measured against the BREAK-EVEN rate (1/1.95 = 51.28%), not
+  // 50%: a parity edge that only beats fair is still negative EV at the
+  // 1.95× payout, so it must not earn a positive bonus. Scaled by the
+  // estimate's own significance so noise cannot fake an edge.
+  const breakEven = BREAK_EVEN.parity;
   const z = (blended.p - 0.5) / Math.max(blended.sigma, 0.005);
-  const biasBonus = clamp(z * 3.2, -7, 7);
+  const zBe = (blended.p - breakEven) / Math.max(blended.sigma, 0.005);
+  const biasBonus = clamp(zBe * 3.2, -7, 7);
 
   // Serial-alignment term: does the side we are scoring match the side the
   // runs structure favours?
@@ -425,14 +497,14 @@ export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): Sp
     : (favoured === side ? 5 * serialStrength : -5 * serialStrength);
 
   const bonus = clamp(biasBonus + alignBonus + cycleBonus, -SPECIALIST_BONUS_CAP, SPECIALIST_BONUS_CAP);
-  const confidence = clamp(Math.round(Math.min(100, (Math.abs(z) / 2.5) * 55 + Math.min(45, parity.length / 4))), 0, 100);
+  const confidence = clamp(Math.round(Math.min(100, (Math.abs(zBe) / 2.5) * 55 + Math.min(45, parity.length / 4))), 0, 100);
   // 1 when the serial structure actively favours the OTHER side — this is the
   // only thing the parity entry gate blocks on.
   const alignAgainst = favoured !== undefined && favoured !== side ? 1 : 0;
 
   const signals: string[] = [];
   signals.push(`p̂ ${(blended.p * 100).toFixed(1)}% (σ ${(blended.sigma * 100).toFixed(1)})`);
-  signals.push(`z ${z >= 0 ? "+" : ""}${z.toFixed(2)}`);
+  signals.push(`z_be ${(zBe >= 0 ? "+" : "")}${zBe.toFixed(2)} vs be ${(breakEven * 100).toFixed(1)}%`);
   if (favoured) {
     signals.push(`${ww.z < 0 ? "clustering" : "alternating"} → ${favoured === "DIGITEVEN" ? "EVEN" : "ODD"} (z_run ${ww.z.toFixed(2)})`);
   } else {
@@ -449,6 +521,8 @@ export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): Sp
       pHat: round(blended.p, 4),
       sigma: round(blended.sigma, 4),
       z: round(z),
+      zBe: round(zBe, 3),
+      breakEven: round(breakEven, 4),
       runsZ: ww.z,
       alignAgainst,
       rho2: round(rho2),
@@ -556,6 +630,15 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
   const z = (blended.p - breakEven) / Math.max(blended.sigma, 0.005);
   const edgeBonus = clamp(z * 3.0, -8, 8);
 
+  // Tail-size-aware entry margin (rare tails must prove their edge harder)
+  // and the market's OWN tail-streak breaking point, so the gate can refuse
+  // a losing streak that is not yet at its natural breaking point.
+  const requiredZBe = barrierEntryMargin(tailCount);
+  const streakAgainst = target.map(t => t === 0);
+  const streakHazard = runHazard(streakAgainst);
+  const hazardBreakProb = streakHazard.hazard.get(streakHazard.kNow) ?? streakHazard.baseline;
+  const hazardRelative = streakHazard.baseline > 1e-9 ? hazardBreakProb / streakHazard.baseline : 1;
+
   const bonus = clamp(edgeBonus + driftBonus + fragilityBonus + adjacencyBonus, -SPECIALIST_BONUS_CAP, SPECIALIST_BONUS_CAP);
   const confidence = clamp(Math.round(Math.min(100, (Math.abs(z) / 2.5) * 55 + Math.min(45, clean.length / 4))), 0, 100);
 
@@ -575,11 +658,15 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
       pHat: round(blended.p, 4),
       sigma: round(blended.sigma, 4),
       z: round(z),
+      zBe: round(z, 3),
       breakEven: round(breakEven, 4),
+      requiredZBe: round(requiredZBe, 3),
       drift: round(drift, 3),
       ewMean: round(ewMean, 3),
       fragility: round(fragility, 3),
       adjacency: round(adjacency, 3),
+      hazardK: streakHazard.kNow,
+      hazardRelative: round(hazardRelative, 3),
     },
     signals,
   };
@@ -626,16 +713,67 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
   const out: DigitCandidate[] = [];
   const pValues: number[] = [];
 
+  const lastDigit = clean[clean.length - 1];
+  const lastTwoDigit = clean[clean.length - 2];
+
+  // Transition-context counts, computed once and reused by all ten
+  // candidates:
+  //   rowOut[a] / rowHit[a,d]  — how often a → d transitioned (1st order)
+  //   ctx2[(a,b)]              — how often the (a,b) pair was followed by d
+  const rowOut = new Array<number>(10).fill(0);
+  const rowHit = new Array<number>(100).fill(0);
+  const ctx2 = new Map<number, { total: number; hits: number[] }>();
+  for (let i = 1; i < clean.length; i++) {
+    const a = clean[i - 1]!;
+    const b = clean[i]!;
+    rowOut[a]! += 1;
+    rowHit[a * 10 + b]! += 1;
+  }
+  for (let i = 2; i < clean.length; i++) {
+    const a = clean[i - 2]!;
+    const b = clean[i - 1]!;
+    const c = clean[i]!;
+    const key = a * 10 + b;
+    let entry = ctx2.get(key);
+    if (!entry) { entry = { total: 0, hits: new Array(10).fill(0) }; ctx2.set(key, entry); }
+    entry.total++;
+    entry.hits[c]! += 1;
+  }
+
   for (let digit = 0; digit < 10; digit++) {
     const series = clean.map(d => (d === digit ? 1 : 0));
     const ew = series.length > 0 ? ewmaRate(series, 0.1, 0.97) : { p: 0.1, sigma: 0.3, nEff: 0 };
     const hits = series.reduce((a, b) => a + b, 0);
     const pMarg = series.length > 0 ? hits / series.length : 0.1;
     const sigmaMarg = Math.sqrt(Math.max(1e-6, (pMarg * (1 - pMarg)) / Math.max(1, series.length)));
-    const blended = blendEstimates([
+
+    // ── Conditional context estimators ─────────────────────────────────────
+    // P(digit | last) and P(digit | last two) from THIS buffer's own
+    // transition structure, Laplace-smoothed, each carrying its own binomial
+    // σ from the context sample size. These are the strongest per-digit
+    // estimators available: the same 10-state context the FAB's Markov uses,
+    // now applied to digit SELECTION (which the marginal-frequency picker
+    // ignores). Thin contexts drop out automatically via their large σ.
+    const estimates: Array<{ p: number; sigma: number }> = [
       { p: ew.p, sigma: ew.sigma },
       { p: pMarg, sigma: sigmaMarg },
-    ]);
+    ];
+    if (lastDigit !== undefined) {
+      const rowTotal = rowOut[lastDigit]!;
+      if (rowTotal >= 6) {
+        const rowHitCount = rowHit[lastDigit * 10 + digit] ?? 0;
+        const p1 = (rowHitCount + 1) / (rowTotal + 10);
+        estimates.push({ p: p1, sigma: Math.sqrt(Math.max(1e-6, (p1 * (1 - p1)) / (rowTotal + 10))) });
+      }
+      if (lastTwoDigit !== undefined) {
+        const ctx = ctx2.get(lastTwoDigit * 10 + lastDigit);
+        if (ctx && ctx.total >= 4) {
+          const p2 = (ctx.hits[digit]! + 1) / (ctx.total + 10);
+          estimates.push({ p: p2, sigma: Math.sqrt(Math.max(1e-6, (p2 * (1 - p2)) / (ctx.total + 10))) });
+        }
+      }
+    }
+    const blended = blendEstimates(estimates);
 
     let gap = clean.length;
     for (let i = clean.length - 1; i >= 0; i--) {
@@ -700,11 +838,17 @@ export function matchRead(digits: number[], lockedBarrier?: number): MatchRead {
     };
   }
 
-  // Rank significant digits by (rate significance) × (dormancy hazard support).
+  // Rank significant digits by BREAK-EVEN significance (z vs 11.2%) ×
+  // dormancy-hazard support. Ranking on z-vs-fair (10%) was a subtle bug: a
+  // digit at 12% looked "2σ hot" while still being worth less than the
+  // 8.93× payout demands — the digit the bot should trust is the one whose
+  // estimate clears the HURDLE by the widest margin, not the one that beats
+  // the population average by the widest margin.
+  const breakEven = BREAK_EVEN.match;
   const eligible = candidates.filter(c => c.significant);
   const pool = eligible.length > 0 ? eligible : candidates;
   const scored = pool.map(c => {
-    const z = (c.p - 0.1) / Math.max(c.sigma, 0.004);
+    const zBe = (c.p - breakEven) / Math.max(c.sigma, 0.004);
     // Dormancy support: a gap at/after this digit's own typical breaking point
     // is the overshoot entry; a digit that just appeared is the worst entry.
     const dormancy = c.hazardRelative >= 1.25 ? 1.2
@@ -712,7 +856,7 @@ export function matchRead(digits: number[], lockedBarrier?: number): MatchRead {
       : c.hazardRelative >= 0.8 ? 0
       : -0.8;
     const gapShape = c.gap >= 4 && c.gap <= 12 ? 0.6 : c.gap < 3 ? -0.9 : 0;
-    return { candidate: c, z, score: z + dormancy + gapShape };
+    return { candidate: c, zBe, score: zBe + dormancy + gapShape };
   }).sort((a, b) => b.score - a.score);
 
   const chosen = lockedBarrier !== undefined
@@ -720,23 +864,25 @@ export function matchRead(digits: number[], lockedBarrier?: number): MatchRead {
     : (scored[0]?.candidate ?? candidates[5]!);
 
   const zChosen = (chosen.p - 0.1) / Math.max(chosen.sigma, 0.004);
-  const breakEven = 1 / 8.93;
   const zVsBreakEven = (chosen.p - breakEven) / Math.max(chosen.sigma, 0.004);
 
+  // The primary bonus term is the break-even significance — the number that
+  // decides whether this trade is +EV. (Previously z-vs-fair drove the bonus
+  // while the break-even z was computed and discarded.)
   let bonus = 0;
-  bonus += clamp(zChosen * 3.0, -8, 8);
+  bonus += clamp(zVsBreakEven * 3.0, -8, 8);
   bonus += chosen.hazardRelative >= 1.25 ? 4 : chosen.hazardRelative >= 1.0 ? 2 : chosen.hazardRelative < 0.8 ? -4 : 0;
   bonus += chosen.gap >= 4 && chosen.gap <= 12 ? 3 : chosen.gap < 3 ? -5 : 0;
   if (lockedBarrier === undefined && eligible.length === 0) bonus -= 4; // no digit survives FDR
 
   bonus = clamp(bonus, -SPECIALIST_BONUS_CAP, SPECIALIST_BONUS_CAP);
-  const confidence = clamp(Math.round(Math.min(100, (Math.max(0, zChosen) / 3) * 60 + (eligible.length > 0 ? 25 : 0) + Math.min(15, clean.length / 12))), 0, 100);
+  const confidence = clamp(Math.round(Math.min(100, (Math.max(0, zVsBreakEven) / 3) * 60 + (eligible.length > 0 ? 25 : 0) + Math.min(15, clean.length / 12))), 0, 100);
 
   const signals: string[] = [];
-  signals.push(`digit ${chosen.digit}: p̂ ${(chosen.p * 100).toFixed(1)}% (z ${zChosen >= 0 ? "+" : ""}${zChosen.toFixed(2)})`);
+  signals.push(`digit ${chosen.digit}: p̂ ${(chosen.p * 100).toFixed(1)}% · be ${(breakEven * 100).toFixed(1)}%`);
+  signals.push(`z_be ${zVsBreakEven >= 0 ? "+" : ""}${zVsBreakEven.toFixed(2)}${zVsBreakEven < MATCH_ENTRY_Z_BE ? " — below entry margin" : ""}`);
   signals.push(eligible.length > 0 ? `${eligible.length}/10 digits pass FDR` : "no digit passes FDR — low conviction");
   signals.push(`gap ${chosen.gap}t · hazard ×${chosen.hazardRelative.toFixed(2)}`);
-  signals.push(`be ${(breakEven * 100).toFixed(1)}% · z_be ${zVsBreakEven >= 0 ? "+" : ""}${zVsBreakEven.toFixed(2)}`);
 
   return {
     barrier: chosen.digit,
@@ -749,7 +895,9 @@ export function matchRead(digits: number[], lockedBarrier?: number): MatchRead {
         pHat: round(chosen.p, 4),
         sigma: round(chosen.sigma, 4),
         z: round(zChosen),
-        zVsBreakEven: round(zVsBreakEven),
+        zVsBreakEven: round(zVsBreakEven, 3),
+        zBe: round(zVsBreakEven, 3),
+        breakEven: round(breakEven, 4),
         gap: chosen.gap,
         hazardRelative: chosen.hazardRelative,
         significantDigits: eligible.length,
@@ -907,9 +1055,20 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
   const lastReturn = recent[recent.length - 1]!;
   const alignedWithTrend = side === "CALL" ? lastReturn > 0 : lastReturn < 0;
 
+  // Fair baseline accounting for flat ticks: a flat tick LOSES for both
+  // Rise and Fall, so the fair split of up vs down is over the non-flat mass —
+  // (1 − P(flat))/2, not 0.5. Measuring z against 0.5 on a stream with flat
+  // ticks systematically overstates the direction edge.
+  const flatRate = flatTicks;
+  const fairBaseline = (1 - flatRate) / 2;
+  const breakEven = BREAK_EVEN.momentum;
+  const z = (blended.p - fairBaseline) / Math.max(blended.sigma, 0.005);
+  const zBe = (blended.p - breakEven) / Math.max(blended.sigma, 0.005);
+
+  // Primary bonus term: significance vs the 1.92× break-even (52.08%) — the
+  // 50% fair rate is NOT where the money changes hands.
   let bonus = 0;
-  const z = (blended.p - 0.5) / Math.max(blended.sigma, 0.005);
-  bonus += clamp(z * 3.0, -7, 7);
+  bonus += clamp(zBe * 3.0, -7, 7);
 
   // Regime alignment: in a trending stream, trade WITH the last move; in a
   // mean-reverting stream, fade it — but only once the move is extended.
@@ -936,13 +1095,14 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
 
   bonus = clamp(bonus, -SPECIALIST_BONUS_CAP, SPECIALIST_BONUS_CAP);
   const confidence = clamp(Math.round(Math.min(100,
-    Math.abs(hurst - 0.5) * 220 + (Math.abs(z) / 2.5) * 35 + (deadChop ? -30 : 0),
+    Math.abs(hurst - 0.5) * 220 + (Math.abs(zBe) / 2.5) * 35 + (deadChop ? -30 : 0),
   )), 0, 100);
 
   const signals: string[] = [];
   signals.push(`H ${hurst.toFixed(2)} ${trending ? "trending" : meanReverting ? "mean-reverting" : "random-walk"}`);
   signals.push(`ρ₁ ${rho1.toFixed(2)} · ρ₂ ${rho2.toFixed(2)}${twoCycle ? " · 2-cycle" : ""}`);
-  signals.push(`p̂ ${(blended.p * 100).toFixed(1)}% (z ${z >= 0 ? "+" : ""}${z.toFixed(2)})`);
+  signals.push(`p̂ ${(blended.p * 100).toFixed(1)}% · be ${(breakEven * 100).toFixed(1)}%`);
+  signals.push(`z_be ${zBe >= 0 ? "+" : ""}${zBe.toFixed(2)} (fair ${(fairBaseline * 100).toFixed(1)}%${flatRate > 0.05 ? `, flats ${(flatRate * 100).toFixed(0)}%` : ""})`);
   signals.push(`asym ${(asymmetry * 100).toFixed(0)}%${deadChop ? " · dead chop" : ""}`);
 
   return {
@@ -962,6 +1122,9 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
       pHat: round(blended.p, 4),
       sigma: round(blended.sigma, 4),
       z: round(z),
+      zBe: round(zBe, 3),
+      breakEven: round(breakEven, 4),
+      fairBaseline: round(fairBaseline, 4),
       asymmetry: round(asymmetry, 3),
       volRatio: round(volRatio, 3),
       flatTicks: round(flatTicks, 3),
@@ -978,42 +1141,76 @@ export interface EntryVerdict {
 }
 
 /**
- * Specialist entry gate — better TIMING.
+ * Specialist entry gate — better TIMING, and the EV floor.
  *
  * Layered on top of the Quantum FAB's green-light check, never replacing it.
- * Each family adds the one timing condition its own estimator can actually
- * justify:
+ * Every family now enforces TWO things:
+ *
+ *  1. THE BREAK-EVEN MARGIN (v2): z_be = (p̂ − 1/payout)/σ must clear
+ *     MIN_ENTRY_Z_BE (0.75). The estimate has to be positive expected value
+ *     by a margin in its own standard errors — this is what makes every
+ *     released trade statistical, not hopeful. A neutral read (too few
+ *     samples) carries z_be = 0 and is blocked: no evidence, no trade.
+ *
+ *  2. The family's own timing condition, which only that family's estimators
+ *     can justify:
  *  - parity:   the runs structure must not be actively favouring the other side;
  *  - barrier:  the conditional tail probability must clear break-even on the
- *              current tick, and the mass must not be drifting away;
+ *              current tick (implied by the margin, kept for the reason text);
  *  - match:    the chosen digit must be at/after its own dormancy breaking point;
- *  - differ:   the chosen digit must not be in a hot run;
+ *  - differ:   the chosen digit must not be in a hot run, and its 1.645σ
+ *              worst-case win rate must clear the 91.7% hurdle;
  *  - momentum: the regime must not be dead chop.
  */
 export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
   const m = read.metrics;
   switch (read.family) {
     case "parity": {
+      const zBe = m["zBe"] ?? 0;
+      if (zBe < MIN_ENTRY_Z_BE) {
+        return { pass: false, reason: `no positive-EV margin (z_be ${zBe.toFixed(2)} < ${MIN_ENTRY_Z_BE})` };
+      }
       const zRun = m["runsZ"] ?? 0;
       const against = m["alignAgainst"] ?? 0;
       // Only block when the serial evidence is significant AND points the other way.
       if (against === 1 && Math.abs(zRun) >= 1.96) {
         return { pass: false, reason: `runs structure favours the other side (z_run ${zRun.toFixed(2)})` };
       }
-      return { pass: true, reason: "parity structure not contradicted" };
+      return { pass: true, reason: "parity edge above break-even, structure not contradicted" };
     }
     case "barrier": {
       const p = m["pHat"] ?? 0;
       const be = m["breakEven"] ?? 0.5;
+      const zBe = m["zBe"] ?? 0;
       if (p <= be) return { pass: false, reason: `conditional p̂ ${(p * 100).toFixed(1)}% ≤ break-even ${(be * 100).toFixed(1)}%` };
-      return { pass: true, reason: "tail probability above break-even" };
+      // Tail-size-aware margin: a 1-digit tail must clear break-even harder
+      // than a 5-digit tail (rare-event estimates are noisier and more biased).
+      const zBeMin = m["requiredZBe"] ?? MIN_ENTRY_Z_BE;
+      if (zBe < zBeMin) {
+        return { pass: false, reason: `edge margin thin (z_be ${zBe.toFixed(2)} < ${zBeMin})` };
+      }
+      // Don't catch a falling knife: a losing streak that is at least 4 ticks
+      // long AND breaking less often than this market's own baseline is not
+      // at its breaking point yet.
+      const k = m["hazardK"] ?? 0;
+      const hz = m["hazardRelative"] ?? 1;
+      if (k >= 4 && hz < 0.7) {
+        return { pass: false, reason: `tail streak ${k}t unusually persistent (hazard ×${hz.toFixed(2)}) — not at breaking point` };
+      }
+      return { pass: true, reason: "tail probability above break-even with margin" };
     }
     case "match": {
+      const zBe = m["zBe"] ?? 0;
+      // Selection-bias-corrected margin: the match p̂ is an argmax of ten
+      // estimates, so it needs a larger clearance to be trusted.
+      if (zBe < MATCH_ENTRY_Z_BE) {
+        return { pass: false, reason: `p̂ below break-even by only ${zBe.toFixed(2)}σ (needs ${MATCH_ENTRY_Z_BE}) — selection bias` };
+      }
       const hazard = m["hazardRelative"] ?? 1;
       const gap = m["gap"] ?? 0;
       if (gap < 3) return { pass: false, reason: `digit ${gap}t dormant — too soon` };
       if (hazard < 0.8) return { pass: false, reason: `dormancy hazard ×${hazard.toFixed(2)} below baseline` };
-      return { pass: true, reason: "dormancy hazard at breaking point" };
+      return { pass: true, reason: "dormancy at breaking point, p̂ above break-even" };
     }
     case "differ": {
       const recent = m["recent6"] ?? 0;
@@ -1024,10 +1221,14 @@ export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
       return { pass: true, reason: "loss-side risk inside tolerance" };
     }
     case "momentum": {
+      const zBe = m["zBe"] ?? 0;
+      if (zBe < MIN_ENTRY_Z_BE) {
+        return { pass: false, reason: `no positive-EV margin (z_be ${zBe.toFixed(2)} < ${MIN_ENTRY_Z_BE})` };
+      }
       const flat = m["flatTicks"] ?? 0;
       const vol = m["volRatio"] ?? 1;
       if (flat > 0.35 || vol < 0.75) return { pass: false, reason: "dead chop — direction is a coin flip" };
-      return { pass: true, reason: "volatility regime tradable" };
+      return { pass: true, reason: "direction edge above break-even, regime tradable" };
     }
     default:
       return { pass: true, reason: "no specialist gate" };

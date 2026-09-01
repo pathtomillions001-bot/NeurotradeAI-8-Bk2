@@ -5,6 +5,8 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { TradingSettingsRecoveryMethod } from './tradingSettingsRecoveryMethod';
+import type { TradingSettingsRiskAmountType } from './tradingSettingsRiskAmountType';
 import type { TradingSettingsRiskProfile } from './tradingSettingsRiskProfile';
 
 export interface TradingSettings {
@@ -53,11 +55,17 @@ export interface TradingSettings {
   recoveryOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades while in recovery mode */
   recoveryUnderDigit?: number;
-  /** Recovery method: split (gradual across wins) or instant (full recovery in one trade) */
-  recoveryMethod?: string;
-  /** Compute recovery stake from live payout, debt, and original target profit */
+  /** Split caps recovery attempts; Instant targets one-win recovery */
+  recoveryMethod?: TradingSettingsRecoveryMethod;
+  /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
   allowedMarkets?: string[];
-  riskAmountType?: "fixed" | "percentage";
+  riskAmountType?: TradingSettingsRiskAmountType;
   riskAmountValue?: number;
+  /**
+     * Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+     * @minimum 0
+     * @maximum 100
+     */
+  botRecoveryMarkup?: number;
 }

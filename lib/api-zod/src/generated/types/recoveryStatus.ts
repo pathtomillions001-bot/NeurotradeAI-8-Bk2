@@ -12,11 +12,11 @@ export interface RecoveryStatus {
   active?: boolean;
   families?: RecoveryFamilyState[];
   activeFamilies?: string[];
-  /** Accumulated loss amount still to be recovered (USD) */
+  /** Mandatory accumulated loss debt still to be recovered (USD). Recovery ends when this is zero. */
   totalUnrecovered?: number;
-  /** Original expected net profit of the normal trade whose loss started recovery */
+  /** Optional original expected net profit of the normal trade whose loss started recovery. Used only to size an ideal recovery stake. */
   targetProfit?: number;
-  /** Portion of the original target profit still outstanding after partial recovery wins */
+  /** Remaining optional sizing-target profit. Never keeps recovery active once loss debt is cleared. */
   remainingTargetProfit?: number;
   /** Total-return payout multiplier of the normal trade whose loss started recovery */
   originPayoutMultiplier?: number;

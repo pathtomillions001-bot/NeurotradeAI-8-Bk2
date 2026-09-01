@@ -675,18 +675,21 @@ function computeRecoveryStake(
   config: BotConfig,
   maxStake: number,
   availableBalance: number,
+  markupPercent = 10,
 ): number {
   if (!recoveryEngine.isInRecovery()) return config.stake;
-  // Bot-specific: conservative 10 % markup on debt.
-  // The shared getDynamicRecoveryStake targets debt + aspirational target-profit,
-  // which over-exposes capital for high-payout bot contracts (Matches 8.93×,
+  // Bot-specific: user-configurable markup on debt (default 10 %, set in Risk
+  // Management settings → botRecoveryMarkup).  The shared
+  // getDynamicRecoveryStake targets debt + aspirational target-profit, which
+  // over-exposes capital for high-payout bot contracts (Matches 8.93×,
   // Over/Under 2.43×, Even/Odd 1.95×).  getBotRecoveryStake sizes the stake
-  // so a single win recovers all debt + 10 % of debt as profit instead.
+  // so a single win recovers all debt + markup % of debt as profit instead.
   return recoveryEngine.getBotRecoveryStake(
     config.stake,
     maxStake,
     availableBalance,
     payout,
+    markupPercent,
   );
 }
 
@@ -720,6 +723,11 @@ async function runLoop(config: BotConfig) {
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLive         = !paperTradeMode && !!token;
   const maxStake       = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
+  // Profit markup (%) on debt used ONLY by this bot's recovery stake sizing.
+  // User-adjustable from Risk Management settings; defaults to 10 %.
+  const botRecoveryMarkup = settings.length > 0
+    ? Number((settings[0] as any).botRecoveryMarkup ?? 10)
+    : 10;
   let availableBalance = accounts.length > 0 && Number(accounts[0].balance) > 0
     ? Number(accounts[0].balance)
     : Number.POSITIVE_INFINITY;
@@ -1004,7 +1012,7 @@ async function runLoop(config: BotConfig) {
         continue;
       }
 
-      const stake = computeRecoveryStake(best.payout, best.winProbability, config, maxStake, availableBalance);
+      const stake = computeRecoveryStake(best.payout, best.winProbability, config, maxStake, availableBalance, botRecoveryMarkup);
       const sharedStep = recoveryEngine.getState().recoveryStep;
 
       session.currentMarket       = best.displayName;

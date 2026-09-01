@@ -23,7 +23,7 @@ export const HealthCheckResponse = zod.object({
 
 
 export const ConnectDerivAccountBody = zod.object({
-  "token": zod.string().min(1)
+  "token": zod.string().min(1).describe('Deriv Personal Access Token (PAT). New tokens start with \"pat_\" (e.g. pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). Create one at app.deriv.com\/account\/api-token with Read and Trade permissions.\n')
 })
 
 export const ConnectDerivAccountResponse = zod.object({
@@ -32,6 +32,7 @@ export const ConnectDerivAccountResponse = zod.object({
   "currency": zod.string(),
   "balance": zod.number(),
   "isVirtual": zod.boolean(),
+  "isActive": zod.boolean().describe('Whether this is the currently active account for the browser session'),
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
@@ -48,26 +49,51 @@ export const GetAccountResponse = zod.object({
   "currency": zod.string(),
   "balance": zod.number(),
   "isVirtual": zod.boolean(),
-  "isActive": zod.boolean().optional(),
+  "isActive": zod.boolean().describe('Whether this is the currently active account for the browser session'),
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
   "connectedAt": zod.string().optional()
 })
 
-/**
- * @summary List all linked Deriv accounts
- */
-export const GetAccountsResponse = zod.array(GetAccountResponse)
 
 /**
- * @summary Switch the active trading account
+ * @summary List all Deriv accounts linked in this browser session
+ */
+export const GetAccountsResponseItem = zod.object({
+  "id": zod.number(),
+  "loginId": zod.string(),
+  "currency": zod.string(),
+  "balance": zod.number(),
+  "isVirtual": zod.boolean(),
+  "isActive": zod.boolean().describe('Whether this is the currently active account for the browser session'),
+  "email": zod.string().nullish(),
+  "fullName": zod.string().nullish(),
+  "country": zod.string().nullish(),
+  "connectedAt": zod.string().optional()
+})
+export const GetAccountsResponse = zod.array(GetAccountsResponseItem)
+
+
+/**
+ * @summary Switch the active Deriv account for this browser session
  */
 export const SwitchAccountBody = zod.object({
-  "loginId": zod.string().min(1)
+  "loginId": zod.string()
 })
 
-export const SwitchAccountResponse = GetAccountResponse
+export const SwitchAccountResponse = zod.object({
+  "id": zod.number(),
+  "loginId": zod.string(),
+  "currency": zod.string(),
+  "balance": zod.number(),
+  "isVirtual": zod.boolean(),
+  "isActive": zod.boolean().describe('Whether this is the currently active account for the browser session'),
+  "email": zod.string().nullish(),
+  "fullName": zod.string().nullish(),
+  "country": zod.string().nullish(),
+  "connectedAt": zod.string().optional()
+})
 
 
 /**
@@ -99,6 +125,7 @@ export const GetMarketsResponseItem = zod.object({
   "trend": zod.enum(['strong_up', 'up', 'sideways', 'down', 'strong_down']),
   "volatility": zod.enum(['low', 'medium', 'high', 'extreme']),
   "rank": zod.number(),
+  "automatedEligible": zod.boolean().describe('Whether autonomous engines may analyze and trade this market'),
   "recommendedContractType": zod.string().nullish(),
   "lastPrice": zod.number().nullish(),
   "priceChange24h": zod.number().nullish()
@@ -768,14 +795,14 @@ export const GetAiEngineStatusResponse = zod.object({
   "family": zod.enum(['overunder', 'risefall', 'evenodd']).optional(),
   "inRecovery": zod.boolean().optional(),
   "recoveryStep": zod.number().optional(),
-  "unrecoveredAmount": zod.number().optional().describe('Dollars still owed before this family returns to normal mode'),
+  "unrecoveredAmount": zod.number().optional().describe('Mandatory loss debt still owed before this family returns to normal mode. Optional target profit is not debt.'),
   "nextStakeMultiplier": zod.number().optional().describe('recoveryMultiplier ^ recoveryStep'),
   "nextStake": zod.number().nullish().describe('The stake (USD) that will be used on this family\'s next recovery trade')
 })).optional(),
   "activeFamilies": zod.array(zod.string()).optional(),
-  "totalUnrecovered": zod.number().optional().describe('Accumulated loss amount still to be recovered (USD)'),
-  "targetProfit": zod.number().optional().describe('Original expected net profit of the normal trade whose loss started recovery'),
-  "remainingTargetProfit": zod.number().optional().describe('Portion of the original target profit still outstanding after partial recovery wins'),
+  "totalUnrecovered": zod.number().optional().describe('Mandatory accumulated loss debt still to be recovered (USD). Recovery ends when this is zero.'),
+  "targetProfit": zod.number().optional().describe('Optional original expected net profit of the normal trade whose loss started recovery. Used only to size an ideal recovery stake.'),
+  "remainingTargetProfit": zod.number().optional().describe('Remaining optional sizing-target profit. Never keeps recovery active once loss debt is cleared.'),
   "originPayoutMultiplier": zod.number().optional().describe('Total-return payout multiplier of the normal trade whose loss started recovery'),
   "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
 }).optional()
@@ -809,14 +836,14 @@ export const ToggleAutonomousEngineResponse = zod.object({
   "family": zod.enum(['overunder', 'risefall', 'evenodd']).optional(),
   "inRecovery": zod.boolean().optional(),
   "recoveryStep": zod.number().optional(),
-  "unrecoveredAmount": zod.number().optional().describe('Dollars still owed before this family returns to normal mode'),
+  "unrecoveredAmount": zod.number().optional().describe('Mandatory loss debt still owed before this family returns to normal mode. Optional target profit is not debt.'),
   "nextStakeMultiplier": zod.number().optional().describe('recoveryMultiplier ^ recoveryStep'),
   "nextStake": zod.number().nullish().describe('The stake (USD) that will be used on this family\'s next recovery trade')
 })).optional(),
   "activeFamilies": zod.array(zod.string()).optional(),
-  "totalUnrecovered": zod.number().optional().describe('Accumulated loss amount still to be recovered (USD)'),
-  "targetProfit": zod.number().optional().describe('Original expected net profit of the normal trade whose loss started recovery'),
-  "remainingTargetProfit": zod.number().optional().describe('Portion of the original target profit still outstanding after partial recovery wins'),
+  "totalUnrecovered": zod.number().optional().describe('Mandatory accumulated loss debt still to be recovered (USD). Recovery ends when this is zero.'),
+  "targetProfit": zod.number().optional().describe('Optional original expected net profit of the normal trade whose loss started recovery. Used only to size an ideal recovery stake.'),
+  "remainingTargetProfit": zod.number().optional().describe('Remaining optional sizing-target profit. Never keeps recovery active once loss debt is cleared.'),
   "originPayoutMultiplier": zod.number().optional().describe('Total-return payout multiplier of the normal trade whose loss started recovery'),
   "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
 }).optional()
@@ -826,6 +853,11 @@ export const ToggleAutonomousEngineResponse = zod.object({
 /**
  * @summary Get user risk profile and trading settings
  */
+export const getSettingsResponseBotRecoveryMarkupMin = 0;
+export const getSettingsResponseBotRecoveryMarkupMax = 100;
+
+
+
 export const GetSettingsResponse = zod.object({
   "id": zod.number(),
   "riskProfile": zod.enum(['conservative', 'moderate', 'aggressive']),
@@ -853,17 +885,23 @@ export const GetSettingsResponse = zod.object({
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
   "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional(),
-  "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, debt, and original target profit'),
+  "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
+  "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
-  "riskAmountValue": zod.number().optional()
+  "riskAmountValue": zod.number().optional(),
+  "botRecoveryMarkup": zod.number().min(getSettingsResponseBotRecoveryMarkupMin).max(getSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 
 
 /**
  * @summary Update risk profile and trading settings
  */
+export const updateSettingsBodyBotRecoveryMarkupMin = 0;
+export const updateSettingsBodyBotRecoveryMarkupMax = 100;
+
+
+
 export const UpdateSettingsBody = zod.object({
   "riskProfile": zod.enum(['conservative', 'moderate', 'aggressive']).optional(),
   "maxRiskPerTrade": zod.number().optional(),
@@ -890,12 +928,18 @@ export const UpdateSettingsBody = zod.object({
   "normalUnderDigit": zod.number().optional(),
   "recoveryOverDigit": zod.number().optional(),
   "recoveryUnderDigit": zod.number().optional(),
-  "recoveryMethod": zod.string().optional(),
-  "recoveryAutoMode": zod.boolean().optional().describe('Auto-compute recovery stake from barrier payout; hide manual multiplier'),
-  "allowedMarkets": zod.union([zod.string(), zod.array(zod.string())]).optional(),
-  "riskAmountType": zod.enum(["fixed", "percentage"]).optional(),
-  "riskAmountValue": zod.number().optional()
+  "recoveryMethod": zod.enum(['split', 'instant']).optional(),
+  "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
+  "allowedMarkets": zod.array(zod.string()).optional(),
+  "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
+  "riskAmountValue": zod.number().optional(),
+  "botRecoveryMarkup": zod.number().min(updateSettingsBodyBotRecoveryMarkupMin).max(updateSettingsBodyBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
+
+export const updateSettingsResponseBotRecoveryMarkupMin = 0;
+export const updateSettingsResponseBotRecoveryMarkupMax = 100;
+
+
 
 export const UpdateSettingsResponse = zod.object({
   "id": zod.number(),
@@ -924,11 +968,12 @@ export const UpdateSettingsResponse = zod.object({
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
   "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional(),
-  "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, debt, and original target profit'),
+  "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
+  "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
-  "riskAmountValue": zod.number().optional()
+  "riskAmountValue": zod.number().optional(),
+  "botRecoveryMarkup": zod.number().min(updateSettingsResponseBotRecoveryMarkupMin).max(updateSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 
 

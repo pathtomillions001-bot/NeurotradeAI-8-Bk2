@@ -339,7 +339,8 @@ export function getDynamicRecoveryStake(
 }
 
 /**
- * Bot-specific recovery stake with a conservative 10 % markup on debt.
+ * Bot-specific recovery stake with a configurable markup on debt
+ * (default 10 %, user-adjustable from Risk Management settings).
  *
  * Used ONLY by the five specialist AI bots.  The shared
  * `getDynamicRecoveryStake` sizes recovery to cover debt plus an aspirational
@@ -347,22 +348,28 @@ export function getDynamicRecoveryStake(
  * (Matches 8.93×, Over/Under 2.43×, Even/Odd 1.95×) over-exposes capital.
  *
  * This function sizes the stake so a single win recovers all outstanding debt
- * plus exactly 10 % of that debt as profit.  A $1 loss → win $1.10; two
- * consecutive $1 losses ($2 debt) → win $2.20.  The manual multiplier,
- * recovery method, and target-profit fields are intentionally ignored.
+ * plus `markupPercent` % of that debt as profit.  At the default 10 % a $1
+ * loss → win $1.10; two consecutive $1 losses ($2 debt) → win $2.20.  The
+ * manual multiplier, recovery method, and target-profit fields are
+ * intentionally ignored.
+ *
+ * @param markupPercent  Profit markup (%) on debt (default 10). This is the
+ *                       ONLY bot-recovery value the user can tune; it comes
+ *                       from settings.botRecoveryMarkup.
  */
 export function getBotRecoveryStake(
   baseStake: number,
   maxTradeStake: number,
   balance: number,
   payoutMultiplier: number,
+  markupPercent = 10,
 ): number {
   ensureFreshDay();
   if (!state.inRecovery) {
     if (baseStake > 0 && isFinite(baseStake)) state.baseStake = baseStake;
     return baseStake;
   }
-  const raw = calculateBotRecoveryStake(state.unrecoveredAmount, payoutMultiplier);
+  const raw = calculateBotRecoveryStake(state.unrecoveredAmount, payoutMultiplier, markupPercent);
   return applyRecoveryStakeLimits(raw, maxTradeStake, balance);
 }
 

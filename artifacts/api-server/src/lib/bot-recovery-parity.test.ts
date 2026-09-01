@@ -169,26 +169,28 @@ describe("bot ↔ main-app recovery parity", () => {
   });
 });
 
-// ── Bot-specific conservative recovery (10 % markup on debt) ─────────────────
+// ── Bot-specific conservative recovery (default 10 % markup on debt) ────────
 //
 // The five specialist AI bots use `getBotRecoveryStake` instead of the shared
 // `getDynamicRecoveryStake`.  The shared formula targets debt + aspirational
 // target-profit (derived from the losing contract's payout), which for bots
 // over-exposes capital.  The bot formula sizes the stake so a single win
-// recovers all debt + 10 % of debt as profit.
+// recovers all debt + markup % of debt as profit.  The markup defaults to
+// 10 % and is user-adjustable via Risk Management settings
+// (settings.botRecoveryMarkup).
 //
 // Example: Even/Odd bot, $1 stake, payout 1.95×
 //   Shared:  (1 + 0.95) / 0.95 = $2.06  → win $1.96 on a $1 loss ❌
 //   Bot:     (1 × 1.10) / 0.95 = $1.16  → win $1.10 on a $1 loss ✓
 
 /** Bot-specific recovery stake via the shared ledger. */
-function botNextStake(payout: number): number {
+function botNextStake(payout: number, markupPercent = 10): number {
   return recoveryEngine.getBotRecoveryStake(
-    BASE_STAKE, 500, Number.POSITIVE_INFINITY, payout,
+    BASE_STAKE, 500, Number.POSITIVE_INFINITY, payout, markupPercent,
   );
 }
 
-describe("bot-specific recovery (10 % markup)", () => {
+describe("bot-specific recovery (default 10 % markup)", () => {
   beforeEach(() => recoveryEngine.resetAll());
 
   it("calculateBotRecoveryStake: $1 debt, 1.95× payout → $1.16", () => {
@@ -279,5 +281,37 @@ describe("bot-specific recovery (10 % markup)", () => {
     // Bot engine uses the new conservative formula
     const bot = botNextStake(EVEN_ODD_PAYOUT);
     assert.equal(bot, 1.16);
+  });
+
+  // ── User-configurable markup (Risk Management → botRecoveryMarkup) ─────────
+
+  it("calculateBotRecoveryStake honours a custom markup (20 % → $1 debt, 1.95× → $1.27)", () => {
+    // (1 × 1.20) / 0.95 = 1.2631… → rounded up to $1.27 by applyRecoveryStakeLimits
+    const raw = calculateBotRecoveryStake(1, EVEN_ODD_PAYOUT, 20);
+    assert.ok(Math.abs(raw - 1.2632) < 0.001, `raw ${raw}`);
+    recoveryEngine.recordOutcome(false, -1, 1, MAX_STEPS, "DIGITEVEN", EVEN_ODD_PAYOUT);
+    assert.equal(botNextStake(EVEN_ODD_PAYOUT, 20), 1.27);
+  });
+
+  it("custom markup scales the recovery target exactly (25 % on $2 debt, 1.95× → $2.64)", () => {
+    // (2 × 1.25) / 0.95 = 2.6315… → ceil to $2.64
+    recoveryEngine.recordOutcome(false, -2, 2, MAX_STEPS, "DIGITEVEN", EVEN_ODD_PAYOUT);
+    assert.equal(botNextStake(EVEN_ODD_PAYOUT, 25), 2.64);
+  });
+
+  it("0 % markup recovers exactly the debt (no profit margin)", () => {
+    // (1 × 1.00) / 0.95 = 1.0526… → ceil to $1.06
+    recoveryEngine.recordOutcome(false, -1, 1, MAX_STEPS, "DIGITEVEN", EVEN_ODD_PAYOUT);
+    assert.equal(botNextStake(EVEN_ODD_PAYOUT, 0), 1.06);
+  });
+
+  it("default remains 10 % when markup is omitted", () => {
+    recoveryEngine.recordOutcome(false, -1, 1, MAX_STEPS, "DIGITEVEN", EVEN_ODD_PAYOUT);
+    assert.equal(botNextStake(EVEN_ODD_PAYOUT), 1.16); // (1 × 1.10) / 0.95 → $1.16
+  });
+
+  it("negative markup is clamped to 0 (never undershoots the debt)", () => {
+    const raw = calculateBotRecoveryStake(1, EVEN_ODD_PAYOUT, -10);
+    assert.ok(Math.abs(raw - 1.0526) < 0.001, `raw ${raw}`);
   });
 });

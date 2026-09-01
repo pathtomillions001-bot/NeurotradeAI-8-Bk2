@@ -40,7 +40,7 @@ import type {
   RankedMarket,
   ScanStatus,
   SuccessResponse,
-  SwitchAccountInput,
+  SwitchAccountBody,
   Trade,
   TradeInput,
   TradeStats,
@@ -285,63 +285,154 @@ export function useGetAccount<TData = Awaited<ReturnType<typeof getAccount>>, TE
 
 
 
-// ── GET /api/auth/accounts — all linked accounts ─────────────────────────────
-export const getGetAccountsUrl = () => `/api/auth/accounts`;
+export const getGetAccountsUrl = () => {
 
-export const getAccounts = async (options?: RequestInit): Promise<DerivAccount[]> =>
-  customFetch<DerivAccount[]>(getGetAccountsUrl(), { ...options, method: 'GET' });
 
-export const getGetAccountsQueryKey = () => ['/api/auth/accounts'] as const;
 
-export const getGetAccountsQueryOptions = <TData = Awaited<ReturnType<typeof getAccounts>>, TError = ErrorType<ApiError>>(
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getAccounts>>, TError, TData>; request?: SecondParameter<typeof customFetch> }
+
+  return `/api/auth/accounts`
+}
+
+/**
+ * @summary List all Deriv accounts linked in this browser session
+ */
+export const getAccounts = async ( options?: RequestInit): Promise<DerivAccount[]> => {
+
+  return customFetch<DerivAccount[]>(getGetAccountsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAccountsQueryKey = () => {
+    return [
+    `/api/auth/accounts`
+    ] as const;
+    }
+
+
+export const getGetAccountsQueryOptions = <TData = Awaited<ReturnType<typeof getAccounts>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAccounts>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getGetAccountsQueryKey();
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof getAccounts>>> = ({ signal }) => getAccounts({ signal, ...requestOptions });
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getAccounts>>, TError, TData> & { queryKey: QueryKey };
-};
 
-export const useGetAccounts = <TData = Awaited<ReturnType<typeof getAccounts>>, TError = ErrorType<ApiError>>(
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getAccounts>>, TError, TData>; request?: SecondParameter<typeof customFetch> }
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } => {
-  const queryOptions = getGetAccountsQueryOptions(options);
-  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  query.queryKey = queryOptions.queryKey;
-  return query;
-};
+const {query: queryOptions, request: requestOptions} = options ?? {};
 
-// ── POST /api/auth/switch-account ─────────────────────────────────────────────
-export const getSwitchAccountUrl = () => `/api/auth/switch-account`;
+  const queryKey =  queryOptions?.queryKey ?? getGetAccountsQueryKey();
 
-export const switchAccount = async (switchAccountInput: SwitchAccountInput, options?: RequestInit): Promise<DerivAccount> =>
-  customFetch<DerivAccount>(getSwitchAccountUrl(), {
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAccounts>>> = ({ signal }) => getAccounts({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAccounts>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAccountsQueryResult = NonNullable<Awaited<ReturnType<typeof getAccounts>>>
+export type GetAccountsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary List all Deriv accounts linked in this browser session
+ */
+
+export function useGetAccounts<TData = Awaited<ReturnType<typeof getAccounts>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAccounts>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAccountsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getSwitchAccountUrl = () => {
+
+
+
+
+  return `/api/auth/switch-account`
+}
+
+/**
+ * @summary Switch the active Deriv account for this browser session
+ */
+export const switchAccount = async (switchAccountBody: SwitchAccountBody, options?: RequestInit): Promise<DerivAccount> => {
+
+  return customFetch<DerivAccount>(getSwitchAccountUrl(),
+  {
     ...options,
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...options?.headers },
-    body: JSON.stringify(switchAccountInput),
-  });
+    body: JSON.stringify(
+      switchAccountBody,)
+  }
+);}
 
-export const getSwitchAccountMutationOptions = <TError = ErrorType<ApiError>, TContext = unknown>(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof switchAccount>>, TError, { data: SwitchAccountInput }, TContext>; request?: SecondParameter<typeof customFetch> }
-): UseMutationOptions<Awaited<ReturnType<typeof switchAccount>>, TError, { data: SwitchAccountInput }, TContext> => {
-  const mutationKey = ['switchAccount'];
-  const { mutation: mutationOptions, request: requestOptions } = options
-    ? options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey
-      ? options
-      : { ...options, mutation: { ...options.mutation, mutationKey } }
-    : { mutation: { mutationKey }, request: undefined };
-  const mutationFn: MutationFunction<Awaited<ReturnType<typeof switchAccount>>, { data: SwitchAccountInput }> = ({ data }) =>
-    switchAccount(data, requestOptions);
-  return { mutationFn, ...mutationOptions };
-};
 
-export const useSwitchAccount = <TError = ErrorType<ApiError>, TContext = unknown>(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof switchAccount>>, TError, { data: SwitchAccountInput }, TContext>; request?: SecondParameter<typeof customFetch> }
-): UseMutationResult<Awaited<ReturnType<typeof switchAccount>>, TError, { data: SwitchAccountInput }, TContext> =>
-  useMutation(getSwitchAccountMutationOptions(options));
 
-// ── Disconnect ────────────────────────────────────────────────────────────────
+
+export const getSwitchAccountMutationOptions = <TError = ErrorType<ApiError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof switchAccount>>, TError,{data: BodyType<SwitchAccountBody>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof switchAccount>>, TError,{data: BodyType<SwitchAccountBody>}, TContext> => {
+
+const mutationKey = ['switchAccount'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof switchAccount>>, {data: BodyType<SwitchAccountBody>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  switchAccount(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type SwitchAccountMutationResult = NonNullable<Awaited<ReturnType<typeof switchAccount>>>
+    export type SwitchAccountMutationBody = BodyType<SwitchAccountBody>
+    export type SwitchAccountMutationError = ErrorType<ApiError>
+
+    /**
+ * @summary Switch the active Deriv account for this browser session
+ */
+export const useSwitchAccount = <TError = ErrorType<ApiError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof switchAccount>>, TError,{data: BodyType<SwitchAccountBody>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof switchAccount>>,
+        TError,
+        {data: BodyType<SwitchAccountBody>},
+        TContext
+      > => {
+      return useMutation(getSwitchAccountMutationOptions(options));
+    }
+
 export const getDisconnectAccountUrl = () => {
 
 

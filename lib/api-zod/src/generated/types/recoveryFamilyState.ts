@@ -11,7 +11,7 @@ export interface RecoveryFamilyState {
   family?: RecoveryFamilyStateFamily;
   inRecovery?: boolean;
   recoveryStep?: number;
-  /** Dollars still owed before this family returns to normal mode */
+  /** Mandatory loss debt still owed before this family returns to normal mode. Optional target profit is not debt. */
   unrecoveredAmount?: number;
   /** recoveryMultiplier ^ recoveryStep */
   nextStakeMultiplier?: number;

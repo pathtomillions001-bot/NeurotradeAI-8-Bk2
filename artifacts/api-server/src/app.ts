@@ -26,22 +26,30 @@ async function bootstrapDb() {
         (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive_exists,
         (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'bearer_token') AS bearer_col_exists,
         (SELECT numeric_precision FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'recovery_multiplier') AS recovery_multiplier_precision,
-        (SELECT numeric_scale FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'recovery_multiplier') AS recovery_multiplier_scale`
+        (SELECT numeric_scale FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'recovery_multiplier') AS recovery_multiplier_scale,
+        (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'bot_recovery_markup') AS bot_markup_col_exists`
     );
     const settingsExists   = Number(rows[0].settings_exists) > 0;
     const adaptiveExists   = Number(rows[0].adaptive_exists) > 0;
     const bearerColExists  = Number(rows[0].bearer_col_exists) > 0;
+    const botMarkupColExists = Number(rows[0].bot_markup_col_exists) > 0;
     const recoveryMultiplierWideEnough =
       Number(rows[0].recovery_multiplier_precision) >= 20 &&
       Number(rows[0].recovery_multiplier_scale) >= 4;
 
     // Push whenever a required table/column is missing or the legacy NUMERIC(4,2)
     // multiplier column would still reject an unrestricted Manual value.
-    if (!(settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough)) {
+    if (!(settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough && botMarkupColExists)) {
       logger.warn("DB schema out of date — running schema push");
-      const root = resolve(import.meta.dirname, "../../../../");
-      execSync("pnpm --filter @workspace/db run push", { cwd: root, stdio: "inherit" });
-      logger.info("DB schema push complete");
+      try {
+        const root = resolve(import.meta.dirname, "../../../../");
+        execSync("pnpm --filter @workspace/db run push", { cwd: root, stdio: "inherit" });
+        logger.info("DB schema push complete");
+      } catch (pushErr) {
+        // Embedded PGlite has no DATABASE_URL for drizzle-kit; the explicit
+        // ALTER TABLE statements below still apply the missing columns.
+        logger.error({ err: pushErr }, "DB schema push unavailable — applying fallback column migrations");
+      }
     }
 
     // Multi-user safety migration. Existing single-user rows are intentionally
@@ -50,6 +58,7 @@ async function bootstrapDb() {
     const sessionMigrations = [
       `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
       `ALTER TABLE settings ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE settings ADD COLUMN IF NOT EXISTS bot_recovery_markup NUMERIC(5, 2) NOT NULL DEFAULT '10'`,
       `ALTER TABLE trades ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
       `UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy'`,
       `ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_login_id_unique`,

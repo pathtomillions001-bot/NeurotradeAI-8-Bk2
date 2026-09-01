@@ -88,10 +88,12 @@ CREATE TABLE IF NOT EXISTS settings (
   recovery_state_json TEXT,
   risk_amount_type TEXT NOT NULL DEFAULT 'fixed',
   risk_amount_value NUMERIC(20, 2) NOT NULL DEFAULT '1.00',
+  bot_recovery_markup NUMERIC(5, 2) NOT NULL DEFAULT '10',
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS bot_recovery_markup NUMERIC(5, 2) NOT NULL DEFAULT '10';
 -- Legacy global rows remain inaccessible and get distinct owners so older
 -- deployments with multiple settings rows can migrate safely.
 UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy';

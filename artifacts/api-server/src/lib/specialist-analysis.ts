@@ -44,7 +44,6 @@
  *    better side selection are exactly what the specialisation is for.
  */
 
-import { normalCdf } from "./quantum-analysis";
 import { EVEN_ODD_PAYOUT, RISE_FALL_PAYOUT, MATCH_PAYOUT, DIFF_PAYOUT } from "./payouts";
 
 export type SpecialistFamily = "parity" | "barrier" | "match" | "differ" | "momentum";
@@ -251,6 +250,145 @@ export function blendEstimates(est: Array<{ p: number; sigma: number }>): { p: n
   return { p: clamp(pSum / wSum, 1e-4, 1 - 1e-4), sigma: Math.sqrt(1 / wSum) };
 }
 
+// ── Exact posterior math (Beta-Binomial) ──────────────────────────────────────
+//
+// Small-sample digit rates are binomial counts; the normal approximation used by
+// a z-test understates their uncertainty (and therefore overstates significance)
+// when n is small — exactly the regime where a Match/Differ bot picks digits.
+// These helpers give the EXACT one-sided posterior probability that a rate p
+// exceeds a threshold, using the regularized incomplete beta function.
+
+/** Lanczos approximation of ln Γ(z), z > 0. */
+function logGamma(z: number): number {
+  const g = 7;
+  const C = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ];
+  if (z < 0.5) return Math.log(Math.PI / Math.sin(Math.PI * z)) - logGamma(1 - z);
+  let x = z - 1;
+  let acc = C[0]!;
+  for (let i = 1; i < g + 2; i++) acc += C[i]! / (x + i);
+  const t = x + g + 0.5;
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(acc);
+}
+
+/** Continued-fraction evaluation of the incomplete beta (Lentz algorithm). */
+function betacf(a: number, b: number, x: number, maxIter = 200, eps = 3e-12): number {
+  const fpmin = 1e-300;
+  const qab = a + b;
+  const qap = a + 1;
+  const qam = a - 1;
+  let c = 1;
+  let d = 1 - (qab * x) / qap;
+  if (Math.abs(d) < fpmin) d = fpmin;
+  d = 1 / d;
+  let h = d;
+  for (let m = 1; m <= maxIter; m++) {
+    const m2 = 2 * m;
+    let aa = (m * (b - m) * x) / ((qam + m2) * (a + m2));
+    d = 1 + aa * d;
+    if (Math.abs(d) < fpmin) d = fpmin;
+    c = 1 + aa / c;
+    if (Math.abs(c) < fpmin) c = fpmin;
+    d = 1 / d;
+    h *= d * c;
+    aa = (-(a + m) * (qab + m) * x) / ((a + m2) * (qap + m2));
+    d = 1 + aa * d;
+    if (Math.abs(d) < fpmin) d = fpmin;
+    c = 1 + aa / c;
+    if (Math.abs(c) < fpmin) c = fpmin;
+    d = 1 / d;
+    const del = d * c;
+    h *= del;
+    if (Math.abs(del - 1) < eps) break;
+  }
+  return h;
+}
+
+/** Regularized incomplete beta I_x(a,b) for a,b > 0, 0 ≤ x ≤ 1. */
+export function regularizedIncompleteBeta(x: number, a: number, b: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const bt = Math.exp(
+    logGamma(a + b) - logGamma(a) - logGamma(b) + a * Math.log(x) + b * Math.log(1 - x),
+  );
+  if (x < (a + 1) / (a + b + 2)) {
+    return (bt * betacf(a, b, x)) / a;
+  }
+  return 1 - (bt * betacf(b, a, 1 - x)) / b;
+}
+
+export interface BetaPosterior {
+  /** Posterior mean (α/(α+β)). */
+  mean: number;
+  /** Posterior standard deviation √(αβ/((α+β)²(α+β+1))). */
+  sigma: number;
+  alpha: number;
+  beta: number;
+}
+
+/**
+ * Beta-Binomial posterior of a Bernoulli rate from `hits`/`n` observations with
+ * a prior of `priorCount` pseudo-observations at `priorRate` (default: 10
+ * pseudo-observations at the fair 10% — a digit rate prior).
+ */
+export function betaPosterior(
+  hits: number,
+  n: number,
+  priorRate = 0.1,
+  priorCount = 10,
+): BetaPosterior {
+  const alpha = Math.max(1e-9, hits + priorCount * priorRate);
+  const beta = Math.max(1e-9, n - hits + priorCount * (1 - priorRate));
+  const sum = alpha + beta;
+  const mean = alpha / sum;
+  const sigma = Math.sqrt((alpha * beta) / (sum * sum * (sum + 1)));
+  return { mean, sigma, alpha, beta };
+}
+
+/**
+ * Inverse regularized incomplete Beta (posterior quantile) by bisection —
+ * 48 iterations is ~2× the double-precision resolution on [0,1].
+ * Used for the differ bot's exact asymmetric upper bound (5.1) instead of the
+ * normal p̂ + 1.645σ, which is wrong near rates of 0.05–0.12.
+ */
+export function betaQuantile(q: number, alpha: number, beta: number): number {
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 48; i++) {
+    const mid = (lo + hi) / 2;
+    if (regularizedIncompleteBeta(mid, alpha, beta) < q) lo = mid;
+    else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * Exact one-sided "null-side" posterior probability used as the FDR p-value.
+ *   hot:  P(p ≤ threshold | data) = I_threshold(α, β)  — small when the digit
+ *         is genuinely ABOVE the threshold.
+ *   cold: P(p ≥ threshold | data) = 1 − I_threshold(α, β) — small when the
+ *         digit is genuinely BELOW the threshold.
+ * No normal approximation — correct for small counts, which is where digit
+ * selection lives.
+ */
+export function posteriorRateProbability(
+  hits: number,
+  n: number,
+  threshold: number,
+  direction: "hot" | "cold",
+  priorRate = 0.1,
+  priorCount = 10,
+): number {
+  if (n <= 0) return 0.5;
+  const { alpha, beta } = betaPosterior(hits, n, priorRate, priorCount);
+  // P(p ≤ threshold) = I_threshold(α, β) for the Beta CDF.
+  const pBelow = regularizedIncompleteBeta(threshold, alpha, beta);
+  return direction === "hot" ? pBelow : 1 - pBelow;
+}
+
 /**
  * Wald–Wolfowitz runs test on a 0/1 series.
  *
@@ -339,16 +477,136 @@ export function runHazard(against: boolean[]): {
 }
 
 /**
+ * Run-length-conditioned probability: P(target | the CURRENT open run's length).
+ *
+ * A 2-state chain conditions on the last state; the strongest serial signal for
+ * a parity/tail bet is how long the open run has already lasted. If the open
+ * run is AGAINST the target, the empirical censored hazard at length k is the
+ * probability the run breaks NOW (= next tick is the target). If the open run
+ * is FOR the target, P(target) = 1 − hazard(k) (the run continues).
+ *
+ * σ comes from the number of runs that ever reached length k (the evidence
+ * behind that hazard estimate); thin history automatically down-weights.
+ */
+export function runConditionedProbability(
+  states: number[],
+  target: number,
+): { p: number; sigma: number; k: number; reached: number } {
+  const s = states.map(x => (x === target ? 1 : 0));
+  if (s.length < 10) return { p: 0.5, sigma: 0.3, k: 0, reached: 0 };
+
+  const runsOf = (want: 0 | 1) => {
+    const reached = new Map<number, number>();
+    const broke = new Map<number, number>();
+    let run = 0;
+    for (const v of s) {
+      if (v === want) {
+        run++;
+        reached.set(run, (reached.get(run) ?? 0) + 1);
+      } else if (run > 0) {
+        broke.set(run, (broke.get(run) ?? 0) + 1);
+        run = 0;
+      }
+    }
+    const hazard = new Map<number, number>();
+    for (const [k, r] of reached) hazard.set(k, ((broke.get(k) ?? 0) + 1) / (r + 2));
+    const observed = [...hazard.entries()]
+      .filter(([k]) => (reached.get(k) ?? 0) >= 3)
+      .map(([, v]) => v)
+      .sort((a, b) => a - b);
+    const baseline = observed.length >= 2
+      ? observed.length % 2 === 1 ? observed[Math.floor(observed.length / 2)]!
+        : (observed[observed.length / 2 - 1]! + observed[observed.length / 2]!) / 2
+      : hazard.size > 0 ? [...hazard.values()].reduce((a, b) => a + b, 0) / hazard.size : 0.5;
+    return { hazard, kNow: run, reached, baseline: baseline > 0 ? baseline : 0.5 };
+  };
+
+  const last = s[s.length - 1]!;
+  if (last === 0) {
+    // Open run of NON-target → breaking it yields the target.
+    const r = runsOf(0);
+    const p = r.hazard.get(r.kNow) ?? r.baseline;
+    const reached = r.reached.get(r.kNow) ?? 0;
+    const sigma = Math.sqrt(Math.max(1e-6, (p * (1 - p)) / Math.max(4, reached)));
+    return { p: clamp(p, 1e-3, 1 - 1e-3), sigma, k: r.kNow, reached };
+  }
+  // Open run of TARGET → P(target) = 1 − P(run breaks).
+  const r = runsOf(1);
+  const pBreak = r.hazard.get(r.kNow) ?? r.baseline;
+  const p = 1 - pBreak;
+  const reached = r.reached.get(r.kNow) ?? 0;
+  const sigma = Math.sqrt(Math.max(1e-6, (p * (1 - p)) / Math.max(4, reached)));
+  return { p: clamp(p, 1e-3, 1 - 1e-3), sigma, k: r.kNow, reached };
+}
+
+/**
+ * Dirichlet-multinomial transition posterior: P(next ∈ tailSet | last digit).
+ *
+ * The exact posterior of the 10-digit transition row out of the LAST observed
+ * digit, with a κ-pseudo-count prior shrunk toward the buffer's own marginal
+ * digit distribution. The tail probability is the posterior mean of the sum
+ * over the tail, and — because the row is Dirichlet — the posterior variance
+ * of that sum has a closed form. This is the richest single-digit estimator a
+ * single-family bot can run: it uses WHICH digit came last, which a 2-state
+ * tail-membership chain throws away.
+ */
+export function dirichletTailProbability(
+  digits: number[],
+  tailSet: ReadonlySet<number>,
+  kappa = 10,
+): { p: number; sigma: number; n: number } {
+  const clean = digits.filter(d => d >= 0 && d <= 9);
+  const last = clean[clean.length - 1];
+  const fairP = tailSet.size / 10;
+  if (clean.length < 5 || last === undefined) return { p: fairP, sigma: 0.3, n: 0 };
+
+  // Marginal digit rates (the prior the transition row shrinks toward).
+  const counts = new Array<number>(10).fill(0);
+  for (const d of clean) counts[d]! += 1;
+  const marg = counts.map(c => (c + 1) / (clean.length + 10));
+
+  // Transition row out of the last digit.
+  const rowOut = new Array<number>(10).fill(0);
+  const rowHit = new Array<number>(100).fill(0);
+  for (let i = 1; i < clean.length; i++) {
+    const a = clean[i - 1]!;
+    const b = clean[i]!;
+    rowOut[a]! += 1;
+    rowHit[a * 10 + b]! += 1;
+  }
+  const rowTotal = rowOut[last]!;
+  if (rowTotal < 4) return { p: fairP, sigma: 0.3, n: rowTotal };
+
+  let alphaTail = 0;
+  let alphaSum = rowTotal + kappa;
+  for (let d = 0; d < 10; d++) {
+    const alpha = rowHit[last * 10 + d]! + kappa * marg[d]!;
+    if (tailSet.has(d)) alphaTail += alpha;
+  }
+  const p = alphaTail / alphaSum;
+  // Exact variance of a sum of Dirichlet proportions: (S−αT)·αT/(S²·(S+1)).
+  const sigma = Math.sqrt(
+    Math.max(1e-12, ((alphaSum - alphaTail) * alphaTail) / (alphaSum * alphaSum * (alphaSum + 1))),
+  );
+  return { p: clamp(p, 1e-4, 1 - 1e-4), sigma, n: rowTotal };
+}
+
+/**
  * Hurst exponent by rescaled-range (R/S) analysis.
  * H > 0.5 ⇒ persistent/trending, H < 0.5 ⇒ anti-persistent/mean-reverting.
  * Returns 0.5 (neutral) when the series is too short to regress.
+ *
+ * v3: the size grid was densified (start 4, ×1.5) so the log-log regression
+ * gets more points — a 40-return half-window now fits 5 sizes instead of 2.
+ * This makes the estimate stable enough to support split-half agreement on
+ * the momentum bot's ~80-tick window (and is a strictly better R/S fit).
  */
 export function hurstExponent(returns: number[]): number {
   const n = returns.length;
   if (n < 32) return 0.5;
   const logN: number[] = [];
   const logRS: number[] = [];
-  for (let size = 8; size <= Math.floor(n / 2); size = Math.floor(size * 1.7)) {
+  for (let size = 4; size <= Math.floor(n / 2); size = Math.floor(size * 1.5)) {
     const segments = Math.floor(n / size);
     if (segments < 1) break;
     let acc = 0;
@@ -414,17 +672,22 @@ export function benjaminiHochberg(pValues: number[], q = 0.25): boolean[] {
 /**
  * Even/Odd specialist read.
  *
- * Four independent estimators, blended by inverse variance:
+ * Six independent estimators, blended by inverse variance:
  *  1. 2-state parity Markov conditioned on the last parity (low σ),
  *  2. 2nd-order parity chain conditioned on the last two parities,
  *  3. unconditional EWMA parity rate,
- *  4. the marginal bias of the whole buffer (a slow, very stable estimate).
+ *  4. the marginal bias of the whole buffer (a slow, very stable estimate),
+ *  5. run-length conditioning — P(target | current open run's length) from the
+ *     censored run hazard (the strongest serial signal for a parity bet),
+ *  6. the exact Dirichlet transition posterior P(target | LAST DIGIT) — the
+ *     digit-level context a 2-state chain cannot see.
  * The runs test then says WHICH SIDE the serial dependence favours, and the
  * lag-2 term catches a period-2 flip cycle.
  */
 export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): SpecialistRead {
   const target = side === "DIGITEVEN" ? 0 : 1;
-  const parity = digits.filter(d => d >= 0 && d <= 9).map(d => d % 2);
+  const clean = digits.filter(d => d >= 0 && d <= 9);
+  const parity = clean.map(d => d % 2);
   if (parity.length < 40) return neutralRead("parity", "Collecting parity samples…");
 
   const targetSeries = parity.map(p => (p === target ? 1 : 0));
@@ -446,11 +709,26 @@ export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): Sp
   const pMarg = hits / targetSeries.length;
   const sigmaMarg = Math.sqrt(Math.max(1e-6, (pMarg * (1 - pMarg)) / targetSeries.length));
 
+  // 5 — run-length conditioning: P(target | length of the CURRENT open run).
+  //    A 2-state chain only knows the last parity; the empirical censored
+  //    hazard at the open run's length is the strongest serial signal there is
+  //    for a parity bet ("odds have run 5 — how likely does even arrive now").
+  const runCond = runConditionedProbability(parity, target);
+
+  // 6 — Dirichlet transition from the LAST DIGIT: P(target parity | last
+  //    digit). The parity chain collapses the 10 digits, so it cannot see that
+  //    "last digit 7" and "last digit 3" predict different even rates even
+  //    though both are odd. The exact Dirichlet row posterior can.
+  const paritySet = new Set(target === 0 ? [0, 2, 4, 6, 8] : [1, 3, 5, 7, 9]);
+  const dirTail = dirichletTailProbability(clean, paritySet);
+
   const blended = blendEstimates([
     { p: pCond, sigma: sigmaCond },
     { p: chain2.p, sigma: sigma2 },
     { p: ew.p, sigma: ew.sigma },
     { p: pMarg, sigma: sigmaMarg },
+    { p: runCond.p, sigma: runCond.sigma },
+    ...(dirTail.n >= 6 ? [{ p: dirTail.p, sigma: dirTail.sigma }] : []),
   ]);
 
   // Serial dependence: runs test → which side the structure favours.
@@ -511,6 +789,10 @@ export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): Sp
     signals.push(`serially independent (z_run ${ww.z.toFixed(2)})`);
   }
   if (cycleBonus !== 0) signals.push(`cycle ρ₂ ${rho2.toFixed(2)}`);
+  if (runCond.reached >= 4) {
+    signals.push(`run ${runCond.k}t ${run.length === runCond.k && runCond.p >= 0.5 ? "favours" : "against"} target (hazard-conditioned p̂ ${(runCond.p * 100).toFixed(1)}%)`);
+  }
+  if (dirTail.n >= 6) signals.push(`last-digit ${clean[clean.length - 1]} → P(target) ${(dirTail.p * 100).toFixed(1)}% (n=${dirTail.n})`);
 
   return {
     family: "parity",
@@ -529,6 +811,10 @@ export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): Sp
       rho3: round(rho3),
       openRun: run.length,
       marginal: round(pMarg, 4),
+      runCondP: round(runCond.p, 4),
+      runCondK: runCond.k,
+      dirTailP: round(dirTail.p, 4),
+      dirTailN: dirTail.n,
     },
     signals,
   };
@@ -579,11 +865,19 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
   const pMarg = tailHits / target.length;
   const sigmaMarg = Math.sqrt(Math.max(1e-6, (pMarg * (1 - pMarg)) / target.length));
 
+  // 5 — Dirichlet transition from the LAST DIGIT: P(next ∈ tail | last digit).
+  //    The 2-state tail chain throws away WHICH digit came last, yet the last
+  //    digit is the single most predictive state for the next digit. The exact
+  //    Dirichlet row posterior (shrunk toward the marginal digit distribution)
+  //    prices the tail from the actual last digit, with closed-form variance.
+  const dirTail = dirichletTailProbability(clean, new Set(tailDigits));
+
   const blended = blendEstimates([
     { p: pCond, sigma: sigmaCond },
     { p: chain2.p, sigma: sigma2 },
     { p: ew.p, sigma: ew.sigma },
     { p: pMarg, sigma: sigmaMarg },
+    ...(dirTail.n >= 6 ? [{ p: dirTail.p, sigma: dirTail.sigma }] : []),
   ]);
 
   // Digit-mass drift: is the digit distribution migrating toward the tail?
@@ -648,6 +942,7 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
   signals.push(`mass drift ${drift >= 0 ? "+" : ""}${drift.toFixed(2)} ${driftAligned ? "↦ tail" : "↤ away"}`);
   if (fragilityBonus !== 0) signals.push(`fragility ${(fragility * 100).toFixed(0)}%`);
   if (adjacencyBonus !== 0) signals.push(`adjacency ${(adjacency * 100).toFixed(0)}%`);
+  if (dirTail.n >= 6) signals.push(`last-digit ${clean[clean.length - 1]} → tail ${(dirTail.p * 100).toFixed(1)}% (n=${dirTail.n})`);
 
   return {
     family: "barrier",
@@ -667,6 +962,8 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
       adjacency: round(adjacency, 3),
       hazardK: streakHazard.kNow,
       hazardRelative: round(hazardRelative, 3),
+      dirTailP: round(dirTail.p, 4),
+      dirTailN: dirTail.n,
     },
     signals,
   };
@@ -744,8 +1041,12 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
     const series = clean.map(d => (d === digit ? 1 : 0));
     const ew = series.length > 0 ? ewmaRate(series, 0.1, 0.97) : { p: 0.1, sigma: 0.3, nEff: 0 };
     const hits = series.reduce((a, b) => a + b, 0);
-    const pMarg = series.length > 0 ? hits / series.length : 0.1;
-    const sigmaMarg = Math.sqrt(Math.max(1e-6, (pMarg * (1 - pMarg)) / Math.max(1, series.length)));
+    const n = series.length;
+    // Exact Beta-Binomial posterior of the digit's rate: a κ=10 pseudo-count
+    // prior at the fair 10%. The posterior mean replaces the raw marginal
+    // (shrinkage — a 1-in-5 hit digit is NOT a 20% digit after 5 draws) and
+    // the posterior σ is exact for small n, unlike the normal approximation.
+    const post = betaPosterior(hits, n, 0.1, 10);
 
     // ── Conditional context estimators ─────────────────────────────────────
     // P(digit | last) and P(digit | last two) from THIS buffer's own
@@ -756,7 +1057,7 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
     // ignores). Thin contexts drop out automatically via their large σ.
     const estimates: Array<{ p: number; sigma: number }> = [
       { p: ew.p, sigma: ew.sigma },
-      { p: pMarg, sigma: sigmaMarg },
+      { p: post.mean, sigma: post.sigma },
     ];
     if (lastDigit !== undefined) {
       const rowTotal = rowOut[lastDigit]!;
@@ -791,15 +1092,23 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
 
     const recent6 = clean.slice(-6).filter(d => d === digit).length;
     const z = (blended.p - 0.1) / Math.max(blended.sigma, 0.004);
-    // One-sided p-value in the direction this bot profits from.
-    const pValue = direction === "hot" ? 1 - normalCdf(z) : normalCdf(z);
+    // EXACT one-sided posterior probability that the digit's rate is above
+    // (hot) / below (cold) the fair 10% — no normal approximation, correct for
+    // small windows. Feeding these into the FDR step means a noise digit can
+    // no longer sneak past with a lucky 5/20 run.
+    const pValue = posteriorRateProbability(hits, n, 0.1, direction, 0.1, 10);
 
+    // Exact asymmetric posterior upper bound (5.1): the 90th percentile of the
+    // Beta posterior, anchored on the blended point estimate (never below it).
+    // Near p ≈ 0.1 the Beta is skewed, so the normal p̂ + 1.645σ bound is wrong
+    // in both directions — the posterior quantile is exact for small counts.
+    const quantileDev = Math.max(0, betaQuantile(0.9, post.alpha, post.beta) - post.mean);
     pValues.push(pValue);
     out.push({
       digit,
       p: blended.p,
       sigma: blended.sigma,
-      upper: clamp(blended.p + 1.645 * blended.sigma, 0, 1),
+      upper: clamp(blended.p + quantileDev, 0, 1),
       gap,
       hazardRelative: round(hazardRelative, 3),
       recent6,
@@ -975,6 +1284,7 @@ export function differRead(digits: number[], lockedBarrier?: number): DifferRead
       favoured: `DIGITDIFF ${chosen.digit}`,
       metrics: {
         pHat: round(chosen.p, 4),
+        sigma: round(chosen.sigma, 4),
         upper: round(chosen.upper, 4),
         worstCaseWin: round(worstCaseWin, 4),
         breakEven: round(breakEven, 4),
@@ -1012,10 +1322,26 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
   const dirSeries = recent.map(r => (r > 0 ? 1 : 0));
   const target = side === "CALL" ? 1 : 0;
 
-  // 1 — Hurst exponent by R/S analysis.
+  // 1 — Hurst exponent by R/S analysis. A single Hurst on ~80 returns is
+  //    high-variance: a noise stream can look "trending" for minutes. We
+  //    therefore split the window in two and only claim a REGIME when both
+  //    halves agree (both trending / both mean-reverting / both neutral).
+  //    Split-half disagreement → treat as random-walk: no regime bonus, no
+  //    regime-based side preference, no false confidence.
   const hurst = hurstExponent(recent);
-  const trending = hurst > 0.55;
-  const meanReverting = hurst < 0.45;
+  let hurstAgreement = 1; // 1 = halves agree (or window too short to split)
+  let hurst1 = hurst;
+  let hurst2 = hurst;
+  if (recent.length >= 64) {
+    const half = Math.floor(recent.length / 2);
+    hurst1 = hurstExponent(recent.slice(0, half));
+    hurst2 = hurstExponent(recent.slice(half));
+    const regime = (h: number) => (h > 0.55 ? 1 : h < 0.45 ? -1 : 0);
+    hurstAgreement = regime(hurst1) === regime(hurst2) ? 1 : 0;
+  }
+  const trending = hurstAgreement === 1 && hurst > 0.55;
+  const meanReverting = hurstAgreement === 1 && hurst < 0.45;
+  const noRegimeClaim = hurstAgreement === 0;
 
   // 2 — autocorrelation vector.
   const rho1 = lagAutocorr(dirSeries, 1);
@@ -1052,6 +1378,33 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
     { p: ew.p, sigma: ew.sigma },
   ]);
 
+  // 6 — signed-drift expectation (6.2): EMA of SIGNED returns with its
+  //    standard error. A trend that exists only in the up/down COUNTS but not
+  //    in the return MAGNITUDES is too weak to trade. σ_EMA = σ_resid·√(α/(2−α)).
+  const driftAlpha = 0.1;
+  let drift = 0;
+  const driftResid: number[] = [];
+  for (const r of recent) {
+    const prev = drift;
+    drift = driftAlpha * r + (1 - driftAlpha) * drift;
+    driftResid.push(r - prev);
+  }
+  const residMean = driftResid.reduce((a, b) => a + b, 0) / driftResid.length;
+  const residSd = Math.sqrt(driftResid.reduce((a, v) => a + (v - residMean) ** 2, 0) / driftResid.length);
+  const driftSe = residSd * Math.sqrt(driftAlpha / (2 - driftAlpha));
+  const driftT = driftSe > 1e-12 ? Math.abs(drift) / driftSe : 0;
+  const driftSupported = driftT >= 1.5;
+
+  // 7 — multi-scale direction consistency (6.3): short (10), mid (30) and long
+  //    (80) direction rates must agree in sign before a trending entry. A
+  //    regime that only exists at one scale is not a regime.
+  const dirRate = (k: number) => recent.slice(-k).filter(r => r > 0).length / Math.max(1, Math.min(k, recent.length));
+  const dirRate10 = dirRate(10);
+  const dirRate30 = dirRate(30);
+  const dirRate80 = dirRate(80);
+  const dirAgreement = (dirRate10 > 0.52 && dirRate30 > 0.52 && dirRate80 > 0.52) ||
+    (dirRate10 < 0.48 && dirRate30 < 0.48 && dirRate80 < 0.48) ? 1 : 0;
+
   const lastReturn = recent[recent.length - 1]!;
   const alignedWithTrend = side === "CALL" ? lastReturn > 0 : lastReturn < 0;
 
@@ -1072,8 +1425,12 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
 
   // Regime alignment: in a trending stream, trade WITH the last move; in a
   // mean-reverting stream, fade it — but only once the move is extended.
+  // The trending bonus is FULL only when the drift is significant (6.2) AND
+  // all three direction scales agree (6.3); a sign-only trend with no
+  // magnitude support gets a quarter of the bonus.
   if (trending) {
-    bonus += alignedWithTrend ? 4 : -4;
+    const strength = driftSupported && dirAgreement === 1 ? 1 : 0.25;
+    bonus += (alignedWithTrend ? 4 : -4) * strength;
   } else if (meanReverting) {
     const run = tailRunLength(dirSeries);
     const extended = run.length >= 2;
@@ -1095,15 +1452,16 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
 
   bonus = clamp(bonus, -SPECIALIST_BONUS_CAP, SPECIALIST_BONUS_CAP);
   const confidence = clamp(Math.round(Math.min(100,
-    Math.abs(hurst - 0.5) * 220 + (Math.abs(zBe) / 2.5) * 35 + (deadChop ? -30 : 0),
+    (noRegimeClaim ? 0 : Math.abs(hurst - 0.5) * 220) + (Math.abs(zBe) / 2.5) * 35 + (deadChop ? -30 : 0),
   )), 0, 100);
 
   const signals: string[] = [];
-  signals.push(`H ${hurst.toFixed(2)} ${trending ? "trending" : meanReverting ? "mean-reverting" : "random-walk"}`);
+  signals.push(`H ${hurst.toFixed(2)} ${trending ? "trending" : meanReverting ? "mean-reverting" : noRegimeClaim ? "ambiguous (halves disagree)" : "random-walk"} (halves ${hurst1.toFixed(2)}/${hurst2.toFixed(2)})`);
   signals.push(`ρ₁ ${rho1.toFixed(2)} · ρ₂ ${rho2.toFixed(2)}${twoCycle ? " · 2-cycle" : ""}`);
   signals.push(`p̂ ${(blended.p * 100).toFixed(1)}% · be ${(breakEven * 100).toFixed(1)}%`);
   signals.push(`z_be ${zBe >= 0 ? "+" : ""}${zBe.toFixed(2)} (fair ${(fairBaseline * 100).toFixed(1)}%${flatRate > 0.05 ? `, flats ${(flatRate * 100).toFixed(0)}%` : ""})`);
   signals.push(`asym ${(asymmetry * 100).toFixed(0)}%${deadChop ? " · dead chop" : ""}`);
+  signals.push(`drift t ${driftT.toFixed(1)}${driftSupported ? "" : " (unsupported)"} · dir ${(dirRate10 * 100).toFixed(0)}/${(dirRate30 * 100).toFixed(0)}/${(dirRate80 * 100).toFixed(0)}${dirAgreement === 1 ? " ✓" : " ✗"}`);
 
   return {
     family: "momentum",
@@ -1116,6 +1474,9 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
         : undefined,
     metrics: {
       hurst: round(hurst, 3),
+      hurst1: round(hurst1, 3),
+      hurst2: round(hurst2, 3),
+      hurstAgreement,
       rho1: round(rho1),
       rho2: round(rho2),
       rho3: round(rho3),
@@ -1128,6 +1489,13 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
       asymmetry: round(asymmetry, 3),
       volRatio: round(volRatio, 3),
       flatTicks: round(flatTicks, 3),
+      drift: round(drift, 4),
+      driftT: round(driftT, 3),
+      driftSupported: driftSupported ? 1 : 0,
+      dirRate10: round(dirRate10, 3),
+      dirRate30: round(dirRate30, 3),
+      dirRate80: round(dirRate80, 3),
+      dirAgreement,
     },
     signals,
   };
@@ -1209,6 +1577,16 @@ export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
       const hazard = m["hazardRelative"] ?? 1;
       const gap = m["gap"] ?? 0;
       if (gap < 3) return { pass: false, reason: `digit ${gap}t dormant — too soon` };
+      // Geometric waiting-time gate (4.2): under the digit's OWN posterior
+      // rate p̂, the chance of a gap at least this long is (1−p̂)^gap. A small
+      // value means the gap is unusually long FOR THIS DIGIT — the exact
+      // "overdue" test. A modest digit that merely passed z_be via a lucky
+      // run must wait until its gap is genuinely overdue, not just long.
+      const pHat = m["pHat"] ?? 0.1;
+      const geoP = Math.pow(Math.max(1e-6, 1 - pHat), gap);
+      if (geoP > 0.35) {
+        return { pass: false, reason: `gap ${gap}t not overdue for a ${(pHat * 100).toFixed(0)}% digit (geometric p ${geoP.toFixed(2)} > 0.35)` };
+      }
       if (hazard < 0.8) return { pass: false, reason: `dormancy hazard ×${hazard.toFixed(2)} below baseline` };
       return { pass: true, reason: "dormancy at breaking point, p̂ above break-even" };
     }

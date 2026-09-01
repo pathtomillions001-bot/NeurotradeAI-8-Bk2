@@ -61,6 +61,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import {
+  antiPatternPenalty,
   botPrecisionScore,
   botGreenLight,
   deepSniperBonus,
@@ -402,6 +403,7 @@ export async function scoreMarketForBot(
   displayName: string,
   config: BotConfig,
   signalMode: SignalMode = "normal",
+  recentTrades?: AntiPatternRecord[],
 ): Promise<BotMarketScore | null> {
   const digits100 = tickManager.getDigits(symbol, 100);
   const digits60  = digits100.slice(-60);
@@ -424,9 +426,15 @@ export async function scoreMarketForBot(
       ((r30?.score ?? r60.score) * 0.25 + r60.score * 0.50 + (r100?.score ?? r60.score) * 0.25) * 10,
     ) / 10;
     const decision = decisionFromWindows([r30, r60, r100]);
+    // v3 — anti-pattern memory in normal mode: refuse to re-enter the exact
+    // (contract, barrier) setup the market recently punished. Recovery keeps
+    // its own (stronger) sniper-gate penalties.
+    const penalty = signalMode === "normal"
+      ? antiPatternPenalty(recentTrades, ct, resolved.barrier)
+      : 0;
     scored.push({
       ...r60,
-      score: combinedScore + metaBonus(decision, signalMode),
+      score: combinedScore + metaBonus(decision, signalMode) - penalty,
       decision,
       digitCandidates: resolved.candidates,
     });
@@ -450,13 +458,14 @@ export async function scoreMarketForBot(
 export async function analyzeMarketsForBot(
   config: BotConfig,
   signalMode: SignalMode = "normal",
+  recentTrades?: AntiPatternRecord[],
 ): Promise<BotMarketScore[]> {
   const scored: BotMarketScore[] = [];
   const needsDigits = config.contractTypes.some(ct => ct.startsWith("DIGIT"));
 
   for (const market of AUTOMATED_DERIV_MARKETS) {
     if (needsDigits && !market.digitEnabled) continue;
-    const best = await scoreMarketForBot(market.symbol, market.displayName, config, signalMode);
+    const best = await scoreMarketForBot(market.symbol, market.displayName, config, signalMode, recentTrades);
     if (best) scored.push(best);
   }
 
@@ -675,18 +684,21 @@ function computeRecoveryStake(
   config: BotConfig,
   maxStake: number,
   availableBalance: number,
+  markupPercent = 10,
 ): number {
   if (!recoveryEngine.isInRecovery()) return config.stake;
-  // Bot-specific: conservative 10 % markup on debt.
-  // The shared getDynamicRecoveryStake targets debt + aspirational target-profit,
-  // which over-exposes capital for high-payout bot contracts (Matches 8.93×,
+  // Bot-specific: user-configurable markup on debt (default 10 %, set in Risk
+  // Management settings → botRecoveryMarkup).  The shared
+  // getDynamicRecoveryStake targets debt + aspirational target-profit, which
+  // over-exposes capital for high-payout bot contracts (Matches 8.93×,
   // Over/Under 2.43×, Even/Odd 1.95×).  getBotRecoveryStake sizes the stake
-  // so a single win recovers all debt + 10 % of debt as profit instead.
+  // so a single win recovers all debt + markup % of debt as profit instead.
   return recoveryEngine.getBotRecoveryStake(
     config.stake,
     maxStake,
     availableBalance,
     payout,
+    markupPercent,
   );
 }
 
@@ -720,6 +732,11 @@ async function runLoop(config: BotConfig) {
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLive         = !paperTradeMode && !!token;
   const maxStake       = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
+  // Profit markup (%) on debt used ONLY by this bot's recovery stake sizing.
+  // User-adjustable from Risk Management settings; defaults to 10 %.
+  const botRecoveryMarkup = settings.length > 0
+    ? Number((settings[0] as any).botRecoveryMarkup ?? 10)
+    : 10;
   let availableBalance = accounts.length > 0 && Number(accounts[0].balance) > 0
     ? Number(accounts[0].balance)
     : Number.POSITIVE_INFINITY;
@@ -798,7 +815,7 @@ async function runLoop(config: BotConfig) {
         if (cached) {
           best = cached;
         } else {
-          const result = await scoreMarketForBot(lockedMarket.symbol, lockedMarket.displayName, config, signalMode);
+          const result = await scoreMarketForBot(lockedMarket.symbol, lockedMarket.displayName, config, signalMode, session.patternTrades);
           if (!result) {
             session.message = "Waiting for tick data on locked market…";
             broadcast();
@@ -822,7 +839,7 @@ async function runLoop(config: BotConfig) {
       } else {
         session.message = inRecovery ? "🎯 Sniper scanning recovery markets…" : `${botName} scanning markets…`;
         broadcast();
-        const scored = await analyzeMarketsForBot(config, signalMode);
+        const scored = await analyzeMarketsForBot(config, signalMode, session.patternTrades);
         session.topMarkets = scored;
         if (scored.length === 0) {
           session.message = "Waiting for tick data stream…";
@@ -1004,7 +1021,7 @@ async function runLoop(config: BotConfig) {
         continue;
       }
 
-      const stake = computeRecoveryStake(best.payout, best.winProbability, config, maxStake, availableBalance);
+      const stake = computeRecoveryStake(best.payout, best.winProbability, config, maxStake, availableBalance, botRecoveryMarkup);
       const sharedStep = recoveryEngine.getState().recoveryStep;
 
       session.currentMarket       = best.displayName;
@@ -1125,10 +1142,14 @@ async function runLoop(config: BotConfig) {
       };
       recordTradeSignal(signalMode, dfRecord, won);
 
+      // v3 — anti-pattern memory for EVERY bot trade (normal + recovery). The
+      // normal-mode scorer uses it to refuse re-entering a setup the market
+      // just punished; the sniper recovery gate uses it as before. Cleared on
+      // recovery exit so a fresh slate follows a completed recovery.
+      session.patternTrades = [...session.patternTrades, {
+        contractType: best.contractType, barrier: best.barrier, won,
+      }].slice(-8);
       if (inRecovery) {
-        session.patternTrades = [...session.patternTrades, {
-          contractType: best.contractType, barrier: best.barrier, won,
-        }].slice(-8);
         session.consecutiveRecoveryLosses = won ? 0 : session.consecutiveRecoveryLosses + 1;
         if (!recoveryEngine.isInRecovery()) {
           session.patternTrades = [];

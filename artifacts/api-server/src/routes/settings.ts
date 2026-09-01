@@ -49,6 +49,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     recoveryAutoMode: (s as any).recoveryAutoMode ?? true,
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
+    botRecoveryMarkup: Number((s as any).botRecoveryMarkup ?? 10),
   };
 }
 
@@ -108,6 +109,7 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).recoveryAutoMode !== undefined) (updateData as any).recoveryAutoMode = (updates as any).recoveryAutoMode;
   if ((updates as any).riskAmountType !== undefined) (updateData as any).riskAmountType = (updates as any).riskAmountType;
   if ((updates as any).riskAmountValue !== undefined) (updateData as any).riskAmountValue = String((updates as any).riskAmountValue);
+  if ((updates as any).botRecoveryMarkup !== undefined) (updateData as any).botRecoveryMarkup = String((updates as any).botRecoveryMarkup);
 
     const [updated] = await db.update(settingsTable)
       .set(updateData)

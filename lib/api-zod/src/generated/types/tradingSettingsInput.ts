@@ -5,6 +5,8 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { TradingSettingsInputRecoveryMethod } from './tradingSettingsInputRecoveryMethod';
+import type { TradingSettingsInputRiskAmountType } from './tradingSettingsInputRiskAmountType';
 import type { TradingSettingsInputRiskProfile } from './tradingSettingsInputRiskProfile';
 
 export interface TradingSettingsInput {
@@ -33,9 +35,16 @@ export interface TradingSettingsInput {
   normalUnderDigit?: number;
   recoveryOverDigit?: number;
   recoveryUnderDigit?: number;
-  recoveryMethod?: "split" | "instant";
+  recoveryMethod?: TradingSettingsInputRecoveryMethod;
+  /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
   allowedMarkets?: string[];
-  riskAmountType?: "fixed" | "percentage";
+  riskAmountType?: TradingSettingsInputRiskAmountType;
   riskAmountValue?: number;
+  /**
+     * Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+     * @minimum 0
+     * @maximum 100
+     */
+  botRecoveryMarkup?: number;
 }

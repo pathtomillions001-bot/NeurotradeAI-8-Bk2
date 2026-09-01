@@ -182,7 +182,8 @@ export function calculateRecoveryStakeRequest(input: RecoveryStakeRequest): numb
 }
 
 /**
- * Bot-specific recovery stake with a conservative 10 % markup on debt.
+ * Bot-specific recovery stake with a configurable markup on debt
+ * (default 10 %).
  *
  * Used ONLY by the five specialist AI bots.  The shared recovery formula
  * (`calculateRecoveryStakeRequest`) sizes the stake to recover debt PLUS an
@@ -191,23 +192,32 @@ export function calculateRecoveryStakeRequest(input: RecoveryStakeRequest): numb
  * which over-exposes the user's capital — a $1 Even/Odd loss would open a
  * $2.06 recovery trade to win $1.96, even though only $1 was lost.
  *
- * This function replaces the target with a flat 10 % of the outstanding debt,
- * so a $1 loss is recovered by a trade sized to return $1.10 — the original
- * $1 debt plus $0.10 profit.  Multi-step recovery compounds naturally because
- * `unrecoveredAmount` accumulates every consecutive loss.
+ * This function replaces the target with a flat markup of the outstanding
+ * debt, so a $1 loss is recovered by a trade sized to return $1.10 (at the
+ * default 10 %) — the original $1 debt plus $0.10 profit.  The markup is
+ * user-configurable from Risk Management settings (`botRecoveryMarkup`) and
+ * applies ONLY to the five specialist AI bots' recovery.  Multi-step recovery
+ * compounds naturally because `unrecoveredAmount` accumulates every
+ * consecutive loss.
  *
  * @param unrecoveredAmount  Total loss debt from the shared recovery ledger.
  * @param payoutMultiplier   Total-return multiplier (includes original stake).
+ * @param markupPercent      Profit markup (%) on debt the bot aims for on a
+ *                           recovery win. Defaults to 10 (10 %). Values below
+ *                           0 are clamped to 0 (recover exactly the debt).
  * @returns The raw (uncapped, unrounded) recovery stake.
  */
 export function calculateBotRecoveryStake(
   unrecoveredAmount: number,
   payoutMultiplier: number,
+  markupPercent = 10,
 ): number {
   const netProfitRate = payoutMultiplier - 1;
   if (!Number.isFinite(netProfitRate) || netProfitRate <= 0) return 0;
-  // 10 % markup: a win should recover all debt and leave 10 % of debt as profit.
-  const targetReturn = Math.max(0, unrecoveredAmount) * 1.10;
+  const safeMarkup = Math.max(0, Number.isFinite(markupPercent) ? markupPercent : 10);
+  const markupFactor = 1 + safeMarkup / 100;
+  // A win should recover all debt and leave `markupPercent` % of debt as profit.
+  const targetReturn = Math.max(0, unrecoveredAmount) * markupFactor;
   return targetReturn / netProfitRate;
 }
 

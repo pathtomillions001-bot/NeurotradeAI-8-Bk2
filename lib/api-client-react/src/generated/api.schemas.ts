@@ -20,7 +20,11 @@ export interface SuccessResponse {
 }
 
 export interface DerivTokenInput {
-  /** @minLength 1 */
+  /**
+     * Deriv Personal Access Token (PAT). New tokens start with "pat_" (e.g. pat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx). Create one at app.deriv.com/account/api-token with Read and Trade permissions.
+
+     * @minLength 1
+     */
   token: string;
 }
 
@@ -30,8 +34,8 @@ export interface DerivAccount {
   currency: string;
   balance: number;
   isVirtual: boolean;
-  /** True when this is the currently selected account for live trading */
-  isActive?: boolean;
+  /** Whether this is the currently active account for the browser session */
+  isActive: boolean;
   /** @nullable */
   email?: string | null;
   /** @nullable */
@@ -39,10 +43,6 @@ export interface DerivAccount {
   /** @nullable */
   country?: string | null;
   connectedAt?: string;
-}
-
-export interface SwitchAccountInput {
-  loginId: string;
 }
 
 export type RankedMarketCategory = typeof RankedMarketCategory[keyof typeof RankedMarketCategory];
@@ -398,7 +398,7 @@ export interface RecoveryFamilyState {
   family?: RecoveryFamilyStateFamily;
   inRecovery?: boolean;
   recoveryStep?: number;
-  /** Dollars still owed before this family returns to normal mode */
+  /** Mandatory loss debt still owed before this family returns to normal mode. Optional target profit is not debt. */
   unrecoveredAmount?: number;
   /** recoveryMultiplier ^ recoveryStep */
   nextStakeMultiplier?: number;
@@ -414,11 +414,11 @@ export interface RecoveryStatus {
   active?: boolean;
   families?: RecoveryFamilyState[];
   activeFamilies?: string[];
-  /** Accumulated loss amount still to be recovered (USD) */
+  /** Mandatory accumulated loss debt still to be recovered (USD). Recovery ends when this is zero. */
   totalUnrecovered?: number;
-  /** Original expected net profit of the normal trade whose loss started recovery */
+  /** Optional original expected net profit of the normal trade whose loss started recovery. Used only to size an ideal recovery stake. */
   targetProfit?: number;
-  /** Portion of the original target profit still outstanding after partial recovery wins */
+  /** Remaining optional sizing-target profit. Never keeps recovery active once loss debt is cleared. */
   remainingTargetProfit?: number;
   /** Total-return payout multiplier of the normal trade whose loss started recovery */
   originPayoutMultiplier?: number;
@@ -455,6 +455,25 @@ export const TradingSettingsRiskProfile = {
   conservative: 'conservative',
   moderate: 'moderate',
   aggressive: 'aggressive',
+} as const;
+
+/**
+ * Split caps recovery attempts; Instant targets one-win recovery
+ */
+export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod[keyof typeof TradingSettingsRecoveryMethod];
+
+
+export const TradingSettingsRecoveryMethod = {
+  split: 'split',
+  instant: 'instant',
+} as const;
+
+export type TradingSettingsRiskAmountType = typeof TradingSettingsRiskAmountType[keyof typeof TradingSettingsRiskAmountType];
+
+
+export const TradingSettingsRiskAmountType = {
+  fixed: 'fixed',
+  percentage: 'percentage',
 } as const;
 
 export interface TradingSettings {
@@ -503,13 +522,19 @@ export interface TradingSettings {
   recoveryOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades while in recovery mode */
   recoveryUnderDigit?: number;
-  /** Recovery method: split (gradual across wins) or instant (full recovery in one trade) */
-  recoveryMethod?: string;
-  /** Compute recovery stake from live payout, debt, and original target profit */
+  /** Split caps recovery attempts; Instant targets one-win recovery */
+  recoveryMethod?: TradingSettingsRecoveryMethod;
+  /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
   allowedMarkets?: string[];
-  riskAmountType?: "fixed" | "percentage";
+  riskAmountType?: TradingSettingsRiskAmountType;
   riskAmountValue?: number;
+  /**
+     * Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+     * @minimum 0
+     * @maximum 100
+     */
+  botRecoveryMarkup?: number;
 }
 
 export type TradingSettingsInputRiskProfile = typeof TradingSettingsInputRiskProfile[keyof typeof TradingSettingsInputRiskProfile];
@@ -519,6 +544,22 @@ export const TradingSettingsInputRiskProfile = {
   conservative: 'conservative',
   moderate: 'moderate',
   aggressive: 'aggressive',
+} as const;
+
+export type TradingSettingsInputRecoveryMethod = typeof TradingSettingsInputRecoveryMethod[keyof typeof TradingSettingsInputRecoveryMethod];
+
+
+export const TradingSettingsInputRecoveryMethod = {
+  split: 'split',
+  instant: 'instant',
+} as const;
+
+export type TradingSettingsInputRiskAmountType = typeof TradingSettingsInputRiskAmountType[keyof typeof TradingSettingsInputRiskAmountType];
+
+
+export const TradingSettingsInputRiskAmountType = {
+  fixed: 'fixed',
+  percentage: 'percentage',
 } as const;
 
 export interface TradingSettingsInput {
@@ -547,12 +588,23 @@ export interface TradingSettingsInput {
   normalUnderDigit?: number;
   recoveryOverDigit?: number;
   recoveryUnderDigit?: number;
-  recoveryMethod?: string;
+  recoveryMethod?: TradingSettingsInputRecoveryMethod;
+  /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
   allowedMarkets?: string[];
-  riskAmountType?: "fixed" | "percentage";
+  riskAmountType?: TradingSettingsInputRiskAmountType;
   riskAmountValue?: number;
+  /**
+     * Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+     * @minimum 0
+     * @maximum 100
+     */
+  botRecoveryMarkup?: number;
 }
+
+export type SwitchAccountBody = {
+  loginId: string;
+};
 
 export type GetMarketsParams = {
 /**

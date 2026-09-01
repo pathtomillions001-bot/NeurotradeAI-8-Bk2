@@ -12,6 +12,8 @@ export interface DerivAccount {
   currency: string;
   balance: number;
   isVirtual: boolean;
+  /** Whether this is the currently active account for the browser session */
+  isActive: boolean;
   /** @nullable */
   email?: string | null;
   /** @nullable */

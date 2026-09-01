@@ -600,11 +600,19 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                   )}
 
                   <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} max={10} accent={bot.accent} />
+
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-muted-foreground flex-1">Markup on debt</span>
+                    <span className="font-mono text-xs text-foreground">
+                      {Number((settings as any)?.botRecoveryMarkup ?? 10)}%
+                    </span>
+                  </div>
                 </div>
 
                 <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
                   Recovery executes exclusively inside {bot.contractLabel}. A loss puts the shared
                   account ledger into recovery and every recovery trade stays in this bot&apos;s contract.
+                  The markup on debt is set in Settings → Risk Management → AI Bot Recovery Markup.
                 </p>
               </div>
 

@@ -81,6 +81,56 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /auth/accounts:
+    get:
+      operationId: getAccounts
+      tags: [auth]
+      summary: List all Deriv accounts linked in this browser session
+      responses:
+        "200":
+          description: Linked accounts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DerivAccount"
+
+  /auth/switch-account:
+    post:
+      operationId: switchAccount
+      tags: [auth]
+      summary: Switch the active Deriv account for this browser session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [loginId]
+              properties:
+                loginId:
+                  type: string
+      responses:
+        "200":
+          description: Newly active account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DerivAccount"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Account not linked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /auth/disconnect:
     post:
       operationId: disconnectAccount
@@ -492,7 +542,7 @@ components:
 
     DerivAccount:
       type: object
-      required: [id, loginId, currency, balance, isVirtual]
+      required: [id, loginId, currency, balance, isVirtual, isActive]
       properties:
         id:
           type: integer
@@ -504,6 +554,9 @@ components:
           type: number
         isVirtual:
           type: boolean
+        isActive:
+          type: boolean
+          description: Whether this is the currently active account for the browser session
         email:
           type: ["string", "null"]
         fullName:
@@ -1111,6 +1164,11 @@ components:
           enum: [fixed, percentage]
         riskAmountValue:
           type: number
+        botRecoveryMarkup:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
 
     TradingSettingsInput:
       type: object
@@ -1185,3 +1243,8 @@ components:
           enum: [fixed, percentage]
         riskAmountValue:
           type: number
+        botRecoveryMarkup:
+          type: number
+          minimum: 0
+          maximum: 100
+          description: Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.

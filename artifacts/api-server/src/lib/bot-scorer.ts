@@ -574,31 +574,36 @@ export function botPrecisionScore(
   const onsetQ        = entropyOnsetBonus(q);
   const edgeCommittee = 0.5 * edgeNorm + 0.5 * zQuality;
 
-  // ── Win-probability fusion (bot v2) ────────────────────────────────────────
-  // The FAB's winP (50-digit empirical + Bayesian Markov + 15-tick momentum)
-  // and the quantum window estimate are two estimates of the SAME quantity
-  // with DIFFERENT uncertainties. The old flat 50/50 mix ignored that; the
-  // bots now fuse by inverse variance — the tighter estimate carries more
-  // weight. The FAB component's uncertainty comes from its dominant terms
-  // (50-digit frequency, ≈20-sample Markov row, 15-tick rate) ⇒ effective
-  // n ≈ 40, used conservatively. The FAB formula itself is untouched — this
-  // is final assembly, and the divergence is intentional: a bot's EV gate,
-  // stake sizing and paper simulation all consume this number, so it must be
-  // the honest, minimum-variance estimate, then passed through the family's
+  // ── SPECIALIST LAYER (new — the single-contract advantage) ─────────────────
+  const specialist = specialistReadFor(contractType, barrier, digits, prices);
+  const specialistBonus = specialist?.bonus ?? 0;
+
+  // ── Win-probability fusion (bot v2 + v3) ───────────────────────────────────
+  // The FAB's winP (50-digit empirical + Bayesian Markov + 15-tick momentum),
+  // the quantum window estimate, and — since v3 — the SPECIALIST's own p̂ are
+  // all estimates of the SAME quantity with DIFFERENT uncertainties. Fusion
+  // is by inverse variance: the tighter estimate carries more weight. The FAB
+  // component's uncertainty comes from its dominant terms (50-digit
+  // frequency, ≈20-sample Markov row, 15-tick rate) ⇒ effective n ≈ 40, used
+  // conservatively. The FAB formula itself is untouched — this is final
+  // assembly, and the divergence is intentional: a bot's EV gate, stake
+  // sizing and paper simulation all consume this number, so it must be the
+  // honest, minimum-variance estimate, then passed through the family's
   // self-learning Platt calibration (identity until ≥12 of the bot's own
   // trades say otherwise).
   const sigmaFab = Math.sqrt(Math.max(1e-6, winP * (1 - winP) / 40));
-  const fused = q.neutral
+  const specWin = specialistWinProbability(specialist);
+  const fused = q.neutral && !specWin
     ? { p: winP, sigma: sigmaFab }
-    : blendEstimates([{ p: winP, sigma: sigmaFab }, { p: q.pHat, sigma: q.sigma }]);
+    : blendEstimates([
+        { p: winP, sigma: sigmaFab },
+        ...(q.neutral ? [] : [{ p: q.pHat, sigma: q.sigma }]),
+        ...(specWin ? [specWin] : []),
+      ]);
   const winPfinal = calibratedWinProbability(
     familyForContract(contractType),
     Math.max(0.01, Math.min(0.99, fused.p)),
   );
-
-  // ── SPECIALIST LAYER (new — the single-contract advantage) ─────────────────
-  const specialist = specialistReadFor(contractType, barrier, digits, prices);
-  const specialistBonus = specialist?.bonus ?? 0;
 
   const ev = winPfinal * (payout - 1) - (1 - winPfinal);
   const evBonus = ev >= 0.05 ? 8 : ev >= 0.015 ? 3 : ev < 0 ? -12 : 0;
@@ -636,6 +641,64 @@ export function botPrecisionScore(
     quantum: q,
     specialist,
   };
+}
+
+/**
+ * Convert a specialist read into a WIN-PROBABILITY estimate {p, σ}.
+ *
+ * The specialist layer's blended p̂ is the family's best single estimator
+ * (2-state chains, Dirichlet tails, FDR-gated digit rates, Hurst-direction
+ * blends), yet until v3 it only added a bonus to the SCORE — the win
+ * probability that drives EV, stake sizing, the EV floor and the paper
+ * simulation never saw it. Every family exposes pHat + σ:
+ *   parity/barrier/match/momentum → p̂ IS the win probability;
+ *   differ → the read is the digit's APPEARANCE rate, so winP = 1 − p̂
+ *   (σ carries over; Var(1−X) = Var(X)).
+ */
+export function specialistWinProbability(
+  read: SpecialistRead | undefined,
+): { p: number; sigma: number } | undefined {
+  if (!read) return undefined;
+  const pHat = read.metrics?.["pHat"];
+  const sigma = read.metrics?.["sigma"];
+  if (!Number.isFinite(pHat) || !Number.isFinite(sigma) || sigma <= 1e-6) return undefined;
+  if (read.family === "differ") {
+    return { p: clamp01(1 - pHat), sigma };
+  }
+  return { p: clamp01(pHat), sigma };
+}
+
+function clamp01(v: number): number {
+  return Math.max(0.01, Math.min(0.99, v));
+}
+
+export interface AntiPatternRecord {
+  contractType: BotContractType;
+  barrier: number | undefined;
+  won: boolean;
+}
+
+/**
+ * Decaying penalty for re-entering a (contract, barrier) setup the market just
+ * punished. Mirrors the recovery sniper gate's anti-pattern map: the most
+ * recent trade on this exact setup decides — a loss adds 10 − 2·age (age in
+ * trades), a win clears the penalty. v3: also applied in NORMAL mode, so a bot
+ * refuses to immediately re-buy the same setup it just lost on.
+ */
+export function antiPatternPenalty(
+  recentTrades: AntiPatternRecord[] | undefined,
+  contractType: BotContractType,
+  barrier: number | undefined,
+): number {
+  if (!recentTrades || recentTrades.length === 0) return 0;
+  const key = `${contractType}_${barrier ?? ""}`;
+  for (let i = recentTrades.length - 1; i >= 0; i--) {
+    const t = recentTrades[i]!;
+    if (`${t.contractType}_${t.barrier ?? ""}` !== key) continue;
+    if (t.won) return 0; // latest trade on this setup won — no penalty
+    return Math.max(0, 10 - (recentTrades.length - 1 - i) * 2);
+  }
+  return 0;
 }
 
 /** Route a contract to its specialist estimator. */

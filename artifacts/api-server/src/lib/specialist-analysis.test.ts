@@ -12,6 +12,9 @@
  *     bonus stays inside its bound.
  *  6. The entry gates block on exactly the condition they document.
  *  7. Side arbitration applies hysteresis.
+ *  8. Exact-probability helpers (Beta posterior, one-sided posterior p-values,
+ *     run-conditioned hazard, Dirichlet last-digit transitions) agree with
+ *     closed forms and detect planted structure.
  */
 
 import assert from "node:assert/strict";
@@ -19,12 +22,18 @@ import { describe, it } from "node:test";
 import {
   benjaminiHochberg,
   barrierRead,
+  betaPosterior,
+  betaQuantile,
   differRead,
+  dirichletTailProbability,
   hurstExponent,
   lagAutocorr,
   matchRead,
   momentumRead,
   parityRead,
+  posteriorRateProbability,
+  regularizedIncompleteBeta,
+  runConditionedProbability,
   runHazard,
   specialistEntryGate,
   specialistSideChoice,
@@ -435,5 +444,271 @@ describe("Bounds and arbitration", () => {
       undefined,
     );
     assert.equal(verdict?.side, "DIGITEVEN");
+  });
+});
+
+describe("Beta-Binomial posterior (exact, no normal approximation)", () => {
+  it("recovers the closed form for a small sample", () => {
+    // Prior: κ=10 pseudo-draws at 10% ⇒ Beta(1, 9). One hit in 5 real draws
+    // ⇒ Beta(2, 13). Mean = 2/15, variance = 2·13/(15²·16).
+    const post = betaPosterior(1, 5, 0.1, 10);
+    assert.ok(Math.abs(post.mean - 2 / 15) < 1e-9, `mean ${post.mean} ≠ 2/15`);
+    assert.ok(Math.abs(post.sigma - Math.sqrt((2 * 13) / (15 * 15 * 16))) < 1e-9, `sigma ${post.sigma}`);
+  });
+
+  it("shrinks a 1-in-5 digit towards the fair 10% (it is not a 20% digit)", () => {
+    const post = betaPosterior(1, 5, 0.1, 10);
+    assert.ok(post.mean > 0.1 && post.mean < 0.2, `expected 0.1 < mean < 0.2, got ${post.mean}`);
+  });
+
+  it("concentrates around the empirical rate once the sample dominates the prior", () => {
+    const post = betaPosterior(30, 200, 0.1, 10);
+    assert.ok(Math.abs(post.mean - 30 / 200) < 0.01, `mean ${post.mean} should approach 0.15`);
+    assert.ok(post.sigma < 0.03, `sigma ${post.sigma} should shrink with n`);
+  });
+
+  it("computes the regularized incomplete Beta correctly at known points", () => {
+    assert.ok(Math.abs(regularizedIncompleteBeta(0.5, 1, 1) - 0.5) < 1e-6);
+    assert.ok(Math.abs(regularizedIncompleteBeta(0.1, 2, 13) - 0.4153708594843323) < 1e-6);
+  });
+
+  it("one-sided posterior p-value: a hot digit yields a small p, a cold digit a large one", () => {
+    const hot = posteriorRateProbability(30, 200, 0.1, "hot", 0.1, 10);
+    const cold = posteriorRateProbability(30, 200, 0.1, "cold", 0.1, 10);
+    assert.ok(hot < 0.05, `expected hot p < 0.05, got ${hot}`);
+    assert.ok(cold > 0.95, `expected cold p > 0.95, got ${cold}`);
+  });
+
+  it("is exact for tiny counts where a normal approximation would lie", () => {
+    // 0 hits in 3 draws, prior Beta(1, 9) ⇒ posterior Beta(1, 12):
+    // P(p ≥ 0.1) = 1 − I_0.1(1, 12) = 1 − (1 − 0.1)^12 = 0.9^12 exactly.
+    // A normal approximation on the raw 0/3 rate would collapse to σ = 0.
+    const p = posteriorRateProbability(0, 3, 0.1, "cold", 0.1, 10);
+    assert.ok(Math.abs(p - 0.9 ** 12) < 1e-9, `expected 0.9^12 = ${0.9 ** 12}, got ${p}`);
+  });
+
+  it("stays neutral when there is no data", () => {
+    assert.equal(posteriorRateProbability(0, 0, 0.1, "hot"), 0.5);
+  });
+});
+
+describe("Run-conditioned probability (censored open-run hazard)", () => {
+  it("favours continuing a long run when the stream clusters", () => {
+    const rnd = mulberry32(1234);
+    const states: number[] = [];
+    let even = rnd() < 0.5;
+    for (let i = 0; i < 300; i++) {
+      even = rnd() < (even ? 0.9 : 0.5); // P(same) = 0.9 clustering
+      states.push(even ? 0 : 1);
+    }
+    for (let i = 0; i < 5; i++) states.push(0); // open even-run of 5
+    const rc = runConditionedProbability(states, 0);
+    assert.ok(rc.p > 0.7, `expected P(even | run of ${rc.k}) > 0.7, got ${rc.p}`);
+    assert.ok(rc.k >= 5, `run length ${rc.k}`);
+    assert.ok(rc.reached >= 4, `needs hazard history, got reached=${rc.reached}`);
+  });
+
+  it("downgrades a run against the target below fair", () => {
+    const rnd = mulberry32(1234);
+    const states: number[] = [];
+    let even = rnd() < 0.5;
+    for (let i = 0; i < 300; i++) {
+      even = rnd() < (even ? 0.9 : 0.5);
+      states.push(even ? 0 : 1);
+    }
+    for (let i = 0; i < 5; i++) states.push(1); // open odd-run of 5, target = even
+    const rc = runConditionedProbability(states, 0);
+    assert.ok(rc.p <= 0.5, `expected P(even | odd run) ≤ 0.5, got ${rc.p}`);
+  });
+
+  it("is neutral without enough history", () => {
+    const rc = runConditionedProbability([0, 1, 0, 1, 0], 0);
+    assert.equal(rc.p, 0.5);
+  });
+});
+
+describe("Dirichlet last-digit transition", () => {
+  it("detects a planted digit → tail bias", () => {
+    const rnd = mulberry32(99);
+    const digits: number[] = [];
+    let last = Math.floor(rnd() * 10);
+    for (let i = 0; i < 500; i++) {
+      let d: number;
+      if (last === 6 && rnd() < 0.5) d = 7 + Math.floor(rnd() * 3);
+      else d = Math.floor(rnd() * 10);
+      digits.push(d);
+      last = d;
+    }
+    digits.push(6, 6, 6); // guarantee the conditioning digit is last
+    const dt = dirichletTailProbability(digits, new Set([7, 8, 9]));
+    assert.ok(dt.n >= 30, `expected a populated transition row, got n=${dt.n}`);
+    assert.ok(dt.p > 0.4, `expected P(tail | 6) > 0.4, got ${dt.p}`);
+  });
+
+  it("returns the fair rate with zero sample when history is missing", () => {
+    const dt = dirichletTailProbability([0, 1, 2], new Set([7, 8, 9]));
+    assert.equal(dt.p, 0.3);
+    assert.equal(dt.n, 0);
+  });
+});
+
+describe("Specialist fusion metrics (v3)", () => {
+  it("parityRead exposes run-conditioned and Dirichlet metrics on a clustering stream", () => {
+    const rnd = mulberry32(1234);
+    const digits: number[] = [];
+    let even = rnd() < 0.5;
+    for (let i = 0; i < 120; i++) {
+      even = rnd() < (even ? 0.9 : 0.5);
+      digits.push(Math.floor(rnd() * 10) % 2 === (even ? 0 : 1) ? (even ? 0 : 1) : (even ? 0 : 1));
+      // keep parity deterministic: push the parity bit we decided
+      digits[digits.length - 1] = even ? 0 : 1;
+    }
+    const read = parityRead(digits, "DIGITEVEN");
+    assert.ok(read.metrics.runCondP !== undefined, "runCondP missing");
+    assert.ok(read.metrics.runCondK !== undefined, "runCondK missing");
+    assert.ok(read.metrics.dirTailP !== undefined, "dirTailP missing");
+  });
+
+  it("barrierRead exposes the Dirichlet tail probability from the last digit", () => {
+    const rnd = mulberry32(99);
+    const digits: number[] = [];
+    let last = Math.floor(rnd() * 10);
+    for (let i = 0; i < 300; i++) {
+      let d: number;
+      if (last === 6 && rnd() < 0.5) d = 7 + Math.floor(rnd() * 3);
+      else d = Math.floor(rnd() * 10);
+      digits.push(d);
+      last = d;
+    }
+    digits.push(6, 6, 6);
+    const read = barrierRead(digits, { side: "DIGITOVER", barrier: 6 });
+    assert.ok((read.metrics.dirTailN ?? 0) >= 30, `expected dirTail sample, got ${read.metrics.dirTailN}`);
+    assert.ok((read.metrics.dirTailP ?? 0) > 0.4, `expected raised tail, got ${read.metrics.dirTailP}`);
+  });
+
+  it("differRead exposes σ so the specialist win probability can be fused", () => {
+    const rnd = mulberry32(91);
+    const coldPool = [0, 1, 2, 3, 4, 6, 7, 8];
+    const digits = Array.from({ length: 400 }, () => {
+      const r = rnd();
+      if (r < 0.30) return 5;
+      return coldPool[Math.floor(rnd() * coldPool.length)]!;
+    });
+    const { read } = differRead(digits);
+    assert.ok(Number.isFinite(read.metrics.sigma ?? NaN), "differ read must carry sigma");
+    assert.ok((read.metrics.sigma ?? 0) > 0, `sigma ${read.metrics.sigma} must be positive`);
+  });
+
+  it("momentumRead requires BOTH split halves to agree before claiming a regime", () => {
+    // A regime flip exactly at the split midpoint: returns 0..39 are an AR(1)
+    // trend, returns 40..79 are noisy alternation. The halves must disagree.
+    const rnd = mulberry32(7);
+    const rets: number[] = [];
+    let x = 0;
+    for (let i = 0; i < 40; i++) {
+      x = 0.65 * x + (rnd() - 0.42) * 0.6;
+      rets.push(x);
+    }
+    const rnd2 = mulberry32(8);
+    let sgn = 1;
+    for (let i = 0; i < 40; i++) {
+      rets.push(sgn * (0.8 + rnd2() * 0.4));
+      sgn = -sgn;
+    }
+    const prices: number[] = [100];
+    for (const r of rets) prices.push(prices[prices.length - 1]! + r);
+    const read = momentumRead(prices, "CALL");
+    assert.equal(read.metrics.hurstAgreement, 0, "split halves disagree on regime");
+    assert.ok((read.metrics.hurst1 ?? 0) > 0.55, `first half should be trending, got ${read.metrics.hurst1}`);
+    assert.ok((read.metrics.hurst2 ?? 0) < 0.5, `second half should not be trending, got ${read.metrics.hurst2}`);
+  });
+
+  it("momentumRead trusts a regime both halves agree on", () => {
+    const prices: number[] = [100];
+    let x = 0;
+    const rnd = mulberry32(7);
+    for (let i = 0; i < 140; i++) {
+      x = 0.65 * x + (rnd() - 0.42) * 0.6;
+      prices.push(prices[prices.length - 1]! + x);
+    }
+    const read = momentumRead(prices, "CALL");
+    assert.equal(read.metrics.hurstAgreement, 1, "halves agree on a persistent regime");
+    assert.ok((read.metrics.hurst1 ?? 0) > 0.55 && (read.metrics.hurst2 ?? 0) > 0.55, "both halves trending");
+  });
+});
+
+describe("Beta quantile (posterior upper bound for Differ)", () => {
+  it("returns the median of a symmetric Beta", () => {
+    assert.ok(Math.abs(betaQuantile(0.5, 2, 2) - 0.5) < 1e-3);
+  });
+
+  it("matches the closed form for Beta(1, β): q = 1 − (1−q)ᵝ", () => {
+    // Beta(1, 409) has CDF I_q = 1 − (1−q)^409; the 90th percentile is
+    // q = 1 − 0.1^(1/409) exactly.
+    const q = betaQuantile(0.9, 1, 409);
+    const expected = 1 - 0.1 ** (1 / 409);
+    assert.ok(Math.abs(q - expected) < 1e-5, `got ${q}, expected ${expected}`);
+  });
+
+  it("the posterior quantile is asymmetric near the boundary (unlike p̂ + 1.645σ)", () => {
+    // 0 hits in 400 draws, prior Beta(1,9): the 90% quantile sits far above
+    // the raw normal bound because the Beta is right-skewed near zero.
+    const { alpha, beta } = betaPosterior(0, 400, 0.1, 10);
+    const quantile = betaQuantile(0.9, alpha, beta);
+    assert.ok(quantile > 0.004 && quantile < 0.02, `quantile ${quantile}`);
+  });
+});
+
+describe("Match geometric waiting-time gate (4.2)", () => {
+  function fakeMatchRead(metrics: Record<string, number>): SpecialistRead {
+    return { family: "match", bonus: 0, confidence: 50, metrics, signals: [] };
+  }
+
+  it("blocks a gap that is ordinary for the digit's own rate", () => {
+    // pHat 14%: a 3-gap happens with (0.86)^3 ≈ 64% probability — not overdue.
+    const gate = specialistEntryGate(fakeMatchRead({ zBe: 1.5, pHat: 0.14, gap: 3, hazardRelative: 1.2 }));
+    assert.equal(gate.pass, false);
+    assert.match(gate.reason, /geometric/);
+  });
+
+  it("admits a gap that is overdue for a genuinely hot digit", () => {
+    // pHat 40%: a 3-gap happens with (0.60)^3 = 21.6% probability — overdue.
+    const gate = specialistEntryGate(fakeMatchRead({ zBe: 1.5, pHat: 0.4, gap: 3, hazardRelative: 1.2 }));
+    assert.equal(gate.pass, true);
+  });
+
+  it("the existing too-soon guard still fires first", () => {
+    const gate = specialistEntryGate(fakeMatchRead({ zBe: 1.5, pHat: 0.4, gap: 1, hazardRelative: 1.2 }));
+    assert.equal(gate.pass, false);
+  });
+});
+
+describe("Momentum drift EMA & multi-scale direction (6.2 / 6.3)", () => {
+  it("exposes drift t-statistic and direction-agreement metrics", () => {
+    // Strong signed drift with small noise: every scale agrees, drift is huge.
+    const rnd = mulberry32(17);
+    const prices: number[] = [100];
+    for (let i = 0; i < 140; i++) prices.push(prices[prices.length - 1]! + 0.5 + (rnd() - 0.5) * 0.4);
+    const read = momentumRead(prices, "CALL");
+    assert.ok((read.metrics.driftT ?? 0) >= 1.5, `driftT ${read.metrics.driftT} should be significant`);
+    assert.ok(read.metrics.dirRate10 !== undefined && read.metrics.dirRate30 !== undefined && read.metrics.dirRate80 !== undefined, "dir rates present");
+    assert.equal(read.metrics.dirAgreement, 1, "persistent drift agrees at all three scales");
+    assert.equal(read.metrics.driftSupported, 1, "drift EMA supports the trend claim");
+  });
+
+  it("marks direction disagreement when the stream flips regime", () => {
+    // recent = last 80 returns: 40 trending + 40 alternating ⇒ the short
+    // direction rate sits at 0.5 and agrees with neither side.
+    const rets: number[] = [];
+    for (let i = 0; i < 40; i++) rets.push(0.5);
+    let sgn = 1;
+    for (let i = 0; i < 40; i++) {
+      rets.push(sgn * 1.0);
+      sgn = -sgn;
+    }
+    const prices: number[] = [100];
+    for (const r of rets) prices.push(prices[prices.length - 1]! + r);
+    const read = momentumRead(prices, "CALL");
+    assert.equal(read.metrics.dirAgreement, 0, "short and long direction rates disagree");
   });
 });

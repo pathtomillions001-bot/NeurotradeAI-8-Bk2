@@ -9,6 +9,7 @@ import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
+import { isLiveTradingEnabled } from "../lib/trading-gate";
 import { getLocalTodayStart } from "../lib/tz";
 import { getFallbackPayout } from "../lib/payouts";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
@@ -311,7 +312,12 @@ router.post("/", async (req, res): Promise<void> => {
     .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
   const balance = account ? Number(account.balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
-  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
+  const configuredPaperTradeMode = settings.length > 0
+    ? (settings[0] as any).paperTradeMode ?? false
+    : false;
+  // A fresh deployment stays in simulation even if a browser later connects a
+  // Deriv token. Live execution must be explicitly enabled by the operator.
+  const paperTradeMode = configuredPaperTradeMode || !isLiveTradingEnabled();
 
   if (stake > balance * (maxRisk / 100) * 5) {
     res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${(balance * maxRisk / 100 * 5).toFixed(2)}` });

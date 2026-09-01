@@ -16,6 +16,7 @@ import { analyzeCompletedTrade, getRecentReports, getIntelligenceSummary } from 
 import { trackRejectedTrade, getMissedOpportunitySummary, getRecentMissed } from "../lib/agents/missed-opportunity";
 import { getStatus as getDynamicConfidenceStatus, loadFromDb as loadDynamicConfidence } from "../lib/agents/dynamic-confidence";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
+import { isLiveTradingEnabled } from "../lib/trading-gate";
 import { getTodayStart } from "./trades";
 import { setTzOffset } from "../lib/tz";
 import {
@@ -471,7 +472,9 @@ async function runAutonomousLoop() {
     const preferredContractTypes = rawPreferred.map(t => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v, i, a) => a.indexOf(v) === i);
     const tradingSettings = buildTradingSettings(settings, preferredContractTypes);
     const marketRotationAfter = settings?.marketRotationAfter ?? 5;
-    const paperTradeMode = tradingSettings.paperTradeMode;
+    // Live execution is opt-in at the deployment level. Until the operator
+    // enables it, every autonomous outcome is simulated even if a token exists.
+    const paperTradeMode = tradingSettings.paperTradeMode || !isLiveTradingEnabled();
 
     // ── Over/Under digit barriers — settings-driven, no hardcoded fallback ────
     // Recovery is a single global state now: whenever it's active, EVERY Over/Under
@@ -1939,7 +1942,8 @@ router.get("/engine/status", async (req, res): Promise<void> => {
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
-    paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
+    paperTradeMode: (settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false) || !isLiveTradingEnabled(),
+    liveTradingEnabled: isLiveTradingEnabled(),
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: ownsEngine ? (cooldownUntil?.toISOString() ?? null) : null,
     sessionLossCount: ownsEngine ? sessionLossCount : 0,
@@ -2032,7 +2036,8 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
-    paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
+    paperTradeMode: (settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false) || !isLiveTradingEnabled(),
+    liveTradingEnabled: isLiveTradingEnabled(),
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: null,
     sessionLossCount,

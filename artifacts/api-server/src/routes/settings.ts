@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { UpdateSettingsBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
+import { isLiveTradingEnabled } from "../lib/trading-gate";
 
 const router = Router();
 
@@ -50,6 +51,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
     botRecoveryMarkup: Number((s as any).botRecoveryMarkup ?? 10),
+    liveTradingEnabled: isLiveTradingEnabled(),
   };
 }
 

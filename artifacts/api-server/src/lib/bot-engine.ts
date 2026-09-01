@@ -37,6 +37,7 @@ import { broadcastSSE } from "./sse";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { isLiveTradingEnabled } from "./trading-gate";
 import { resolveRecoveryPayout } from "./recovery-payout";
 import * as recoveryEngine from "./agents/recovery-engine";
 import {
@@ -727,7 +728,10 @@ async function runLoop(config: BotConfig) {
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
   recoveryEngine.setPersistenceSession(ownerSessionId);
-  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
+  // Live-money execution is opt-in at the deployment level. This keeps a
+  // fresh Railway deployment in simulation even if a token is connected.
+  const paperTradeMode = (settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false)
+    || !isLiveTradingEnabled();
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLive         = !paperTradeMode && !!token;

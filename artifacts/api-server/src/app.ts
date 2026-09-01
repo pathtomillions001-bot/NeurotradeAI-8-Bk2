@@ -3,7 +3,8 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import { execSync } from "child_process";
-import { resolve } from "path";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import router from "./routes";
 import { logger } from "./lib/logger";
 import { loadPersistedToken } from "./routes/auth";
@@ -16,6 +17,28 @@ import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { pool, db, marketWinRatesTable } from "@workspace/db";
 import { browserSession } from "./lib/session";
+
+/**
+ * Find the monorepo root from either the current working directory or the
+ * bundled API module directory. Railway starts the combined service from the
+ * repository root, while local filtered pnpm commands use the API package as
+ * their working directory.
+ */
+function findWorkspaceRoot(): string {
+  const starts = [process.cwd(), resolve(import.meta.dirname)];
+  for (const start of starts) {
+    let directory = start;
+    for (;;) {
+      if (existsSync(join(directory, "pnpm-workspace.yaml"))) return directory;
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  return process.cwd();
+}
+
+const workspaceRoot = findWorkspaceRoot();
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables or columns are missing. */
 async function bootstrapDb() {
@@ -42,8 +65,10 @@ async function bootstrapDb() {
     if (!(settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough && botMarkupColExists)) {
       logger.warn("DB schema out of date — running schema push");
       try {
-        const root = resolve(import.meta.dirname, "../../../../");
-        execSync("pnpm --filter @workspace/db run push", { cwd: root, stdio: "inherit" });
+        execSync("pnpm --filter @workspace/db run push", {
+          cwd: workspaceRoot,
+          stdio: "inherit",
+        });
         logger.info("DB schema push complete");
       } catch (pushErr) {
         // Embedded PGlite has no DATABASE_URL for drizzle-kit; the explicit
@@ -106,6 +131,24 @@ app.use(async (_req, res, next) => {
 });
 
 app.use("/api", router);
+
+// ── Optional combined Railway deployment ─────────────────────────────────────
+// In production the Railway web service can serve both the Vite application and
+// the API from one origin. This preserves the browser's relative /api requests,
+// HttpOnly session cookies, OAuth callback, and SSE connections without a
+// cross-origin proxy. The API-only Replit/local workflow remains unchanged.
+const frontendDist = resolve(workspaceRoot, "artifacts/trading-platform/dist/public");
+if (process.env.SERVE_FRONTEND === "true" && existsSync(frontendDist)) {
+  app.use(express.static(frontendDist));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" || req.path.startsWith("/api") || !req.accepts("html")) {
+      next();
+      return;
+    }
+    res.sendFile(join(frontendDist, "index.html"));
+  });
+  logger.info({ frontendDist }, "Combined frontend serving enabled");
+}
 
 // ── Startup ──────────────────────────────────────────────────────────────────
 // Ensure DB schema is applied before anything else touches the database

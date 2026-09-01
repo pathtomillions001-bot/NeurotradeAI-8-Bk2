@@ -1,0 +1,15 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "RAILPACK",
+    "buildCommand": "pnpm run build:railway"
+  },
+  "deploy": {
+    "preDeployCommand": ["pnpm run db:push:railway"],
+    "startCommand": "pnpm run start:railway",
+    "healthcheckPath": "/api/healthz",
+    "healthcheckTimeout": 300,
+    "restartPolicyType": "ON_FAILURE",
+    "restartPolicyMaxRetries": 10
+  }
+}

@@ -77,6 +77,11 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
                 onCheckedChange={(checked) => handleToggle(checked)}
               />
             </div>
+            {(engineStatus as any).liveTradingEnabled === false && (
+              <div className="mt-2 rounded border border-amber-500/25 bg-amber-500/10 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+                Simulation only — live trading disabled
+              </div>
+            )}
           </div>
         )}
       </div>

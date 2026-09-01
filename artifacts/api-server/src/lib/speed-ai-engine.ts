@@ -27,6 +27,7 @@ import { broadcastSSE } from "./sse";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { isLiveTradingEnabled } from "./trading-gate";
 import {
   OVER_PAYOUTS,
   UNDER_PAYOUTS,
@@ -1578,7 +1579,11 @@ async function runLoop(config: SpeedAIConfig) {
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
   recoveryEngine.setPersistenceSession(ownerSessionId);
-  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
+  // Keep live-money execution opt-in at the deployment level. A token may be
+  // connected for account/balance testing, but this engine simulates trades
+  // until LIVE_TRADING_ENABLED is explicitly enabled.
+  const paperTradeMode = (settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false)
+    || !isLiveTradingEnabled();
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
   const isLive         = !paperTradeMode && !!token;

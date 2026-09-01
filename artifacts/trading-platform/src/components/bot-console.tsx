@@ -20,7 +20,8 @@ import {
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
-import { useGetSettings } from "@workspace/api-client-react";
+import { useGetSettings, useUpdateSettings, getGetSettingsQueryKey } from "@workspace/api-client-react";
+import { useQueryClient } from "@tanstack/react-query";
 import { OVER_PAYOUTS, UNDER_PAYOUTS } from "@/lib/payouts";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON, SCAN_MARKETS, SCAN_MARKET_COUNT } from "@/lib/bots";
@@ -175,6 +176,37 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
     scanning: null, symbol: null, scanned: 0, total: SCAN_MARKET_COUNT, results: [],
   });
   const { data: settings } = useGetSettings();
+  const updateSettings = useUpdateSettings();
+  const queryClient = useQueryClient();
+
+  // AI Bot Recovery Markup — user-adjustable 0–100 % (default 10). The value
+  // is shared by all five specialist bots and saved IMMEDIATELY on
+  // blur/Enter, so the user can tune it from this console without a trip to
+  // Settings. The engine re-reads it at recovery-stake time, meaning the
+  // change applies even to a bot that is already running.
+  const markupSaved = Number((settings as any)?.botRecoveryMarkup ?? 10);
+  const [markupDraft, setMarkupDraft] = useState<string | null>(null);
+  const saveMarkup = (raw: string) => {
+    setMarkupDraft(null);
+    if (raw.trim() === "") return;
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) return;
+    const next = Math.min(100, Math.max(0, Math.round(parsed * 100) / 100));
+    if (next === markupSaved) return;
+    updateSettings.mutate(
+      { data: { botRecoveryMarkup: next } as any },
+      {
+        onSuccess: (saved: any) => {
+          queryClient.setQueryData(getGetSettingsQueryKey(), saved);
+          queryClient.invalidateQueries({ queryKey: getGetSettingsQueryKey() });
+          toast.success(`AI Bot recovery markup set to ${next}% — all five bots will use it`);
+        },
+        onError: (err: any) => {
+          toast.error(err?.data?.error || err?.message || "Failed to save recovery markup");
+        },
+      },
+    );
+  };
 
   const [config, setConfig] = useState<BotConfigState>({
     sideMode: "both",
@@ -603,16 +635,31 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
 
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs text-muted-foreground flex-1">Markup on debt</span>
-                    <span className="font-mono text-xs text-foreground">
-                      {Number((settings as any)?.botRecoveryMarkup ?? 10)}%
-                    </span>
+                    <div className="flex items-center gap-1">
+                      <Input
+                        type="number"
+                        value={markupDraft ?? String(markupSaved)}
+                        min={0} max={100} step={0.5}
+                        onChange={e => setMarkupDraft(e.target.value)}
+                        onBlur={e => saveMarkup(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                          if (e.key === "Escape") setMarkupDraft(null);
+                        }}
+                        disabled={updateSettings.isPending}
+                        className={`w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10 focus-visible:ring-0 ${accent.focusBorder} disabled:opacity-50`}
+                      />
+                      <span className="text-[10px] text-muted-foreground w-6">%</span>
+                    </div>
                   </div>
                 </div>
 
                 <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
                   Recovery executes exclusively inside {bot.contractLabel}. A loss puts the shared
                   account ledger into recovery and every recovery trade stays in this bot&apos;s contract.
-                  The markup on debt is set in Settings → Risk Management → AI Bot Recovery Markup.
+                  The markup on debt is adjustable above — set any percentage you prefer (0–100 %,
+                  default 10) and it saves instantly, applies to all five AI bots, and is also
+                  available under Settings → Risk Profile → AI Bot Recovery Markup.
                 </p>
               </div>
 

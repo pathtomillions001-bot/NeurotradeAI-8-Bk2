@@ -444,9 +444,17 @@ export async function scoreMarketForBot(
   if (scored.length === 1) return scored[0]!;
 
   // Specialist arbitration with hysteresis.
+  // v4 — arbitrate by EXPECTED VALUE, not raw bonus: OVER 2 (1.40×, be 71.4%)
+  // and UNDER 2 (4.72×, be 21.2%) can have different EV orderings than bonus
+  // orderings, and EV is the objective that pays. The hysteresis margin is in
+  // EV units (2pp); the bonus remains the fallback when EV is unavailable.
+  const evBySide = new Map<string, number>(scored.map(s => [s.contractType, s.expectedValue]));
+  const useEv = scored.every(s => Number.isFinite(s.expectedValue));
   const verdict = specialistSideChoice(
     scored.map(s => ({ side: s.contractType, read: s.specialist ?? { family: "parity", bonus: 0, confidence: 0, metrics: {}, signals: [] } })),
     session.lastSide,
+    useEv ? 0.02 : 6,
+    useEv ? (_read, side) => evBySide.get(side) ?? 0 : undefined,
   );
   const chosen = (verdict && scored.find(s => s.contractType === verdict.side)) ?? scored[0]!;
   return { ...chosen, digitCandidates: chosen.digitCandidates ?? candidates };
@@ -959,6 +967,19 @@ async function runLoop(config: BotConfig) {
         continue;
       }
 
+      // ── Pre-warmed payout quote (v4: fetched BEFORE revalidation so the
+      //    specialist gate can be tested against the REAL break-even 1/payout,
+      //    not the fallback schedule) ────────────────────────────────────────
+      const payoutQuote = await resolveRecoveryPayout({
+        symbol: best.symbol,
+        contractType: best.contractType,
+        barrier: best.barrier,
+        duration: 1,
+        durationUnit: "t",
+        currency,
+      });
+      best = { ...best, payout: payoutQuote.payoutMultiplier };
+
       // ── Execution-tick revalidation (FAB method 6) ─────────────────────────
       const reDigits = tickManager.getDigits(best.symbol, 60);
       const rePrices = tickManager.getTicks(best.symbol, 50);
@@ -979,10 +1000,12 @@ async function runLoop(config: BotConfig) {
         // execution tick, not just at decision time. v2: the specialist gate
         // itself is re-run — a break-even margin that evaporates between
         // decision and execution is exactly when a trade should be abandoned.
+        // v4: the gate receives the LIVE payout quote, so z_be is recomputed
+        // against 1/live-payout instead of the fallback schedule.
         const freshSpecialist = specialistReadFor(best.contractType, best.barrier, reDigits, rePrices);
         if (freshSpecialist) {
           session.lastSpecialist = freshSpecialist;
-          const freshGate = specialistEntryGate(freshSpecialist);
+          const freshGate = specialistEntryGate(freshSpecialist, { payout: payoutQuote.payoutMultiplier });
           if (!freshGate.pass) {
             session.message = `⏱️ Specialist edge lost at execution tick (${freshGate.reason}) — re-scanning…`;
             broadcast();
@@ -992,17 +1015,6 @@ async function runLoop(config: BotConfig) {
           }
         }
       }
-
-      // ── Pre-warmed payout quote + exact sizing ─────────────────────────────
-      const payoutQuote = await resolveRecoveryPayout({
-        symbol: best.symbol,
-        contractType: best.contractType,
-        barrier: best.barrier,
-        duration: 1,
-        durationUnit: "t",
-        currency,
-      });
-      best = { ...best, payout: payoutQuote.payoutMultiplier };
 
       // ── Hard EV floor (bot v2) ─────────────────────────────────────────────
       // Final backstop, applied at the LAST possible moment with the freshest

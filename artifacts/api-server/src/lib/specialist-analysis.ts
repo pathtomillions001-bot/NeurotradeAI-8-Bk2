@@ -106,6 +106,32 @@ export function barrierEntryMargin(tailSize: number): number {
  */
 export const DIGIT_SWITCH_MARGIN = 0.5;
 
+/**
+ * Selection margin (v4): the chosen digit must BEAT THE RUNNER-UP as a
+ * z-test of their difference, or the bot is coin-flipping between two
+ * near-equal digits. The margin is
+ *
+ *     D = (p̂_best − p̂_second) / √(σ_best² + σ_second²)
+ *
+ * Under "the top two are equally good" this is ≈ N(0,1) — so the 95%
+ * one-sided threshold (1.645) refuses ~95% of genuine coin-flips, while a
+ * decisive digit (one clearly-hot digit vs a noise field) clears it by a
+ * wide margin. A locked digit is exempt — the user decided.
+ */
+export const MATCH_SELECTION_MARGIN = 1.645;
+
+/** Same z-test of the difference for Differ, on the worst-case win rates
+ * (equivalently the upper bounds): (worst_best − worst_second)/√(σ₁²+σ₂²). */
+export const DIFFER_SELECTION_MARGIN = 1.645;
+
+/**
+ * Match context-support floor (v4): P(chosen | last digit) below 70% of the
+ * fair 10% means the current tick's transition context actively contradicts
+ * the trade — the entry is refused even if the window statistics look hot.
+ * Only enforced once the transition row is thick (≥ 10 transitions).
+ */
+export const MATCH_CTX_SUPPORT_MIN = 0.07;
+
 /** Break-even win rates p* = 1/payout, per family. */
 export const BREAK_EVEN = {
   parity: 1 / EVEN_ODD_PAYOUT,    // 1.95× ⇒ 51.28%
@@ -238,8 +264,33 @@ export function secondOrderTwoState(
 
 /** Inverse-variance blend of independent probability estimates. */
 export function blendEstimates(est: Array<{ p: number; sigma: number }>): { p: number; sigma: number } {
+  return blendEstimatesCorrelated(est, 0);
+}
+
+/**
+ * Inverse-variance blend with correlation-aware variance inflation.
+ *
+ * Every family read blends several estimates of the SAME quantity computed
+ * from the SAME tick buffer (EWMA, marginal, chains, run-hazard, Dirichlet).
+ * Those estimates are positively correlated, so the textbook inverse-variance
+ * σ = 1/√Σ(1/σᵢ²) understates the true uncertainty and inflates every z that
+ * the gates rely on. For k estimates with common pairwise correlation ρ the
+ * variance of the weighted mean is inflated by (1 + (k−1)·ρ) relative to the
+ * independence case:
+ *
+ *     σ_eff = σ_iid · √(1 + (k−1)·ρ)
+ *
+ * ρ = 0 reproduces the plain inverse-variance blend (used by the outer
+ * FAB/quantum/specialist fusion in bot-scorer, where the three sources ARE
+ * largely independent). The family reads pass ρ ≈ 0.30–0.35 — a deliberately
+ * conservative middle ground between independence and full duplication.
+ */
+export function blendEstimatesCorrelated(
+  est: Array<{ p: number; sigma: number }>,
+  rho = 0.3,
+): { p: number; sigma: number; k: number } {
   const usable = est.filter(e => Number.isFinite(e.p) && Number.isFinite(e.sigma) && e.sigma > 1e-6);
-  if (usable.length === 0) return { p: 0.5, sigma: 0.35 };
+  if (usable.length === 0) return { p: 0.5, sigma: 0.35, k: 0 };
   let wSum = 0;
   let pSum = 0;
   for (const e of usable) {
@@ -247,7 +298,10 @@ export function blendEstimates(est: Array<{ p: number; sigma: number }>): { p: n
     wSum += w;
     pSum += w * e.p;
   }
-  return { p: clamp(pSum / wSum, 1e-4, 1 - 1e-4), sigma: Math.sqrt(1 / wSum) };
+  const k = usable.length;
+  const sigmaIid = Math.sqrt(1 / wSum);
+  const sigma = k > 1 ? sigmaIid * Math.sqrt(1 + (k - 1) * Math.max(0, rho)) : sigmaIid;
+  return { p: clamp(pSum / wSum, 1e-4, 1 - 1e-4), sigma, k };
 }
 
 // ── Exact posterior math (Beta-Binomial) ──────────────────────────────────────
@@ -349,6 +403,48 @@ export function betaPosterior(
 }
 
 /**
+ * RECENCY-WEIGHTED Beta-Binomial posterior (v4).
+ *
+ * Same exact posterior math as `betaPosterior`, but the observations are
+ * exponentially DECAYED (oldest ≈ 0, newest = 1) before counting, so the
+ * posterior describes the RECENT stream: with `decay = 0.99` the effective
+ * sample is n_eff ≈ (1+decay)/(1−decay) ≈ 199 ticks (~3 minutes of a 1s
+ * index) instead of the whole multi-thousand-tick buffer. The old raw-count
+ * posterior gave a digit that was hot thirty minutes ago the same weight as
+ * one hot right now, and its tiny σ (n = full window) let it dominate the
+ * context-aware blend no matter what the recent ticks said.
+ */
+export function weightedBetaPosterior(
+  series: number[],
+  priorRate = 0.1,
+  priorCount = 10,
+  decay = 0.99,
+): BetaPosterior & { nEff: number } {
+  if (series.length === 0) {
+    return {
+      mean: priorRate,
+      sigma: Math.sqrt((priorRate * (1 - priorRate)) / (priorCount + 1)),
+      alpha: priorCount * priorRate,
+      beta: priorCount * (1 - priorRate),
+      nEff: 0,
+    };
+  }
+  let wSum = 0;
+  let hits = 0;
+  for (let i = 0; i < series.length; i++) {
+    const w = Math.pow(decay, series.length - 1 - i);
+    wSum += w;
+    if (series[i]) hits += w;
+  }
+  const alpha = Math.max(1e-9, hits + priorCount * priorRate);
+  const beta = Math.max(1e-9, wSum - hits + priorCount * (1 - priorRate));
+  const sum = alpha + beta;
+  const mean = alpha / sum;
+  const sigma = Math.sqrt((alpha * beta) / (sum * sum * (sum + 1)));
+  return { mean, sigma, alpha, beta, nEff: wSum };
+}
+
+/**
  * Inverse regularized incomplete Beta (posterior quantile) by bisection —
  * 48 iterations is ~2× the double-precision resolution on [0,1].
  * Used for the differ bot's exact asymmetric upper bound (5.1) instead of the
@@ -385,6 +481,37 @@ export function posteriorRateProbability(
   if (n <= 0) return 0.5;
   const { alpha, beta } = betaPosterior(hits, n, priorRate, priorCount);
   // P(p ≤ threshold) = I_threshold(α, β) for the Beta CDF.
+  const pBelow = regularizedIncompleteBeta(threshold, alpha, beta);
+  return direction === "hot" ? pBelow : 1 - pBelow;
+}
+
+/**
+ * Recency-weighted one-sided posterior p-value (v4).
+ *
+ * Same exact Beta-CDF math as `posteriorRateProbability`, but the counts come
+ * from the exponentially-decayed series (see `weightedBetaPosterior`), so the
+ * FDR step asks "is this digit hot/cold IN THE RECENT STREAM" instead of "in
+ * the entire buffer".
+ */
+export function posteriorRateProbabilityWeighted(
+  series: number[],
+  threshold: number,
+  direction: "hot" | "cold",
+  priorRate = 0.1,
+  priorCount = 10,
+  decay = 0.99,
+): number {
+  if (series.length === 0) return 0.5;
+  let wSum = 0;
+  let hits = 0;
+  for (let i = 0; i < series.length; i++) {
+    const w = Math.pow(decay, series.length - 1 - i);
+    wSum += w;
+    if (series[i]) hits += w;
+  }
+  if (wSum <= 0) return 0.5;
+  const alpha = Math.max(1e-9, hits + priorCount * priorRate);
+  const beta = Math.max(1e-9, wSum - hits + priorCount * (1 - priorRate));
   const pBelow = regularizedIncompleteBeta(threshold, alpha, beta);
   return direction === "hot" ? pBelow : 1 - pBelow;
 }
@@ -645,6 +772,55 @@ export function hurstExponent(returns: number[]): number {
 }
 
 /**
+ * Lo–MacKinlay variance-ratio test (v4).
+ *
+ * The distribution-backed complement to the Hurst exponent: under a random
+ * walk the variance of q-period returns is q × the variance of 1-period
+ * returns, so VR(q) ≈ 1. VR > 1 ⇒ trending (variance grows faster than the
+ * horizon), VR < 1 ⇒ mean-reverting (variance grows slower). Uses the
+ * OVERLAPPING estimator (Lo–MacKinlay 1988) with the heteroskedasticity-robust
+ * z-statistic, so a volatility cluster cannot fake a trend. Neutral {1, 0}
+ * when the series is too short or degenerate (zero variance).
+ */
+export function varianceRatioTest(
+  returns: number[],
+  q = 4,
+): { vr: number; z: number; n: number } {
+  const n = returns.length;
+  const neutral = { vr: 1, z: 0, n: 0 };
+  if (n < 2 * q + 4) return neutral;
+  const mean = returns.reduce((a, b) => a + b, 0) / n;
+  let var1 = 0;
+  for (const r of returns) var1 += (r - mean) ** 2;
+  var1 /= n - 1;
+  if (var1 < 1e-12) return neutral;
+
+  // Overlapping q-period variance (Lo–MacKinlay eq. 4.1).
+  const m = q * (n - q + 1) * (1 - q / n);
+  let sqSum = 0;
+  for (let t = q - 1; t < n; t++) {
+    let s = 0;
+    for (let k = 0; k < q; k++) s += returns[t - k]! - mean;
+    sqSum += s * s;
+  }
+  const varQ = sqSum / m;
+  const vr = varQ / var1;
+
+  // Heteroskedasticity-robust standard error (Lo–MacKinlay eq. 4.4).
+  const res = returns.map(r => r - mean);
+  let theta = 0;
+  for (let j = 1; j < q; j++) {
+    let num = 0;
+    for (let t = j; t < n; t++) num += res[t]! * res[t]! * res[t - j]! * res[t - j]!;
+    const delta = num / (n - j) / (var1 * var1);
+    theta += Math.pow((2 * (q - j)) / q, 2) * delta;
+  }
+  const se = theta > 1e-12 ? Math.sqrt(theta / (n - q)) : 0;
+  const z = se > 1e-12 ? (vr - 1) / se : 0;
+  return { vr: round(vr, 3), z: round(z, 2), n };
+}
+
+/**
  * Benjamini–Hochberg FDR selection.
  *
  * `pValues[i]` tests candidate i. Returns the set of candidates that survive at
@@ -722,14 +898,16 @@ export function parityRead(digits: number[], side: "DIGITEVEN" | "DIGITODD"): Sp
   const paritySet = new Set(target === 0 ? [0, 2, 4, 6, 8] : [1, 3, 5, 7, 9]);
   const dirTail = dirichletTailProbability(clean, paritySet);
 
-  const blended = blendEstimates([
+  // v4 — correlation-aware blend: all six estimates descend from the same
+  // parity series, so their σ is inflated by √(1+(k−1)·ρ) with ρ = 0.30.
+  const blended = blendEstimatesCorrelated([
     { p: pCond, sigma: sigmaCond },
     { p: chain2.p, sigma: sigma2 },
     { p: ew.p, sigma: ew.sigma },
     { p: pMarg, sigma: sigmaMarg },
     { p: runCond.p, sigma: runCond.sigma },
     ...(dirTail.n >= 6 ? [{ p: dirTail.p, sigma: dirTail.sigma }] : []),
-  ]);
+  ], 0.30);
 
   // Serial dependence: runs test → which side the structure favours.
   const ww = waldWolfowitz(parity);
@@ -872,13 +1050,14 @@ export function barrierRead(digits: number[], opts: BarrierReadOptions): Special
   //    prices the tail from the actual last digit, with closed-form variance.
   const dirTail = dirichletTailProbability(clean, new Set(tailDigits));
 
-  const blended = blendEstimates([
+  // v4 — correlation-aware blend (ρ = 0.30): same-buffer estimators.
+  const blended = blendEstimatesCorrelated([
     { p: pCond, sigma: sigmaCond },
     { p: chain2.p, sigma: sigma2 },
     { p: ew.p, sigma: ew.sigma },
     { p: pMarg, sigma: sigmaMarg },
     ...(dirTail.n >= 6 ? [{ p: dirTail.p, sigma: dirTail.sigma }] : []),
-  ]);
+  ], 0.30);
 
   // Digit-mass drift: is the digit distribution migrating toward the tail?
   const ewMean = (() => {
@@ -981,7 +1160,7 @@ export function payoutForBarrier(side: "DIGITOVER" | "DIGITUNDER", barrier: numb
 
 export interface DigitCandidate {
   digit: number;
-  /** EWMA occurrence rate */
+  /** Blended occurrence rate (recency-weighted Beta + transition contexts) */
   p: number;
   /** Standard error of that rate */
   sigma: number;
@@ -995,6 +1174,16 @@ export interface DigitCandidate {
   recent6: number;
   /** Survives the FDR correction in the direction this bot cares about */
   significant: boolean;
+  /**
+   * P(this digit | last digit) from the exact Dirichlet-style transition row
+   * (κ=10 prior toward the digit's own marginal rate). The MATCH gate reads it
+   * as context support (must not contradict the trade), the DIFFER gate reads
+   * it as the immediate repeat hazard (must fit the loss budget). Undefined
+   * while the row is thin (< 8 transitions).
+   */
+  ctxSupport?: number;
+  /** Transitions observed out of the last digit (evidence behind ctxSupport). */
+  ctxN?: number;
 }
 
 /**
@@ -1037,16 +1226,23 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
     entry.hits[c]! += 1;
   }
 
+  // Marginal digit rates (the prior the transition rows shrink toward).
+  const marg = (() => {
+    const counts = new Array<number>(10).fill(0);
+    for (const d of clean) counts[d]! += 1;
+    return counts.map(c => (c + 1) / (clean.length + 10));
+  })();
+
   for (let digit = 0; digit < 10; digit++) {
     const series = clean.map(d => (d === digit ? 1 : 0));
-    const ew = series.length > 0 ? ewmaRate(series, 0.1, 0.97) : { p: 0.1, sigma: 0.3, nEff: 0 };
-    const hits = series.reduce((a, b) => a + b, 0);
-    const n = series.length;
-    // Exact Beta-Binomial posterior of the digit's rate: a κ=10 pseudo-count
-    // prior at the fair 10%. The posterior mean replaces the raw marginal
-    // (shrinkage — a 1-in-5 hit digit is NOT a 20% digit after 5 draws) and
-    // the posterior σ is exact for small n, unlike the normal approximation.
-    const post = betaPosterior(hits, n, 0.1, 10);
+    // v4 — RECENCY-WEIGHTED exact Beta posterior (n_eff ≈ 199 ticks at
+    // decay 0.99). Replaces both the EWMA and the raw-count posterior: same
+    // exponential memory as the EWMA, but with EXACT posterior uncertainty
+    // (and the mean/sigma/quantile/p-value all come from the SAME model).
+    // The old raw-count posterior over the whole buffer (σ ≈ 0.01 for a
+    // 2,000-tick window) dominated the blend no matter what the recent ticks
+    // said — a digit hot 30 minutes ago stayed "hot".
+    const post = weightedBetaPosterior(series, 0.1, 10, 0.99);
 
     // ── Conditional context estimators ─────────────────────────────────────
     // P(digit | last) and P(digit | last two) from THIS buffer's own
@@ -1056,7 +1252,6 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
     // now applied to digit SELECTION (which the marginal-frequency picker
     // ignores). Thin contexts drop out automatically via their large σ.
     const estimates: Array<{ p: number; sigma: number }> = [
-      { p: ew.p, sigma: ew.sigma },
       { p: post.mean, sigma: post.sigma },
     ];
     if (lastDigit !== undefined) {
@@ -1074,7 +1269,10 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
         }
       }
     }
-    const blended = blendEstimates(estimates);
+    // v4 — correlation-aware blend: the context estimators and the weighted
+    // posterior all descend from the same buffer, so their σ must be inflated
+    // (ρ = 0.35) or the blended z overstates the evidence.
+    const blended = blendEstimatesCorrelated(estimates, 0.35);
 
     let gap = clean.length;
     for (let i = clean.length - 1; i >= 0; i--) {
@@ -1094,15 +1292,32 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
     const z = (blended.p - 0.1) / Math.max(blended.sigma, 0.004);
     // EXACT one-sided posterior probability that the digit's rate is above
     // (hot) / below (cold) the fair 10% — no normal approximation, correct for
-    // small windows. Feeding these into the FDR step means a noise digit can
-    // no longer sneak past with a lucky 5/20 run.
-    const pValue = posteriorRateProbability(hits, n, 0.1, direction, 0.1, 10);
+    // small windows. v4: computed on the RECENCY-WEIGHTED posterior so the FDR
+    // step tests the recent stream, not the whole buffer.
+    const pValue = posteriorRateProbabilityWeighted(series, 0.1, direction, 0.1, 10, 0.99);
 
     // Exact asymmetric posterior upper bound (5.1): the 90th percentile of the
-    // Beta posterior, anchored on the blended point estimate (never below it).
-    // Near p ≈ 0.1 the Beta is skewed, so the normal p̂ + 1.645σ bound is wrong
-    // in both directions — the posterior quantile is exact for small counts.
+    // weighted Beta posterior, anchored on the blended point estimate (never
+    // below it). Near p ≈ 0.1 the Beta is skewed, so the normal p̂ + 1.645σ
+    // bound is wrong in both directions — the posterior quantile is exact.
     const quantileDev = Math.max(0, betaQuantile(0.9, post.alpha, post.beta) - post.mean);
+
+    // v4 — current-tick context: P(this digit | last digit) from the exact
+    // Dirichlet-style transition row (κ=10 prior toward the digit's marginal
+    // rate). For MATCH it is the context support the entry gate requires; for
+    // DIFFER it is the immediate repeat hazard (the loss side). Undefined
+    // while the row is thin — the gates then fall back to their count checks.
+    let ctxSupport: number | undefined;
+    let ctxN: number | undefined;
+    if (lastDigit !== undefined) {
+      const rowTotal = rowOut[lastDigit] ?? 0;
+      if (rowTotal >= 8) {
+        const hitsLastToD = rowHit[lastDigit * 10 + digit] ?? 0;
+        ctxSupport = (hitsLastToD + 10 * marg[digit]!) / (rowTotal + 10);
+        ctxN = rowTotal;
+      }
+    }
+
     pValues.push(pValue);
     out.push({
       digit,
@@ -1113,6 +1328,8 @@ export function digitCandidates(digits: number[], direction: "hot" | "cold"): Di
       hazardRelative: round(hazardRelative, 3),
       recent6,
       significant: false,
+      ctxSupport: ctxSupport !== undefined ? round(ctxSupport, 4) : undefined,
+      ctxN,
     });
   }
 
@@ -1175,6 +1392,30 @@ export function matchRead(digits: number[], lockedBarrier?: number): MatchRead {
   const zChosen = (chosen.p - 0.1) / Math.max(chosen.sigma, 0.004);
   const zVsBreakEven = (chosen.p - breakEven) / Math.max(chosen.sigma, 0.004);
 
+  // v4 — selection margin: a z-test of the difference between the two
+  // strongest digits. Under "the top two are equally good" the statistic is
+  // ≈ N(0,1), so the 1.645 threshold refuses ~95% of coin-flips between
+  // near-equal digits while a decisive digit clears it easily. A LOCKED digit
+  // is the user's explicit choice and is exempt.
+  let pBest = 0;
+  let pSecond = 0;
+  let sigmaBest = 0.01;
+  let sigmaSecond = 0.01;
+  let bestZ = -Infinity;
+  let secondZ = -Infinity;
+  for (const c of pool) {
+    const z = (c.p - breakEven) / Math.max(c.sigma, 0.004);
+    if (z > bestZ) {
+      secondZ = bestZ; pSecond = pBest; sigmaSecond = sigmaBest;
+      bestZ = z; pBest = c.p; sigmaBest = c.sigma;
+    } else if (z > secondZ) {
+      secondZ = z; pSecond = c.p; sigmaSecond = c.sigma;
+    }
+  }
+  const selectionMargin = lockedBarrier === undefined
+    ? (pBest - pSecond) / Math.sqrt(sigmaBest * sigmaBest + sigmaSecond * sigmaSecond)
+    : undefined;
+
   // The primary bonus term is the break-even significance — the number that
   // decides whether this trade is +EV. (Previously z-vs-fair drove the bonus
   // while the break-even z was computed and discarded.)
@@ -1192,6 +1433,12 @@ export function matchRead(digits: number[], lockedBarrier?: number): MatchRead {
   signals.push(`z_be ${zVsBreakEven >= 0 ? "+" : ""}${zVsBreakEven.toFixed(2)}${zVsBreakEven < MATCH_ENTRY_Z_BE ? " — below entry margin" : ""}`);
   signals.push(eligible.length > 0 ? `${eligible.length}/10 digits pass FDR` : "no digit passes FDR — low conviction");
   signals.push(`gap ${chosen.gap}t · hazard ×${chosen.hazardRelative.toFixed(2)}`);
+  if (selectionMargin !== undefined) {
+    signals.push(`leads runner-up by ${selectionMargin.toFixed(2)}σ_be`);
+  }
+  if (chosen.ctxN !== undefined && chosen.ctxN >= 10) {
+    signals.push(`P(${chosen.digit}|last) ${((chosen.ctxSupport ?? 0) * 100).toFixed(1)}% (n=${chosen.ctxN})`);
+  }
 
   return {
     barrier: chosen.digit,
@@ -1210,6 +1457,8 @@ export function matchRead(digits: number[], lockedBarrier?: number): MatchRead {
         gap: chosen.gap,
         hazardRelative: chosen.hazardRelative,
         significantDigits: eligible.length,
+        ...(selectionMargin !== undefined ? { selectionMargin: round(selectionMargin, 3) } : {}),
+        ...(chosen.ctxSupport !== undefined ? { ctxSupport: chosen.ctxSupport, ctxN: chosen.ctxN ?? 0 } : {}),
       },
       signals,
     },
@@ -1260,6 +1509,28 @@ export function differRead(digits: number[], lockedBarrier?: number): DifferRead
   const worstCaseWin = 1 - chosen.upper;
   const zSafety = (worstCaseWin - breakEven) / Math.max(chosen.sigma, 0.004);
 
+  // v4 — selection margin: a z-test of the difference between the two safest
+  // digits (worst-case win rates = 1 − upper). Exempt for a locked digit.
+  let worstBest = 0;
+  let worstSecond = 0;
+  let sigmaBest = 0.01;
+  let sigmaSecond = 0.01;
+  let bestZ = -Infinity;
+  let secondZ = -Infinity;
+  for (const c of pool) {
+    const worst = 1 - c.upper;
+    const z = (worst - breakEven) / Math.max(c.sigma, 0.004);
+    if (z > bestZ) {
+      secondZ = bestZ; worstSecond = worstBest; sigmaSecond = sigmaBest;
+      bestZ = z; worstBest = worst; sigmaBest = c.sigma;
+    } else if (z > secondZ) {
+      secondZ = z; worstSecond = worst; sigmaSecond = c.sigma;
+    }
+  }
+  const selectionMargin = lockedBarrier !== undefined
+    ? undefined
+    : (worstBest - worstSecond) / Math.sqrt(sigmaBest * sigmaBest + sigmaSecond * sigmaSecond);
+
   let bonus = 0;
   bonus += clamp(zSafety * 3.0, -8, 8);
   bonus += chosen.recent6 === 0 ? 3 : chosen.recent6 === 1 ? 1 : chosen.recent6 >= 3 ? -6 : -2;
@@ -1274,6 +1545,12 @@ export function differRead(digits: number[], lockedBarrier?: number): DifferRead
   signals.push(`p̂ ${(chosen.p * 100).toFixed(1)}% · UB ${(chosen.upper * 100).toFixed(1)}%`);
   signals.push(chosen.recent6 >= 3 ? `⚠ hot run (${chosen.recent6}/6t) — vetoed` : `last seen ${chosen.gap}t ago`);
   signals.push(eligible.length > 0 ? `${eligible.length}/10 digits pass cold FDR` : "no cold-significant digit");
+  if (selectionMargin !== undefined) {
+    signals.push(`leads runner-up by ${selectionMargin.toFixed(2)}σ_safety`);
+  }
+  if (chosen.ctxN !== undefined && chosen.ctxN >= 8) {
+    signals.push(`repeat hazard P(${chosen.digit}|last) ${((chosen.ctxSupport ?? 0) * 100).toFixed(1)}% (n=${chosen.ctxN})`);
+  }
 
   return {
     barrier: chosen.digit,
@@ -1292,6 +1569,8 @@ export function differRead(digits: number[], lockedBarrier?: number): DifferRead
         gap: chosen.gap,
         recent6: chosen.recent6,
         significantDigits: eligible.length,
+        ...(selectionMargin !== undefined ? { selectionMargin: round(selectionMargin, 3) } : {}),
+        ...(chosen.ctxSupport !== undefined ? { ctxSupport: chosen.ctxSupport, ctxN: chosen.ctxN ?? 0 } : {}),
       },
       signals,
     },
@@ -1372,11 +1651,22 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
   const chain2 = secondOrderTwoState(dirSeries, target, 0.985);
   const sigma2 = Math.sqrt(Math.max(1e-6, (chain2.p * (1 - chain2.p)) / Math.max(4, chain2.n)));
   const ew = ewmaRate(dirSeries.map(d => (d === target ? 1 : 0)), 0.5, 0.96);
-  const blended = blendEstimates([
+  // v4 — correlation-aware blend (ρ = 0.30): same-buffer estimators.
+  const blended = blendEstimatesCorrelated([
     { p: pCond, sigma: sigmaCond },
     { p: chain2.p, sigma: sigma2 },
     { p: ew.p, sigma: ew.sigma },
-  ]);
+  ], 0.30);
+
+  // 8 — v4: Lo–MacKinlay variance-ratio test (the distribution-backed
+  //     random-walk test Hurst lacks) and a Wald–Wolfowitz runs test on the
+  //     direction stream (the parity bot's serial-dependence test, now used
+  //     for direction too). Both are bounded additive terms: they confirm or
+  //     contradict the Hurst regime, never override the z_be margin.
+  const vr = varianceRatioTest(recent, 4);
+  const vrSupports = trending ? vr.vr > 1.05 : meanReverting ? vr.vr < 0.95 : true;
+  const vrContradicts = trending ? vr.vr < 0.95 : meanReverting ? vr.vr > 1.05 : false;
+  const wwDir = waldWolfowitz(dirSeries);
 
   // 6 — signed-drift expectation (6.2): EMA of SIGNED returns with its
   //    standard error. A trend that exists only in the up/down COUNTS but not
@@ -1426,15 +1716,31 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
   // Regime alignment: in a trending stream, trade WITH the last move; in a
   // mean-reverting stream, fade it — but only once the move is extended.
   // The trending bonus is FULL only when the drift is significant (6.2) AND
-  // all three direction scales agree (6.3); a sign-only trend with no
-  // magnitude support gets a quarter of the bonus.
+  // all three direction scales agree (6.3) AND the variance-ratio test
+  // confirms the regime (v4); a sign-only trend with no magnitude support
+  // gets a quarter of the bonus, and a directly CONTRADICTING variance-ratio
+  // zeroes the regime bonus entirely (the regime claim needs distributional
+  // support, not just Hurst).
   if (trending) {
-    const strength = driftSupported && dirAgreement === 1 ? 1 : 0.25;
-    bonus += (alignedWithTrend ? 4 : -4) * strength;
+    const strength = driftSupported && dirAgreement === 1 && vrSupports ? 1 : 0.25;
+    bonus += (alignedWithTrend ? 4 : -4) * (vrContradicts ? 0 : strength);
   } else if (meanReverting) {
     const run = tailRunLength(dirSeries);
     const extended = run.length >= 2;
-    bonus += (!alignedWithTrend && extended) ? 4 : (alignedWithTrend ? -3 : 0);
+    if (!vrContradicts) bonus += (!alignedWithTrend && extended) ? 4 : (alignedWithTrend ? -3 : 0);
+  }
+
+  // v4 — variance-ratio significance bonus (bounded): |z| ≥ 1.5 is a real
+  // departure from the random walk, in the direction of the regime.
+  if (Math.abs(vr.z) >= 1.5) bonus += clamp(vr.z * 0.4, -2, 2);
+
+  // v4 — runs-test alignment: significant CLUSTERING (z < 0) means streaks
+  // persist → ride the last move; significant ALTERNATION (z > 0) means the
+  // stream flips → fade the last move. Each side is scored against its own
+  // alignment, so only the structurally-supported side earns the bonus.
+  if (Math.abs(wwDir.z) >= 1.96) {
+    const clusters = wwDir.z < 0;
+    bonus += clusters === alignedWithTrend ? 2 : -2;
   }
 
   // 2-cycle: the stream flips every other tick.
@@ -1462,6 +1768,12 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
   signals.push(`z_be ${zBe >= 0 ? "+" : ""}${zBe.toFixed(2)} (fair ${(fairBaseline * 100).toFixed(1)}%${flatRate > 0.05 ? `, flats ${(flatRate * 100).toFixed(0)}%` : ""})`);
   signals.push(`asym ${(asymmetry * 100).toFixed(0)}%${deadChop ? " · dead chop" : ""}`);
   signals.push(`drift t ${driftT.toFixed(1)}${driftSupported ? "" : " (unsupported)"} · dir ${(dirRate10 * 100).toFixed(0)}/${(dirRate30 * 100).toFixed(0)}/${(dirRate80 * 100).toFixed(0)}${dirAgreement === 1 ? " ✓" : " ✗"}`);
+  if (vr.n > 0) {
+    signals.push(`VR(${vr.vr.toFixed(2)}) z ${vr.z >= 0 ? "+" : ""}${vr.z.toFixed(1)} ${vrSupports ? "✓" : vrContradicts ? "contradicts" : "neutral"}`);
+  }
+  if (Math.abs(wwDir.z) >= 1.96) {
+    signals.push(`runs ${wwDir.z < 0 ? "clustering" : "alternating"} (z ${wwDir.z.toFixed(2)})`);
+  }
 
   return {
     family: "momentum",
@@ -1496,6 +1808,10 @@ export function momentumRead(prices: number[], side: "CALL" | "PUT"): Specialist
       dirRate30: round(dirRate30, 3),
       dirRate80: round(dirRate80, 3),
       dirAgreement,
+      vr: vr.vr,
+      vrZ: vr.z,
+      vrSupports: vrSupports ? 1 : vrContradicts ? -1 : 0,
+      runsZ: wwDir.z,
     },
     signals,
   };
@@ -1530,11 +1846,31 @@ export interface EntryVerdict {
  *              worst-case win rate must clear the 91.7% hurdle;
  *  - momentum: the regime must not be dead chop.
  */
-export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
+export function specialistEntryGate(
+  read: SpecialistRead,
+  opts?: { payout?: number },
+): EntryVerdict {
   const m = read.metrics;
+  // v4 — LIVE-PAYOUT-AWARE hurdle. The read's metrics were computed against
+  // the FALLBACK payout schedule; when the engine supplies the live quote
+  // (fetched before the execution-tick revalidation), the break-even and the
+  // z_be margin are recomputed against the REAL hurdle 1/payout. A trade that
+  // only clears the fallback break-even is refused.
+  const livePayout = opts?.payout && Number.isFinite(opts.payout) && opts.payout > 1
+    ? opts.payout
+    : undefined;
+  const be = livePayout !== undefined
+    ? 1 / livePayout
+    : (m["breakEven"] as number | undefined) ?? 0.5;
+  const metricZBe = (m["zBe"] as number | undefined) ?? 0;
+  const pHat = (m["pHat"] as number | undefined) ?? 0;
+  const sigma = (m["sigma"] as number | undefined) ?? 0.05;
+  const zBe = livePayout !== undefined && sigma > 1e-9
+    ? (pHat - be) / sigma
+    : metricZBe;
+
   switch (read.family) {
     case "parity": {
-      const zBe = m["zBe"] ?? 0;
       if (zBe < MIN_ENTRY_Z_BE) {
         return { pass: false, reason: `no positive-EV margin (z_be ${zBe.toFixed(2)} < ${MIN_ENTRY_Z_BE})` };
       }
@@ -1548,8 +1884,6 @@ export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
     }
     case "barrier": {
       const p = m["pHat"] ?? 0;
-      const be = m["breakEven"] ?? 0.5;
-      const zBe = m["zBe"] ?? 0;
       if (p <= be) return { pass: false, reason: `conditional p̂ ${(p * 100).toFixed(1)}% ≤ break-even ${(be * 100).toFixed(1)}%` };
       // Tail-size-aware margin: a 1-digit tail must clear break-even harder
       // than a 5-digit tail (rare-event estimates are noisier and more biased).
@@ -1568,11 +1902,23 @@ export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
       return { pass: true, reason: "tail probability above break-even with margin" };
     }
     case "match": {
-      const zBe = m["zBe"] ?? 0;
       // Selection-bias-corrected margin: the match p̂ is an argmax of ten
       // estimates, so it needs a larger clearance to be trusted.
       if (zBe < MATCH_ENTRY_Z_BE) {
         return { pass: false, reason: `p̂ below break-even by only ${zBe.toFixed(2)}σ (needs ${MATCH_ENTRY_Z_BE}) — selection bias` };
+      }
+      // v4 — selection margin: the chosen digit must decisively beat the
+      // runner-up (exempt for a locked digit — the user decided).
+      const selMargin = m["selectionMargin"] as number | undefined;
+      if (selMargin !== undefined && selMargin < MATCH_SELECTION_MARGIN) {
+        return { pass: false, reason: `digit only leads the runner-up by ${selMargin.toFixed(2)}σ (needs ${MATCH_SELECTION_MARGIN}) — near-equal digits` };
+      }
+      // v4 — current-tick context support: the live transition row must not
+      // contradict the trade.
+      const ctxN = m["ctxN"] as number | undefined;
+      const ctxSupport = m["ctxSupport"] as number | undefined;
+      if (ctxN !== undefined && ctxN >= 10 && ctxSupport !== undefined && ctxSupport < MATCH_CTX_SUPPORT_MIN) {
+        return { pass: false, reason: `context contradicts the digit (P(target|last) ${(ctxSupport * 100).toFixed(1)}% < ${(MATCH_CTX_SUPPORT_MIN * 100).toFixed(0)}%)` };
       }
       const hazard = m["hazardRelative"] ?? 1;
       const gap = m["gap"] ?? 0;
@@ -1582,7 +1928,6 @@ export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
       // value means the gap is unusually long FOR THIS DIGIT — the exact
       // "overdue" test. A modest digit that merely passed z_be via a lucky
       // run must wait until its gap is genuinely overdue, not just long.
-      const pHat = m["pHat"] ?? 0.1;
       const geoP = Math.pow(Math.max(1e-6, 1 - pHat), gap);
       if (geoP > 0.35) {
         return { pass: false, reason: `gap ${gap}t not overdue for a ${(pHat * 100).toFixed(0)}% digit (geometric p ${geoP.toFixed(2)} > 0.35)` };
@@ -1593,13 +1938,26 @@ export function specialistEntryGate(read: SpecialistRead): EntryVerdict {
     case "differ": {
       const recent = m["recent6"] ?? 0;
       if (recent >= 3) return { pass: false, reason: `target digit hot (${recent}/6t)` };
+      // v4 — repeat-hazard gate: the immediate loss probability of a Differ is
+      // P(target | last digit) — if the last tick was the target, this is the
+      // chance it repeats. It must fit the loss budget 1 − be (≈8.26% at the
+      // 1.09× payout), or the trade is −EV RIGHT NOW. Replaces the pure count
+      // heuristic with the exact transition estimate (thick row required).
+      const ctxN = m["ctxN"] as number | undefined;
+      const ctxSupport = m["ctxSupport"] as number | undefined;
+      if (ctxN !== undefined && ctxN >= 8 && ctxSupport !== undefined && ctxSupport > 1 - be) {
+        return { pass: false, reason: `repeat hazard P(target|last) ${(ctxSupport * 100).toFixed(1)}% exceeds the loss budget ${((1 - be) * 100).toFixed(1)}%` };
+      }
+      // v4 — selection margin in z-safety units (exempt for a locked digit).
+      const selMargin = m["selectionMargin"] as number | undefined;
+      if (selMargin !== undefined && selMargin < DIFFER_SELECTION_MARGIN) {
+        return { pass: false, reason: `safest digit only leads the runner-up by ${selMargin.toFixed(2)}σ (needs ${DIFFER_SELECTION_MARGIN})` };
+      }
       const worst = m["worstCaseWin"] ?? 0;
-      const be = m["breakEven"] ?? 0.917;
       if (worst < be) return { pass: false, reason: `worst-case win ${(worst * 100).toFixed(1)}% < break-even ${(be * 100).toFixed(1)}%` };
       return { pass: true, reason: "loss-side risk inside tolerance" };
     }
     case "momentum": {
-      const zBe = m["zBe"] ?? 0;
       if (zBe < MIN_ENTRY_Z_BE) {
         return { pass: false, reason: `no positive-EV margin (z_be ${zBe.toFixed(2)} < ${MIN_ENTRY_Z_BE})` };
       }
@@ -1626,29 +1984,37 @@ export interface SideVerdict {
  * specialist arbitrates between them and applies HYSTERESIS: switching sides
  * costs a margin, so the bot does not flip-flop between two near-equal setups
  * on consecutive ticks. `currentSide` is the side the session last traded.
+ *
+ * v4 — the objective is pluggable. The default ranks by the specialist BONUS;
+ * the bot engine passes `valueOf` ranking by EXPECTED VALUE, because barriers
+ * with different payouts can make the higher-bonus side the lower-EV side.
+ * The margin is expressed in the value function's units (the engine uses 0.02
+ * = 2pp of EV).
  */
 export function specialistSideChoice(
   reads: Array<{ side: string; read: SpecialistRead }>,
   currentSide?: string,
   switchMargin = 6,
+  valueOf?: (read: SpecialistRead, side: string) => number,
 ): SideVerdict | null {
   if (reads.length === 0) return null;
   if (reads.length === 1) {
     return { side: reads[0]!.side, margin: 0, reason: "single side armed" };
   }
-  const sorted = reads.slice().sort((a, b) => b.read.bonus - a.read.bonus);
+  const val = valueOf ?? ((r: SpecialistRead) => r.bonus);
+  const sorted = reads.slice().sort((a, b) => val(b.read, b.side) - val(a.read, a.side));
   const best = sorted[0]!;
   const runnerUp = sorted[1]!;
-  const margin = best.read.bonus - runnerUp.read.bonus;
+  const margin = val(best.read, best.side) - val(runnerUp.read, runnerUp.side);
   if (currentSide && currentSide !== best.side && margin < switchMargin) {
     const held = reads.find(r => r.side === currentSide);
     if (held) {
       return {
         side: currentSide,
-        margin: round(margin, 1),
-        reason: `hysteresis — ${best.side} leads by only ${margin.toFixed(1)}`,
+        margin: round(margin, 3),
+        reason: `hysteresis — ${best.side} leads by only ${margin.toFixed(2)}`,
       };
     }
   }
-  return { side: best.side, margin: round(margin, 1), reason: `${best.side} leads by ${margin.toFixed(1)}` };
+  return { side: best.side, margin: round(margin, 3), reason: `${best.side} leads by ${margin.toFixed(2)}` };
 }

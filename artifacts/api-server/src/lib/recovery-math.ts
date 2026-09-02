@@ -195,7 +195,7 @@ export function calculateRecoveryStakeRequest(input: RecoveryStakeRequest): numb
  * This function replaces the target with a flat markup of the outstanding
  * debt, so a $1 loss is recovered by a trade sized to return $1.10 (at the
  * default 10 %) — the original $1 debt plus $0.10 profit.  The markup is
- * user-configurable from Risk Management settings (`botRecoveryMarkup`) and
+ * user-configurable from the AI Bot deploy console (`botRecoveryMarkup`) and
  * applies ONLY to the five specialist AI bots' recovery.  Multi-step recovery
  * compounds naturally because `unrecoveredAmount` accumulates every
  * consecutive loss.

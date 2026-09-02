@@ -24,6 +24,7 @@ import {
   isAutomatedMarket,
 } from "./deriv";
 import { broadcastSSE } from "./sse";
+import { friendlyErrorMessage } from "./friendly-error";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
@@ -1546,7 +1547,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
   runLoop(config).catch(err => {
     logger.error({ err }, "NeuroAI FAB runLoop error");
     session.running = false;
-    session.message = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    session.message = `⚠️ ${friendlyErrorMessage(err)}`;
     broadcast();
   }).finally(() => {
     releaseTradingOwnership("neuroai");
@@ -1963,10 +1964,10 @@ async function runLoop(config: SpeedAIConfig) {
         try {
           await db.update(tradesTable).set({
             status: "error", profit: "0", payout: "0", closedAt: new Date(),
-            agentReasoning: `${fabReason} [EXECUTION FAILED: ${err instanceof Error ? err.message : String(err)}]`,
+            agentReasoning: `${fabReason} [EXECUTION FAILED: ${friendlyErrorMessage(err, { max: 200 })}]`,
           }).where(eq(tradesTable.id, fabTrade.id));
         } catch { /* best-effort */ }
-        session.message = `Trade retry: ${err instanceof Error ? err.message : String(err)}`;
+        session.message = `🔁 Retrying trade — ${friendlyErrorMessage(err)}`;
         broadcast();
         await sleep(1500);
         continue;

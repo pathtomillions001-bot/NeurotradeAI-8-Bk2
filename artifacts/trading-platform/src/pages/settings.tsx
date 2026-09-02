@@ -94,7 +94,6 @@ export default function Settings() {
     riskProfile: "moderate" as "conservative" | "moderate" | "aggressive",
     riskAmountType: "fixed" as "fixed" | "percentage",
     riskAmountValue: 1,
-    botRecoveryMarkup: 10,
     dailyTarget: 50,
     dailyLossLimit: 30,
     maxDrawdown: 10,
@@ -129,7 +128,6 @@ export default function Settings() {
         riskProfile: settings.riskProfile as any,
         riskAmountType: ((settings as any).riskAmountType ?? "fixed") as "fixed" | "percentage",
         riskAmountValue: (settings as any).riskAmountValue ?? 1,
-        botRecoveryMarkup: Number((settings as any).botRecoveryMarkup ?? 10),
         dailyTarget: settings.dailyTarget,
         dailyLossLimit: settings.dailyLossLimit,
         maxDrawdown: settings.maxDrawdown,
@@ -286,12 +284,10 @@ export default function Settings() {
           <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
             <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
           </SettingRow>
-          <SettingRow
-            label="AI Bot Recovery Markup"
-            description="Profit margin (%) the five AI Bots (AI Bot section) add on top of accumulated loss debt when sizing a recovery stake. A 10% markup on a $1 loss targets a $1.10 recovery win. Applies ONLY to the AI Bots' recovery system — the shared engine is not affected."
-          >
-            <NumInput value={form.botRecoveryMarkup} onChange={(v) => set("botRecoveryMarkup", v)} min={0} max={100} step={0.5} suffix="%" />
-          </SettingRow>
+          {/* NOTE: the AI Bot Recovery Markup intentionally does NOT live here.
+              It is a bot-only setting, editable from the AI Bot section
+              (bot deploy console). The main autonomous engine and the NeuroAI
+              Quantum FAB use their own recovery logic. */}
         </CardContent>
       </Card>
 

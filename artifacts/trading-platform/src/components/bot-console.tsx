@@ -181,9 +181,10 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
 
   // AI Bot Recovery Markup — user-adjustable 0–100 % (default 10). The value
   // is shared by all five specialist bots and saved IMMEDIATELY on
-  // blur/Enter, so the user can tune it from this console without a trip to
-  // Settings. The engine re-reads it at recovery-stake time, meaning the
-  // change applies even to a bot that is already running.
+  // blur/Enter. This console is the ONLY place it is edited — it is a
+  // bot-only feature, not part of the main app settings. The engine re-reads
+  // it at recovery-stake time, meaning the change applies even to a bot that
+  // is already running.
   const markupSaved = Number((settings as any)?.botRecoveryMarkup ?? 10);
   const [markupDraft, setMarkupDraft] = useState<string | null>(null);
   const saveMarkup = (raw: string) => {
@@ -658,8 +659,9 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                   Recovery executes exclusively inside {bot.contractLabel}. A loss puts the shared
                   account ledger into recovery and every recovery trade stays in this bot&apos;s contract.
                   The markup on debt is adjustable above — set any percentage you prefer (0–100 %,
-                  default 10) and it saves instantly, applies to all five AI bots, and is also
-                  available under Settings → Risk Profile → AI Bot Recovery Markup.
+                  default 10) and it saves instantly, applying to all five AI bots. It is a bot-only
+                  setting: the main autonomous engine and the NeuroAI Quantum FAB use their own
+                  recovery logic and are never affected by it.
                 </p>
               </div>
 

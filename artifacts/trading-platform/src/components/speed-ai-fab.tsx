@@ -952,15 +952,16 @@ export function SpeedAIFab() {
                     )}
                   </div>
 
-                  {/* Status message */}
+                  {/* Status message — clamped so an unexpectedly long backend
+                      message can never blow up the panel layout */}
                   {status?.message && (
-                    <div className={`text-xs px-3 py-2 rounded-lg border font-mono ${
+                    <div className={`text-xs px-3 py-2 rounded-lg border font-mono break-words line-clamp-4 ${
                       status.message.startsWith("✅") ? "bg-green-500/10 border-green-500/20 text-green-400" :
                       status.message.startsWith("🛑") ? "bg-red-500/10 border-red-500/20 text-red-400" :
                       status.message.startsWith("🎯") ? "bg-amber-500/10 border-amber-500/25 text-amber-300" :
                       "bg-secondary/30 border-border text-muted-foreground"
                     }`}>
-                      {status.message}
+                      {status.message.length > 220 ? `${status.message.slice(0, 220)}…` : status.message}
                     </div>
                   )}
 

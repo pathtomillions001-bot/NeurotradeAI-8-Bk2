@@ -340,7 +340,7 @@ export function getDynamicRecoveryStake(
 
 /**
  * Bot-specific recovery stake with a configurable markup on debt
- * (default 10 %, user-adjustable from Risk Management settings).
+ * (default 10 %, user-adjustable from the AI Bot deploy console).
  *
  * Used ONLY by the five specialist AI bots.  The shared
  * `getDynamicRecoveryStake` sizes recovery to cover debt plus an aspirational

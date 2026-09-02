@@ -9,6 +9,7 @@ import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
+import { friendlyErrorMessage } from "../lib/friendly-error";
 import { getLocalTodayStart } from "../lib/tz";
 import { getFallbackPayout } from "../lib/payouts";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
@@ -459,8 +460,9 @@ router.post("/", async (req, res): Promise<void> => {
       // profit_table doesn't expose tick-level exit spot; fall back to entry price for display
       exitPrice = contractResult.exitSpot || entryPrice;
     } catch (liveErr) {
-      const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-      logger.warn({ liveErrMsg: errMsg, symbol, contractType, barrier }, "Live manual trade failed");
+      const rawErrMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
+      const errMsg = friendlyErrorMessage(liveErr);
+      logger.warn({ liveErrMsg: rawErrMsg, symbol, contractType, barrier }, "Live manual trade failed");
       // Mark as "error" (not "lost") — outcome is unknown when execution throws.
       // The consecutive-loss counter in the autonomous loop counts only "lost" records,
       // so an unknown outcome must never pollute the streak or trigger false cooldowns.
@@ -468,7 +470,7 @@ router.post("/", async (req, res): Promise<void> => {
         .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
                agentReasoning: `[LIVE — FAILED: ${errMsg}] ${(analysis as any).reasoning ?? ""}` })
         .where(eq(tradesTable.id, openTrade.id));
-      res.status(500).json({ error: `Trade execution failed: ${errMsg}` });
+      res.status(500).json({ error: `Trade execution failed — ${errMsg}` });
       return;
     }
 

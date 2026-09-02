@@ -25,6 +25,14 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
 import { RISE_FALL_PAYOUT } from "./payouts";
+import {
+  describeDerivHttpFailure,
+  isTransientDerivFailure,
+} from "./friendly-error";
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // ── Deriv API base URLs ───────────────────────────────────────────────────────
 export const DERIV_REST_BASE = "https://api.derivws.com";
@@ -84,7 +92,9 @@ export async function exchangeOAuthCode(
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`OAuth token exchange failed: ${res.status} ${text}`);
+    throw new Error(
+      describeDerivHttpFailure("Sign-in with Deriv", res.status, text),
+    );
   }
   const data = await res.json() as any;
   return {
@@ -110,7 +120,9 @@ export async function getDerivAccounts(bearerToken: string): Promise<Array<{
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`GET /accounts failed: ${res.status} ${text}`);
+    throw new Error(
+      describeDerivHttpFailure("Fetching your Deriv accounts", res.status, text),
+    );
   }
   const data = await res.json() as any;
   return data.data ?? [];
@@ -126,18 +138,65 @@ export async function getOtpWebSocketUrl(
   bearerToken: string,
   accountId: string,
 ): Promise<string> {
-  const res = await fetch(
-    `${DERIV_REST_BASE}/trading/v1/options/accounts/${accountId}/otp`,
-    { method: "POST", headers: derivHeaders(bearerToken) },
-  );
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`OTP request failed: ${res.status} ${text}`);
+  // The OTP endpoint sits behind Cloudflare and returns raw 502 HTML pages or
+  // 503 {"errors":[{"code":"CircuitBreakerBusy",...}]} envelopes during brief
+  // Deriv health probes. Those recover within seconds, so retry transient
+  // failures a few times before surfacing anything — and never leak the raw
+  // response body (full HTML pages) into a user-visible error message.
+  const maxAttempts = 3;
+  let lastStatus = 0;
+  let lastBody = "";
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(
+        `${DERIV_REST_BASE}/trading/v1/options/accounts/${accountId}/otp`,
+        { method: "POST", headers: derivHeaders(bearerToken) },
+      );
+    } catch (err) {
+      // Network-level failure (DNS, reset, timeout) — transient, retry.
+      lastStatus = 0;
+      lastBody = err instanceof Error ? err.message : String(err);
+      logger.warn({ attempt, maxAttempts, err: lastBody }, "OTP request network error — retrying");
+      if (attempt < maxAttempts) {
+        await sleep(1000 * 2 ** (attempt - 1));
+        continue;
+      }
+      throw new Error(
+        "Trading session handshake failed — the connection to Deriv was interrupted. The engine will retry automatically.",
+      );
+    }
+
+    if (res.ok) {
+      const data = await res.json() as any;
+      const url: string | undefined = data?.data?.url;
+      if (!url) throw new Error("Deriv did not issue a trading session URL — please try again.");
+      return url;
+    }
+
+    lastStatus = res.status;
+    lastBody = await res.text().catch(() => "");
+
+    if (isTransientDerivFailure(res.status, lastBody) && attempt < maxAttempts) {
+      const backoffMs = 1000 * 2 ** (attempt - 1); // 1s → 2s
+      logger.warn(
+        { attempt, maxAttempts, status: res.status, backoffMs },
+        "OTP request hit a transient Deriv failure — retrying before surfacing",
+      );
+      await sleep(backoffMs);
+      continue;
+    }
+
+    throw new Error(
+      describeDerivHttpFailure("Trading session handshake (OTP)", res.status, lastBody),
+    );
   }
-  const data = await res.json() as any;
-  const url: string | undefined = data?.data?.url;
-  if (!url) throw new Error("OTP response did not contain a WebSocket URL");
-  return url;
+
+  // Unreachable in practice (loop always throws or returns), but keeps types safe.
+  throw new Error(
+    describeDerivHttpFailure("Trading session handshake (OTP)", lastStatus, lastBody),
+  );
 }
 
 // ── Market definitions (synthetics only) ──────────────────────────────────────

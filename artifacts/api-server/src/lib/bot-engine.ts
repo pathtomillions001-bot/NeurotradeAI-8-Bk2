@@ -34,6 +34,7 @@ import {
   isAutomatedMarket,
 } from "./deriv";
 import { broadcastSSE } from "./sse";
+import { friendlyErrorMessage } from "./friendly-error";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
@@ -341,7 +342,7 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
   runLoop(config).catch(err => {
     logger.error({ err }, "Specialist bot runLoop error");
     session.running = false;
-    session.message = `Error: ${err instanceof Error ? err.message : String(err)}`;
+    session.message = `⚠️ ${friendlyErrorMessage(err)}`;
     broadcast();
   }).finally(() => {
     releaseTradingOwnership("bots");
@@ -687,8 +688,8 @@ function computeRecoveryStake(
   markupPercent = 10,
 ): number {
   if (!recoveryEngine.isInRecovery()) return config.stake;
-  // Bot-specific: user-configurable markup on debt (default 10 %, set in Risk
-  // Management settings → botRecoveryMarkup).  The shared
+  // Bot-specific: user-configurable markup on debt (default 10 %, set in the
+  // AI Bot deploy console → botRecoveryMarkup).  The shared
   // getDynamicRecoveryStake targets debt + aspirational target-profit, which
   // over-exposes capital for high-payout bot contracts (Matches 8.93×,
   // Over/Under 2.43×, Even/Odd 1.95×).  getBotRecoveryStake sizes the stake
@@ -733,7 +734,8 @@ async function runLoop(config: BotConfig) {
   const isLive         = !paperTradeMode && !!token;
   const maxStake       = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
   // Profit markup (%) on debt used ONLY by this bot's recovery stake sizing.
-  // User-adjustable (Settings → Risk Profile, or directly in the Bot Console);
+  // User-adjustable from the AI Bot deploy console only (it is deliberately
+  // NOT part of the main app settings, which serve the shared engines);
   // defaults to 10 %.  This is only the loop-start snapshot — the value is
   // re-read from the DB at recovery-stake time so mid-session user
   // adjustments apply without redeploying the bot.
@@ -1117,10 +1119,10 @@ async function runLoop(config: BotConfig) {
           try {
             await db.update(tradesTable).set({
               status: "error", profit: "0", payout: "0", closedAt: new Date(),
-              agentReasoning: `${botReason} [EXECUTION FAILED: ${err instanceof Error ? err.message : String(err)}]`,
+              agentReasoning: `${botReason} [EXECUTION FAILED: ${friendlyErrorMessage(err, { max: 200 })}]`,
             }).where(eq(tradesTable.id, botTrade!.id));
           } catch { /* best-effort */ }
-          session.message = `Trade retry: ${err instanceof Error ? err.message : String(err)}`;
+          session.message = `🔁 Retrying trade — ${friendlyErrorMessage(err)}`;
           broadcast();
           await sleep(1500);
           continue;

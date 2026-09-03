@@ -49,3 +49,4 @@ Thumbs.db
 .local/
 .data/
 **/.data/
+__pycache__/

@@ -20,6 +20,16 @@ import {
   type BotContractType,
 } from "../lib/bot-engine";
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
+import * as dualLock from "../lib/dual-lock-engine";
+import {
+  DUAL_LOCK_NORMAL_CONTRACTS,
+  DUAL_LOCK_RECOVERY_CONTRACTS,
+  isNormalContract,
+  isRecoveryContract,
+  type DualLockContract,
+} from "../lib/dual-lock-analysis";
+import { db, settingsTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
 
 const router = Router();
@@ -42,6 +52,9 @@ interface ParsedBotBody {
 function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotBody } | { ok: false; error: string } {
   const bot = getBotDefinition(botId);
   if (!bot) return { ok: false, error: "Unknown bot" };
+  // Pre-locked bots (Dual-Lock Range Sentinel) have their own endpoints — they
+  // are never driven through the generic specialist route.
+  if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -160,18 +173,153 @@ function visibleStatus(sessionId: string) {
 
 router.get("/", (req, res) => {
   const status = visibleStatus(req.sessionId);
+  const dual = visibleDualStatus(req.sessionId);
   res.json({
-    bots: BOT_CATALOG.map(bot => ({
-      ...bot,
-      session: status.running && status.botId === bot.id ? status : null,
-    })),
-    activeBotId: status.running ? status.botId : null,
+    bots: BOT_CATALOG.map(bot => {
+      if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
+        return { ...bot, session: dual.running ? dual : null };
+      }
+      return { ...bot, session: status.running && status.botId === bot.id ? status : null };
+    }),
+    activeBotId: dual.running
+      ? dualLock.DUAL_LOCK_BOT_ID
+      : (status.running ? status.botId : null),
   });
+});
+
+// ── Dual-Lock Range Sentinel (pre-locked bot) ─────────────────────────────────
+//
+// This bot has its own engine because its lifecycle is different: ALL analysis
+// runs once in /scan, the chosen (market, normal, recovery) triple is frozen,
+// and /start simply executes it until TP or SL. It shares the account-global
+// recovery ledger, the recovery stake formula and the single-executor arbiter
+// with the other five bots.
+
+function visibleDualStatus(sessionId: string) {
+  const status = dualLock.getStatus();
+  const owner = dualLock.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, lock: undefined };
+}
+
+async function dualSimParams(sessionId: string, body: any) {
+  let markupPercent = 10;
+  let maxStake = 500;
+  try {
+    const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
+    if (rows.length > 0) {
+      const v = Number((rows[0] as any).botRecoveryMarkup);
+      if (Number.isFinite(v)) markupPercent = v;
+      const m = Number((rows[0] as any).maxTradeStake);
+      if (Number.isFinite(m) && m > 0) maxStake = m;
+    }
+  } catch { /* defaults */ }
+  return {
+    stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
+    takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
+    stopLoss: Number(body?.stopLoss) > 0 ? Number(body.stopLoss) : 5,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body?.maxRecoverySteps) || 3)),
+    markupPercent,
+    maxStake,
+  };
+}
+
+router.get("/duallock/contracts", (_req, res) => {
+  res.json({
+    normal: DUAL_LOCK_NORMAL_CONTRACTS,
+    recovery: DUAL_LOCK_RECOVERY_CONTRACTS,
+  });
+});
+
+router.get("/duallock/status", (req, res) => {
+  res.json(visibleDualStatus(req.sessionId));
+});
+
+router.post("/duallock/scan", async (req, res): Promise<void> => {
+  try {
+    const params = await dualSimParams(req.sessionId, req.body);
+    const result = await dualLock.scanForLock(req.sessionId, params);
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Dual-Lock scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/duallock/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const parseContract = (raw: any): DualLockContract | null => {
+    if (!raw) return null;
+    const side = raw.side === "DIGITOVER" || raw.side === "DIGITUNDER" ? raw.side : null;
+    const barrier = Number(raw.barrier);
+    if (!side || !Number.isInteger(barrier)) return null;
+    return { side, barrier };
+  };
+
+  const normal = parseContract(body.normal);
+  const recovery = parseContract(body.recovery);
+  if (!normal || !isNormalContract(normal.side, normal.barrier)) {
+    res.status(400).json({ error: "normal must be one of Over 1, Under 8, Over 2, Under 7" });
+    return;
+  }
+  if (!recovery || !isRecoveryContract(recovery.side, recovery.barrier)) {
+    res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 5, Under 4" });
+    return;
+  }
+  if (typeof body.symbol !== "string" || !isAutomatedMarket(body.symbol)) {
+    res.status(400).json({ error: "A valid locked market symbol is required" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === body.symbol);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+
+  const existingOwner = dualLock.getOwnerSessionId();
+  if (dualLock.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+    return;
+  }
+
+  const result = await dualLock.startSession({
+    ownerSessionId: req.sessionId,
+    symbol: market.symbol,
+    displayName: market.displayName,
+    normal,
+    recovery,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    lockedAnalysis: body.analysis,
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
+});
+
+router.post("/duallock/stop", (req, res) => {
+  const owner = dualLock.getOwnerSessionId();
+  if (dualLock.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  dualLock.stopSession();
+  res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
 });
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
+  const dual = visibleDualStatus(req.sessionId);
+  if (dual.running) { res.json(dual); return; }
   res.json(visibleStatus(req.sessionId));
 });
 

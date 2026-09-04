@@ -23,7 +23,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily;
+  family: SpecialistFamily | "duallock";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -31,7 +31,13 @@ export interface BotDefinition {
   /** What the specialisation buys — shown on the card and in the console. */
   edge: string[];
   /** Accent used by the UI (theme-safe tailwind colour names). */
-  accent: "cyan" | "violet" | "amber" | "emerald" | "rose";
+  accent: "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo";
+  /**
+   * Bots whose entire analysis happens ONCE, before deployment, and whose
+   * contract pair is then frozen for the whole session (see the Dual-Lock
+   * Range Sentinel). The UI renders a different console for these.
+   */
+  preLocked?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -192,6 +198,35 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "≈50%",
     nominalPayout: "1.92×",
+  },
+  {
+    id: "duallock",
+    name: "Dual-Lock Range Sentinel",
+    code: "BOT-DUALLOCK",
+    family: "duallock",
+    contractLabel: "Over / Under (dual-locked)",
+    tagline: "Pre-locked pair · non-stop session",
+    description:
+      "The only bot that does ALL of its thinking before it starts. It searches every market for one triple — market, normal contract (Over 1 / Under 8 / Over 2 / Under 7) and recovery contract (Over 4 / Over 5 / Under 5 / Under 4) — that can survive an uninterrupted session, then freezes it. From the first trade to TP or SL there is no re-analysis, no market switching and no contract change: the pair was chosen precisely because it does not need any.",
+    edge: [
+      "Loss-clustering Markov chain — ξ = P(loss|loss)/P(loss); a market where losses attract losses is refused outright, because consecutive losses (not a low win rate) is what kills a non-stop session",
+      "Conditional recovery estimand — the recovery leg is scored on P(win | last digit lost the normal contract) from Dirichlet-smoothed transition rows, not on its unconditional rate: recovery only ever trades from the post-loss state",
+      "5th-percentile Beta posterior bounds on an autocorrelation-corrected effective sample size n_eff = n(1−ρ₁)/(1+ρ₁) — a locked session must be +EV in its WORST plausible case, not its expected one",
+      "Pearson χ² block-homogeneity (Wilson–Hilferty z) rejects drifting markets — drift is the exact failure mode of a lock that cannot adapt",
+      "Stationary block bootstrap of the real digit stream through the real engine rules (debt-driven recovery stake, max steps, TP, SL) returns the headline number: P(take-profit before stop-loss)",
+      "Benjamini–Hochberg FDR across all ~320 market × pair candidates — the winner has to be genuinely good, not merely the luckiest of hundreds",
+      "Geometric extreme-value loss-run forecast E[L_max] plus a live circuit breaker that halts if the realised ladder exceeds the modelled p95 depth",
+    ],
+    accent: "indigo",
+    icon: "lock",
+    preLocked: true,
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Dual-locked pair", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "The scan selects and freezes both the normal and the recovery contract" },
+    ],
+    nominalWinRate: "70–80% normal · 40–50% recovery",
+    nominalPayout: "1.23–1.40× · 1.95–2.43×",
   },
 ];
 

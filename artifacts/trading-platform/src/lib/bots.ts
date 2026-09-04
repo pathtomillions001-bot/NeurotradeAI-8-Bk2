@@ -7,9 +7,9 @@
  * giving each specialist its own hue.
  */
 
-import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck } from "lucide-react";
+import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock } from "lucide-react";
 
-export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose";
+export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo";
 
 export interface BotSideOption {
   id: "both" | "primary" | "secondary";
@@ -37,6 +37,8 @@ export interface BotCardData {
   sides: BotSideOption[];
   nominalWinRate: string;
   nominalPayout: string;
+  /** Pre-locked bots analyse once, then freeze their pair for the session. */
+  preLocked?: boolean;
   session: BotSessionStatus | null;
 }
 
@@ -56,6 +58,23 @@ export interface BotSessionStatus {
   recoveryTargetProfit: number;
   recoveryRemainingTargetProfit: number;
   consecutiveRecoveryLosses: number;
+  /** Dual-Lock only: deepest realised consecutive-loss run this session. */
+  deepestLossRun?: number;
+  /** Dual-Lock only: the frozen triple + its pre-deploy telemetry. */
+  lock?: {
+    symbol: string;
+    displayName: string;
+    normal: string;
+    recovery: string;
+    survival: number;
+    ruin: number;
+    clusterRatio: number;
+    normalLcb: number;
+    recoveryConditional: number;
+    expectedMaxLossRun: number;
+    recoveryDepthP95: number;
+    signals: string[];
+  };
   currentMarket?: string;
   currentContractType?: string;
   lastResult?: "won" | "lost";
@@ -196,6 +215,23 @@ export const ACCENTS: Record<AccentKey, {
     focusBorder: "focus:border-emerald-500/50",
     cardGlow: "shadow-emerald-950/40",
   },
+  indigo: {
+    text: "text-indigo-300",
+    dot: "bg-indigo-400",
+    grad: "from-indigo-600 to-blue-700",
+    iconBg: "bg-indigo-500/15",
+    iconBorder: "border border-indigo-500/30",
+    badgeBg: "bg-indigo-500/20",
+    activeBg: "bg-indigo-500/15",
+    activeBorder: "border-indigo-500/50",
+    panelBg: "bg-indigo-500/[0.06]",
+    panelBorder: "border-indigo-500/20",
+    headerGrad: "from-indigo-950/50 via-blue-950/25 to-transparent",
+    outlineBtn: "border-indigo-500/30 text-indigo-300 hover:bg-indigo-500/10",
+    solidBtn: "bg-indigo-600 hover:bg-indigo-500",
+    focusBorder: "focus:border-indigo-500/50",
+    cardGlow: "shadow-indigo-950/40",
+  },
   rose: {
     text: "text-rose-300",
     dot: "bg-rose-400",
@@ -221,6 +257,7 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   crosshair: Crosshair,
   trend: TrendingUp,
   shield: ShieldCheck,
+  lock: Lock,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

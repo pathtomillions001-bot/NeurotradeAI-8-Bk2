@@ -7,9 +7,9 @@
  * giving each specialist its own hue.
  */
 
-import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock } from "lucide-react";
+import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target } from "lucide-react";
 
-export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo";
+export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky";
 
 export interface BotSideOption {
   id: "both" | "primary" | "secondary";
@@ -39,6 +39,8 @@ export interface BotCardData {
   nominalPayout: string;
   /** Pre-locked bots analyse once, then freeze their pair for the session. */
   preLocked?: boolean;
+  /** Sniper bots lock one market + one contract and wait for a conclusive setup. */
+  sniper?: boolean;
   session: BotSessionStatus | null;
 }
 
@@ -74,6 +76,63 @@ export interface BotSessionStatus {
     expectedMaxLossRun: number;
     recoveryDepthP95: number;
     signals: string[];
+  };
+  /**
+   * Dual-Lock only: ADVISORY edge-validity read. Tells the user how long the
+   * locked edge is expected to stay valid and how much of it is left. It never
+   * stops the session — stopping and re-scanning is always the user's choice.
+   */
+  validity?: {
+    state: "fresh" | "aging" | "stale" | "expired";
+    freshness: number;
+    remainingSeconds: number;
+    remainingTrades: number;
+    elapsedSeconds: number;
+    horizonSeconds: number;
+    expectedSeconds: number;
+    realisedRate: number;
+    lockedRate: number;
+    deviationSigma: number;
+    phStatistic: number;
+    phThreshold: number;
+    changeDetected: boolean;
+    normalTrades: number;
+    advice: string;
+    bindingFactor: string;
+    forecastSummary: string;
+  };
+  /**
+   * Kill-Shot only: the frozen target (market + the user's single contract) and
+   * its pre-deploy read.
+   */
+  killLock?: {
+    symbol: string;
+    displayName: string;
+    contract: string;
+    confidence: number;
+    pWin: number;
+    pLower: number;
+    breakEven: number;
+    payout: number;
+    expectedValue: number;
+    pTwoInARow: number;
+    clusterRatio: number;
+    signals: string[];
+  };
+  /** Kill-Shot only: what the sniper is waiting for right now. */
+  hunt?: {
+    phase: "waiting" | "armed" | "firing" | "settling";
+    evidence: number;
+    logLR: number;
+    threshold: number;
+    oddsForEdge: number;
+    expectedTicks: number;
+    confidence: number;
+    pWin: number;
+    pLower: number;
+    blockers: string[];
+    ticksWatched: number;
+    setupsRejected: number;
   };
   currentMarket?: string;
   currentContractType?: string;
@@ -232,6 +291,23 @@ export const ACCENTS: Record<AccentKey, {
     focusBorder: "focus:border-indigo-500/50",
     cardGlow: "shadow-indigo-950/40",
   },
+  sky: {
+    text: "text-sky-300",
+    dot: "bg-sky-400",
+    grad: "from-sky-600 to-cyan-700",
+    iconBg: "bg-sky-500/15",
+    iconBorder: "border border-sky-500/30",
+    badgeBg: "bg-sky-500/20",
+    activeBg: "bg-sky-500/15",
+    activeBorder: "border-sky-500/50",
+    panelBg: "bg-sky-500/[0.06]",
+    panelBorder: "border-sky-500/20",
+    headerGrad: "from-sky-950/50 via-cyan-950/25 to-transparent",
+    outlineBtn: "border-sky-500/30 text-sky-300 hover:bg-sky-500/10",
+    solidBtn: "bg-sky-600 hover:bg-sky-500",
+    focusBorder: "focus:border-sky-500/50",
+    cardGlow: "shadow-sky-950/40",
+  },
   rose: {
     text: "text-rose-300",
     dot: "bg-rose-400",
@@ -258,6 +334,7 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   trend: TrendingUp,
   shield: ShieldCheck,
   lock: Lock,
+  target: Target,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

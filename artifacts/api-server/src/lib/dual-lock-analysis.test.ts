@@ -3,7 +3,7 @@ import assert from "node:assert";
 import {
   evaluateMarket, screenAndRank, lossClustering, stationarityZ,
   conditionalTransitionRate, simulateSession, winSet, lossSet,
-  DUAL_LOCK_NORMAL_CONTRACTS, DUAL_LOCK_RECOVERY_CONTRACTS, isDeployable,
+  DUAL_LOCK_NORMAL_CONTRACTS, DUAL_LOCK_RECOVERY_CONTRACTS, isDeployable, DUAL_LOCK_MIN_SURVIVAL,
 } from "./dual-lock-analysis";
 
 function rng(seed: number) { let s = seed >>> 0; return () => { s ^= s<<13; s>>>=0; s^=s>>17; s^=s<<5; s>>>=0; return s/4294967296; }; }
@@ -66,4 +66,26 @@ test("simulation obeys TP/SL and returns a probability", () => {
 
 test("insufficient history yields no candidates", () => {
   assert.equal(evaluateMarket("X","X", uniform(50)).length, 0);
+});
+
+test("the 90% survival bar is enforced — nothing at or below 90% may be locked", () => {
+  assert.ok(DUAL_LOCK_MIN_SURVIVAL > 0.9, `bar ${DUAL_LOCK_MIN_SURVIVAL} must exceed 0.90`);
+  const base = {
+    metrics: { blocked: 0 }, score: 95, clusterRatio: 0.98,
+  } as any;
+  assert.equal(isDeployable({ ...base, survival: 0.90 }), false, "exactly 90% must be refused");
+  assert.equal(isDeployable({ ...base, survival: 0.899 }), false, "89.9% must be refused");
+  assert.equal(isDeployable({ ...base, survival: 0.95 }), true, "95% must be accepted");
+});
+
+test("every scored candidate carries an edge-validity forecast", () => {
+  const params = { stake:1, takeProfit:10, stopLoss:5, maxRecoverySteps:3, markupPercent:10, maxStake:500 };
+  const scored = evaluateMarket("FAIR","Fair", uniform(800), params);
+  const withValidity = scored.filter(c => c.validity);
+  assert.ok(withValidity.length > 0, "candidates should report a validity horizon");
+  for (const c of withValidity) {
+    assert.ok(c.validity!.p20Ticks > 0);
+    assert.ok(c.validity!.p20Ticks < c.validity!.p50Ticks);
+    assert.ok(c.signals.some(s => s.includes("edge validity")), "validity must be surfaced in signals");
+  }
 });

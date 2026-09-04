@@ -67,8 +67,75 @@ import {
   type DualLockCandidate,
   type DualLockContract,
 } from "./dual-lock-analysis";
+import { winSet } from "./dual-lock-analysis";
+import {
+  EdgeValidityTracker,
+  estimateEdgeValidity,
+  type ValiditySnapshot,
+} from "./dual-lock-validity";
 
 export const DUAL_LOCK_BOT_ID = "duallock";
+
+// ── Session-parameter sovereignty ─────────────────────────────────────────────
+//
+// PRODUCT RULE (Dual-Lock only): the risk parameters the user sets before their
+// FIRST scan are the parameters for the whole engagement. A re-scan may change
+// the market and the contract pair — that is what a re-scan is for — but it may
+// NEVER change the stake, take-profit, stop-loss or max recovery steps. This
+// prevents the subtle failure where a survival figure is quoted for one set of
+// boundaries and the session is then run with another.
+//
+// The committed parameters are held here, keyed by browser session, and every
+// scan and start is forced through them. They are released only when the user
+// explicitly asks for a fresh engagement (`resetSessionParams`).
+
+export interface DualLockSessionParams {
+  stake: number;
+  takeProfit: number;
+  stopLoss: number;
+  maxRecoverySteps: number;
+}
+
+const committedParams = new Map<string, DualLockSessionParams>();
+
+/**
+ * Commit (or read back) the immutable risk parameters for a browser session.
+ * The first call wins; every later call returns the committed values and
+ * reports which of the requested fields were overridden.
+ */
+export function commitSessionParams(
+  sessionId: string,
+  requested: DualLockSessionParams,
+): { params: DualLockSessionParams; committed: boolean; overridden: string[] } {
+  const existing = committedParams.get(sessionId);
+  if (!existing) {
+    const params: DualLockSessionParams = {
+      stake: requested.stake,
+      takeProfit: requested.takeProfit,
+      stopLoss: requested.stopLoss,
+      maxRecoverySteps: requested.maxRecoverySteps,
+    };
+    committedParams.set(sessionId, params);
+    return { params, committed: true, overridden: [] };
+  }
+  const overridden: string[] = [];
+  const near = (a: number, b: number) => Math.abs(a - b) < 1e-9;
+  if (!near(existing.stake, requested.stake)) overridden.push("stake");
+  if (!near(existing.takeProfit, requested.takeProfit)) overridden.push("takeProfit");
+  if (!near(existing.stopLoss, requested.stopLoss)) overridden.push("stopLoss");
+  if (existing.maxRecoverySteps !== requested.maxRecoverySteps) overridden.push("maxRecoverySteps");
+  return { params: { ...existing }, committed: false, overridden };
+}
+
+export function getCommittedParams(sessionId: string): DualLockSessionParams | undefined {
+  const p = committedParams.get(sessionId);
+  return p ? { ...p } : undefined;
+}
+
+/** Start a brand-new engagement: the next scan may set fresh parameters. */
+export function resetSessionParams(sessionId: string): void {
+  committedParams.delete(sessionId);
+}
 
 // ── Config / status types ─────────────────────────────────────────────────────
 
@@ -126,6 +193,15 @@ export interface DualLockStatus {
     recoveryDepthP95: number;
     signals: string[];
   };
+  /**
+   * ADVISORY edge-validity read: how long the locked edge is expected to remain
+   * valid, and how much of it is left. This NEVER stops the session — the user
+   * decides when to stop and re-scan.
+   */
+  validity?: ValiditySnapshot & {
+    bindingFactor: string;
+    forecastSummary: string;
+  };
 }
 
 export interface DualLockScanResult {
@@ -154,6 +230,10 @@ interface SessionState {
   lastResult?: "won" | "lost";
   message?: string;
   stopRequested: boolean;
+  /** Advisory edge-decay tracker (never halts the session). */
+  validity: EdgeValidityTracker | null;
+  validityBinding: string;
+  validitySummary: string;
 }
 
 function freshSession(): SessionState {
@@ -170,6 +250,9 @@ function freshSession(): SessionState {
     currentLossRun: 0,
     deepestLossRun: 0,
     stopRequested: false,
+    validity: null,
+    validityBinding: "unbounded",
+    validitySummary: "",
   };
 }
 
@@ -240,6 +323,13 @@ export function getStatus(): DualLockStatus {
           expectedMaxLossRun: a?.expectedMaxLossRun ?? 0,
           recoveryDepthP95: a?.metrics?.["recoveryDepthP95"] ?? 0,
           signals: a?.signals ?? [],
+        }
+      : undefined,
+    validity: session.validity
+      ? {
+          ...session.validity.snapshot(),
+          bindingFactor: session.validityBinding,
+          forecastSummary: session.validitySummary,
         }
       : undefined,
   };
@@ -353,11 +443,40 @@ export async function startSession(config: DualLockConfig): Promise<{ ok: boolea
   }
   if (!isAutomatedMarket(config.symbol)) return fail(`${config.symbol} cannot be traded by this bot`);
 
+  // ── Edge-validity forecast (advisory) ───────────────────────────────────────
+  // Recomputed from the live digit buffer at deploy time so the countdown the
+  // user sees starts from the market as it is NOW, not as it was mid-scan. The
+  // tracker only ever informs; it can never stop or alter the session.
+  let tracker: EdgeValidityTracker | null = null;
+  let validityBinding = "unbounded";
+  let validitySummary = "";
+  try {
+    const digits = tickManager.getDigits(config.symbol, 400).filter(d => d >= 0 && d <= 9);
+    const nWin = winSet(config.normal);
+    const series = digits.map(d => (nWin.has(d) ? 1 : 0));
+    const lockedRate = config.lockedAnalysis?.normalMean
+      ?? (series.length > 0 ? series.reduce((a, b) => a + b, 0) / series.length : nWin.size / 10);
+    const criticalRate = config.lockedAnalysis?.normalLcb ?? lockedRate * 0.97;
+    const forecast = series.length >= 120
+      ? estimateEdgeValidity(series, criticalRate, config.symbol)
+      : config.lockedAnalysis?.validity;
+    if (forecast) {
+      tracker = new EdgeValidityTracker(lockedRate, forecast);
+      validityBinding = forecast.bindingFactor;
+      validitySummary = forecast.summary;
+    }
+  } catch (err) {
+    logger.warn({ err }, "Dual-Lock: edge-validity forecast unavailable (session continues)");
+  }
+
   session = {
     ...freshSession(),
     running: true,
     sessionId: `bot_duallock_${Date.now()}`,
     config,
+    validity: tracker,
+    validityBinding,
+    validitySummary,
     currentStake: config.stake,
     message: `Locked on ${config.displayName}: ${contractLabel(config.normal)} normal → ${contractLabel(config.recovery)} recovery. Starting continuous execution…`,
   };
@@ -594,6 +713,12 @@ async function runLoop(config: DualLockConfig) {
         session.currentLossRun++;
         session.deepestLossRun = Math.max(session.deepestLossRun, session.currentLossRun);
       }
+
+      // Advisory edge-decay tracking. Only NORMAL-leg outcomes feed it: the
+      // recovery leg is a different contract with a different win rate, so
+      // mixing it in would corrupt the estimate of the edge that was locked.
+      // This call cannot stop the session — it only updates what the user sees.
+      if (!inRecovery) session.validity?.recordNormalOutcome(won);
 
       // Shared ledger — the same call the other five bots make.
       recoveryEngine.recordOutcome(won, profit, stake, config.maxRecoverySteps, contract.side, payout);

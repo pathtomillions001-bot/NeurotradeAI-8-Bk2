@@ -21,6 +21,8 @@ import {
 } from "../lib/bot-engine";
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
+import * as killShot from "../lib/killshot-engine";
+import { validateKillShotContract, killShotLabel } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
@@ -55,6 +57,8 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   // Pre-locked bots (Dual-Lock Range Sentinel) have their own endpoints — they
   // are never driven through the generic specialist route.
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
+  // Sniper bots (Kill-Shot Precision Sniper) likewise have their own endpoints.
+  if (bot.sniper) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -174,16 +178,22 @@ function visibleStatus(sessionId: string) {
 router.get("/", (req, res) => {
   const status = visibleStatus(req.sessionId);
   const dual = visibleDualStatus(req.sessionId);
+  const snipe = visibleKillShotStatus(req.sessionId);
   res.json({
     bots: BOT_CATALOG.map(bot => {
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, session: dual.running ? dual : null };
       }
+      if (bot.id === killShot.KILLSHOT_BOT_ID) {
+        return { ...bot, session: snipe.running ? snipe : null };
+      }
       return { ...bot, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: dual.running
       ? dualLock.DUAL_LOCK_BOT_ID
-      : (status.running ? status.botId : null),
+      : snipe.running
+        ? killShot.KILLSHOT_BOT_ID
+        : (status.running ? status.botId : null),
   });
 });
 
@@ -214,14 +224,17 @@ async function dualSimParams(sessionId: string, body: any) {
       if (Number.isFinite(m) && m > 0) maxStake = m;
     }
   } catch { /* defaults */ }
-  return {
+  // The Dual-Lock bot commits its risk parameters on the FIRST scan of an
+  // engagement and refuses to change them afterwards — a re-scan may move the
+  // market and contract pair, never the stake / TP / SL / steps.
+  const requested = {
     stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
     takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
     stopLoss: Number(body?.stopLoss) > 0 ? Number(body.stopLoss) : 5,
     maxRecoverySteps: Math.max(1, Math.min(10, Number(body?.maxRecoverySteps) || 3)),
-    markupPercent,
-    maxStake,
   };
+  const { params, committed, overridden } = dualLock.commitSessionParams(sessionId, requested);
+  return { ...params, markupPercent, maxStake, committed, overridden };
 }
 
 router.get("/duallock/contracts", (_req, res) => {
@@ -235,11 +248,36 @@ router.get("/duallock/status", (req, res) => {
   res.json(visibleDualStatus(req.sessionId));
 });
 
+/**
+ * Start a brand-new Dual-Lock engagement — releases the committed risk
+ * parameters so the next scan may set fresh ones. Refused while a session runs.
+ */
+router.post("/duallock/reset", (req, res): void => {
+  if (dualLock.isRunning() && dualLock.getOwnerSessionId() === req.sessionId) {
+    res.status(409).json({ error: "Stop the running session before starting a new engagement." });
+    return;
+  }
+  dualLock.resetSessionParams(req.sessionId);
+  res.json({ ok: true });
+});
+
+router.get("/duallock/params", (req, res) => {
+  res.json({ params: dualLock.getCommittedParams(req.sessionId) ?? null });
+});
+
 router.post("/duallock/scan", async (req, res): Promise<void> => {
   try {
-    const params = await dualSimParams(req.sessionId, req.body);
-    const result = await dualLock.scanForLock(req.sessionId, params);
-    res.json(result);
+    const { markupPercent, maxStake, committed, overridden, ...params } =
+      await dualSimParams(req.sessionId, req.body);
+    const result = await dualLock.scanForLock(req.sessionId, { ...params, markupPercent, maxStake });
+    res.json({
+      ...result,
+      // Echo the parameters the scan ACTUALLY used, plus whether the request
+      // tried to change locked ones, so the console can tell the user.
+      sessionParams: params,
+      paramsCommittedNow: committed,
+      paramsOverridden: overridden,
+    });
   } catch (err) {
     logger.error({ err }, "Dual-Lock scan failed");
     res.status(500).json({ error: "Scan failed" });
@@ -280,6 +318,19 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     return;
   }
 
+  // Risk parameters are whatever was committed at the first scan of this
+  // engagement — the start request cannot widen or change them. This is what
+  // guarantees the quoted survival figure applies to the session being run.
+  const committed = dualLock.getCommittedParams(req.sessionId);
+  if (!committed) {
+    res.status(409).json({ error: "Run the Dual-Lock analysis first — this bot may only deploy a scanned lock." });
+    return;
+  }
+  if (committed.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+
   const existingOwner = dualLock.getOwnerSessionId();
   if (dualLock.isRunning() && existingOwner && existingOwner !== req.sessionId) {
     res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
@@ -292,10 +343,10 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     displayName: market.displayName,
     normal,
     recovery,
-    stake: body.stake,
-    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
-    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
-    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    stake: committed.stake,
+    stopLoss: committed.stopLoss,
+    takeProfit: committed.takeProfit,
+    maxRecoverySteps: committed.maxRecoverySteps,
     lockedAnalysis: body.analysis,
   });
   if (!result.ok) {
@@ -315,11 +366,117 @@ router.post("/duallock/stop", (req, res) => {
   res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
 });
 
+// ── Kill-Shot Precision Sniper (sniper bot) ───────────────────────────────────
+//
+// Its own engine because its lifecycle is different again: the user names ONE
+// contract, the scan names ONE market, both are frozen, and the engine then
+// simply waits — sometimes a long time — until the full evidence stack clears.
+// It shares the account-global recovery ledger, the recovery stake formula and
+// the single-executor arbiter with every other bot in the section.
+
+function visibleKillShotStatus(sessionId: string) {
+  const status = killShot.getStatus();
+  const owner = killShot.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, killLock: undefined, hunt: undefined };
+}
+
+router.get("/killshot/status", (req, res) => {
+  res.json(visibleKillShotStatus(req.sessionId));
+});
+
+/**
+ * Scan every digit-enabled market for the user's ONE chosen contract.
+ * When the contract is Matches with no digit, all ten digits are scored too and
+ * the SPRT threshold carries a log(#candidates) selection surcharge.
+ */
+router.post("/killshot/scan", async (req, res): Promise<void> => {
+  const parsed = validateKillShotContract(req.body?.contract);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  try {
+    const result = await killShot.scanForTarget(req.sessionId, parsed.contract);
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Kill-Shot scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/killshot/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+
+  const parsed = validateKillShotContract(body.contract);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  // A Matches digit must be resolved (by the user or by the scan) before the
+  // contract can be frozen — the engine will not choose one mid-session.
+  if (parsed.contract.kind === "match" && parsed.contract.digit === undefined) {
+    res.status(400).json({ error: "Run the scan first so the AI can select the Matches digit" });
+    return;
+  }
+
+  if (typeof body.symbol !== "string" || !isAutomatedMarket(body.symbol)) {
+    res.status(400).json({ error: "A valid locked market symbol is required" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === body.symbol);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+
+  const existingOwner = killShot.getOwnerSessionId();
+  if (killShot.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+    return;
+  }
+
+  const result = await killShot.startSession({
+    ownerSessionId: req.sessionId,
+    symbol: market.symbol,
+    displayName: market.displayName,
+    contract: parsed.contract,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    maxTrades: Math.max(0, Math.min(100, Number(body.maxTrades) || 0)),
+    lockedAnalysis: body.analysis,
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  logger.info({ symbol: market.symbol, contract: killShotLabel(parsed.contract) }, "Kill-Shot deployed");
+  res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
+});
+
+router.post("/killshot/stop", (req, res) => {
+  const owner = killShot.getOwnerSessionId();
+  if (killShot.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  killShot.stopSession();
+  res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
+});
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
+  const snipe = visibleKillShotStatus(req.sessionId);
+  if (snipe.running) { res.json(snipe); return; }
   res.json(visibleStatus(req.sessionId));
 });
 

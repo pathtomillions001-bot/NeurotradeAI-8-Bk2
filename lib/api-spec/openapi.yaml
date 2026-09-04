@@ -1168,7 +1168,7 @@ components:
           type: number
           minimum: 0
           maximum: 100
-          description: Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+          description: Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Kill-Shot Precision Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
 
     TradingSettingsInput:
       type: object
@@ -1247,4 +1247,4 @@ components:
           type: number
           minimum: 0
           maximum: 100
-          description: Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+          description: Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Kill-Shot Precision Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.

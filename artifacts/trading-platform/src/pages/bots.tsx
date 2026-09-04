@@ -16,6 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { BotConsole } from "@/components/bot-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
+import { KillShotConsole } from "@/components/killshot-console";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
@@ -286,7 +287,7 @@ export default function Bots() {
       {/* ── Bot grid ───────────────────────────────────────────────────── */}
       {isLoading && (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {[0, 1, 2, 3, 4, 5].map(i => (
+          {[0, 1, 2, 3, 4, 5, 6].map(i => (
             <Card key={i} className="border-border bg-card">
               <CardContent className="p-4 space-y-3">
                 <div className="flex gap-3">
@@ -331,10 +332,20 @@ export default function Bots() {
       )}
 
       {/* ── Console ────────────────────────────────────────────────────── */}
-      {/* Pre-locked bots (Dual-Lock Range Sentinel) get their own console: their
-          lifecycle is scan-once → freeze → run, not configure-per-trade. */}
+      {/* Three consoles for three lifecycles:
+          · sniper (Kill-Shot)   — choose one contract → lock one market → wait
+          · preLocked (Dual-Lock) — scan once → freeze the pair → run non-stop
+          · everything else       — configure per trade */}
       <AnimatePresence>
-        {openBot?.preLocked ? (
+        {openBot?.sniper ? (
+          <KillShotConsole
+            bot={openBot}
+            open={openBotId !== null}
+            onOpenChange={open => { if (!open) setOpenBotId(null); }}
+            session={liveSession}
+            onSession={setSession}
+          />
+        ) : openBot?.preLocked ? (
           <DualLockConsole
             bot={openBot}
             open={openBotId !== null}

@@ -11,6 +11,8 @@ import type { SpecialistFamily } from "./specialist-analysis";
 
 export type BotSideMode = "both" | "primary" | "secondary";
 
+export type BotAccent = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky";
+
 export interface BotSideOption {
   id: BotSideMode;
   label: string;
@@ -23,7 +25,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock";
+  family: SpecialistFamily | "duallock" | "killshot";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -31,13 +33,19 @@ export interface BotDefinition {
   /** What the specialisation buys — shown on the card and in the console. */
   edge: string[];
   /** Accent used by the UI (theme-safe tailwind colour names). */
-  accent: "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo";
+  accent: BotAccent;
   /**
    * Bots whose entire analysis happens ONCE, before deployment, and whose
    * contract pair is then frozen for the whole session (see the Dual-Lock
    * Range Sentinel). The UI renders a different console for these.
    */
   preLocked?: boolean;
+  /**
+   * Bots that lock ONE market + ONE user-chosen contract and then simply wait
+   * for a conclusive setup (the Kill-Shot Precision Sniper). The UI renders a
+   * dedicated console for these.
+   */
+  sniper?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -207,8 +215,12 @@ export const BOT_CATALOG: BotDefinition[] = [
     contractLabel: "Over / Under (dual-locked)",
     tagline: "Pre-locked pair · non-stop session",
     description:
-      "The only bot that does ALL of its thinking before it starts. It searches every market for one triple — market, normal contract (Over 1 / Under 8 / Over 2 / Under 7) and recovery contract (Over 4 / Over 5 / Under 5 / Under 4) — that can survive an uninterrupted session, then freezes it. From the first trade to TP or SL there is no re-analysis, no market switching and no contract change: the pair was chosen precisely because it does not need any.",
+      "The only bot that does ALL of its thinking before it starts. It searches every market for one triple — market, normal contract (Over 1 / Under 8 / Over 2 / Under 7) and recovery contract (Over 4 / Over 5 / Under 5 / Under 4) — that clears a 90% simulated survival bar, then freezes it. From the first trade to TP or SL there is no re-analysis, no market switching and no contract change. A live edge-validity clock tells you how long the locked read is expected to stay true, so you choose your own moment to stop and re-scan — the bot never stops itself.",
     edge: [
+      "90% survival floor — a market is only locked if the block bootstrap says it reaches take-profit before stop-loss more than 90% of the time; anything less is ignored until the next re-scan",
+      "EDGE-VALIDITY CLOCK — a first-passage forecast of how long the locked edge should last: excess (non-binomial) block variance gives the true drift rate σ_drift, and E[ticks] = blockSize·(margin/σ_drift)², cross-checked against the 6τ autocorrelation memory horizon and the market's own CUSUM regime-dwell time. Advisory only: it counts down and warns, it never stops your session",
+      "Live Page–Hinkley change detector on the realised normal-leg win rate — tells you when the locked edge has measurably decayed, in real time, without any mid-session re-analysis",
+      "Frozen risk parameters — stake, take-profit, stop-loss and recovery steps are committed once and cannot change on a re-scan, so the quoted survival figure always describes the session you are actually running",
       "Loss-clustering Markov chain — ξ = P(loss|loss)/P(loss); a market where losses attract losses is refused outright, because consecutive losses (not a low win rate) is what kills a non-stop session",
       "Conditional recovery estimand — the recovery leg is scored on P(win | last digit lost the normal contract) from Dirichlet-smoothed transition rows, not on its unconditional rate: recovery only ever trades from the post-loss state",
       "5th-percentile Beta posterior bounds on an autocorrelation-corrected effective sample size n_eff = n(1−ρ₁)/(1+ρ₁) — a locked session must be +EV in its WORST plausible case, not its expected one",
@@ -227,6 +239,37 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "70–80% normal · 40–50% recovery",
     nominalPayout: "1.23–1.40× · 1.95–2.43×",
+  },
+  {
+    id: "killshot",
+    name: "Kill-Shot Precision Sniper",
+    code: "BOT-KILLSHOT",
+    family: "killshot",
+    contractLabel: "One contract · your choice",
+    tagline: "Few trades · maximum certainty",
+    description:
+      "The patience engine. You name ONE contract — Over 7, Under 2, Matches, Even or Odd (never both sides) — and it locks a single market and simply waits. It takes no trade at all until Wald's sequential probability ratio test says the evidence for a real edge has crossed 200:1 AND six independent structural gates are clear. Waiting is free; being wrong is not. The market never rotates and never switches, and recovery trades are sniped with exactly the same patience as normal ones.",
+    edge: [
+      "WALD SPRT as the trigger — the provably fastest test to reach a given certainty (Wald–Wolfowitz optimality). Type-I error is set at 0.5%, so a fired signal carries ≈200:1 evidence odds; type-II is loose at 10% because waiting longer costs this bot nothing",
+      "Anytime-valid confidence sequences (test supermartingales + Ville's inequality) — the win-rate floor is valid at the exact data-dependent moment the bot chooses to fire, which is precisely where an ordinary confidence interval silently becomes invalid from repeated peeking",
+      "Variable-order Markov context model with Krichevsky–Trofimov mixing — P(win | last 0/1/2/3 digits) fused by context-tree weighting, so deep context is trusted only in proportion to the evidence behind it",
+      "CONSECUTIVE-LOSS MARKOV GATE — the loss stream gets its own 2-state chain; ξ = P(loss|loss)/P(loss) must be ≤ 1.0 and the stationary P(two losses in a row) must stay under 2%. A market that pairs its losses is refused no matter how high its win rate, because paired losses — not a low win rate — are what force a recovery ladder deep",
+      "Multi-horizon concordance across 60/120/240/480 ticks — an edge visible in one window and absent in the others is a window artefact and is vetoed outright",
+      "Pearson χ² block homogeneity plus an explicit monotone-trend slope: hundreds of ticks of accumulated SPRT evidence only mean something if they came from one regime",
+      "Benjamini–Hochberg FDR across every market × digit examined, plus a log(#candidates) evidence surcharge added directly to the SPRT threshold — the winner must be genuinely exceptional, never merely the luckiest of dozens",
+      "Recovery is sniped too — a recovery trade waits for the identical full evidence stack, because a rushed recovery trade is exactly how a two-loss streak becomes a five-loss streak",
+    ],
+    accent: "sky",
+    icon: "target",
+    sniper: true,
+    hasSides: false,
+    hasDigitLock: true,
+    digitLockHelp: "For Matches you may name the digit, or leave it to the AI — it will score all ten in every market and pick the one with the strongest evidence.",
+    sides: [
+      { id: "both", label: "Your single contract", contracts: ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITEVEN", "DIGITODD"], desc: "You choose exactly one — over, under, matches, even or odd" },
+    ],
+    nominalWinRate: "gated ≥ break-even + margin",
+    nominalPayout: "1.09–8.93×",
   },
 ];
 

@@ -119,47 +119,6 @@ function scoreColor(score: number) {
   return "text-red-400";
 }
 
-function SpecialistPanel({ specialist, accent }: { specialist: ScanMarketScore["specialist"]; accent: AccentKey }) {
-  if (!specialist) return null;
-  const a = ACCENTS[accent];
-  const entries = Object.entries(specialist.metrics).filter(([, v]) => typeof v === "number");
-  return (
-    <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <Sparkles className={`w-3.5 h-3.5 ${a.text}`} />
-          <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>Specialist Layer</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`text-[10px] font-mono ${specialist.bonus >= 0 ? "text-green-400" : "text-red-400"}`}>
-            {specialist.bonus >= 0 ? "+" : ""}{specialist.bonus.toFixed(1)}
-          </span>
-          <span className="text-[9px] font-mono text-muted-foreground/60">{specialist.confidence}% conf</span>
-        </div>
-      </div>
-
-      <div className="space-y-1">
-        {specialist.signals.map((s, i) => (
-          <p key={i} className="text-[10px] font-mono text-muted-foreground leading-relaxed">· {s}</p>
-        ))}
-      </div>
-
-      {entries.length > 0 && (
-        <div className="grid grid-cols-4 gap-1 pt-1">
-          {entries.slice(0, 8).map(([key, value]) => (
-            <div key={key} className="bg-black/25 rounded px-1.5 py-1 text-center">
-              <p className="text-[8px] text-muted-foreground/60 uppercase truncate">{key}</p>
-              <p className="text-[10px] font-mono text-white/90">
-                {Math.abs(value) >= 100 ? value.toFixed(0) : value.toFixed(2)}
-              </p>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ── Console ───────────────────────────────────────────────────────────────────
 
 export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
@@ -789,8 +748,6 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                       <p className="text-[10px] text-muted-foreground leading-relaxed">{scanResult.best.reason}</p>
                     </div>
                   </div>
-
-                  <SpecialistPanel specialist={scanResult.best.specialist} accent={bot.accent} />
 
                   <div className="space-y-2">
                     <Button

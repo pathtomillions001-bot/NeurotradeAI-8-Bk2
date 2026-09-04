@@ -14,7 +14,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck,
+  ChevronLeft, X, ShieldCheck, Timer,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -51,6 +51,27 @@ interface Candidate {
   reason: string;
   signals: string[];
   metrics: Record<string, number>;
+  validity?: EdgeValidity;
+}
+
+interface EdgeValidity {
+  meanTicks: number;
+  p20Ticks: number;
+  p50Ticks: number;
+  p20Seconds: number;
+  p50Seconds: number;
+  p20Trades: number;
+  p50Trades: number;
+  bindingFactor: string;
+  confidence: number;
+  summary: string;
+}
+
+interface SessionParams {
+  stake: number;
+  takeProfit: number;
+  stopLoss: number;
+  maxRecoverySteps: number;
 }
 
 interface ScanResult {
@@ -58,15 +79,35 @@ interface ScanResult {
   best: Candidate | null;
   allScored: Candidate[];
   reason: string;
+  sessionParams?: SessionParams;
+  paramsCommittedNow?: boolean;
+  paramsOverridden?: string[];
 }
+
+/** Human-friendly duration from seconds. */
+function dur(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0m";
+  const h = Math.floor(seconds / 3600);
+  const m = Math.round((seconds % 3600) / 60);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${Math.round(seconds)}s`;
+}
+
+const VALIDITY_TONE: Record<string, { text: string; bg: string; border: string; bar: string; label: string }> = {
+  fresh:   { text: "text-green-400",  bg: "bg-green-500/[0.07]",  border: "border-green-500/25",  bar: "bg-green-400",  label: "EDGE FRESH" },
+  aging:   { text: "text-cyan-300",   bg: "bg-cyan-500/[0.07]",   border: "border-cyan-500/25",   bar: "bg-cyan-400",   label: "EDGE AGING" },
+  stale:   { text: "text-amber-300",  bg: "bg-amber-500/[0.08]",  border: "border-amber-500/30",  bar: "bg-amber-400",  label: "EDGE WEAKENING" },
+  expired: { text: "text-red-400",    bg: "bg-red-500/[0.08]",    border: "border-red-500/30",    bar: "bg-red-400",    label: "EDGE EXPIRED" },
+};
 
 function label(c: Contract) {
   return `${c.side === "DIGITOVER" ? "Over" : "Under"} ${c.barrier}`;
 }
 
-function NumInput({ label: lbl, value, onChange, min, step = 1, suffix, accent }: {
+function NumInput({ label: lbl, value, onChange, min, step = 1, suffix, accent, disabled }: {
   label: string; value: number; onChange: (v: number) => void;
-  min?: number; step?: number; suffix?: string; accent: AccentKey;
+  min?: number; step?: number; suffix?: string; accent: AccentKey; disabled?: boolean;
 }) {
   const a = ACCENTS[accent];
   return (
@@ -74,9 +115,9 @@ function NumInput({ label: lbl, value, onChange, min, step = 1, suffix, accent }
       <span className="text-xs text-muted-foreground flex-1">{lbl}</span>
       <div className="flex items-center gap-1">
         <Input
-          type="number" value={value} min={min} step={step}
+          type="number" value={value} min={min} step={step} disabled={disabled}
           onChange={e => onChange(Number(e.target.value))}
-          className={`w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10 focus-visible:ring-0 ${a.focusBorder}`}
+          className={`w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10 focus-visible:ring-0 disabled:opacity-60 ${a.focusBorder}`}
         />
         {suffix && <span className="text-[10px] text-muted-foreground w-6">{suffix}</span>}
       </div>
@@ -114,8 +155,48 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
     stopLoss: 5,
     maxRecoverySteps: 3,
   });
-  const set = <K extends keyof typeof config>(k: K, v: number) =>
+  /**
+   * Once the first scan of an engagement runs, the server COMMITS these risk
+   * parameters and refuses to change them on any later scan or start. The
+   * console mirrors that: the inputs go read-only and the only way to change
+   * them is to explicitly begin a new engagement.
+   */
+  const [paramsLocked, setParamsLocked] = useState(false);
+  const set = <K extends keyof typeof config>(k: K, v: number) => {
+    if (paramsLocked) return;
     setConfig(prev => ({ ...prev, [k]: v }));
+  };
+
+  // Reflect any parameters already committed on the server for this browser
+  // session (e.g. after a page reload mid-engagement).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    fetch("/api/bots/duallock/params")
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => {
+        if (cancelled || !d?.params) return;
+        setConfig(d.params);
+        setParamsLocked(true);
+      })
+      .catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+  }, [open]);
+
+  const startNewEngagement = async () => {
+    try {
+      const res = await fetch("/api/bots/duallock/reset", { method: "POST" });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        toast.error(d.error ?? "Stop the running session first");
+        return;
+      }
+      setParamsLocked(false);
+      setScanResult(null);
+      setStep("config");
+      toast.success("New engagement — you can set fresh risk parameters");
+    } catch { toast.error("Could not start a new engagement"); }
+  };
 
   useEffect(() => {
     if (!settings) return;
@@ -180,7 +261,19 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
       });
       const data = await res.json();
       if (!res.ok) { toast.error(data.error ?? "Scan failed"); setStep("config"); return; }
-      setScanResult(data as ScanResult);
+      const result = data as ScanResult;
+      // The server is the authority on the risk parameters: from the first scan
+      // onward they are frozen for the whole engagement.
+      if (result.sessionParams) {
+        setConfig(result.sessionParams);
+        setParamsLocked(true);
+        if (result.paramsOverridden && result.paramsOverridden.length > 0) {
+          toast.info(
+            `Kept your original ${result.paramsOverridden.join(", ")} — Dual-Lock never changes risk settings on a re-scan.`,
+          );
+        }
+      }
+      setScanResult(result);
       setStep("scan-result");
     } catch {
       toast.error("Could not connect to the analysis engine");
@@ -199,6 +292,8 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
           normal: c.normal,
           recovery: c.recovery,
           analysis: c,
+          // Risk parameters are enforced server-side from the engagement's
+          // committed values; these are sent only for validation parity.
           ...config,
         }),
       });
@@ -281,13 +376,30 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
 
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Session Boundaries</p>
-                  <NumInput label="Base stake" value={config.stake} onChange={v => set("stake", v)} min={0.35} step={0.5} suffix="USD" accent={bot.accent} />
-                  <NumInput label="Take profit" value={config.takeProfit} onChange={v => set("takeProfit", v)} min={1} step={1} suffix="USD" accent={bot.accent} />
-                  <NumInput label="Stop loss" value={config.stopLoss} onChange={v => set("stopLoss", v)} min={1} step={1} suffix="USD" accent={bot.accent} />
-                  <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} step={1} accent={bot.accent} />
-                  <p className="text-[9px] text-muted-foreground/60">
-                    The scan tests these exact numbers, so the survival figure applies to this session.
-                  </p>
+                  <NumInput label="Base stake" value={config.stake} onChange={v => set("stake", v)} min={0.35} step={0.5} suffix="USD" accent={bot.accent} disabled={paramsLocked} />
+                  <NumInput label="Take profit" value={config.takeProfit} onChange={v => set("takeProfit", v)} min={1} step={1} suffix="USD" accent={bot.accent} disabled={paramsLocked} />
+                  <NumInput label="Stop loss" value={config.stopLoss} onChange={v => set("stopLoss", v)} min={1} step={1} suffix="USD" accent={bot.accent} disabled={paramsLocked} />
+                  <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} step={1} accent={bot.accent} disabled={paramsLocked} />
+                  {paramsLocked ? (
+                    <div className="rounded-lg border border-amber-500/25 bg-amber-500/[0.06] px-2.5 py-2 space-y-1.5">
+                      <p className="text-[10px] text-amber-200 leading-relaxed flex items-start gap-1.5">
+                        <Lock className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                        <span>
+                          Risk settings are frozen for this engagement. Re-scans may change the
+                          market and contract pair, never your stake, TP, SL or steps.
+                        </span>
+                      </p>
+                      <button onClick={startNewEngagement}
+                              className="text-[10px] text-amber-300 hover:text-amber-200 underline underline-offset-2">
+                        Start a new engagement to change them
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-[9px] text-muted-foreground/60">
+                      The scan tests these exact numbers, so the survival figure applies to this
+                      session — and they are locked for the rest of the engagement once you scan.
+                    </p>
+                  )}
                 </div>
 
                 <Button onClick={handleScan} disabled={loading}
@@ -341,6 +453,35 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                               tone={scanResult.best.clusterRatio <= 1 ? "text-green-400" : "text-amber-300"} />
                       </div>
                     </div>
+
+                    {/* Edge-validity forecast — how long this lock should hold */}
+                    {scanResult.best.validity && (
+                      <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/[0.06] p-3 space-y-2">
+                        <div className="flex items-center justify-between">
+                          <p className="text-[10px] uppercase tracking-widest font-semibold text-cyan-300 flex items-center gap-1.5">
+                            <Timer className="w-3 h-3" /> Edge Validity Forecast
+                          </p>
+                          <span className="text-[9px] font-mono text-muted-foreground/70">
+                            {scanResult.best.validity.confidence}% conf
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <Stat label="Expected to hold"
+                                value={dur(scanResult.best.validity.p50Seconds)} tone="text-cyan-300" />
+                          <Stat label="Re-scan by"
+                                value={dur(scanResult.best.validity.p20Seconds)} tone="text-amber-300" />
+                          <Stat label="≈ trades"
+                                value={`${scanResult.best.validity.p20Trades}–${scanResult.best.validity.p50Trades}`} />
+                          <Stat label="Limited by"
+                                value={scanResult.best.validity.bindingFactor} />
+                        </div>
+                        <p className="text-[10px] text-muted-foreground leading-relaxed">
+                          This is how long the analysed conditions are expected to last. The bot will
+                          <span className="text-white/80"> keep trading past it</span> — the countdown is
+                          advice, and stopping to re-scan is always your call.
+                        </p>
+                      </div>
+                    )}
 
                     <Button onClick={() => handleStart(scanResult.best!)} disabled={loading}
                             className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
@@ -412,6 +553,60 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                   </div>
                 </div>
 
+                {/* ── LIVE EDGE-VALIDITY MONITOR ──────────────────────────
+                    Answers "is the edge I locked still there, and how long
+                    have I got?" — continuously, without any mid-session
+                    re-analysis. It is ADVISORY: the session never stops
+                    itself on this signal. */}
+                {session?.validity && (() => {
+                  const v = session.validity!;
+                  const tone = VALIDITY_TONE[v.state] ?? VALIDITY_TONE["fresh"]!;
+                  return (
+                    <div className={`rounded-xl border ${tone.border} ${tone.bg} p-3 space-y-2`}>
+                      <div className="flex items-center justify-between">
+                        <p className={`text-[10px] uppercase tracking-widest font-semibold ${tone.text} flex items-center gap-1.5`}>
+                          <Timer className="w-3 h-3" /> {tone.label}
+                        </p>
+                        <span className={`text-[10px] font-mono font-bold ${tone.text}`}>
+                          {v.freshness}%
+                        </span>
+                      </div>
+
+                      <div className="h-1.5 rounded-full bg-black/40 overflow-hidden">
+                        <div className={`h-full ${tone.bar} transition-all duration-700`}
+                             style={{ width: `${Math.max(2, v.freshness)}%` }} />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <Stat label="Validity left" value={dur(v.remainingSeconds)} tone={tone.text} />
+                        <Stat label="Running for" value={dur(v.elapsedSeconds)} />
+                        <Stat label="Locked rate" value={`${(v.lockedRate * 100).toFixed(1)}%`} />
+                        <Stat
+                          label="Realised now"
+                          value={`${(v.realisedRate * 100).toFixed(1)}%`}
+                          tone={v.deviationSigma < -1.5 ? "text-red-400" : v.deviationSigma < -0.5 ? "text-amber-300" : "text-green-400"}
+                        />
+                      </div>
+
+                      {v.changeDetected && (
+                        <p className="text-[10px] font-mono text-red-300 leading-relaxed">
+                          ⚠ Page–Hinkley change detector fired ({v.phStatistic.toFixed(2)} &gt; {v.phThreshold.toFixed(2)})
+                          — the market has measurably left its analysed regime.
+                        </p>
+                      )}
+
+                      <p className="text-[10px] text-muted-foreground leading-relaxed">{v.advice}</p>
+
+                      {(v.state === "stale" || v.state === "expired") && isRunning && (
+                        <Button onClick={handleStop} disabled={loading} variant="outline"
+                                className="w-full h-8 text-[11px] border-amber-500/40 text-amber-200 hover:bg-amber-500/10">
+                          <StopCircle className="w-3.5 h-3.5 mr-1.5" /> Stop &amp; Re-Scan for a Fresh Market
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })()}
+
                 {session?.lock && (
                   <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
                     <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text} flex items-center gap-1.5`}>
@@ -480,8 +675,8 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                     </Button>
                   ) : (
                     <>
-                      <Button onClick={() => setStep("config")} variant="outline" className="flex-1 h-9 text-xs border-white/10">
-                        New Session
+                      <Button onClick={startNewEngagement} variant="outline" className="flex-1 h-9 text-xs border-white/10">
+                        New Engagement
                       </Button>
                       <Button onClick={handleScan} disabled={loading} className={`flex-1 h-9 text-xs ${a.solidBtn} text-white font-bold`}>
                         <ScanSearch className="w-3.5 h-3.5 mr-1.5" /> Re-Scan

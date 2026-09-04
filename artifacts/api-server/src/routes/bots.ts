@@ -304,11 +304,18 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 5, Under 4" });
     return;
   }
-  if (typeof body.symbol !== "string" || !isAutomatedMarket(body.symbol)) {
-    res.status(400).json({ error: "A valid locked market symbol is required" });
+  // In hunt mode the market is only the STARTING target — the loop re-selects it
+  // continuously — so it may be omitted and the first digit-enabled market is
+  // used. In lock mode it is frozen for the session and must be named.
+  const targetMode = body.targetMode === "lock" ? "lock" : "hunt";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  const fallback = AUTOMATED_DERIV_MARKETS.find(m => m.digitEnabled);
+  const symbol = requested ?? fallback?.symbol;
+  if (!symbol || !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: "A valid market symbol is required" });
     return;
   }
-  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === body.symbol);
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === symbol);
   if (!market || !market.digitEnabled) {
     res.status(400).json({ error: "This bot needs a digit-enabled market" });
     return;
@@ -420,11 +427,18 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     return;
   }
 
-  if (typeof body.symbol !== "string" || !isAutomatedMarket(body.symbol)) {
-    res.status(400).json({ error: "A valid locked market symbol is required" });
+  // In hunt mode the market is only the STARTING target — the loop re-selects it
+  // continuously — so it may be omitted and the first digit-enabled market is
+  // used. In lock mode it is frozen for the session and must be named.
+  const targetMode = body.targetMode === "lock" ? "lock" : "hunt";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  const fallback = AUTOMATED_DERIV_MARKETS.find(m => m.digitEnabled);
+  const symbol = requested ?? fallback?.symbol;
+  if (!symbol || !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: "A valid market symbol is required" });
     return;
   }
-  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === body.symbol);
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === symbol);
   if (!market || !market.digitEnabled) {
     res.status(400).json({ error: "This bot needs a digit-enabled market" });
     return;
@@ -450,13 +464,14 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
     maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
     maxTrades: Math.max(0, Math.min(100, Number(body.maxTrades) || 0)),
+    targetMode,
     lockedAnalysis: body.analysis,
   });
   if (!result.ok) {
     res.status(409).json({ error: result.error });
     return;
   }
-  logger.info({ symbol: market.symbol, contract: killShotLabel(parsed.contract) }, "Kill-Shot deployed");
+  logger.info({ symbol: market.symbol, contract: killShotLabel(parsed.contract), targetMode }, "Kill-Shot deployed");
   res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
 });
 

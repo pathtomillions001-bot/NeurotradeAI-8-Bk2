@@ -78,30 +78,6 @@ export interface BotSessionStatus {
     signals: string[];
   };
   /**
-   * Dual-Lock only: ADVISORY edge-validity read. Tells the user how long the
-   * locked edge is expected to stay valid and how much of it is left. It never
-   * stops the session — stopping and re-scanning is always the user's choice.
-   */
-  validity?: {
-    state: "fresh" | "aging" | "stale" | "expired";
-    freshness: number;
-    remainingSeconds: number;
-    remainingTrades: number;
-    elapsedSeconds: number;
-    horizonSeconds: number;
-    expectedSeconds: number;
-    realisedRate: number;
-    lockedRate: number;
-    deviationSigma: number;
-    phStatistic: number;
-    phThreshold: number;
-    changeDetected: boolean;
-    normalTrades: number;
-    advice: string;
-    bindingFactor: string;
-    forecastSummary: string;
-  };
-  /**
    * Kill-Shot only: the frozen target (market + the user's single contract) and
    * its pre-deploy read.
    */
@@ -133,6 +109,23 @@ export interface BotSessionStatus {
     blockers: string[];
     ticksWatched: number;
     setupsRejected: number;
+    /** "hunt" rotates markets; "lock" keeps the one the user froze. */
+    targetMode: "hunt" | "lock";
+    targetSymbol: string;
+    targetDisplayName: string;
+    marketsScanned: number;
+    bestConfidence: number;
+    /** prime = the anytime-valid floor clears break-even; standard = SPRT fired. */
+    tier: "prime" | "standard" | "marginal";
+    /** Entry-timing layer: what the bot is waiting on once armed. */
+    timing: {
+      ready: boolean;
+      score: number;
+      waitTicks: number;
+      reason: string;
+      momentumPP: number;
+      gapRatio: number;
+    };
   };
   currentMarket?: string;
   currentContractType?: string;

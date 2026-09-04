@@ -15,6 +15,22 @@ function uniformDigits(n: number, seed = 7) {
   const r = rng(seed);
   return Array.from({ length: n }, () => Math.floor(r() * 10));
 }
+/**
+ * Digit stream in which `winDigits` occur with probability `p` and every other
+ * digit shares the remainder uniformly. This is how a contract is given a real,
+ * known edge to find.
+ */
+function biasedDigits(n: number, seed: number, winDigits: number[], p: number) {
+  const r = rng(seed);
+  const others = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].filter(d => !winDigits.includes(d));
+  const out: number[] = [];
+  for (let i = 0; i < n; i++) {
+    if (r() < p) out.push(winDigits[Math.floor(r() * winDigits.length)]!);
+    else out.push(others[Math.floor(r() * others.length)]!);
+  }
+  return out;
+}
+
 /** Digit stream biased so that HIGH digits are over-represented. */
 function highBiased(n: number, seed = 13, pHigh = 0.90) {
   const r = rng(seed);
@@ -229,10 +245,84 @@ test("BH screening is a hard requirement for deployability", () => {
   }
 });
 
-test("gate constants stay severe — this bot must not drift toward frequency", () => {
-  assert.ok(KILLSHOT_GATES.alpha <= 0.01, "type-I error must stay at or below 1%");
+test("gate constants keep the bot selective without making it unable to fire", () => {
+  // Type-I error may be looser than the original 0.5% — the multiple-comparison
+  // risk in hunt mode is carried by the BH screen and the selection surcharge —
+  // but it must stay at or below 5%.
+  assert.ok(KILLSHOT_GATES.alpha <= 0.05, `alpha ${KILLSHOT_GATES.alpha}`);
   assert.ok(KILLSHOT_GATES.maxClusterRatio <= 1.0, "losses must never be allowed to attract losses");
-  assert.ok(KILLSHOT_GATES.maxPTwoInARow <= 0.02);
-  assert.ok(KILLSHOT_GATES.minConfidence >= 80);
-  assert.ok(KILLSHOT_GATES.minAgreeingHorizons >= 3);
+  assert.ok(KILLSHOT_GATES.minConfidence >= 60, `minConfidence ${KILLSHOT_GATES.minConfidence}`);
+  assert.ok(KILLSHOT_GATES.minAgreeingHorizons >= 2, "the edge must appear in at least two horizons");
+  // The alternative H₁ must be stated in absolute points and stay small: a
+  // relative δ made H₁ unreachable on high-probability contracts.
+  assert.ok(KILLSHOT_GATES.deltaAbs > 0 && KILLSHOT_GATES.deltaAbs <= 0.03);
+});
+
+test("every Deriv digit contract is structurally −EV on an unbiased stream, and says so", () => {
+  // This is the fact the old refusal message hid. Each contract pays below its
+  // fair rate, so an unbiased stream is always slightly −EV and the market must
+  // be measurably hot before ANY analysis can call the contract +EV.
+  const contracts = [
+    { kind: "over" as const, digit: 0 },
+    { kind: "over" as const, digit: 4 },
+    { kind: "over" as const, digit: 8 },
+    { kind: "under" as const, digit: 5 },
+    { kind: "match" as const, digit: 5 },
+    { kind: "even" as const },
+    { kind: "odd" as const },
+  ];
+  for (const c of contracts) {
+    const cand = evaluateKillShotCandidate("S", "S", uniformDigits(1200, 5), c);
+    assert.ok(cand, `${killShotLabel(c)} should be scored`);
+    assert.equal(cand!.fairRate, killShotWinSet(c).size / 10);
+    assert.ok(cand!.headroomPP < 0, `${killShotLabel(c)} must report negative headroom`);
+    assert.ok(cand!.requiredRate > cand!.breakEven, "H₁ must sit above break-even");
+    assert.equal(cand!.deployable, false, `${killShotLabel(c)} must not fire on a fair stream`);
+    // Every candidate must surface the structural fact, whatever else blocked
+    // it — the old refusal message said "re-scan in a few minutes", which was
+    // wrong advice for a block that is arithmetic, not transient.
+    assert.ok(
+      cand!.signals.some(sig => sig.includes("structural headroom")),
+      `${killShotLabel(c)} must report its headroom: ${cand!.signals.join(" | ")}`,
+    );
+  }
+});
+
+test("a genuinely biased market IS deployable — for every contract family", () => {
+  // The regression this whole recalibration exists for. The previous gates
+  // refused all of these: the SPRT alternative was unreachable, the flat 2%
+  // ceiling on P(two losses in a row) is unsatisfiable below an ~86% win rate,
+  // and the loss-pairing veto tripped on sampling noise.
+  const cases: Array<[string, number[], Parameters<typeof evaluateKillShotCandidate>[3]]> = [
+    ["Over 4 at 58%",  biasedDigits(1200, 22, [5, 6, 7, 8, 9], 0.58), { kind: "over", digit: 4 }],
+    ["Over 4 at 65%",  biasedDigits(1200, 23, [5, 6, 7, 8, 9], 0.65), { kind: "over", digit: 4 }],
+    ["Over 7 at 27%",  biasedDigits(1200, 24, [8, 9], 0.27),          { kind: "over", digit: 7 }],
+    ["Matches 5 at 14%", biasedDigits(1200, 25, [5], 0.14),           { kind: "match", digit: 5 }],
+    ["Even at 57%",    biasedDigits(1200, 26, [0, 2, 4, 6, 8], 0.57), { kind: "even" }],
+    ["Over 1 at 90%",  biasedDigits(1200, 21, [2, 3, 4, 5, 6, 7, 8, 9], 0.90), { kind: "over", digit: 1 }],
+  ];
+  for (const [name, digits, contract] of cases) {
+    const cand = evaluateKillShotCandidate("HOT", name, digits, contract);
+    assert.ok(cand, `${name} should be scored`);
+    assert.equal(cand!.sprt.decision, "fire", `${name}: the sequential test must fire`);
+    assert.ok(cand!.expectedValue > 0, `${name}: EV must be positive, got ${cand!.expectedValue}`);
+    assert.ok(cand!.tier !== "marginal", `${name}: tier ${cand!.tier}`);
+    assert.equal(cand!.deployable, true, `${name}: ${cand!.blockers.join(" | ") || `conf ${cand!.confidence}`}`);
+    assert.equal(cand!.blockers.length, 0, `${name} must be clean: ${cand!.blockers.join(" | ")}`);
+  }
+});
+
+test("the loss-pairing veto uses a confidence bound, so noise cannot refuse a clean stream", () => {
+  // ξ wanders either side of 1.0 on an independent stream purely from sampling
+  // noise. Gating on the point estimate vetoed clean markets roughly half the
+  // time; gating on the one-sided lower bound only vetoes DEMONSTRATED clustering.
+  const paired = pairedLosses(1200).map(d => (d > 1 ? 1 : 0));
+  const clean = biasedDigits(1200, 24, [8, 9], 0.27).map(d => (d > 7 ? 1 : 0));
+  const p = lossStructure(paired);
+  const c = lossStructure(clean);
+
+  assert.ok(p.clusterRatioLower > 1, `genuinely paired losses must stay vetoed: bound ${p.clusterRatioLower}`);
+  assert.ok(p.clusterRatioLower < p.clusterRatio, "the bound must sit below the estimate");
+  assert.ok(c.clusterRatioLower <= c.clusterRatio, "the bound must sit below the estimate");
+  assert.ok(c.clusterRatioLower < 1, `a clean stream must clear the bound, got ${c.clusterRatioLower}`);
 });

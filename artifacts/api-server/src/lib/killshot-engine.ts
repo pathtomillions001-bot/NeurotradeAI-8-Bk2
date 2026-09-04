@@ -3,30 +3,51 @@
  *
  * OPERATING MODEL
  * ───────────────
- * The inverse of every other bot in the section. The other six are throughput
- * engines: they look for a good trade and take it. This one is a patience
- * engine. It sits on ONE locked market watching one locked contract, and it
- * takes no action at all — for minutes, for hours — until Wald's sequential
- * probability ratio test says the accumulated evidence for a real edge has
- * crossed a 200:1 threshold AND six independent structural gates are clear.
- * Then it fires once.
+ * HUNT, THEN WAIT, THEN FIRE. Two separations, and they are the whole design:
  *
- * The design consequences of that, all of which differ from `bot-engine.ts`:
+ *   WHAT to trade  — chosen continuously by the evidence stack, across every
+ *                    digit-enabled market, exactly like the generalist bots.
+ *   WHEN to trade  — chosen by the execution-timing layer, which holds an armed
+ *                    setup until the entry tick is actually a good one.
  *
- *  · NO MARKET ROTATION, EVER. The market is chosen once, before the session,
- *    and frozen. It is not re-picked after a loss, after a win, on a stall, or
- *    on any timer. `config.symbol` is the only market this session will ever
- *    touch, and it is re-asserted on every single fire.
+ * An earlier revision collapsed both into a single pre-session decision: the
+ * user locked one market before pressing run and the bot then waited on it. That
+ * was the wrong split. A market that goes quiet produces no setup ever, and the
+ * user could not distinguish "waiting for a setup" from "waiting on a dead
+ * market" — so in practice the bot looked broken. It now hunts like the Barrier
+ * Architect and still refuses to fire on a bad tick.
  *
- *  · NO CONTRACT DRIFT. The user names exactly one contract — Over N, Under N,
- *    Matches D, Even, or Odd. Never both sides of a pair. The only degree of
- *    freedom the AI has is the Matches digit, and only when the user explicitly
- *    delegates it. A sovereignty check runs immediately before every buy.
+ * The design consequences:
  *
- *  · WAITING IS THE DEFAULT STATE. The loop's normal condition is "armed,
- *    watching, not trading". Firing is the exception. The console shows the
- *    SPRT evidence bar filling so the user can see the bot working while it is
- *    deliberately doing nothing.
+ *  · MARKET ROTATION IS ON BY DEFAULT (`targetMode: "hunt"`). Every few seconds
+ *    the loop re-scores every digit market for the user's contract through the
+ *    same screened, surcharged scan the deploy screen uses, and moves to a
+ *    challenger only when it beats the held market by SWITCH_MARGIN confidence
+ *    points or the held market has been non-deployable for STALE_SCAN_LIMIT
+ *    passes. Hysteresis on both sides, so it cannot thrash. `targetMode: "lock"`
+ *    restores the original single-market behaviour.
+ *
+ *  · NO ROTATION WHILE A RECOVERY LADDER IS OPEN. The debt was incurred on the
+ *    current market, and moving market mid-recovery would change the payout the
+ *    shared stake formula was sized against.
+ *
+ *  · NO CONTRACT DRIFT, EVER. The user names exactly one contract — Over N,
+ *    Under N, Matches D, Even, or Odd. Never both sides of a pair. The only
+ *    degree of freedom the AI has is the Matches digit, and only when the user
+ *    explicitly delegates it. A sovereignty check runs immediately before every
+ *    buy. Hunt mode selects MARKETS; it can never select a contract.
+ *
+ *  · ARMED IS NOT FIRED. Once the evidence stack clears, `killshot-timing.ts`
+ *    decides whether THIS tick is the entry: short-window momentum must still
+ *    match the measured regime, the contract's own renewal clock must be near
+ *    due rather than just reset or long droughted, the feed must be fresh, and
+ *    enough new ticks must have arrived since the last shot for this to be an
+ *    independent bet. A patience valve fires the shot anyway once the objection
+ *    has stood for TIMING.maxWaitTicks, so a conclusive setup never rots.
+ *
+ *  · WAITING IS STILL THE DEFAULT STATE. The loop's normal condition is
+ *    "watching, not trading". Firing is the exception, and the console shows
+ *    both the evidence bar and the timing reason so the waiting is legible.
  *
  *  · THE SAME SHARED RECOVERY SYSTEM. Identical to the other bots: the ONE
  *    account-global ledger (`lib/agents/recovery-engine.ts`), the ONE recovery
@@ -73,9 +94,11 @@ import {
   killShotPayout,
   KILLSHOT_CONTRACT_TYPE,
   KILLSHOT_GATES,
+  KILLSHOT_WINDOW,
   type KillShotCandidate,
   type KillShotContract,
 } from "./killshot-analysis";
+import { evaluateKillShotTiming, TIMING } from "./killshot-timing";
 
 export const KILLSHOT_BOT_ID = "killshot";
 const BOT_NAME = "Kill-Shot Precision Sniper";
@@ -84,9 +107,22 @@ const BOT_NAME = "Kill-Shot Precision Sniper";
 
 export interface KillShotConfig {
   ownerSessionId?: string;
-  /** FROZEN market — never re-selected for the life of the session. */
+  /**
+   * Starting market. In `lock` mode it is FROZEN for the whole session; in
+   * `hunt` mode it is only the first target and the loop re-selects the best
+   * market for the user's contract continuously.
+   */
   symbol: string;
   displayName: string;
+  /**
+   * `hunt` (default) — rotate across every digit-enabled market looking for the
+   * best one for the user's contract, exactly as the generalist bots do, and
+   * still wait for the entry tick before firing. `lock` — the original
+   * behaviour: one market, frozen, for the life of the session.
+   *
+   * The user's CONTRACT is sovereign in both modes and never rotates.
+   */
+  targetMode?: "hunt" | "lock";
   /** FROZEN contract — exactly one side, never both. */
   contract: KillShotContract;
   stake: number;
@@ -120,7 +156,7 @@ export interface KillShotStatus {
   lastResult?: "won" | "lost";
   message?: string;
   config?: Omit<KillShotConfig, "ownerSessionId">;
-  /** The frozen target and its pre-deploy read. */
+  /** The current target (market + the user's single contract) and its read. */
   killLock?: {
     symbol: string;
     displayName: string;
@@ -156,6 +192,26 @@ export interface KillShotStatus {
     ticksWatched: number;
     /** Number of shots the bot has declined to take. */
     setupsRejected: number;
+    /** "hunt" rotates markets, "lock" keeps the one the user froze. */
+    targetMode: "hunt" | "lock";
+    /** The market currently being watched. */
+    targetSymbol: string;
+    targetDisplayName: string;
+    /** How many markets the last hunt pass scored. */
+    marketsScanned: number;
+    /** Best confidence seen anywhere in the last hunt pass. */
+    bestConfidence: number;
+    /** Evidence tier of the current target. */
+    tier: "prime" | "standard" | "marginal";
+    /** Entry-timing layer — what the bot is waiting on once the evidence is in. */
+    timing: {
+      ready: boolean;
+      score: number;
+      waitTicks: number;
+      reason: string;
+      momentumPP: number;
+      gapRatio: number;
+    };
   };
 }
 
@@ -200,6 +256,13 @@ function freshHunt(): NonNullable<KillShotStatus["hunt"]> {
     blockers: [],
     ticksWatched: 0,
     setupsRejected: 0,
+    targetMode: "hunt",
+    targetSymbol: "",
+    targetDisplayName: "",
+    marketsScanned: 0,
+    bestConfidence: 0,
+    tier: "marginal",
+    timing: { ready: false, score: 0, waitTicks: 0, reason: "", momentumPP: 0, gapRatio: 0 },
   };
 }
 
@@ -271,8 +334,8 @@ export function getStatus(): KillShotStatus {
     config: publicConfig,
     killLock: cfg
       ? {
-          symbol: cfg.symbol,
-          displayName: cfg.displayName,
+          symbol: session.hunt.targetSymbol || cfg.symbol,
+          displayName: session.hunt.targetDisplayName || cfg.displayName,
           contract: killShotLabel(cfg.contract),
           confidence: a?.confidence ?? 0,
           pWin: a?.pWin ?? 0,
@@ -285,7 +348,7 @@ export function getStatus(): KillShotStatus {
           signals: a?.signals ?? [],
         }
       : undefined,
-    hunt: session.running ? session.hunt : undefined,
+    hunt: session.running ? { ...session.hunt, targetSymbol: session.hunt.targetSymbol || cfg?.symbol || "" } : undefined,
   };
 }
 
@@ -310,10 +373,19 @@ export function stopSession() {
  *
  * The market this returns is the ONLY market the session will ever trade.
  */
-export async function scanForTarget(
-  ownerSessionId: string | undefined,
+/**
+ * Score every digit-enabled market for ONE contract through the full stack and
+ * return the Benjamini–Hochberg-screened ranking.
+ *
+ * Shared by the pre-deploy scan and by the running hunt loop, so the market the
+ * bot trades in hunt mode is selected by exactly the same statistics the user
+ * saw on the scan screen. `onProgress` lets the caller stream scan progress.
+ */
+async function scoreAllMarkets(
   contract: KillShotContract,
-): Promise<KillShotScanResult> {
+  ownerSessionId?: string,
+  onProgress?: (market: { displayName: string; symbol: string }, scanned: number, total: number, results: KillShotCandidate[]) => void,
+): Promise<{ ranked: KillShotCandidate[]; scanned: number; penaltyNats: number }> {
   const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
 
   // Candidate contracts: the user's exact choice, or all ten digits when they
@@ -331,16 +403,8 @@ export async function scanForTarget(
   let scanned = 0;
 
   for (const market of markets) {
-    broadcastSSE("bot_scan_progress", {
-      botId: KILLSHOT_BOT_ID,
-      scanning: market.displayName,
-      symbol: market.symbol,
-      scanned,
-      total: markets.length,
-      results: screenKillShotCandidates(all).slice(0, 8),
-    }, ownerSessionId);
-
-    const digits = tickManager.getDigits(market.symbol, 600);
+    onProgress?.(market, scanned, markets.length, screenKillShotCandidates(all).slice(0, 8));
+    const digits = tickManager.getDigits(market.symbol, KILLSHOT_WINDOW);
     for (const c of contracts) {
       const cand = evaluateKillShotCandidate(market.symbol, market.displayName, digits, c, penaltyNats);
       if (cand) all.push(cand);
@@ -350,15 +414,56 @@ export async function scanForTarget(
   }
 
   const ranked = screenKillShotCandidates(all);
+  onProgress?.({ displayName: "", symbol: "" }, markets.length, markets.length, ranked.slice(0, 8));
+  return { ranked, scanned: markets.length, penaltyNats };
+}
 
-  broadcastSSE("bot_scan_progress", {
-    botId: KILLSHOT_BOT_ID,
-    scanning: null,
-    symbol: null,
-    scanned: markets.length,
-    total: markets.length,
-    results: ranked.slice(0, 8),
-  }, ownerSessionId);
+/**
+ * Explain a refusal in terms the user can act on.
+ *
+ * The old message said "re-scan in a few minutes", which was wrong advice: for
+ * most contracts the block is STRUCTURAL, not transient. Every Deriv digit
+ * contract pays below its fair rate, so an unbiased stream is always slightly
+ * −EV and the market has to be measurably hot before any analysis can call it
+ * +EV. Saying so is the difference between "wait" and "pick another contract".
+ */
+function explainRefusal(best: KillShotCandidate, contract: KillShotContract): string {
+  const head = best.headroomPP;
+  const structural =
+    `${killShotLabel(contract)} pays ${best.payout.toFixed(2)}×, so break-even is ` +
+    `${(best.breakEven * 100).toFixed(1)}% while an unbiased stream wins only ${(best.fairRate * 100).toFixed(1)}% ` +
+    `(${head >= 0 ? "+" : ""}${head.toFixed(1)}pp of headroom). The market has to run ` +
+    `${Math.abs(head).toFixed(1)}pp ${head < 0 ? "hot" : "cold"} before this contract can be +EV at all.`;
+  return `No market currently clears the kill-shot bar for ${killShotLabel(contract)}. ` +
+    `Best was ${best.displayName} at ${best.confidence}% confidence — blocked by: ${best.blockers[0] ?? "insufficient evidence"}. ` +
+    structural;
+}
+
+/**
+ * Find the best market for the user's chosen contract, right now.
+ *
+ * Every digit-enabled market is scored through the full stack. When the user
+ * chose Matches WITHOUT naming a digit, all ten digits are scored in every
+ * market too, and the selection surcharge log(10 × markets) is applied to the
+ * SPRT threshold so the winner cannot be a lucky argmax.
+ *
+ * In `lock` mode the winner is the only market the session will ever trade. In
+ * `hunt` mode this same ranking is re-run continuously by the loop.
+ */
+export async function scanForTarget(
+  ownerSessionId: string | undefined,
+  contract: KillShotContract,
+): Promise<KillShotScanResult> {
+  const { ranked } = await scoreAllMarkets(contract, ownerSessionId, (market, scanned, total, results) => {
+    broadcastSSE("bot_scan_progress", {
+      botId: KILLSHOT_BOT_ID,
+      scanning: market.displayName || null,
+      symbol: market.symbol || null,
+      scanned,
+      total,
+      results,
+    }, ownerSessionId);
+  });
 
   if (ranked.length === 0) {
     return {
@@ -372,12 +477,10 @@ export async function scanForTarget(
   const best = ranked[0]!;
   const suitable = best.deployable;
   const reason = suitable
-    ? `${best.displayName}: ${best.label} — ${best.confidence}% confidence, ` +
+    ? `${best.displayName}: ${best.label} — ${best.confidence}% confidence (${best.tier.toUpperCase()}), ` +
       `${(best.pWin * 100).toFixed(1)}% win rate (anytime-valid floor ${(best.pLower * 100).toFixed(1)}%), ` +
-      `SPRT odds ${best.sprt.oddsForEdge.toFixed(0)}:1, P(2 losses in a row) ${(best.loss.pTwoInARow * 100).toFixed(2)}%`
-    : `No market currently clears the kill-shot bar for ${killShotLabel(contract)}. ` +
-      `Best was ${best.displayName} at ${best.confidence}% confidence — blocked by: ${best.blockers[0] ?? "insufficient evidence"}. ` +
-      `This bot refuses marginal setups by design; re-scan in a few minutes.`;
+      `SPRT odds ${best.sprt.oddsForEdge.toFixed(0)}:1, EV ${best.expectedValue >= 0 ? "+" : ""}${(best.expectedValue * 100).toFixed(1)}% per $1`
+    : explainRefusal(best, contract);
 
   return { suitable, best, allScored: ranked.slice(0, 20), reason };
 }
@@ -411,7 +514,9 @@ export async function startSession(config: KillShotConfig): Promise<{ ok: boolea
     sessionId: `bot_killshot_${Date.now()}`,
     config,
     currentStake: config.stake,
-    message: `Locked on ${config.displayName} · ${killShotLabel(config.contract)}. Hunting for a kill shot — no trade until the evidence is conclusive.`,
+    message: (config.targetMode ?? "hunt") === "hunt"
+      ? `Hunting every digit market for ${killShotLabel(config.contract)}, starting on ${config.displayName}. No trade on deploy — the bot waits for conclusive evidence AND a good entry tick.`
+      : `Locked on ${config.displayName} · ${killShotLabel(config.contract)}. Hunting for a kill shot — no trade until the evidence is conclusive and the entry tick is right.`,
   };
 
   logger.info({
@@ -466,17 +571,42 @@ async function runLoop(config: KillShotConfig) {
     ? Number(accounts[0]!.balance)
     : Number.POSITIVE_INFINITY;
 
-  // THE LOCK. Captured once, here, and never reassigned. Every read below goes
-  // through these two constants, so there is no code path — not a stall, not a
-  // loss streak, not an error retry — that can move this session to another
-  // market or another contract.
-  const LOCKED_SYMBOL = config.symbol;
+  // ── WHAT IS FROZEN AND WHAT IS NOT ──────────────────────────────────────
+  //
+  // THE CONTRACT IS FROZEN. Captured once, here, never reassigned. Every read
+  // below goes through these constants, so there is no code path — not a stall,
+  // not a loss streak, not an error retry — that can move this session to a
+  // contract the user did not choose.
   const LOCKED_CONTRACT: KillShotContract = { ...config.contract };
   const LOCKED_TYPE = KILLSHOT_CONTRACT_TYPE[LOCKED_CONTRACT.kind];
   const LOCKED_WINSET = killShotWinSet(LOCKED_CONTRACT);
 
-  let consecutiveErrors = 0;
+  // THE MARKET IS NOT FROZEN IN HUNT MODE. This is the change the bot needed:
+  // locking one market before the session meant that if that market went quiet
+  // the bot sat on it forever, and the user could not tell "waiting for a setup"
+  // from "waiting on a market that will never produce one". Hunt mode re-runs
+  // the same scan the user saw on the deploy screen, continuously, and moves to
+  // whichever market currently carries the strongest evidence for the user's
+  // contract — exactly how the generalist bots rotate.
+  const HUNT = (config.targetMode ?? "hunt") === "hunt";
+  /** A challenger must beat the held market by this many confidence points. */
+  const SWITCH_MARGIN = 8;
+  /** Held market is dropped after this many consecutive non-deployable scans. */
+  const STALE_SCAN_LIMIT = 3;
+  /** Minimum time between hunt passes — a full sweep of every market is costly. */
+  const HUNT_SCAN_INTERVAL_MS = 6000;
+
+  let targetSymbol = config.symbol;
+  let targetName = config.displayName;
+  let targetRead: KillShotCandidate | null = config.lockedAnalysis ?? null;
+  let lastHuntAt = 0;
+  let staleScans = 0;
+  /** Ticks the current timing objection has been standing (patience valve). */
+  let timingWaitTicks = 0;
+  let ticksSinceLastShot = Number.POSITIVE_INFINITY;
   let lastDigitCount = 0;
+
+  let consecutiveErrors = 0;
 
   while (session.running && !session.stopRequested) {
     try {
@@ -496,33 +626,86 @@ async function runLoop(config: KillShotConfig) {
         continue;
       }
 
+      const inRecovery = recoveryEngine.isInRecovery();
+
       // ── THE HUNT ───────────────────────────────────────────────────────────
-      // Re-evaluate the LOCKED market and the LOCKED contract only. Nothing
-      // here can select a different market — `scanForTarget` is not reachable
-      // from the running loop at all.
-      const digits = tickManager.getDigits(LOCKED_SYMBOL, 600);
+      // Re-select the best market for the user's contract. Skipped in `lock`
+      // mode, and skipped while a recovery ladder is open: the debt was incurred
+      // on the current market, and moving market mid-recovery would change the
+      // payout the shared stake formula was sized against.
+      if (HUNT && !inRecovery && Date.now() - lastHuntAt >= HUNT_SCAN_INTERVAL_MS) {
+        lastHuntAt = Date.now();
+        try {
+          const { ranked } = await scoreAllMarkets(LOCKED_CONTRACT);
+          const deployable = ranked.filter(c => c.deployable);
+          const best = deployable[0] ?? null;
+          const held = ranked.find(c => c.symbol === targetSymbol) ?? null;
+
+          session.hunt.marketsScanned = ranked.length > 0 ? new Set(ranked.map(c => c.symbol)).size : 0;
+          session.hunt.bestConfidence = ranked[0]?.confidence ?? 0;
+
+          if (held?.deployable) staleScans = 0; else staleScans++;
+
+          if (best && best.symbol !== targetSymbol) {
+            const heldOk = held?.deployable === true && staleScans < STALE_SCAN_LIMIT;
+            const betterBy = best.confidence - (held?.confidence ?? 0);
+            if (!heldOk || betterBy >= SWITCH_MARGIN) {
+              logger.info(
+                { from: targetSymbol, to: best.symbol, confidence: best.confidence, tier: best.tier },
+                "Kill-Shot hunt: rotating to a stronger market",
+              );
+              targetSymbol = best.symbol;
+              targetName = best.displayName;
+              timingWaitTicks = 0;
+              lastDigitCount = 0;
+              session.message = `🔎 Hunt moved to ${best.displayName} — ${best.label} at ${best.confidence}% confidence (${best.tier}).`;
+              broadcast();
+            }
+          } else if (!deployable.length && staleScans >= STALE_SCAN_LIMIT && ranked.length > 0) {
+            // Nothing is deployable anywhere; stay put on the strongest market so
+            // the evidence keeps accumulating instead of thrashing between them.
+            const strongest = ranked[0]!;
+            if (strongest.symbol !== targetSymbol) {
+              targetSymbol = strongest.symbol;
+              targetName = strongest.displayName;
+              lastDigitCount = 0;
+            }
+          }
+        } catch (err) {
+          logger.warn({ err }, "Kill-Shot hunt pass failed — holding the current market");
+        }
+      }
+
+      session.hunt.targetMode = HUNT ? "hunt" : "lock";
+      session.hunt.targetSymbol = targetSymbol;
+      session.hunt.targetDisplayName = targetName;
+
+      // ── THE READ ───────────────────────────────────────────────────────────
+      // The current target, scored on the user's contract. No selection penalty
+      // here: the market was already chosen by a screened, surcharged pass.
+      const digits = tickManager.getDigits(targetSymbol, KILLSHOT_WINDOW);
       if (digits.length !== lastDigitCount) {
         session.hunt.ticksWatched += Math.max(0, digits.length - lastDigitCount);
+        ticksSinceLastShot += Math.max(0, digits.length - lastDigitCount);
         lastDigitCount = digits.length;
       }
 
       const read = evaluateKillShotCandidate(
-        LOCKED_SYMBOL,
-        config.displayName,
+        targetSymbol,
+        targetName,
         digits,
         LOCKED_CONTRACT,
-        0, // no selection penalty: the market is already fixed, nothing is being chosen
+        0,
       );
-
-      const inRecovery = recoveryEngine.isInRecovery();
 
       if (!read) {
         session.hunt.phase = "waiting";
-        session.message = `Building history on ${config.displayName} — ${digits.length}/${KILLSHOT_GATES.minSamples} digits before analysis can begin.`;
+        session.message = `Building history on ${targetName} — ${digits.length}/${KILLSHOT_GATES.minSamples} digits before analysis can begin.`;
         broadcast();
         await sleep(1500);
         continue;
       }
+      targetRead = read;
 
       // Publish the live evidence state so the user can watch the bot think.
       session.hunt.evidence = Math.max(0, read.sprt.progress);
@@ -533,36 +716,74 @@ async function runLoop(config: KillShotConfig) {
       session.hunt.confidence = read.confidence;
       session.hunt.pWin = read.pWin;
       session.hunt.pLower = read.pLower;
+      session.hunt.tier = read.tier;
       session.hunt.blockers = read.blockers.slice(0, 3);
 
-      // THE ONE DECISION. Every gate must be clear. In recovery the bar is the
-      // SAME — a recovery trade is sniped exactly as carefully as a normal one,
-      // because a rushed recovery trade is how a 2-loss streak becomes a 5.
+      // THE EVIDENCE DECISION. Every gate must be clear. In recovery the bar is
+      // the SAME — a recovery trade is sniped exactly as carefully as a normal
+      // one, because a rushed recovery trade is how a 2-loss streak becomes a 5.
       if (!read.deployable) {
         session.hunt.phase = "waiting";
+        timingWaitTicks = 0;
+        session.hunt.timing = { ready: false, score: 0, waitTicks: 0, reason: "", momentumPP: 0, gapRatio: 0 };
         const top = read.blockers[0] ?? "gathering evidence";
         session.message = inRecovery
           ? `🎯 Recovery armed — holding fire until the setup is conclusive. ${top}`
-          : `👁 Watching ${config.displayName} · ${read.confidence}% confidence · ${top}`;
+          : `👁 Watching ${targetName} · ${read.confidence}% confidence · ${top}`;
         broadcast();
         // Patience is free. Poll slowly — this is a sniper, not a scalper.
         await sleep(1400);
         continue;
       }
 
-      // ── ARMED → FIRE ───────────────────────────────────────────────────────
+      // ── ARMED. NOW WAIT FOR THE ENTRY TICK ─────────────────────────────────
+      // This is the second half of the answer to "don't trade the moment I press
+      // run". The evidence says the market carries an edge; it does not say the
+      // NEXT tick is the one to be in. A digit contract settles on the next tick,
+      // so the bot checks that the regime it measured is still live (momentum),
+      // that the contract's own renewal clock is near due rather than just reset
+      // or long droughted, that the feed is fresh, and that enough new ticks have
+      // arrived since the last shot for this to be an independent bet.
       session.hunt.phase = "armed";
+      const timing = evaluateKillShotTiming({
+        digits,
+        winSet: LOCKED_WINSET,
+        secondsSinceLastTick: tickManager.getTickAgeSeconds(targetSymbol),
+        medianTickGapSeconds: targetSymbol.startsWith("1HZ") ? 1 : 2,
+        ticksSinceLastShot,
+        waitedTicks: timingWaitTicks,
+      });
+      session.hunt.timing = {
+        ready: timing.ready,
+        score: timing.score,
+        waitTicks: timing.waitTicks,
+        reason: timing.reason,
+        momentumPP: timing.components.momentumPP,
+        gapRatio: timing.components.gapRatio,
+      };
+
+      if (!timing.ready) {
+        timingWaitTicks++;
+        session.hunt.setupsRejected++;
+        session.message = inRecovery
+          ? `🎯 Recovery armed (${read.confidence}% · ${read.tier}) — ${timing.reason}`
+          : `⏳ Armed on ${targetName} · ${read.confidence}% confidence (${read.tier}) — ${timing.reason}`;
+        broadcast();
+        await sleep(900);
+        continue;
+      }
+      timingWaitTicks = 0;
       broadcast();
 
-      // Contract sovereignty — re-asserted immediately before every buy. A bug
-      // anywhere upstream can never make this bot fire a contract or a market
-      // the user did not choose.
-      if (LOCKED_SYMBOL !== config.symbol
-          || LOCKED_CONTRACT.kind !== config.contract.kind
-          || LOCKED_CONTRACT.digit !== config.contract.digit) {
+      // Contract sovereignty — re-asserted immediately before every buy. In hunt
+      // mode the market may legitimately have moved, but the contract may not,
+      // and the market must still be one the scan is allowed to look at.
+      if (LOCKED_CONTRACT.kind !== config.contract.kind
+          || LOCKED_CONTRACT.digit !== config.contract.digit
+          || !isAutomatedMarket(targetSymbol)) {
         session.running = false;
         session.message = "⚠️ Lock integrity check failed — session halted before firing";
-        logger.error({ LOCKED_SYMBOL, LOCKED_CONTRACT, config }, "Kill-Shot lock violation");
+        logger.error({ targetSymbol, LOCKED_CONTRACT, config }, "Kill-Shot lock violation");
         broadcast();
         return;
       }
@@ -572,7 +793,7 @@ async function runLoop(config: KillShotConfig) {
         : LOCKED_CONTRACT.digit;
 
       const payoutQuote = await resolveRecoveryPayout({
-        symbol: LOCKED_SYMBOL,
+        symbol: targetSymbol,
         contractType: LOCKED_TYPE,
         barrier,
         duration: 1,
@@ -600,22 +821,24 @@ async function runLoop(config: KillShotConfig) {
       const sharedStep = recoveryEngine.getState().recoveryStep;
       session.hunt.phase = "firing";
       session.currentStake = stake;
-      session.currentMarket = config.displayName;
+      session.currentMarket = targetName;
       session.currentContractType = killShotLabel(LOCKED_CONTRACT);
       session.message = inRecovery
-        ? `🎯 KILL SHOT [Recovery R${sharedStep}] ${killShotLabel(LOCKED_CONTRACT)} on ${config.displayName} · $${stake.toFixed(2)} · ${read.confidence}% conf`
-        : `🎯 KILL SHOT ${killShotLabel(LOCKED_CONTRACT)} on ${config.displayName} · $${stake.toFixed(2)} · ${read.confidence}% conf · ${read.sprt.oddsForEdge.toFixed(0)}:1 odds`;
+        ? `🎯 KILL SHOT [Recovery R${sharedStep}] ${killShotLabel(LOCKED_CONTRACT)} on ${targetName} · $${stake.toFixed(2)} · ${read.confidence}% conf`
+        : `🎯 KILL SHOT ${killShotLabel(LOCKED_CONTRACT)} on ${targetName} · $${stake.toFixed(2)} · ${read.confidence}% conf · ${read.sprt.oddsForEdge.toFixed(0)}:1 odds`;
       broadcast();
 
-      const reason = `[${BOT_NAME}${inRecovery ? " RECOVERY" : ""}] ${killShotLabel(LOCKED_CONTRACT)} · ` +
-        `conf ${read.confidence}% · p̂ ${(read.pWin * 100).toFixed(1)}% (floor ${(read.pLower * 100).toFixed(1)}%) · ` +
+      const reason = `[${BOT_NAME}${inRecovery ? " RECOVERY" : ""}] ${killShotLabel(LOCKED_CONTRACT)} on ${targetName} · ` +
+        `conf ${read.confidence}% (${read.tier}) · p̂ ${(read.pWin * 100).toFixed(1)}% (floor ${(read.pLower * 100).toFixed(1)}%) · ` +
         `SPRT ${read.sprt.logLR}/${read.sprt.upper} nats · ξ ${read.loss.clusterRatio.toFixed(2)} · ` +
-        `${read.concordance.agreeing}/${read.concordance.total} horizons · watched ${session.hunt.ticksWatched} ticks`;
+        `${read.concordance.agreeing}/${read.concordance.total} horizons · EV ${(read.expectedValue * 100).toFixed(1)}%/$1 · ` +
+        `entry ${timing.score}/100 (momentum ${timing.components.momentumPP >= 0 ? "+" : ""}${timing.components.momentumPP.toFixed(1)}pp, renewal ${timing.components.gapRatio.toFixed(2)}×) · ` +
+        `watched ${session.hunt.ticksWatched} ticks`;
 
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
-        symbol: LOCKED_SYMBOL,
-        displayName: config.displayName,
+        symbol: targetSymbol,
+        displayName: targetName,
         contractType: LOCKED_TYPE,
         barrier: barrier ?? null,
         stake: String(Math.round(stake * 100) / 100),
@@ -632,13 +855,13 @@ async function runLoop(config: KillShotConfig) {
       // ── Execute ────────────────────────────────────────────────────────────
       let won: boolean;
       let profit: number;
-      let entryPrice = tickManager.getLatestPrice(LOCKED_SYMBOL) ?? 0;
+      let entryPrice = tickManager.getLatestPrice(targetSymbol) ?? 0;
       let exitPrice = entryPrice;
 
       if (isLive) {
         try {
           const liveResult = await executeLiveTrade(token!, {
-            symbol: LOCKED_SYMBOL,
+            symbol: targetSymbol,
             contractType: LOCKED_TYPE,
             stake: Math.round(stake * 100) / 100,
             duration: 1,
@@ -673,11 +896,11 @@ async function runLoop(config: KillShotConfig) {
         // Paper mode settles against the market's REAL next digit — this bot's
         // entire thesis is the digit stream, so a coin flip would be meaningless.
         session.hunt.phase = "settling";
-        const before = tickManager.getDigits(LOCKED_SYMBOL, 1)[0];
+        const before = tickManager.getDigits(targetSymbol, 1)[0];
         let digit = before;
         for (let i = 0; i < 40; i++) {
           await sleep(120);
-          const d = tickManager.getDigits(LOCKED_SYMBOL, 1)[0];
+          const d = tickManager.getDigits(targetSymbol, 1)[0];
           if (d !== undefined && d !== before) { digit = d; break; }
           digit = d;
         }
@@ -728,8 +951,23 @@ async function runLoop(config: KillShotConfig) {
         } catch { /* best-effort */ }
       }
 
-      // Reset the hunt: the next shot must earn its own evidence from scratch.
-      session.hunt = { ...freshHunt(), setupsRejected: session.hunt.setupsRejected };
+      // Reset the hunt: the next shot must earn its own evidence from scratch,
+      // and it must be spaced far enough from this one that it is an independent
+      // bet rather than the same evidence window spent twice. The market and the
+      // hunt-mode counters survive the reset — only the evidence is discarded.
+      session.hunt = {
+        ...freshHunt(),
+        setupsRejected: session.hunt.setupsRejected,
+        targetMode: session.hunt.targetMode,
+        targetSymbol,
+        targetDisplayName: targetName,
+        marketsScanned: session.hunt.marketsScanned,
+        bestConfidence: session.hunt.bestConfidence,
+        tier: read.tier,
+      };
+      ticksSinceLastShot = 0;
+      timingWaitTicks = 0;
+      lastHuntAt = 0; // re-hunt immediately: the landscape has changed
       session.message = won
         ? `✅ Kill shot landed — +$${profit.toFixed(2)}. Returning to the hunt.`
         : `❌ Shot missed — -$${Math.abs(profit).toFixed(2)}. Recovery armed; the next shot waits for full evidence.`;

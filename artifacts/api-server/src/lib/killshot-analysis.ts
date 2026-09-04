@@ -49,6 +49,14 @@
  * ─────────────────────────────────────────────────────────────────────────────
  * A trade fires only when ALL seven layers agree. Any single veto stands.
  *
+ * L1 is satisfied at one of two bars. PRIME: the anytime-valid floor itself
+ * clears break-even — airtight at any stopping time, and rare. STANDARD: the
+ * sequential test has fired and the floor sits within a bounded relative
+ * shortfall of break-even, with the cross-market Benjamini–Hochberg screen
+ * carrying the multiple-comparison risk. The prime bar alone needs ~1300 ticks
+ * of one regime to resolve a 2-point edge, which is why the prime-only version
+ * of this bot never traded.
+ *
  * L1. WALD SEQUENTIAL PROBABILITY RATIO TEST (the primary trigger).
  *     H₀: p = p_be (break-even — the trade is worthless)
  *     H₁: p = p_be + δ (a real, tradeable edge)
@@ -58,8 +66,10 @@
  *     observations among ALL tests with the same error rates — i.e. it is the
  *     provably fastest way to reach a given certainty. Since this bot is
  *     defined by "be certain, take as long as you like", the SPRT is not a
- *     heuristic choice; it is the optimal one. α is set to 0.5 %, so a fired
- *     signal carries ≈ 200:1 evidence odds.
+ *     heuristic choice; it is the optimal one. The alternative H₁ is break-even
+ *     + 2 ABSOLUTE points, which is the scale the house margin lives at; a
+ *     relative δ made H₁ unreachable on high-probability contracts and is why an
+ *     earlier revision of this bot could never fire.
  *
  * L2. VARIABLE-ORDER MARKOV CONTEXT MODEL.
  *     Digit streams carry short-range structure. A fixed 1st-order chain is too
@@ -78,10 +88,16 @@
  *     interval, this one cannot be gamed by watching it until it looks good.
  *
  * L4. CONSECUTIVE-LOSS MARKOV GATE (the ruin fix — the user's stated priority).
- *     Model the loss indicator as a 2-state chain and require:
+ *     Model the loss indicator as a 2-state chain and require the scale-free
  *         ξ = P(loss|loss)/P(loss) ≤ 1.0   (losses must not attract losses)
- *         P(two losses in a row) ≤ 1.5 %
- *     and compute the stationary-chain probability of a k-long loss run
+ *     The gate uses the one-sided 95 % LOWER bound on ξ, not its point estimate:
+ *     ξ wanders either side of 1.0 on an independent stream from sampling noise
+ *     alone, and gating on the estimate refused clean markets half the time.
+ *     An absolute ceiling on P(two losses in a row) was tried and removed: it is
+ *     unsatisfiable below ~86 % win rate, so it banned every mid-barrier contract
+ *     regardless of the market. P(two in a row) is still reported, against its
+ *     own independence baseline pLoss², because the comparison is what is
+ *     meaningful. Also compute the stationary-chain probability of a k-long loss run
  *         P(run ≥ k) = π_L · q^(k−1)
  *     which must stay under a hard ceiling. A market that produces paired
  *     losses is refused no matter how high its win rate is, because the whole
@@ -426,6 +442,17 @@ export interface LossStructure {
   pLossGivenLoss: number;
   /** ξ = P(loss|loss)/P(loss). ≤ 1 means losses REPEL each other. */
   clusterRatio: number;
+  /**
+   * One-sided 95 % LOWER bound on ξ. This is what the gate uses.
+   *
+   * ξ is an estimate, and on an independent stream it wanders either side of
+   * 1.0 purely from sampling noise — gating on the point estimate refused
+   * perfectly clean markets half the time (a synthetic 28 % stream scored
+   * ξ = 1.01 and was vetoed). "Losses must not attract losses" is only a
+   * meaningful veto when the clustering is DEMONSTRATED, so the gate asks
+   * whether even the conservative bound still exceeds 1.
+   */
+  clusterRatioLower: number;
   /** Stationary-chain P(two losses in a row). */
   pTwoInARow: number;
   /** Stationary-chain P(three losses in a row). */
@@ -466,6 +493,10 @@ export function lossStructure(wins: number[]): LossStructure {
   const prior = 5;
   const q = (lossThenLoss + prior * pLoss) / (lossTransitions + prior);
   const clusterRatio = pLoss > 1e-6 ? q / pLoss : 1;
+  // Wald interval on the conditional, carried through the ξ = q/pLoss scaling.
+  const qSe = Math.sqrt(Math.max(1e-9, q * (1 - q)) / Math.max(1, lossTransitions));
+  const qLower = Math.max(0, q - 1.645 * qSe);
+  const clusterRatioLower = pLoss > 1e-6 ? qLower / pLoss : 1;
 
   let maxRun = 0;
   let cur = 0;
@@ -478,6 +509,7 @@ export function lossStructure(wins: number[]): LossStructure {
     pLoss: round(pLoss),
     pLossGivenLoss: round(q),
     clusterRatio: round(clusterRatio, 3),
+    clusterRatioLower: round(clusterRatioLower, 3),
     pTwoInARow: round(pLoss * q),
     pThreeInARow: round(pLoss * q * q),
     maxLossRun: maxRun,
@@ -565,6 +597,13 @@ export function concordance(digits: number[], winSet: ReadonlySet<number>, break
   };
 }
 
+/**
+ * Digit history the engine feeds each evaluation. Long enough that the
+ * anytime-valid confidence sequence is tight (its width falls as 1/√n), short
+ * enough that it still describes the current regime.
+ */
+export const KILLSHOT_WINDOW = 1200;
+
 // ── Candidate evaluation ──────────────────────────────────────────────────────
 
 /**
@@ -576,28 +615,56 @@ export function concordance(digits: number[], winSet: ReadonlySet<number>, break
 export const KILLSHOT_GATES = {
   /** Minimum digit history before any candidate may even be scored. */
   minSamples: 200,
-  /** SPRT type-I error: firing on a market with no edge. 1-in-200. */
-  alpha: 0.005,
-  /** SPRT type-II error: missing a real edge. Cheap — waiting costs nothing. */
-  beta: 0.10,
-  /** Edge size the SPRT is powered to detect, as a fraction of break-even. */
-  deltaRel: 0.06,
-  /** Anytime-valid LCB must clear break-even by this relative margin. */
-  lcbMarginRel: 0.03,
+  /**
+   * SPRT type-I error: firing on a market with no edge. 1-in-20 (≈20:1 evidence
+   * odds per test). It was 0.5 % while this bot locked a single market and had
+   * nothing else to do; in hunt mode the multiple-comparison risk is carried by
+   * the Benjamini–Hochberg screen and the log(#candidates) surcharge instead,
+   * which is where it belongs, so the per-test α can be honest rather than
+   * punitive.
+   */
+  alpha: 0.05,
+  /** SPRT type-II error: missing a real edge. */
+  beta: 0.20,
+  /**
+   * The edge the SPRT is powered to detect, in ABSOLUTE probability points
+   * above break-even — deliberately not a relative fraction.
+   *
+   * A relative δ made the test unanswerable: for Over 0 (break-even 91.7 %) a
+   * 6 % relative δ set H₁ at 97.2 %, a rate no digit stream reaches, so the test
+   * could only ever abandon and the bot could never fire on any contract. Two
+   * absolute points is the scale the house margin actually lives at, and it is
+   * reachable — when the truth sits above H₁ the log-likelihood ratio
+   * accumulates at ~0.02 nats/tick and the test decides in ~150 ticks.
+   */
+  deltaAbs: 0.02,
+  /** Ceiling on H₁ so an extreme contract is never handed an unreachable bar. */
+  deltaMaxRel: 0.35,
+  /** PRIME tier: the anytime-valid floor must clear break-even by this much. */
+  lcbMarginRel: 0.015,
+  /**
+   * STANDARD tier: how far the anytime-valid floor may sit BELOW break-even
+   * while the SPRT still carries the shot. A confidence sequence over a few
+   * hundred ticks is several points wide, so demanding the floor itself beat
+   * break-even is demanding ~1300 ticks of one regime — airtight, but it is why
+   * the bot previously never traded. The BH-FDR screen across every market is
+   * what controls the false-discovery risk this tolerance admits.
+   */
+  maxLcbShortfallRel: 0.09,
   /** Loss clustering ceiling — losses must not attract losses. */
   maxClusterRatio: 1.0,
-  /** Hard ceiling on the stationary probability of two losses in a row. */
-  maxPTwoInARow: 0.02,
   /** |χ²→z| ceiling: the regime must be stable. */
   maxStationarityZ: 2.5,
   /** Absolute ceiling on the block-rate trend slope. */
   maxTrend: 0.05,
   /** Minimum agreeing horizons out of those measurable. */
-  minAgreeingHorizons: 3,
+  minAgreeingHorizons: 2,
   /** Maximum spread between horizon rates. */
-  maxHorizonSpread: 0.12,
+  maxHorizonSpread: 0.15,
   /** Composite confidence a candidate must reach to be deployable. */
-  minConfidence: 82,
+  minConfidence: 70,
+  /** Confidence a PRIME (anytime-valid) setup must reach. */
+  minConfidencePrime: 66,
 } as const;
 
 export interface KillShotCandidate {
@@ -621,6 +688,25 @@ export interface KillShotCandidate {
   stationarity: { z: number; trend: number; rates: number[] };
   concordance: Concordance;
   samples: number;
+  /**
+   * Evidence tier. `prime` — the anytime-valid floor itself clears break-even,
+   * so the shot is defensible at any stopping time. `standard` — the sequential
+   * test fired and the floor sits within tolerance of break-even. `marginal` —
+   * never fired.
+   */
+  tier: "prime" | "standard" | "marginal";
+  /** Win rate of an unbiased stream on this contract (winSet.size / 10). */
+  fairRate: number;
+  /** The rate the SPRT must be convinced of (break-even + δ). */
+  requiredRate: number;
+  /**
+   * fairRate − breakEven, in percentage points. Negative for every Deriv digit
+   * contract — that gap is the house margin, and it is the amount by which the
+   * market must be running hot before the contract can be +EV at all.
+   */
+  headroomPP: number;
+  /** Independence baseline for P(two losses in a row), i.e. pLoss². */
+  pairBaseline: number;
   /** Passed every hard gate — only these may ever be fired. */
   deployable: boolean;
   /** Reasons the candidate was refused (empty ⇒ clean). */
@@ -655,7 +741,10 @@ export function evaluateKillShotCandidate(
   const wins = clean.map(d => (winSet.has(d) ? 1 : 0));
 
   // ── L1: SPRT ──────────────────────────────────────────────────────────────
-  const p1 = clamp(breakEven * (1 + KILLSHOT_GATES.deltaRel), breakEven + 0.005, 0.995);
+  // H₁ = break-even + δ, with δ absolute (see KILLSHOT_GATES.deltaAbs) and
+  // capped so an extreme contract is never handed an unreachable alternative.
+  const deltaCap = Math.min(KILLSHOT_GATES.deltaAbs, (1 - breakEven) * KILLSHOT_GATES.deltaMaxRel);
+  const p1 = clamp(breakEven + Math.max(0.004, deltaCap), breakEven + 0.004, 0.995);
   const sprtRes = sprt(wins, breakEven, p1, KILLSHOT_GATES.alpha, KILLSHOT_GATES.beta, penaltyNats);
 
   // ── L2: variable-order context model ──────────────────────────────────────
@@ -692,24 +781,29 @@ export function evaluateKillShotCandidate(
   // This IS the one-sided p-value fed to the BH-FDR screen.
   const pBelowBe = round(clamp(regularizedBelow(breakEven, post.alpha, post.beta), 0, 1), 6);
 
-  // ── Hard gates ────────────────────────────────────────────────────────────
+  // Structural headroom: how far an unbiased stream sits from break-even. This
+  // is the number that explains a refusal — for Over 0 it is −1.7pp, which is
+  // why no honest analysis of a fair market can ever call it +EV.
+  const fairRate = winSet.size / 10;
+  const headroomPP = (fairRate - breakEven) * 100;
+  const pairBaseline = (1 - pWin) ** 2;
+
+  // ── Structural gates (contract-agnostic, always hard) ───────────────────
+  //
+  // These are the gates that keep a kill shot a kill shot. Note what is NOT
+  // here any more: an absolute ceiling on P(two losses in a row). A flat 2 %
+  // ceiling is unsatisfiable for any contract whose win rate is below ~86 % —
+  // an independent 55 % stream pairs its losses 20 % of the time — so it silently
+  // banned Over 3–8, Matches, Even and Odd outright no matter how good the market
+  // was. Loss pairing is scale-dependent; the scale-free statistic that actually
+  // measures it is ξ = P(loss|loss)/P(loss), and that is what gates here.
   const blockers: string[] = [];
 
-  if (sprtRes.decision !== "fire") {
+  if (loss.clusterRatioLower > KILLSHOT_GATES.maxClusterRatio) {
     blockers.push(
-      sprtRes.decision === "abandon"
-        ? `SPRT rejected the edge (logLR ${sprtRes.logLR} ≤ ${sprtRes.lower})`
-        : `SPRT still gathering evidence (${sprtRes.logLR}/${sprtRes.upper} nats, ≈${sprtRes.expectedRemaining} more ticks)`,
+      `losses cluster — ξ ${loss.clusterRatio.toFixed(2)} (95% lower bound ${loss.clusterRatioLower.toFixed(2)}) ` +
+      `is demonstrably above ${KILLSHOT_GATES.maxClusterRatio}`,
     );
-  }
-  if (pLower <= breakEven * (1 + KILLSHOT_GATES.lcbMarginRel)) {
-    blockers.push(`anytime-valid worst case ${(pLower * 100).toFixed(1)}% does not clear break-even ${(breakEven * 100).toFixed(1)}%`);
-  }
-  if (loss.clusterRatio > KILLSHOT_GATES.maxClusterRatio) {
-    blockers.push(`losses cluster (ξ ${loss.clusterRatio.toFixed(2)} > ${KILLSHOT_GATES.maxClusterRatio})`);
-  }
-  if (loss.pTwoInARow > KILLSHOT_GATES.maxPTwoInARow) {
-    blockers.push(`P(2 losses in a row) ${(loss.pTwoInARow * 100).toFixed(2)}% exceeds the ${(KILLSHOT_GATES.maxPTwoInARow * 100).toFixed(1)}% ceiling`);
   }
   if (Math.abs(stat.z) > KILLSHOT_GATES.maxStationarityZ) {
     blockers.push(`non-stationary (z ${stat.z})`);
@@ -724,7 +818,48 @@ export function evaluateKillShotCandidate(
     blockers.push(`horizons disagree (spread ${(conc.spread * 100).toFixed(1)}%)`);
   }
   if (expectedValue <= 0) {
-    blockers.push(`negative expected value (${(expectedValue * 100).toFixed(1)}% per $1)`);
+    blockers.push(
+      `negative expected value (${(expectedValue * 100).toFixed(1)}% per $1) — ` +
+      `${killShotLabel(contract)} needs the market running at ${((1 / payout) * 100).toFixed(1)}% ` +
+      `but an unbiased stream wins only ${((winSet.size / 10) * 100).toFixed(1)}%`,
+    );
+  }
+
+  // ── Evidence tier (the trigger) ─────────────────────────────────────────
+  // Two bars, one of which must be met. The prime bar is airtight at any
+  // stopping time. The standard bar admits a bounded shortfall on the
+  // anytime-valid floor and leans on the SPRT plus the cross-market FDR screen;
+  // it exists because the prime bar alone needs ~1300 ticks of a single regime
+  // to detect a 2-point edge, which is why this bot previously never fired.
+  const shortfallRel = Math.max(0, breakEven - pLower) / Math.max(1e-6, breakEven);
+  /**
+   * The edge the confidence score is built from.
+   *
+   * Above break-even the anytime-valid floor is used directly — it is the
+   * airtight number. Within tolerance of break-even the point estimate is used
+   * but DISCOUNTED in proportion to how much of the tolerance is consumed, so
+   * the score falls continuously to zero exactly at the tolerance edge. Without
+   * this, a stream running 8.3 points hot on Over 1 scored zero on the edge term
+   * purely because a simultaneous confidence bound over 1200 ticks is wide, and
+   * an overwhelming setup (SPRT odds ~10⁶:1) failed the confidence bar.
+   */
+  const edgeEvidence = pLower >= breakEven
+    ? pLower - breakEven
+    : (pWin - breakEven) * Math.max(0, 1 - shortfallRel / KILLSHOT_GATES.maxLcbShortfallRel);
+  const prime = pLower >= breakEven * (1 + KILLSHOT_GATES.lcbMarginRel);
+  const standard = sprtRes.decision === "fire" && shortfallRel <= KILLSHOT_GATES.maxLcbShortfallRel;
+  const tier: KillShotCandidate["tier"] = prime ? "prime" : standard ? "standard" : "marginal";
+
+  if (tier === "marginal") {
+    if (sprtRes.decision !== "fire") {
+      blockers.push(
+        sprtRes.decision === "abandon"
+          ? `SPRT rejected the edge (logLR ${sprtRes.logLR} ≤ ${sprtRes.lower}) — the stream is running below the ${((p1) * 100).toFixed(1)}% this contract needs`
+          : `SPRT still gathering evidence (${sprtRes.logLR}/${sprtRes.upper} nats, ≈${sprtRes.expectedRemaining} more ticks)`,
+      );
+    } else {
+      blockers.push(`anytime-valid worst case ${(pLower * 100).toFixed(1)}% sits ${((breakEven - pLower) * 100).toFixed(1)}pp under break-even ${(breakEven * 100).toFixed(1)}% (tolerance ${(KILLSHOT_GATES.maxLcbShortfallRel * breakEven * 100).toFixed(1)}pp)`);
+    }
   }
 
   // ── Composite confidence ──────────────────────────────────────────────────
@@ -732,27 +867,37 @@ export function evaluateKillShotCandidate(
   // means a single weak layer drags the whole score down, which is the correct
   // behaviour for a bot whose promise is "no margin for error".
   const sprtTerm = clamp(sprtRes.progress, 0, 1);
-  const edgeTerm = clamp((pLower - breakEven) / Math.max(0.01, breakEven), 0, 1);
-  const lossTerm = clamp(1.6 - loss.clusterRatio, 0, 1);
+  // Scale the edge by δ, the increment the sequential test is powered to detect,
+  // NOT by break-even. Dividing by break-even collapsed this term on
+  // high-probability contracts — a 6-point edge on Over 1 (break-even 81.3 %)
+  // scored 0.07 out of 1, so the best possible setup on that contract could not
+  // reach the confidence bar. δ is the same yardstick everywhere else.
+  const edgeTerm = clamp(edgeEvidence / KILLSHOT_GATES.deltaAbs, 0, 1);
+  const lossTerm = clamp(1.6 - Math.max(loss.clusterRatioLower, Math.min(1, loss.clusterRatio)), 0, 1);
   const statTerm = clamp(1 - Math.abs(stat.z) / KILLSHOT_GATES.maxStationarityZ, 0, 1);
   const concTerm = conc.total > 0 ? conc.agreeing / conc.total : 0;
   const evTerm = clamp(expectedValue / 0.15, 0, 1);
+  // The tier is itself evidence: an anytime-valid floor above break-even is a
+  // strictly stronger claim than a fired sequential test with a bounded shortfall.
+  const tierTerm = tier === "prime" ? 1 : tier === "standard" ? 0.65 : 0.15;
 
   const confidence = Math.round(clamp(
     100 * (
-      0.28 * sprtTerm +
-      0.20 * edgeTerm +
-      0.20 * lossTerm +
-      0.12 * statTerm +
-      0.12 * concTerm +
-      0.08 * evTerm
+      0.24 * sprtTerm +
+      0.18 * edgeTerm +
+      0.18 * lossTerm +
+      0.10 * statTerm +
+      0.10 * concTerm +
+      0.08 * evTerm +
+      0.12 * tierTerm
     ), 0, 100));
 
   const signals: string[] = [
-    `SPRT ${sprtRes.logLR}/${sprtRes.upper} nats · ${sprtRes.decision === "fire" ? "FIRE" : sprtRes.decision} · odds ${sprtRes.oddsForEdge.toFixed(0)}:1`,
+    `${tier === "prime" ? "🥇 PRIME" : tier === "standard" ? "🥈 STANDARD" : "◇ MARGINAL"} · SPRT ${sprtRes.logLR}/${sprtRes.upper} nats · ${sprtRes.decision === "fire" ? "FIRE" : sprtRes.decision} · odds ${sprtRes.oddsForEdge.toFixed(0)}:1 · needs ${((p1) * 100).toFixed(1)}%`,
+    `structural headroom ${headroomPP >= 0 ? "+" : ""}${headroomPP.toFixed(1)}pp — a fair stream wins ${((winSet.size / 10) * 100).toFixed(1)}%, break-even is ${(breakEven * 100).toFixed(1)}%, so the market must run ${Math.abs(headroomPP).toFixed(1)}pp ${headroomPP < 0 ? "hot" : "cold"} before this contract is +EV`,
     `p̂ ${(pWin * 100).toFixed(1)}% · anytime-valid floor ${(pLower * 100).toFixed(1)}% vs break-even ${(breakEven * 100).toFixed(1)}%`,
     `context model order ${ctx.dominantOrder} · P(win|context) ${(ctx.p * 100).toFixed(1)}%`,
-    `loss pairing ξ ${loss.clusterRatio.toFixed(2)} · P(2 in a row) ${(loss.pTwoInARow * 100).toFixed(2)}% · longest run ${loss.maxLossRun}`,
+    `loss pairing ξ ${loss.clusterRatio.toFixed(2)} (bound ${loss.clusterRatioLower.toFixed(2)}) · P(2 in a row) ${(loss.pTwoInARow * 100).toFixed(2)}% vs ${(pairBaseline * 100).toFixed(2)}% if losses were independent · longest run ${loss.maxLossRun}`,
     `stationarity z ${stat.z} · trend ${stat.trend >= 0 ? "+" : ""}${stat.trend}/block`,
     `horizons ${conc.agreeing}/${conc.total} agree · spread ${(conc.spread * 100).toFixed(1)}%`,
     `EV ${expectedValue >= 0 ? "+" : ""}${(expectedValue * 100).toFixed(1)}% per $1 at ${payout.toFixed(2)}×`,
@@ -776,7 +921,13 @@ export function evaluateKillShotCandidate(
     stationarity: stat,
     concordance: conc,
     samples: clean.length,
-    deployable: blockers.length === 0 && confidence >= KILLSHOT_GATES.minConfidence,
+    tier,
+    fairRate: round(winSet.size / 10),
+    requiredRate: round(p1),
+    headroomPP: round(headroomPP, 2),
+    pairBaseline: round(pairBaseline),
+    deployable: blockers.length === 0
+      && confidence >= (tier === "prime" ? KILLSHOT_GATES.minConfidencePrime : KILLSHOT_GATES.minConfidence),
     blockers,
     signals,
     pValue: pBelowBe,

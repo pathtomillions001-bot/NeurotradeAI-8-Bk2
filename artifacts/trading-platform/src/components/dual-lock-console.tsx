@@ -272,11 +272,10 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                     <Lock className="w-3 h-3" /> How this bot works
                   </p>
                   <p className="text-[10px] text-muted-foreground leading-relaxed">
-                    One deep scan chooses a <span className="text-white/80">market</span>, a{" "}
-                    <span className="text-white/80">normal contract</span> (Over 1 · Under 8 · Over 2 · Under 7)
-                    and a <span className="text-white/80">recovery contract</span> (Over 4 · Over 5 · Under 5 · Under 4).
-                    All three are then frozen — the session runs non-stop to TP or SL with zero mid-trade analysis,
-                    so the pair is selected for <em>survival</em>, not for a single good entry.
+                    One scan picks the market, the <span className="text-white/80">normal contract</span>{" "}
+                    (Over 1 · Under 8 · Over 2 · Under 7) and the{" "}
+                    <span className="text-white/80">recovery contract</span> (Over 4 · Over 5 · Under 5 · Under 4),
+                    then locks all three. The session runs non-stop to TP or SL.
                   </p>
                 </div>
 
@@ -287,8 +286,7 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                   <NumInput label="Stop loss" value={config.stopLoss} onChange={v => set("stopLoss", v)} min={1} step={1} suffix="USD" accent={bot.accent} />
                   <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={v => set("maxRecoverySteps", v)} min={1} step={1} accent={bot.accent} />
                   <p className="text-[9px] text-muted-foreground/60">
-                    These exact numbers are fed into the pre-deploy bootstrap, so the survival probability you see is
-                    the probability of <em>this</em> session, not a generic one.
+                    The scan tests these exact numbers, so the survival figure applies to this session.
                   </p>
                 </div>
 
@@ -314,7 +312,7 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                        style={{ width: `${(progress.scanned / Math.max(1, progress.total)) * 100}%` }} />
                 </div>
                 <p className="text-[10px] font-mono text-muted-foreground/70">
-                  {progress.scanned}/{progress.total} markets · 16 contract pairs each · bootstrap sessions per pair
+                  {progress.scanned}/{progress.total} markets
                 </p>
               </div>
             )}
@@ -335,25 +333,13 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                       <div className="grid grid-cols-2 gap-1.5">
                         <Stat label="Normal" value={label(scanResult.best.normal)} tone={a.text} />
                         <Stat label="Recovery" value={label(scanResult.best.recovery)} tone="text-amber-300" />
-                        <Stat label="Normal worst-case" value={`${(scanResult.best.normalLcb * 100).toFixed(1)}%`} />
-                        <Stat label="Break-even" value={`${(scanResult.best.normalBreakEven * 100).toFixed(1)}%`} />
-                        <Stat label="Recovery | post-loss" value={`${(scanResult.best.recoveryConditional * 100).toFixed(1)}%`} />
-                        <Stat label="Recovery break-even" value={`${(scanResult.best.recoveryBreakEven * 100).toFixed(1)}%`} />
-                        <Stat label="Loss clustering ξ"
-                              value={scanResult.best.clusterRatio.toFixed(2)}
-                              tone={scanResult.best.clusterRatio <= 1 ? "text-green-400" : "text-amber-300"} />
-                        <Stat label="P(2 losses in a row)" value={`${(scanResult.best.pTwoInARow * 100).toFixed(1)}%`} />
-                        <Stat label="E[longest loss run]" value={scanResult.best.expectedMaxLossRun.toFixed(1)} />
-                        <Stat label="Ruin risk"
+                        <Stat label="Risk of hitting SL"
                               value={`${(scanResult.best.ruin * 100).toFixed(0)}%`}
                               tone={scanResult.best.ruin < 0.3 ? "text-green-400" : "text-red-400"} />
+                        <Stat label="Loss clustering"
+                              value={scanResult.best.clusterRatio <= 1 ? "Low" : "Moderate"}
+                              tone={scanResult.best.clusterRatio <= 1 ? "text-green-400" : "text-amber-300"} />
                       </div>
-                    </div>
-
-                    <div className="space-y-1">
-                      {scanResult.best.signals.map((s, i) => (
-                        <p key={i} className="text-[10px] font-mono text-muted-foreground leading-relaxed">· {s}</p>
-                      ))}
                     </div>
 
                     <Button onClick={() => handleStart(scanResult.best!)} disabled={loading}
@@ -386,14 +372,9 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                       <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
                       <p className="text-xs font-semibold text-amber-300">No Survivable Lock Available</p>
                     </div>
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
-                    {scanResult.best && (
-                      <div className="space-y-1 pt-1">
-                        {scanResult.best.signals.map((s, i) => (
-                          <p key={i} className="text-[9px] font-mono text-muted-foreground/70">· {s}</p>
-                        ))}
-                      </div>
-                    )}
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      No market is currently safe to lock for a non-stop session. Try again in a moment.
+                    </p>
                   </div>
                 )}
 
@@ -440,10 +421,8 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                     <div className="grid grid-cols-2 gap-1.5">
                       <Stat label="Normal" value={session.lock.normal} tone={a.text} />
                       <Stat label="Recovery" value={session.lock.recovery} tone="text-amber-300" />
-                      <Stat label="Modelled survival" value={`${(session.lock.survival * 100).toFixed(0)}%`} tone="text-green-400" />
-                      <Stat label="Clustering ξ" value={session.lock.clusterRatio.toFixed(2)} />
                       <Stat label="Deepest loss run" value={String(session.deepestLossRun ?? 0)} />
-                      <Stat label="Breaker at" value={`${Math.max(3, Math.round(session.lock.recoveryDepthP95)) + 2} losses`} tone="text-red-300" />
+                      <Stat label="Auto-stop at" value={`${Math.max(3, Math.round(session.lock.recoveryDepthP95)) + 2} losses`} tone="text-red-300" />
                     </div>
                   </div>
                 )}
@@ -489,8 +468,7 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                       </span>
                     </div>
                     <p className="text-[10px] text-muted-foreground leading-relaxed">
-                      Firing the locked recovery contract {session.lock?.recovery ?? ""} on the same shared ledger the
-                      other bots use. Exits the instant the debt is cleared.
+                      Firing the locked {session.lock?.recovery ?? "recovery"} contract. Exits as soon as the debt is cleared.
                     </p>
                   </div>
                 )}

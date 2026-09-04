@@ -14,7 +14,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck, Timer,
+  ChevronLeft, X, ShieldCheck,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -51,22 +51,7 @@ interface Candidate {
   reason: string;
   signals: string[];
   metrics: Record<string, number>;
-  validity?: EdgeValidity;
 }
-
-interface EdgeValidity {
-  meanTicks: number;
-  p20Ticks: number;
-  p50Ticks: number;
-  p20Seconds: number;
-  p50Seconds: number;
-  p20Trades: number;
-  p50Trades: number;
-  bindingFactor: string;
-  confidence: number;
-  summary: string;
-}
-
 interface SessionParams {
   stake: number;
   takeProfit: number;
@@ -83,23 +68,6 @@ interface ScanResult {
   paramsCommittedNow?: boolean;
   paramsOverridden?: string[];
 }
-
-/** Human-friendly duration from seconds. */
-function dur(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds <= 0) return "0m";
-  const h = Math.floor(seconds / 3600);
-  const m = Math.round((seconds % 3600) / 60);
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m`;
-  return `${Math.round(seconds)}s`;
-}
-
-const VALIDITY_TONE: Record<string, { text: string; bg: string; border: string; bar: string; label: string }> = {
-  fresh:   { text: "text-green-400",  bg: "bg-green-500/[0.07]",  border: "border-green-500/25",  bar: "bg-green-400",  label: "EDGE FRESH" },
-  aging:   { text: "text-cyan-300",   bg: "bg-cyan-500/[0.07]",   border: "border-cyan-500/25",   bar: "bg-cyan-400",   label: "EDGE AGING" },
-  stale:   { text: "text-amber-300",  bg: "bg-amber-500/[0.08]",  border: "border-amber-500/30",  bar: "bg-amber-400",  label: "EDGE WEAKENING" },
-  expired: { text: "text-red-400",    bg: "bg-red-500/[0.08]",    border: "border-red-500/30",    bar: "bg-red-400",    label: "EDGE EXPIRED" },
-};
 
 function label(c: Contract) {
   return `${c.side === "DIGITOVER" ? "Over" : "Under"} ${c.barrier}`;
@@ -454,34 +422,6 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                       </div>
                     </div>
 
-                    {/* Edge-validity forecast — how long this lock should hold */}
-                    {scanResult.best.validity && (
-                      <div className="rounded-xl border border-cyan-500/25 bg-cyan-500/[0.06] p-3 space-y-2">
-                        <div className="flex items-center justify-between">
-                          <p className="text-[10px] uppercase tracking-widest font-semibold text-cyan-300 flex items-center gap-1.5">
-                            <Timer className="w-3 h-3" /> Edge Validity Forecast
-                          </p>
-                          <span className="text-[9px] font-mono text-muted-foreground/70">
-                            {scanResult.best.validity.confidence}% conf
-                          </span>
-                        </div>
-                        <div className="grid grid-cols-2 gap-1.5">
-                          <Stat label="Expected to hold"
-                                value={dur(scanResult.best.validity.p50Seconds)} tone="text-cyan-300" />
-                          <Stat label="Re-scan by"
-                                value={dur(scanResult.best.validity.p20Seconds)} tone="text-amber-300" />
-                          <Stat label="≈ trades"
-                                value={`${scanResult.best.validity.p20Trades}–${scanResult.best.validity.p50Trades}`} />
-                          <Stat label="Limited by"
-                                value={scanResult.best.validity.bindingFactor} />
-                        </div>
-                        <p className="text-[10px] text-muted-foreground leading-relaxed">
-                          This is how long the analysed conditions are expected to last. The bot will
-                          <span className="text-white/80"> keep trading past it</span> — the countdown is
-                          advice, and stopping to re-scan is always your call.
-                        </p>
-                      </div>
-                    )}
 
                     <Button onClick={() => handleStart(scanResult.best!)} disabled={loading}
                             className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
@@ -553,59 +493,6 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
                   </div>
                 </div>
 
-                {/* ── LIVE EDGE-VALIDITY MONITOR ──────────────────────────
-                    Answers "is the edge I locked still there, and how long
-                    have I got?" — continuously, without any mid-session
-                    re-analysis. It is ADVISORY: the session never stops
-                    itself on this signal. */}
-                {session?.validity && (() => {
-                  const v = session.validity!;
-                  const tone = VALIDITY_TONE[v.state] ?? VALIDITY_TONE["fresh"]!;
-                  return (
-                    <div className={`rounded-xl border ${tone.border} ${tone.bg} p-3 space-y-2`}>
-                      <div className="flex items-center justify-between">
-                        <p className={`text-[10px] uppercase tracking-widest font-semibold ${tone.text} flex items-center gap-1.5`}>
-                          <Timer className="w-3 h-3" /> {tone.label}
-                        </p>
-                        <span className={`text-[10px] font-mono font-bold ${tone.text}`}>
-                          {v.freshness}%
-                        </span>
-                      </div>
-
-                      <div className="h-1.5 rounded-full bg-black/40 overflow-hidden">
-                        <div className={`h-full ${tone.bar} transition-all duration-700`}
-                             style={{ width: `${Math.max(2, v.freshness)}%` }} />
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <Stat label="Validity left" value={dur(v.remainingSeconds)} tone={tone.text} />
-                        <Stat label="Running for" value={dur(v.elapsedSeconds)} />
-                        <Stat label="Locked rate" value={`${(v.lockedRate * 100).toFixed(1)}%`} />
-                        <Stat
-                          label="Realised now"
-                          value={`${(v.realisedRate * 100).toFixed(1)}%`}
-                          tone={v.deviationSigma < -1.5 ? "text-red-400" : v.deviationSigma < -0.5 ? "text-amber-300" : "text-green-400"}
-                        />
-                      </div>
-
-                      {v.changeDetected && (
-                        <p className="text-[10px] font-mono text-red-300 leading-relaxed">
-                          ⚠ Page–Hinkley change detector fired ({v.phStatistic.toFixed(2)} &gt; {v.phThreshold.toFixed(2)})
-                          — the market has measurably left its analysed regime.
-                        </p>
-                      )}
-
-                      <p className="text-[10px] text-muted-foreground leading-relaxed">{v.advice}</p>
-
-                      {(v.state === "stale" || v.state === "expired") && isRunning && (
-                        <Button onClick={handleStop} disabled={loading} variant="outline"
-                                className="w-full h-8 text-[11px] border-amber-500/40 text-amber-200 hover:bg-amber-500/10">
-                          <StopCircle className="w-3.5 h-3.5 mr-1.5" /> Stop &amp; Re-Scan for a Fresh Market
-                        </Button>
-                      )}
-                    </div>
-                  );
-                })()}
 
                 {session?.lock && (
                   <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>

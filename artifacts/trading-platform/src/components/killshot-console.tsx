@@ -3,11 +3,16 @@
  *
  * A third interaction model, because the bot is a third kind of thing. The five
  * generalists are cockpits and the Dual-Lock is a monitor; this one is a
- * SCOPE. The user's job is a single decision — which contract — and then the
- * screen's job is to make the waiting legible: an evidence bar that fills as
- * the SPRT accumulates, the live gate list, and the countdown of ticks the test
- * still expects to need. The bot doing nothing is the bot working correctly,
- * and the UI has to say so clearly or the user will think it is broken.
+ * SCOPE. The user's job is a single decision — which contract — plus one about
+ * how the market is chosen: HUNT (default) re-scans every digit market
+ * continuously and moves to the strongest one, LOCK freezes a single market for
+ * the session.
+ *
+ * The screen's job is to make the waiting legible, and the waiting now has two
+ * distinct phases that must not be confused: the EVIDENCE bar (is there an edge
+ * at all?) and the ENTRY bar (is this the tick to be in on?). A bot that is
+ * armed but holding for a better entry is working correctly, and the UI has to
+ * say so clearly or the user will think it is broken.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -43,6 +48,16 @@ interface Candidate {
   loss: { clusterRatio: number; pTwoInARow: number; maxLossRun: number; expectedMaxRun: number };
   concordance: { agreeing: number; total: number; spread: number };
   samples: number;
+  /** prime | standard | marginal — the evidence bar this candidate met. */
+  tier: "prime" | "standard" | "marginal";
+  /** Win rate of an unbiased stream on this contract. */
+  fairRate: number;
+  /** The rate the SPRT must be convinced of. */
+  requiredRate: number;
+  /** fairRate − breakEven in percentage points (the house margin, negated). */
+  headroomPP: number;
+  /** P(two losses in a row) if losses were independent — the comparison basis. */
+  pairBaseline: number;
   deployable: boolean;
   blockers: string[];
   signals: string[];
@@ -109,6 +124,8 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
   });
   const { data: settings } = useGetSettings();
 
+  /** hunt = rotate markets continuously (default); lock = freeze one market. */
+  const [targetMode, setTargetMode] = useState<"hunt" | "lock">("hunt");
   const [kind, setKind] = useState<Kind>("over");
   const [digit, setDigit] = useState<number>(7);
   /** For Matches only: let the AI pick the digit. */
@@ -219,13 +236,38 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
       const res = await fetch("/api/bots/killshot/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol: c.symbol, contract: c.contract, analysis: c, ...config }),
+        body: JSON.stringify({ symbol: c.symbol, contract: c.contract, analysis: c, targetMode, ...config }),
       });
       const data = await res.json();
       if (!res.ok) { toast.error(data.error ?? "Failed to start"); return; }
       onSession(data.status);
       setStep("running");
-      toast.success(`🎯 Locked on ${c.displayName} · ${c.label}`);
+      toast.success(targetMode === "hunt"
+        ? `🎯 Hunting with ${c.displayName} · ${c.label} as the opening market`
+        : `🎯 Locked on ${c.displayName} · ${c.label}`);
+    } catch {
+      toast.error("Could not start the bot");
+    } finally { setLoading(false); }
+  };
+
+  /**
+   * Deploy straight into hunt mode with no pre-scan. The market is only the
+   * opening target — the loop re-selects it continuously — so a scan is no
+   * longer a prerequisite for running the bot.
+   */
+  const handleStartHunt = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/bots/killshot/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contract: contractPayload(), targetMode: "hunt", ...config }),
+      });
+      const data = await res.json();
+      if (!res.ok) { toast.error(data.error ?? "Failed to start"); return; }
+      onSession(data.status);
+      setStep("running");
+      toast.success(`🎯 Hunting every digit market for ${contractLabel()}`);
     } catch {
       toast.error("Could not start the bot");
     } finally { setLoading(false); }
@@ -292,10 +334,44 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                     <Crosshair className="w-3 h-3" /> How this bot works
                   </p>
                   <p className="text-[10px] text-muted-foreground leading-relaxed">
-                    Pick <span className="text-white/80">one contract</span>. The scan picks one market
-                    and freezes it — <span className="text-white/80">no switching, ever</span>. Then the
-                    bot waits, sometimes a long time, and only fires when the evidence for a real edge
-                    crosses 200:1 and every structural gate is clear.
+                    Pick <span className="text-white/80">one contract</span> — that never changes. Then
+                    choose how the <span className="text-white/80">market</span> is picked: hunt every
+                    digit market continuously, or freeze one. Pressing run never trades immediately: the
+                    bot waits for conclusive evidence <span className="text-white/80">and</span> for a
+                    good entry tick, and only then fires.
+                  </p>
+                </div>
+
+                {/* Market selection mode — the contract is frozen either way */}
+                <div className="space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                    Market Selection
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    {([
+                      { id: "hunt" as const, title: "Hunt", desc: "Re-scans every digit market and moves to the strongest one" },
+                      { id: "lock" as const, title: "Lock", desc: "Freeze one market for the whole session" },
+                    ]).map(m => (
+                      <button
+                        key={m.id}
+                        onClick={() => setTargetMode(m.id)}
+                        className={`px-2 py-2 rounded-lg text-left transition-colors ${
+                          targetMode === m.id
+                            ? `${a.activeBg} border ${a.activeBorder}`
+                            : "bg-white/[0.03] border border-white/5 hover:bg-white/[0.07]"
+                        }`}
+                      >
+                        <p className={`text-[11px] font-semibold ${targetMode === m.id ? a.text : "text-muted-foreground"}`}>
+                          {m.title}
+                        </p>
+                        <p className="text-[9px] text-muted-foreground/70 leading-snug mt-0.5">{m.desc}</p>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="text-[9px] text-muted-foreground/70 leading-relaxed">
+                    {targetMode === "hunt"
+                      ? "Hunt mode keeps the same gates — it just stops the bot sitting on a market that has gone quiet. It never rotates while a recovery ladder is open."
+                      : "Lock mode is the original behaviour: the market the scan returns is the only market this session will ever touch."}
                   </p>
                 </div>
 
@@ -386,6 +462,13 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                         className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
                   <ScanSearch className="w-4 h-4 mr-2" /> Find the Best Market for {contractLabel()}
                 </Button>
+
+                {targetMode === "hunt" && (
+                  <Button onClick={handleStartHunt} disabled={loading} variant="outline"
+                          className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
+                    <Target className="w-3.5 h-3.5 mr-2" /> Start Hunting Now — no scan needed
+                  </Button>
+                )}
               </div>
             )}
 
@@ -428,9 +511,14 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                         <Stat label="Worst case (valid)" value={`${(scanResult.best.pLower * 100).toFixed(1)}%`} />
                         <Stat label="Break-even" value={`${(scanResult.best.breakEven * 100).toFixed(1)}%`} />
                         <Stat label="Evidence odds" value={`${scanResult.best.sprt.oddsForEdge.toFixed(0)}:1`} tone={a.text} />
-                        <Stat label="P(2 losses in a row)"
-                              value={`${(scanResult.best.loss.pTwoInARow * 100).toFixed(2)}%`}
-                              tone={scanResult.best.loss.pTwoInARow < 0.02 ? "text-green-400" : "text-amber-300"} />
+                        <Stat label="Evidence bar" value={scanResult.best.tier.toUpperCase()}
+                              tone={scanResult.best.tier === "prime" ? "text-green-400" : "text-cyan-300"} />
+                        <Stat label="EV per $1"
+                              value={`${scanResult.best.expectedValue >= 0 ? "+" : ""}${(scanResult.best.expectedValue * 100).toFixed(1)}%`}
+                              tone={scanResult.best.expectedValue > 0 ? "text-green-400" : "text-red-400"} />
+                        <Stat label="Losses pair vs random"
+                              value={`${(scanResult.best.loss.pTwoInARow * 100).toFixed(1)}% / ${(scanResult.best.pairBaseline * 100).toFixed(1)}%`}
+                              tone={scanResult.best.loss.pTwoInARow <= scanResult.best.pairBaseline ? "text-green-400" : "text-amber-300"} />
                       </div>
                     </div>
 
@@ -527,7 +615,12 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                           : hunt.phase === "firing" ? "Firing kill shot"
                           : "Settling"}
                       </p>
-                      <span className="text-[10px] font-mono text-muted-foreground/70">
+                      <span className="text-[10px] font-mono text-muted-foreground/70 flex items-center gap-1.5">
+                        {hunt.tier !== "marginal" && (
+                          <span className={`px-1 py-0.5 rounded text-[8px] font-bold ${
+                            hunt.tier === "prime" ? "bg-green-500/20 text-green-300" : "bg-cyan-500/20 text-cyan-300"
+                          }`}>{hunt.tier.toUpperCase()}</span>
+                        )}
                         {hunt.confidence}% conf
                       </span>
                     </div>
@@ -563,21 +656,61 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                         ))}
                       </div>
                     )}
+
+                    {/* ENTRY TIMING — the second, separate reason the bot waits.
+                        Evidence says the market has an edge; this says whether the
+                        NEXT tick is the one to be in on. Showing both is what makes
+                        "armed but not firing" legible instead of looking stuck. */}
+                    {hunt.phase === "armed" && hunt.timing && (
+                      <div className="rounded-lg border border-white/10 bg-black/30 p-2 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">Entry timing</p>
+                          <span className={`text-[9px] font-mono font-bold ${hunt.timing.ready ? "text-green-400" : "text-amber-300"}`}>
+                            {hunt.timing.score}/100
+                          </span>
+                        </div>
+                        <div className="h-1.5 rounded-full bg-black/40 overflow-hidden">
+                          <div className={`h-full transition-all duration-500 ${hunt.timing.ready ? "bg-green-400" : "bg-amber-400"}`}
+                               style={{ width: `${Math.max(2, hunt.timing.score)}%` }} />
+                        </div>
+                        <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
+                          {hunt.timing.reason}
+                        </p>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <Stat label="Short-run momentum"
+                                value={`${hunt.timing.momentumPP >= 0 ? "+" : ""}${hunt.timing.momentumPP.toFixed(1)}pp`}
+                                tone={hunt.timing.momentumPP >= 0 ? "text-green-400" : "text-amber-300"} />
+                          <Stat label="Renewal position" value={`${hunt.timing.gapRatio.toFixed(2)}× due`} />
+                        </div>
+                        {hunt.timing.waitTicks > 0 && (
+                          <p className="text-[9px] text-muted-foreground/60">
+                            Holding {hunt.timing.waitTicks} tick(s) — the shot is taken anyway once the
+                            objection has stood long enough, so a conclusive setup never rots.
+                          </p>
+                        )}
+                      </div>
+                    )}
                   </div>
                 )}
 
                 {session?.killLock && (
                   <div className="rounded-xl border border-white/10 bg-black/25 p-3 space-y-2">
                     <p className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground flex items-center gap-1.5">
-                      <Lock className="w-3 h-3" /> Frozen target · no switching
+                      <Lock className="w-3 h-3" />
+                      {hunt?.targetMode === "lock"
+                        ? "Frozen target · no switching"
+                        : `Current target · hunting ${hunt?.marketsScanned || 0} markets`}
                     </p>
                     <p className="text-xs font-bold text-white">{session.killLock.displayName}</p>
                     <div className="grid grid-cols-2 gap-1.5">
-                      <Stat label="Contract" value={session.killLock.contract} tone={a.text} />
+                      <Stat label="Contract (frozen)" value={session.killLock.contract} tone={a.text} />
                       <Stat label="Payout" value={`${session.killLock.payout.toFixed(2)}×`} />
-                      <Stat label="Locked win rate" value={`${(session.killLock.pWin * 100).toFixed(1)}%`} />
+                      <Stat label="Win rate" value={`${(session.killLock.pWin * 100).toFixed(1)}%`} />
                       <Stat label="Loss pairing ξ" value={session.killLock.clusterRatio.toFixed(2)}
                             tone={session.killLock.clusterRatio <= 1 ? "text-green-400" : "text-amber-300"} />
+                      {hunt?.targetMode === "hunt" && (
+                        <Stat label="Best anywhere" value={`${hunt.bestConfidence}%`} tone={a.text} />
+                      )}
                     </div>
                   </div>
                 )}

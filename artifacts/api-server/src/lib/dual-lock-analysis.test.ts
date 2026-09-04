@@ -78,14 +78,3 @@ test("the 90% survival bar is enforced — nothing at or below 90% may be locked
   assert.equal(isDeployable({ ...base, survival: 0.95 }), true, "95% must be accepted");
 });
 
-test("every scored candidate carries an edge-validity forecast", () => {
-  const params = { stake:1, takeProfit:10, stopLoss:5, maxRecoverySteps:3, markupPercent:10, maxStake:500 };
-  const scored = evaluateMarket("FAIR","Fair", uniform(800), params);
-  const withValidity = scored.filter(c => c.validity);
-  assert.ok(withValidity.length > 0, "candidates should report a validity horizon");
-  for (const c of withValidity) {
-    assert.ok(c.validity!.p20Ticks > 0);
-    assert.ok(c.validity!.p20Ticks < c.validity!.p50Ticks);
-    assert.ok(c.signals.some(s => s.includes("edge validity")), "validity must be surfaced in signals");
-  }
-});

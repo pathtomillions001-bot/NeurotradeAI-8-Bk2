@@ -76,7 +76,6 @@ import {
   regularizedIncompleteBeta,
   payoutForBarrier,
 } from "./specialist-analysis";
-import { estimateEdgeValidity, type EdgeValidity } from "./dual-lock-validity";
 
 // ── Contract vocabulary (hard-wired: this bot may not trade anything else) ────
 
@@ -548,11 +547,6 @@ export interface DualLockCandidate {
   reason: string;
   signals: string[];
   metrics: Record<string, number>;
-  /**
-   * How long this locked edge is expected to remain valid (advisory — it never
-   * stops a session; see `lib/dual-lock-validity.ts`).
-   */
-  validity?: EdgeValidity;
 }
 
 export interface DualLockEvalOptions extends SessionSimParams {
@@ -696,21 +690,6 @@ export function evaluateDualLockCandidate(
     signals.push(`bootstrap session: survival ${(sim.survival * 100).toFixed(1)}% · ruin ${(sim.ruin * 100).toFixed(1)}% · E[P&L] ${sim.meanPnl >= 0 ? "+" : ""}$${sim.meanPnl.toFixed(2)} · median ${sim.medianTrades} trades`);
     signals.push(`recovery depth p95 ${sim.maxRecoveryDepthP95} steps · worst drawdown $${sim.worstDrawdown.toFixed(2)}`);
   }
-  // ── Edge validity horizon ─────────────────────────────────────────────────
-  // How long the read that justifies this lock should stay true. The critical
-  // level is the conservative bound the lock is granted on: once the live rate
-  // drifts down to it, the justification is gone. Purely advisory — it is
-  // surfaced to the user, never used to stop a session.
-  const validity = runSim || gates.length === 0
-    ? estimateEdgeValidity(nSeries, nRate.lcb, symbol)
-    : undefined;
-  if (validity) {
-    signals.push(
-      `edge validity ≈ ${validity.p50Ticks} ticks expected · re-scan by ${validity.p20Ticks} ticks ` +
-      `(binding: ${validity.bindingFactor}, drift σ ${validity.drift.sigmaDrift.toFixed(4)}/block, conf ${validity.confidence}%)`,
-    );
-  }
-
   for (const f of softFlags) signals.push(`⚠ ${f}`);
   if (gates.length > 0) signals.push(`BLOCKED: ${gates.join(" · ")}`);
 
@@ -744,11 +723,7 @@ export function evaluateDualLockCandidate(
     samples: clean.length,
     reason,
     signals,
-    validity,
     metrics: {
-      validityP20Ticks: validity?.p20Ticks ?? 0,
-      validityP50Ticks: validity?.p50Ticks ?? 0,
-      validityConfidence: validity?.confidence ?? 0,
       normalLcb: round(nRate.lcb, 4),
       normalMean: round(nRate.mean, 4),
       normalBe: round(nBe, 4),

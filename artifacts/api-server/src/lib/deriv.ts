@@ -725,6 +725,17 @@ class DerivTickManager extends EventEmitter {
     return buf.slice(-count);
   }
 
+  /**
+   * Seconds since the last tick arrived for this symbol (Infinity if it has
+   * never ticked). Consumers that settle against the NEXT tick — the digit
+   * bots — need this to know whether "next" means now or an unknown time after
+   * a stalled feed.
+   */
+  getTickAgeSeconds(symbol: string): number {
+    const last = this.lastTickMs.get(symbol);
+    return last ? (Date.now() - last) / 1000 : Number.POSITIVE_INFINITY;
+  }
+
   getLatestPrice(symbol: string): number | null {
     return this.latestPrices.get(symbol) ?? null;
   }

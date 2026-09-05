@@ -809,17 +809,16 @@ export function screenAndRank(candidates: DualLockCandidate[], q = 0.2): DualLoc
 }
 
 /**
- * Composite score floor for a lock.
+ * Composite score floor for a lock. UNCHANGED at its original value.
  *
- * Lowered from 58 when the survival floor was lifted. The composite is 55 %
- * structural read + 45 % simulated survival, so with the survival bar gone a
- * high floor here would simply re-impose it by the back door: a market at 50 %
- * survival with a perfect structural read scored 52.8 and was refused anyway.
- * 40 keeps the floor's actual job — refuse a candidate whose STRUCTURAL read is
- * poor — without silently vetoing every market whose bootstrap survival is
- * merely ordinary.
+ * The 90 % survival gate was lifted; this floor was deliberately left exactly as
+ * it was, so the bot behaves as it did before that gate existed rather than
+ * being loosened twice in one edit. The composite is 55 % structural read +
+ * 45 % simulated survival, so at the survival figures synthetic indices actually
+ * produce (70–80 %) this floor asks for a structural read of roughly 40–47 out
+ * of 100 — a real bar, but a reachable one, unlike the 90 % survival wall.
  */
-export const DUAL_LOCK_MIN_SCORE = 40;
+export const DUAL_LOCK_MIN_SCORE = 58;
 
 /**
  * SURVIVAL IS A RANKING SIGNAL, NOT A GATE.

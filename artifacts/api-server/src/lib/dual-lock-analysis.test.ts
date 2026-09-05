@@ -3,7 +3,7 @@ import assert from "node:assert";
 import {
   evaluateMarket, screenAndRank, lossClustering, stationarityZ,
   conditionalTransitionRate, simulateSession, winSet, lossSet,
-  DUAL_LOCK_NORMAL_CONTRACTS, DUAL_LOCK_RECOVERY_CONTRACTS, isDeployable, DUAL_LOCK_MIN_SURVIVAL,
+  DUAL_LOCK_NORMAL_CONTRACTS, DUAL_LOCK_RECOVERY_CONTRACTS, isDeployable, DUAL_LOCK_MIN_SURVIVAL, DUAL_LOCK_MIN_SCORE,
 } from "./dual-lock-analysis";
 
 function rng(seed: number) { let s = seed >>> 0; return () => { s ^= s<<13; s>>>=0; s^=s>>17; s^=s<<5; s>>>=0; return s/4294967296; }; }
@@ -70,6 +70,9 @@ test("insufficient history yields no candidates", () => {
 
 test("the survival floor is lifted — survival ranks, it no longer vetoes", () => {
   assert.equal(DUAL_LOCK_MIN_SURVIVAL, 0, "the 90% survival gate must be gone");
+  // Nothing else was loosened: the bot must behave exactly as it did before the
+  // survival gate existed, and that state had a 58 composite floor.
+  assert.equal(DUAL_LOCK_MIN_SCORE, 58, "the composite floor must be unchanged at 58");
   const base = {
     metrics: { blocked: 0 }, score: 95, clusterRatio: 0.98,
   } as any;

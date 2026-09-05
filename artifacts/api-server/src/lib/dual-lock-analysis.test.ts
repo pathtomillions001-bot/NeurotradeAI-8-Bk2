@@ -68,13 +68,35 @@ test("insufficient history yields no candidates", () => {
   assert.equal(evaluateMarket("X","X", uniform(50)).length, 0);
 });
 
-test("the 90% survival bar is enforced — nothing at or below 90% may be locked", () => {
-  assert.ok(DUAL_LOCK_MIN_SURVIVAL > 0.9, `bar ${DUAL_LOCK_MIN_SURVIVAL} must exceed 0.90`);
+test("the survival floor is lifted — survival ranks, it no longer vetoes", () => {
+  assert.equal(DUAL_LOCK_MIN_SURVIVAL, 0, "the 90% survival gate must be gone");
   const base = {
     metrics: { blocked: 0 }, score: 95, clusterRatio: 0.98,
   } as any;
-  assert.equal(isDeployable({ ...base, survival: 0.90 }), false, "exactly 90% must be refused");
-  assert.equal(isDeployable({ ...base, survival: 0.899 }), false, "89.9% must be refused");
-  assert.equal(isDeployable({ ...base, survival: 0.95 }), true, "95% must be accepted");
+  // A low-survival market is now lockable: it will simply rank below a
+  // higher-survival one, and the user sees the number on the scan card.
+  assert.equal(isDeployable({ ...base, survival: 0.05 }), true, "5% survival must no longer be refused");
+  assert.equal(isDeployable({ ...base, survival: 0.50 }), true, "50% survival must be accepted");
+  assert.equal(isDeployable({ ...base, survival: 0.95 }), true, "95% must still be accepted");
+  // The structural gates still bite.
+  assert.equal(isDeployable({ ...base, survival: 0.99, clusterRatio: 1.20 }), false, "clustering must still veto");
+  assert.equal(isDeployable({ ...base, survival: 0.99, score: 20 }), false, "a poor structural read must still veto");
+  assert.equal(isDeployable({ ...base, survival: 0.99, metrics: { blocked: 1 } }), false, "a blocked candidate must still veto");
+});
+
+test("ranking still puts the highest-survival candidate first", () => {
+  const mk = (survival: number) => ({
+    symbol: "S", displayName: "S", normal: { side: "DIGITOVER", barrier: 1 },
+    recovery: { side: "DIGITUNDER", barrier: 5 }, score: 60, survival, ruin: 1 - survival,
+    meanPnl: 0, normalLcb: 0.8, normalMean: 0.82, normalBreakEven: 0.81, normalPayout: 1.23,
+    recoveryConditional: 0.5, recoveryLcb: 0.5, recoveryBreakEven: 0.51, recoveryPayout: 1.95,
+    clusterRatio: 1.0, pTwoInARow: 0.04, expectedMaxLossRun: 2, stationarityZ: 0,
+    significant: true, pValue: 0.001, samples: 400, reason: "", signals: [],
+    metrics: { blocked: 0 },
+  } as any);
+  const ranked = screenAndRank([mk(0.35), mk(0.9), mk(0.6)]);
+  assert.deepEqual(ranked.map(c => c.survival), [0.9, 0.6, 0.35]);
+  // …and every one of them is deployable now.
+  assert.ok(ranked.every(c => isDeployable(c)));
 });
 

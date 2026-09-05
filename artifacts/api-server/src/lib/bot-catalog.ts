@@ -25,7 +25,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot";
+  family: SpecialistFamily | "duallock" | "apex";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -41,11 +41,11 @@ export interface BotDefinition {
    */
   preLocked?: boolean;
   /**
-   * Bots that lock ONE market + ONE user-chosen contract and then simply wait
-   * for a conclusive setup (the Kill-Shot Precision Sniper). The UI renders a
-   * dedicated console for these.
+   * Bots that lock ONE market + ONE user-chosen contract, then simply wait for
+   * the market, the context and the tick to all agree (the Apex One-Shot
+   * Sniper). The UI renders a dedicated console for these.
    */
-  sniper?: boolean;
+  oneShot?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -215,9 +215,9 @@ export const BOT_CATALOG: BotDefinition[] = [
     contractLabel: "Over / Under (dual-locked)",
     tagline: "Pre-locked pair · non-stop session",
     description:
-      "The only bot that does ALL of its thinking before it starts. It searches every market for one triple — market, normal contract (Over 1 / Under 8 / Over 2 / Under 7) and recovery contract (Over 4 / Over 5 / Under 5 / Under 4) — that clears a 90% simulated survival bar, then freezes it. From the first trade to TP or SL there is no re-analysis, no market switching and no contract change.",
+      "The only bot that does ALL of its thinking before it starts. It searches every market for the triple — market, normal contract (Over 1 / Under 8 / Over 2 / Under 7) and recovery contract (Over 4 / Over 5 / Under 5 / Under 4) — with the highest simulated survival, then freezes it. From the first trade to TP or SL there is no re-analysis, no market switching and no contract change.",
     edge: [
-      "90% survival floor — a market is only locked if the block bootstrap says it reaches take-profit before stop-loss more than 90% of the time; anything less is ignored until the next re-scan",
+      "Survival is the ranking signal, not a veto — the block bootstrap's P(take-profit before stop-loss) decides WHICH market is locked and is printed on the scan card, but no market is refused merely for a modest survival figure (the old 90% floor admitted nothing and was lifted)",
       "Live Page–Hinkley change detector on the realised normal-leg win rate — tells you when the locked edge has measurably decayed, in real time, without any mid-session re-analysis",
       "Frozen risk parameters — stake, take-profit, stop-loss and recovery steps are committed once and cannot change on a re-scan, so the quoted survival figure always describes the session you are actually running",
       "Loss-clustering Markov chain — ξ = P(loss|loss)/P(loss); a market where losses attract losses is refused outright, because consecutive losses (not a low win rate) is what kills a non-stop session",
@@ -240,37 +240,39 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalPayout: "1.23–1.40× · 1.95–2.43×",
   },
   {
-    id: "killshot",
-    name: "Kill-Shot Precision Sniper",
-    code: "BOT-KILLSHOT",
-    family: "killshot",
+    id: "apex",
+    name: "Apex One-Shot Sniper",
+    code: "BOT-APEX",
+    family: "apex",
     contractLabel: "One contract · your choice",
-    tagline: "Few trades · maximum certainty",
+    tagline: "Analyse once · lock · wait for the one shot",
     description:
-      "The patience engine, in two separable halves. You name ONE contract — Over 7, Under 2, Matches, Even or Odd (never both sides) — and that never changes. The MARKET is chosen continuously: hunt mode re-scores every digit market and moves to the strongest one, so the bot cannot sit on a market that has gone quiet (lock mode freezes one instead). Pressing run never trades: the bot waits until Wald's sequential probability ratio test says the evidence for a real edge is conclusive AND every structural gate is clear, and THEN waits again for a good entry tick before it fires. Recovery trades are sniped with exactly the same patience as normal ones.",
+      "The certainty engine. You name ONE contract — Over 7, Under 2, Matches, Even or Odd (never both sides of a pair) — and the AI analyses every digit market and LOCKS the single best one for it. From that moment there is no market switching and no rotation, exactly like the Barrier Architect in locked mode; the bot simply waits, for as long as it takes, until the market, the context and the tick all agree, and then takes one shot. It does not price a promised win rate — it replays its own entry rule over each market's real digit history and reports what that rule actually produced.",
     edge: [
-      "WALD SPRT as the trigger — the provably fastest test to reach a given certainty (Wald–Wolfowitz optimality). The alternative H₁ is break-even + 2 ABSOLUTE points, the scale the house margin actually lives at; an earlier relative δ put H₁ at 97% on Over 0, a rate no digit stream reaches, which is why that version could never fire on any contract",
-      "HUNT, DON'T LOCK — every digit market is re-scored through the same screened, surcharged scan the deploy screen uses, and the bot moves to a challenger only when it wins by 8+ confidence points or the held market has been non-deployable for 3 passes. It never rotates while a recovery ladder is open, and it can never rotate the CONTRACT",
-      "SEPARATE ENTRY-TIMING LAYER — armed is not fired. Once the evidence clears, the bot still waits for the tick: short-window momentum must match the measured regime (noise-scaled at 1.25σ), the contract's own renewal clock must be near due rather than just reset or long droughted, the feed must be fresh, and enough new ticks must have arrived since the last shot for it to be an independent bet. A patience valve fires anyway once an objection has stood 45 ticks, so a conclusive setup never rots",
-      "STRUCTURAL HEADROOM, stated plainly — every Deriv digit contract pays below its fair rate, so an unbiased stream is always ~1.2–1.7 points −EV and the market must be measurably hot before ANY analysis can call it +EV. The scan now reports that gap per contract instead of telling you to re-scan later",
-      "Anytime-valid confidence sequences (test supermartingales + Ville's inequality) — the win-rate floor is valid at the exact data-dependent moment the bot chooses to fire, which is precisely where an ordinary confidence interval silently becomes invalid from repeated peeking",
-      "Variable-order Markov context model with Krichevsky–Trofimov mixing — P(win | last 0/1/2/3 digits) fused by context-tree weighting, so deep context is trusted only in proportion to the evidence behind it",
-      "CONSECUTIVE-LOSS MARKOV GATE — the loss stream gets its own 2-state chain and the one-sided 95% LOWER bound on ξ = P(loss|loss)/P(loss) must be ≤ 1.0, so only DEMONSTRATED clustering is refused. A market that pairs its losses is vetoed no matter how high its win rate, because paired losses — not a low win rate — are what force a recovery ladder deep. The old flat 2% ceiling on P(two losses in a row) was removed: it is unsatisfiable below an ~86% win rate, so it silently banned every mid-barrier contract, Matches, Even and Odd",
-      "Multi-horizon concordance across 60/120/240/480 ticks — an edge visible in one window and absent in the others is a window artefact and is vetoed outright",
-      "Pearson χ² block homogeneity plus an explicit monotone-trend slope: hundreds of ticks of accumulated SPRT evidence only mean something if they came from one regime",
-      "Benjamini–Hochberg FDR across every market × digit examined, plus a log(#candidates) evidence surcharge added directly to the SPRT threshold — the winner must be genuinely exceptional, never merely the luckiest of dozens",
-      "Recovery is sniped too — a recovery trade waits for the identical full evidence stack, because a rushed recovery trade is exactly how a two-loss streak becomes a five-loss streak",
+      "WALK-FORWARD REPLAY OF THE LIVE ENTRY RULE — the exact conditional rule the engine fires on is replayed tick-by-tick over each market's own history using only information available at that tick, so the quoted accuracy is measured on the decisions this bot really makes instead of on a statistic computed over the whole stream",
+      "EXACT LADDER-RUIN PROBABILITY — the debt-driven recovery ladder grows geometrically (debt(k) = stake·(1+a)^(k−1)), so ladderDepthLimit solves in closed form for k*, the number of consecutive losses your stake, payout, markup, stake cap and stop loss can absorb, and finite Markov chain imbedding (Fu & Koutras) then gives P(a deeper run occurs) exactly — no Monte Carlo, no normal approximation",
+      "CONSECUTIVE-LOSS MARKOV CHAIN as the objective, not a diagnostic — ξ = P(L|L)/P(L) is fitted to the REPLAYED SHOTS and gated on its one-sided 95% upper bound, so only demonstrated clustering is refused; a market that pairs its losses is vetoed however high its win rate, because depth (not accuracy) is what ruins a ladder",
+      "CLOSED-FORM MEAN TIME TO LADDER BREAK — E[T_k] = [1 + r(1−q^(k−1))/(1−q)] / (r·q^(k−1)) for the fitted 2-state chain, so the console can say '≈240 shots before this ladder breaks' rather than only quoting a probability",
+      "CONDITIONAL ENTRY, because the marginal can never carry it — every Deriv digit contract pays below its fair rate (Over 1 pays 1.23× against an 80% fair rate), so an unbiased stream is always −EV and the only honest edge is P(win | the digits that just came), estimated by a variable-order Markov model with Krichevsky–Trofimov mixing: a hot market is carried by the marginal term and a hot context by the deeper ones, under one rule",
+      "MARKOV STATE TIMING — the same loss chain is used as an entry filter: if P(win | last tick lost) beats P(win | last tick won) by more than its own standard error the bot waits for the post-loss state, and vice versa. A genuine timing edge measured on the model that gates consecutive losses",
+      "ANYTIME-VALID CONFIDENCE SEQUENCE (betting test supermartingale + Ville's inequality) — a bot that re-tests every tick and fires when the test passes will fire on pure noise eventually; this lower bound is valid simultaneously at every tick, including at the data-dependent moment the bot chooses to fire",
+      "WALD SPRT on the market stream, H₁ = break-even + 2 ABSOLUTE points — the provably minimum-expected-sample-size test for 'be certain, take as long as you like'. A relative δ is a known trap: on Over 0 it puts H₁ at 97%, a rate no digit stream reaches, so the test could only abandon",
+      "PAGE–HINKLEY DRIFT GUARD — a locked market cannot be rotated out of, so a sustained fall in its realised win rate stops the bot firing and, if it persists, ends the session and asks for a fresh analysis. It never quietly moves market",
+      "Pearson χ² block homogeneity plus an explicit drift slope, and multi-horizon concordance across 60/120/240/480 ticks — hundreds of ticks of accumulated evidence only mean something if they came from one regime",
+      "Benjamini–Hochberg FDR across every market × digit examined plus a log(#candidates) surcharge on the SPRT threshold — the locked market must be genuinely exceptional, not the luckiest of dozens",
+      "THREE EXPLICIT CERTAINTY BARS (Elite / Strict / Balanced) instead of one hidden threshold — the previous version of this bot hard-coded a single severe bar and the practical result was a bot that never traded, which is indistinguishable from a broken one. The bar is now a user decision and every gate is printed when it blocks",
+      "RECOVERY IS SNIPED TOO, on the same shared ledger and the same debt-driven stake formula as every other bot in this section — a recovery trade waits for all three gates, because a hurried recovery is how a two-loss streak becomes a five-loss streak",
     ],
     accent: "sky",
-    icon: "target",
-    sniper: true,
+    icon: "zap",
+    oneShot: true,
     hasSides: false,
     hasDigitLock: true,
-    digitLockHelp: "For Matches you may name the digit, or leave it to the AI — it will score all ten in every market and pick the one with the strongest evidence.",
+    digitLockHelp: "For Matches you may name the digit or leave it to the AI — it scores all ten in every digit market and locks the strongest.",
     sides: [
       { id: "both", label: "Your single contract", contracts: ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITEVEN", "DIGITODD"], desc: "You choose exactly one — over, under, matches, even or odd" },
     ],
-    nominalWinRate: "gated ≥ break-even + margin",
+    nominalWinRate: "replayed, not promised",
     nominalPayout: "1.09–8.93×",
   },
 ];

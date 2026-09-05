@@ -21,8 +21,8 @@ import {
 } from "../lib/bot-engine";
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
-import * as killShot from "../lib/killshot-engine";
-import { validateKillShotContract, killShotLabel } from "../lib/killshot-analysis";
+import * as apex from "../lib/apex-engine";
+import { validateApexContract, apexLabel, type ApexCertainty } from "../lib/apex-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
@@ -57,8 +57,8 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   // Pre-locked bots (Dual-Lock Range Sentinel) have their own endpoints — they
   // are never driven through the generic specialist route.
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
-  // Sniper bots (Kill-Shot Precision Sniper) likewise have their own endpoints.
-  if (bot.sniper) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
+  // One-shot bots (Apex One-Shot Sniper) likewise have their own endpoints.
+  if (bot.oneShot) return { ok: false, error: `${bot.name} uses the /apex endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -178,21 +178,21 @@ function visibleStatus(sessionId: string) {
 router.get("/", (req, res) => {
   const status = visibleStatus(req.sessionId);
   const dual = visibleDualStatus(req.sessionId);
-  const snipe = visibleKillShotStatus(req.sessionId);
+  const shot = visibleApexStatus(req.sessionId);
   res.json({
     bots: BOT_CATALOG.map(bot => {
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, session: dual.running ? dual : null };
       }
-      if (bot.id === killShot.KILLSHOT_BOT_ID) {
-        return { ...bot, session: snipe.running ? snipe : null };
+      if (bot.id === apex.APEX_BOT_ID) {
+        return { ...bot, session: shot.running ? shot : null };
       }
       return { ...bot, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: dual.running
       ? dualLock.DUAL_LOCK_BOT_ID
-      : snipe.running
-        ? killShot.KILLSHOT_BOT_ID
+      : shot.running
+        ? apex.APEX_BOT_ID
         : (status.running ? status.botId : null),
   });
 });
@@ -373,49 +373,75 @@ router.post("/duallock/stop", (req, res) => {
   res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
 });
 
-// ── Kill-Shot Precision Sniper (sniper bot) ───────────────────────────────────
+// ── Apex One-Shot Sniper (one-shot bot) ───────────────────────────────────────
 //
 // Its own engine because its lifecycle is different again: the user names ONE
-// contract, the scan names ONE market, both are frozen, and the engine then
-// simply waits — sometimes a long time — until the full evidence stack clears.
+// contract, the scan analyses every digit market and names ONE, both are frozen,
+// and the engine then simply waits — sometimes a long time — until the market,
+// the context and the tick all agree. There is no hunt mode and no rotation.
 // It shares the account-global recovery ledger, the recovery stake formula and
 // the single-executor arbiter with every other bot in the section.
 
-function visibleKillShotStatus(sessionId: string) {
-  const status = killShot.getStatus();
-  const owner = killShot.getOwnerSessionId();
+function visibleApexStatus(sessionId: string) {
+  const status = apex.getStatus();
+  const owner = apex.getOwnerSessionId();
   if (!owner || owner === sessionId) return status;
-  return { ...status, running: false, sessionId: null, config: undefined, killLock: undefined, hunt: undefined };
+  return { ...status, running: false, sessionId: null, config: undefined, apexLock: undefined, watch: undefined };
 }
 
-router.get("/killshot/status", (req, res) => {
-  res.json(visibleKillShotStatus(req.sessionId));
+router.get("/apex/status", (req, res) => {
+  res.json(visibleApexStatus(req.sessionId));
 });
 
+/** Read the bot-recovery markup + stake cap the ladder projection must use. */
+async function apexRisk(sessionId: string, body: any) {
+  let markupPercent = 10;
+  let maxStake = 500;
+  try {
+    const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
+    if (rows.length > 0) {
+      const v = Number((rows[0] as any).botRecoveryMarkup);
+      if (Number.isFinite(v)) markupPercent = v;
+      const m = Number((rows[0] as any).maxTradeStake);
+      if (Number.isFinite(m) && m > 0) maxStake = m;
+    }
+  } catch { /* defaults */ }
+  return {
+    stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
+    stopLoss: Number(body?.stopLoss) > 0 ? Number(body.stopLoss) : 5,
+    markupPercent,
+    maxStake,
+  };
+}
+
 /**
- * Scan every digit-enabled market for the user's ONE chosen contract.
+ * Analyse every digit-enabled market for the user's ONE chosen contract and
+ * return the ranking. The winner is the market the session will be locked to.
  * When the contract is Matches with no digit, all ten digits are scored too and
  * the SPRT threshold carries a log(#candidates) selection surcharge.
  */
-router.post("/killshot/scan", async (req, res): Promise<void> => {
-  const parsed = validateKillShotContract(req.body?.contract);
+router.post("/apex/scan", async (req, res): Promise<void> => {
+  const parsed = validateApexContract(req.body?.contract);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
   }
+  const certainty: ApexCertainty =
+    req.body?.certainty === "elite" || req.body?.certainty === "balanced" ? req.body.certainty : "strict";
   try {
-    const result = await killShot.scanForTarget(req.sessionId, parsed.contract);
+    const risk = await apexRisk(req.sessionId, req.body);
+    const result = await apex.scanForMarket(req.sessionId, parsed.contract, certainty, risk);
     res.json(result);
   } catch (err) {
-    logger.error({ err }, "Kill-Shot scan failed");
+    logger.error({ err }, "Apex scan failed");
     res.status(500).json({ error: "Scan failed" });
   }
 });
 
-router.post("/killshot/start", async (req, res): Promise<void> => {
+router.post("/apex/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
 
-  const parsed = validateKillShotContract(body.contract);
+  const parsed = validateApexContract(body.contract);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
@@ -424,21 +450,16 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
   // contract can be frozen — the engine will not choose one mid-session.
   if (parsed.contract.kind === "match" && parsed.contract.digit === undefined) {
     res.status(400).json({ error: "Run the scan first so the AI can select the Matches digit" });
-    return;
   }
 
-  // In hunt mode the market is only the STARTING target — the loop re-selects it
-  // continuously — so it may be omitted and the first digit-enabled market is
-  // used. In lock mode it is frozen for the session and must be named.
-  const targetMode = body.targetMode === "lock" ? "lock" : "hunt";
+  // The market is LOCKED for the session — there is no hunt mode — so it must be
+  // named, and it must be one the scan is allowed to look at.
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
-  const fallback = AUTOMATED_DERIV_MARKETS.find(m => m.digitEnabled);
-  const symbol = requested ?? fallback?.symbol;
-  if (!symbol || !isAutomatedMarket(symbol)) {
-    res.status(400).json({ error: "A valid market symbol is required" });
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys only onto a market it has locked" });
     return;
   }
-  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === symbol);
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
   if (!market || !market.digitEnabled) {
     res.status(400).json({ error: "This bot needs a digit-enabled market" });
     return;
@@ -447,42 +468,44 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "stake must be ≥ 0.35" });
     return;
   }
+  const certainty: ApexCertainty =
+    body.certainty === "elite" || body.certainty === "balanced" ? body.certainty : "strict";
 
-  const existingOwner = killShot.getOwnerSessionId();
-  if (killShot.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+  const existingOwner = apex.getOwnerSessionId();
+  if (apex.isRunning() && existingOwner && existingOwner !== req.sessionId) {
     res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
     return;
   }
 
-  const result = await killShot.startSession({
+  const result = await apex.startSession({
     ownerSessionId: req.sessionId,
     symbol: market.symbol,
     displayName: market.displayName,
     contract: parsed.contract,
+    certainty,
     stake: body.stake,
     stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
     takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
     maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
-    maxTrades: Math.max(0, Math.min(100, Number(body.maxTrades) || 0)),
-    targetMode,
+    maxShots: Math.max(0, Math.min(100, Number(body.maxShots) || 0)),
     lockedAnalysis: body.analysis,
   });
   if (!result.ok) {
     res.status(409).json({ error: result.error });
     return;
   }
-  logger.info({ symbol: market.symbol, contract: killShotLabel(parsed.contract), targetMode }, "Kill-Shot deployed");
-  res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
+  logger.info({ symbol: market.symbol, contract: apexLabel(parsed.contract), certainty }, "Apex deployed");
+  res.json({ ok: true, status: visibleApexStatus(req.sessionId) });
 });
 
-router.post("/killshot/stop", (req, res) => {
-  const owner = killShot.getOwnerSessionId();
-  if (killShot.isRunning() && owner && owner !== req.sessionId) {
+router.post("/apex/stop", (req, res) => {
+  const owner = apex.getOwnerSessionId();
+  if (apex.isRunning() && owner && owner !== req.sessionId) {
     res.status(409).json({ error: "You cannot stop another browser session's bot." });
     return;
   }
-  killShot.stopSession();
-  res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
+  apex.stopSession();
+  res.json({ ok: true, status: visibleApexStatus(req.sessionId) });
 });
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -490,8 +513,8 @@ router.post("/killshot/stop", (req, res) => {
 router.get("/status", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
-  const snipe = visibleKillShotStatus(req.sessionId);
-  if (snipe.running) { res.json(snipe); return; }
+  const shot = visibleApexStatus(req.sessionId);
+  if (shot.running) { res.json(shot); return; }
   res.json(visibleStatus(req.sessionId));
 });
 

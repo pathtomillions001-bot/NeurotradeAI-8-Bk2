@@ -7,7 +7,7 @@
  * giving each specialist its own hue.
  */
 
-import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target } from "lucide-react";
+import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky";
 
@@ -39,8 +39,8 @@ export interface BotCardData {
   nominalPayout: string;
   /** Pre-locked bots analyse once, then freeze their pair for the session. */
   preLocked?: boolean;
-  /** Sniper bots lock one market + one contract and wait for a conclusive setup. */
-  sniper?: boolean;
+  /** One-shot bots lock one market + one contract and wait for the perfect tick. */
+  oneShot?: boolean;
   session: BotSessionStatus | null;
 }
 
@@ -78,53 +78,57 @@ export interface BotSessionStatus {
     signals: string[];
   };
   /**
-   * Kill-Shot only: the frozen target (market + the user's single contract) and
-   * its pre-deploy read.
+   * Apex only: the frozen lock (market + the user's single contract) and the
+   * read the scan produced when it chose that market.
    */
-  killLock?: {
+  apexLock?: {
     symbol: string;
     displayName: string;
     contract: string;
+    certainty: string;
     confidence: number;
-    pWin: number;
-    pLower: number;
-    breakEven: number;
     payout: number;
-    expectedValue: number;
-    pTwoInARow: number;
-    clusterRatio: number;
+    breakEven: number;
+    /** Replayed accuracy of the entry rule on this market's own history. */
+    replayWinRate: number;
+    replayShots: number;
+    replayFireRate: number;
+    /** 1 − P(the recovery ladder breaks) over the projection horizon. */
+    ladderSafety: number;
+    ladderLimit: number;
+    ladderHorizon: number;
+    expectedShotsToBreak: number;
+    /** ξ = P(L|L)/P(L) on the replayed shots, and its 95 % upper bound. */
+    xi: number;
+    xiUpper: number;
     signals: string[];
   };
-  /** Kill-Shot only: what the sniper is waiting for right now. */
-  hunt?: {
-    phase: "waiting" | "armed" | "firing" | "settling";
-    evidence: number;
-    logLR: number;
-    threshold: number;
-    oddsForEdge: number;
-    expectedTicks: number;
+  /** Apex only: what the bot is waiting for right now. */
+  watch?: {
+    phase: "watching" | "armed" | "firing" | "settling";
     confidence: number;
-    pWin: number;
-    pLower: number;
+    /** Conditional P(win | current context) and the bar it must clear. */
+    condP: number;
+    condLower: number;
+    bar: number;
+    marginPP: number;
+    contextOrder: number;
+    contextCount: number;
     blockers: string[];
     ticksWatched: number;
     setupsRejected: number;
-    /** "hunt" rotates markets; "lock" keeps the one the user froze. */
-    targetMode: "hunt" | "lock";
-    targetSymbol: string;
-    targetDisplayName: string;
-    marketsScanned: number;
-    bestConfidence: number;
-    /** prime = the anytime-valid floor clears break-even; standard = SPRT fired. */
-    tier: "prime" | "standard" | "marginal";
-    /** Entry-timing layer: what the bot is waiting on once armed. */
-    timing: {
+    /** Page–Hinkley drift guard on the locked market. */
+    drift: { ph: number; threshold: number; fired: boolean; consecutive: number };
+    /** Entry-timing layer. */
+    entry: {
       ready: boolean;
       score: number;
       waitTicks: number;
       reason: string;
       momentumPP: number;
       gapRatio: number;
+      preferredState: "after-loss" | "after-win" | "none";
+      stateEdgePP: number;
     };
   };
   currentMarket?: string;
@@ -328,6 +332,7 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   shield: ShieldCheck,
   lock: Lock,
   target: Target,
+  zap: Zap,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

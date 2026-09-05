@@ -64,6 +64,7 @@ import {
   isRecoveryContract,
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
+  DUAL_LOCK_MIN_SCORE,
   type DualLockCandidate,
   type DualLockContract,
 } from "./dual-lock-analysis";
@@ -382,9 +383,16 @@ export async function scanForLock(
 
   const best = ranked[0]!;
   const suitable = isDeployable(best);
+  // Name the ACTUAL reason nothing was lockable. Survival is no longer a gate,
+  // so a refusal is always structural — saying "re-scan shortly" without naming
+  // the blocker is what made the old 90 % bar look like a mystery.
+  const blocker = best.signals.find(s => s.startsWith("BLOCKED:"))
+    ?? (best.clusterRatio > 1.08
+      ? `losses cluster (ξ ${best.clusterRatio.toFixed(2)} > 1.08)`
+      : `composite lock score ${best.score.toFixed(0)} is under the ${DUAL_LOCK_MIN_SCORE} floor`);
   const reason = suitable
     ? `${best.displayName}: lock ${contractLabel(best.normal)} → recovery ${contractLabel(best.recovery)} — ${(best.survival * 100).toFixed(0)}% simulated survival, loss-clustering ξ ${best.clusterRatio.toFixed(2)}, normal worst-case ${(best.normalLcb * 100).toFixed(1)}% vs ${(best.normalBreakEven * 100).toFixed(1)}% break-even`
-    : `No triple currently clears the lock bar (best: ${best.displayName} ${contractLabel(best.normal)}→${contractLabel(best.recovery)}, survival ${(best.survival * 100).toFixed(0)}%, score ${best.score.toFixed(0)}). A locked non-stop session needs a market that is stationary AND non-clustering — re-scan shortly.`;
+    : `No triple is lockable right now (best: ${best.displayName} ${contractLabel(best.normal)}→${contractLabel(best.recovery)}, survival ${(best.survival * 100).toFixed(0)}%, score ${best.score.toFixed(0)}). Reason: ${blocker.replace(/^BLOCKED:\s*/, "")}. Survival is NOT the blocker — a locked non-stop session needs a market that is stationary and does not pair its losses.`;
 
   return { suitable, best, allScored: ranked.slice(0, 24), reason };
 }

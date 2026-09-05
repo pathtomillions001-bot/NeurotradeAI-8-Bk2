@@ -808,35 +808,56 @@ export function screenAndRank(candidates: DualLockCandidate[], q = 0.2): DualLoc
   });
 }
 
-export const DUAL_LOCK_MIN_SCORE = 58;
 /**
- * SURVIVAL BAR — the Dual-Lock Range Sentinel only ever locks a market whose
- * simulated P(take-profit before stop-loss) exceeds 90 %.
+ * Composite score floor for a lock. UNCHANGED at its original value.
  *
- * This is a hard product requirement, not a tuning knob: because the session
- * cannot rotate markets, cannot re-analyse and cannot re-tune, the ONLY defence
- * against a bad market is refusing to enter it. Anything at or below 90 % is
- * ignored and the user waits for the next re-scan.
+ * The 90 % survival gate was lifted; this floor was deliberately left exactly as
+ * it was, so the bot behaves as it did before that gate existed rather than
+ * being loosened twice in one edit. The composite is 55 % structural read +
+ * 45 % simulated survival, so at the survival figures synthetic indices actually
+ * produce (70–80 %) this floor asks for a structural read of roughly 40–47 out
+ * of 100 — a real bar, but a reachable one, unlike the 90 % survival wall.
  */
-export const DUAL_LOCK_MIN_SURVIVAL = 0.9001;
+export const DUAL_LOCK_MIN_SCORE = 58;
 
-/** Is this candidate good enough to open a locked, unattended session on? */
+/**
+ * SURVIVAL IS A RANKING SIGNAL, NOT A GATE.
+ *
+ * This bot previously refused to lock ANY market whose block-bootstrap
+ * P(take-profit before stop-loss) was ≤ 90 %. In practice that admitted nothing:
+ * a synthetic index whose digits are close to uniform produces a normal leg that
+ * is mildly −EV per trade by construction, so the bootstrap survival clusters in
+ * the 40–80 % band and the scan returned "no lock" every single time. The bar was
+ * not selecting good markets, it was switching the bot off.
+ *
+ * Survival is therefore no longer a deployability condition. It still does the
+ * two jobs it is genuinely good at:
+ *   · it is 45 % of the composite lock score, so it dominates the RANKING, and
+ *   · it is printed verbatim on the scan result, so the user chooses with the
+ *     number in front of them rather than having the choice made for them.
+ * Kept as an exported constant so the UI and the docs can quote what the old bar
+ * was, and so a future re-tightening is a one-line change rather than a rewrite.
+ */
+export const DUAL_LOCK_MIN_SURVIVAL = 0;
+
 /**
  * Is this candidate good enough to open a locked, unattended session on?
  *
- * The bar is the SIMULATED SESSION, not the per-trade edge: the user's question
- * is "will this reach take-profit before stop-loss without me watching", and
- * the block bootstrap answers exactly that, on the real digit stream, through
- * the real recovery arithmetic. The structural hard gates (clustering, drift,
- * significantly-sub-break-even legs) must all be clear; the FDR `significant`
- * flag is reported as a quality badge — a market can be perfectly lockable
- * without a statistically provable per-trade edge, which is the normal state of
- * a well-behaved synthetic index.
+ * The gates that remain are the STRUCTURAL ones — the properties of a market
+ * that no recovery arithmetic can rescue a frozen session from:
+ *   · `blocked` — the hard gates in `evaluateDualLockCandidate` (losses cluster,
+ *     the rate is non-stationary, or a leg is significantly below break-even);
+ *   · `score` — the composite read, which survival now only influences;
+ *   · `clusterRatio` ≤ 1.08 — losses must not attract losses, because
+ *     consecutive losses (not a low win rate) is what ruins an unattended ladder.
+ *
+ * The FDR `significant` flag is reported as a quality badge, not a veto: a market
+ * can be perfectly lockable without a statistically provable per-trade edge,
+ * which is the normal state of a well-behaved synthetic index.
  */
 export function isDeployable(c: DualLockCandidate | null | undefined): boolean {
   return !!c
     && c.metrics["blocked"] === 0
     && c.score >= DUAL_LOCK_MIN_SCORE
-    && c.survival >= DUAL_LOCK_MIN_SURVIVAL
     && c.clusterRatio <= 1.08;
 }

@@ -16,7 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { BotConsole } from "@/components/bot-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
-import { ApexConsole } from "@/components/apex-console";
+import { KillShotConsole } from "@/components/killshot-console";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
@@ -333,12 +333,12 @@ export default function Bots() {
 
       {/* ── Console ────────────────────────────────────────────────────── */}
       {/* Three consoles for three lifecycles:
-          · oneShot (Apex)        — choose one contract → AI locks one market → wait
+          · oneShot (Kill-Shot)   — choose one contract → AI locks one market → wait
           · preLocked (Dual-Lock) — scan once → freeze the pair → run non-stop
           · everything else       — configure per trade */}
       <AnimatePresence>
         {openBot?.oneShot ? (
-          <ApexConsole
+          <KillShotConsole
             bot={openBot}
             open={openBotId !== null}
             onOpenChange={open => { if (!open) setOpenBotId(null); }}

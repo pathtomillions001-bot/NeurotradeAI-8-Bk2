@@ -613,6 +613,8 @@ export function analyzeTrend(prices: number[]) {
 // 200k numbers — a rounding error in memory — and it is the difference between
 // a bot that can be judged and a bot that can only ever say "gathering
 // evidence". See `lib/killshot-analysis.ts` for what the depth buys.
+/** Ticks the simulated feed pre-seeds per market when Deriv is unreachable. */
+const SIM_SEED_TICKS = 3_000;
 const TICK_BUFFER_SIZE = 5_000;
 const DIGIT_BUFFER_SIZE = 10_000;
 
@@ -1067,6 +1069,11 @@ class DerivTickManager extends EventEmitter {
     if (prices.length > TICK_BUFFER_SIZE) prices.shift();
     this.tickBuffers.set(market.symbol, prices);
     this.latestPrices.set(market.symbol, rounded);
+    // The simulated feed must LOOK like a feed: engines that check tick
+    // freshness before entering read this timestamp, and leaving it unset makes
+    // the age infinite, which reads as a permanently stalled market and blocks
+    // every timing layer in the app whenever Deriv is unreachable.
+    this.lastTickMs.set(market.symbol, Date.now());
 
     if (market.digitEnabled) {
       const digit = extractLastDigit(rounded, market.pipSize);
@@ -1084,16 +1091,26 @@ class DerivTickManager extends EventEmitter {
     this.usingSimulated = true;
     logger.info("TickManager: starting simulated prices (no live symbols available)");
 
+    // Seed a DEEP history, not a token one.
+    //
+    // Simulated mode is what runs whenever the public WS is unreachable, and the
+    // analysis bots now measure themselves on a train/test split of a few
+    // thousand digits. Seeding 150 ticks per market left them permanently unable
+    // to say anything at all: the round-robin below hands each market roughly one
+    // tick per second, so reaching a judgeable window would take hours. This
+    // costs a few milliseconds at startup and makes the offline mode behave like
+    // the live one.
     for (const market of DERIV_MARKETS) {
       const params = SIM_PARAMS[market.symbol];
       if (!params || !market.digitEnabled) continue;
       this.simPrices.set(market.symbol, params.base);
       let price = params.base;
-      for (let i = 0; i < 150; i++) {
+      for (let i = 0; i < SIM_SEED_TICKS; i++) {
         const delta = price * params.vol * this.gaussianRandom();
         price = Math.max(price * 0.5, price + delta);
         this.pushSimulatedTick(market, price);
       }
+      this.simPrices.set(market.symbol, price);
     }
 
     let idx = 0;

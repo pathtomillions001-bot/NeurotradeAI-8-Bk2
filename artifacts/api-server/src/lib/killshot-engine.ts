@@ -83,6 +83,7 @@ import {
   KILLSHOT_CONTRACT_TYPE,
   SCAN_WINDOW,
   MIN_HISTORY,
+  IDENTITY_PLATT,
   type KillShotCandidate,
   type Certainty,
   type ShotContract,
@@ -94,10 +95,21 @@ import { evaluateTiming } from "./killshot-timing";
 export const KILLSHOT_BOT_ID = "killshot";
 const BOT_NAME = "Kill-Shot Oracle";
 
-/** Consecutive health-flagged evaluations before the lock is declared dead. */
-const RESCAN_HALT_EVALS = 5;
+/**
+ * HEALTH ESCALATION.
+ *
+ * A locked bot that abandons its market at the first bad read is no better than
+ * one that never fires: a re-read is a fresh measurement on a fresh window, so a
+ * marginal market flips verdict on sampling noise alone. Degradation therefore
+ * has to be SUSTAINED before it means anything — the alert wants ~45 seconds of
+ * agreement and ending the session wants ~3 minutes.
+ */
+const RESCAN_ALERT_EVALS = 3;
+const RESCAN_HALT_EVALS = 12;
 /** How often the expensive market-level re-read runs, in ms. */
-const REREAD_INTERVAL_MS = 4000;
+const REREAD_INTERVAL_MS = 15_000;
+/** Ticks the drift detector looks back over — the recent past, not all history. */
+const HEALTH_WINDOW = 1500;
 /** Ceiling on the post-loss bar boost, in σ. */
 const MAX_BAR_BOOST = 2.5;
 
@@ -328,34 +340,46 @@ function broadcast() {
   broadcastSSE("bot_update", getStatus(), ownerSessionId);
 }
 
+/**
+ * The frozen lock, as the console renders it.
+ *
+ * `lockedAnalysis` arrives from the client, so every field is read defensively:
+ * the session's INTEGRITY comes from the model card and the locked symbol, which
+ * the engine validates itself, while the analysis is only what gets displayed.
+ * A caller that posts a partial analysis must get a session with blank numbers,
+ * never a crashed status endpoint.
+ */
 function lockInfo(cfg: KillShotConfig | null): KillShotLockInfo | undefined {
   if (!cfg) return undefined;
-  const a = cfg.lockedAnalysis;
+  const a = cfg.lockedAnalysis as Partial<KillShotCandidate> | undefined;
+  const walk = a?.walk;
+  const test = walk?.test;
+  const num = (v: unknown, fallback = 0): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
   return {
     symbol: cfg.symbol,
     displayName: cfg.displayName,
     contract: shotLabel(cfg.contract),
     certainty: cfg.certainty,
     verdict: a?.verdict ?? "—",
-    confidence: a?.confidence ?? 0,
-    payout: a?.payout ?? shotPayout(cfg.contract),
-    breakEven: a?.breakEven ?? cfg.card.breakEven,
-    oosWinRate: a?.walk.test.winRate ?? 0,
-    oosWinRateLower: a?.walk.test.winRateLower ?? 0,
-    oosShots: a?.walk.test.nShots ?? 0,
-    oosTicks: a?.walk.testTicks ?? 0,
-    edgePerDollar: a?.edgePerDollar ?? 0,
-    evidenceE: a?.walk.test.evidence.peak ?? 1,
-    brierSkill: a?.walk.platt.brierSkill ?? 0,
+    confidence: num(a?.confidence),
+    payout: num(a?.payout, shotPayout(cfg.contract)),
+    breakEven: num(a?.breakEven, cfg.card.breakEven),
+    oosWinRate: num(test?.winRate),
+    oosWinRateLower: num(test?.winRateLower),
+    oosShots: num(test?.nShots),
+    oosTicks: num(walk?.testTicks),
+    edgePerDollar: num(a?.edgePerDollar),
+    evidenceE: num(test?.evidence?.peak, 1),
+    brierSkill: num(walk?.platt?.brierSkill),
     tau: cfg.card.tau,
-    ladderSafety: a?.ladder.safety ?? 0,
-    ladderLimit: a?.ladder.limit ?? 0,
-    expectedShotsToBreak: a?.ladder.expectedShotsToBreak ?? 0,
-    xi: a?.walk.test.chain.xi ?? 1,
-    pairsBefore: a?.walk.shield.pairsBefore ?? 0,
-    pairsAfter: a?.walk.shield.pairsAfter ?? 0,
+    ladderSafety: num(a?.ladder?.safety),
+    ladderLimit: num(a?.ladder?.limit),
+    expectedShotsToBreak: num(a?.ladder?.expectedShotsToBreak),
+    xi: num(test?.chain?.xi, 1),
+    pairsBefore: num(walk?.shield?.pairsBefore),
+    pairsAfter: num(walk?.shield?.pairsAfter),
     forced: cfg.forced === true,
-    signals: a?.signals ?? [],
+    signals: Array.isArray(a?.signals) ? a!.signals.slice(0, 12) : [],
   };
 }
 
@@ -561,6 +585,45 @@ function explainRefusal(best: KillShotCandidate, certaintyLabel: string, examine
     `Blocked by: ${best.blockers[0] ?? "insufficient evidence"}.${knob}`;
 }
 
+/**
+ * Coerce a client-supplied model card into one the engine can run.
+ *
+ * Only τ and the calibration are genuinely the analysis's to give; the timing
+ * constants belong to the certainty level the user picked, and the payout and
+ * break-even are properties of the contract itself, so a card that disagrees
+ * with either is corrected rather than trusted.
+ */
+function sanitiseCard(raw: ModelCard, contract: ShotContract, spec: ReturnType<typeof certaintySpec>): ModelCard {
+  const num = (v: unknown, fallback: number): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+  const payout = shotPayout(contract);
+  const platt = raw?.platt ?? IDENTITY_PLATT;
+  const hmm = raw?.hmm;
+  const fair = shotWinSet(contract).size / 10;
+  return {
+    tau: num(raw?.tau, 0),
+    targetShotRate: Math.min(0.5, Math.max(0.001, num(raw?.targetShotRate, spec.targetShotRate))),
+    platt: {
+      a: num(platt.a, 1),
+      b: num(platt.b, 0),
+      brierSkill: num(platt.brierSkill, 0),
+      logLossSkill: num(platt.logLossSkill, 0),
+      n: num(platt.n, 0),
+    },
+    hmm: {
+      pHot: num(hmm?.pHot, Math.min(0.98, fair + 0.06)),
+      pCold: num(hmm?.pCold, Math.max(0.01, fair - 0.06)),
+      stay: num(hmm?.stay, 0.97),
+      prior: num(hmm?.prior, 0.5),
+    },
+    breakEven: 1 / payout,
+    payout,
+    minSpacing: Math.round(num(raw?.minSpacing, spec.minSpacing)),
+    postLossTightening: num(raw?.postLossTightening, spec.postLossTightening),
+    postLossCoolTicks: Math.round(num(raw?.postLossCoolTicks, spec.postLossCoolTicks)),
+    fittedOn: Math.round(num(raw?.fittedOn, 0)),
+  };
+}
+
 // ── Session start ─────────────────────────────────────────────────────────────
 
 export async function startSession(config: KillShotConfig): Promise<{ ok: boolean; error?: string }> {
@@ -585,9 +648,13 @@ export async function startSession(config: KillShotConfig): Promise<{ ok: boolea
   if (config.contract.kind === "match" && config.contract.digit === undefined) {
     return fail("The Matches digit must be resolved by the scan before deployment");
   }
-  if (!config.card || !Number.isFinite(config.card.tau)) {
+  if (!config.card || !Number.isFinite(Number(config.card.tau))) {
     return fail("Run the analysis first — this bot only deploys a rule it has measured");
   }
+  // The card decides what the live rule DOES, so it is normalised before it is
+  // frozen: a malformed field would otherwise surface as a crashed loop rather
+  // than a refusal, and the session's own spec is the right fallback.
+  config = { ...config, card: sanitiseCard(config.card, config.contract, certaintySpec(config.certainty)) };
 
   session = {
     ...freshSession(),
@@ -665,6 +732,7 @@ async function runLoop(config: KillShotConfig) {
   const LOCKED_WINSET = shotWinSet(LOCKED_CONTRACT);
   const CARD: ModelCard = { ...config.card };
   const SPEC = certaintySpec(config.certainty);
+  const BREAK_EVEN = CARD.breakEven;
 
   let timingWaitTicks = 0;
   let ticksSinceLastShot = Number.POSITIVE_INFINITY;
@@ -672,7 +740,10 @@ async function runLoop(config: KillShotConfig) {
   let lossRun = 0;
   let lastDigitCount = 0;
   let lastReadAt = 0;
-  let cachedRead: KillShotCandidate | null = config.lockedAnalysis ?? null;
+  // The live read is always the SERVER's own, never the client's copy of the
+  // scan: the first pass through the loop re-evaluates the locked market before
+  // anything can fire. The posted analysis is display material only.
+  let cachedRead: KillShotCandidate | null = null;
   let healthEvals = 0;
   let consecutiveErrors = 0;
 
@@ -726,24 +797,41 @@ async function runLoop(config: KillShotConfig) {
         }
         // The drift detector runs on the raw win series of the locked contract,
         // independently of the candidate evaluation, so it keeps working even
-        // when the window is too short for a full re-read.
-        const wins = digits.map(d => (LOCKED_WINSET.has(d) ? 1 : 0));
+        // when the window is too short for a full re-read. It looks at the
+        // RECENT past: a fall that happened before this session began is part of
+        // the history the lock was measured on, not news.
+        const wins = digits.slice(-HEALTH_WINDOW).map(d => (LOCKED_WINSET.has(d) ? 1 : 0));
         const ph = pageHinkley(wins);
-        const degraded = ph.fired || (cachedRead?.verdict === "refused");
+
+        // What counts as "the market has changed" is deliberately narrow. A
+        // verdict is a composite of a dozen things, several of which (ladder
+        // depth, clustering z, FDR) are properties of the SESSION rather than of
+        // the market, and it flips on sampling noise when a market sits near the
+        // bar. Only two things justify holding fire on a locked market: a
+        // detected regime break, or an expectancy that has gone clearly negative
+        // — point estimate below break-even AND the lower bound below it by more
+        // than the tolerance the user's own certainty level allows.
+        const test = cachedRead?.walk.test;
+        const measurable = (test?.nShots ?? 0) >= 8;
+        const expectancyGone = measurable
+          && (cachedRead?.edgePerDollar ?? 0) < 0
+          && (test?.winRateLower ?? 0) < BREAK_EVEN - SPEC.shortfallTolerance;
+        const degraded = ph.fired || expectancyGone;
         healthEvals = degraded ? healthEvals + 1 : 0;
+        const alerting = healthEvals >= RESCAN_ALERT_EVALS;
         session.watch.health = {
           ph: ph.ph,
           threshold: ph.threshold,
           fired: ph.fired,
           consecutive: healthEvals,
-          needsRescan: healthEvals >= 2,
+          needsRescan: alerting,
           note: ph.fired
-            ? `Realised win rate on ${LOCKED_NAME} has fallen away from its locked baseline (Page–Hinkley ${ph.ph.toFixed(1)}/${ph.threshold}).`
-            : cachedRead?.verdict === "refused"
-              ? `The locked market's live read has turned negative: ${cachedRead.blockers[0] ?? "expectancy below break-even"}.`
+            ? `Realised win rate on ${LOCKED_NAME} has fallen away from its locked baseline (Page–Hinkley ${ph.ph.toFixed(1)}/${ph.threshold} over the last ${Math.min(HEALTH_WINDOW, digits.length)} ticks).`
+            : expectancyGone
+              ? `The locked market's live re-measurement has turned negative: ${test!.nShots} shots at ${(test!.winRate * 100).toFixed(1)}% (floor ${(test!.winRateLower * 100).toFixed(1)}%) against a ${(BREAK_EVEN * 100).toFixed(1)}% break-even.`
               : "",
         };
-        session.needsRescan = session.watch.health.needsRescan;
+        session.needsRescan = alerting;
       }
 
       if (!cachedRead) {
@@ -778,17 +866,15 @@ async function runLoop(config: KillShotConfig) {
         continue;
       }
 
-      if (!cachedRead.deployable) {
-        session.watch.phase = "watching";
-        timingWaitTicks = 0;
-        const top = cachedRead.blockers[0] ?? "gathering evidence";
-        session.message = inRecovery
-          ? `🎯 Recovery armed — holding until the locked market's live read clears. ${top}`
-          : `👁 Watching ${LOCKED_NAME} · ${cachedRead.verdict.toUpperCase()} ${cachedRead.confidence}/100 · ${top}`;
-        broadcast();
-        await sleep(1600);
-        continue;
-      }
+      // NOTE ON WHAT IS *NOT* A GATE HERE.
+      //
+      // The live re-read's verdict is displayed, never re-imposed. Certification
+      // is a DEPLOYMENT decision the user already made on measured evidence; if
+      // it were re-run as a live gate, every marginal market would spend its life
+      // flickering across the bar and the bot would be un-tradeable for exactly
+      // the reason its predecessor was. What the re-read is for is detecting that
+      // the market has CHANGED (handled above), and everything else is left to
+      // the frozen rule: the edge bar, the post-loss shield and the tick.
 
       // ── GATE 2 + 3: EDGE, with the post-loss SHIELD applied ────────────────
       // The shield is the rule the scan simulated: after a loss the bar rises by
@@ -832,7 +918,7 @@ async function runLoop(config: KillShotConfig) {
         session.watch.setupsRejected++;
         session.message = inRecovery
           ? `🎯 Recovery armed — waiting for a qualifying edge. ${entry.reason}`
-          : `👁 Market clear, waiting for the edge — ${entry.reason}`;
+          : `👁 Watching ${LOCKED_NAME} · live read ${cachedRead.verdict.toUpperCase()} ${cachedRead.confidence}/100 · ${entry.reason}`;
         broadcast();
         await sleep(900);
         continue;

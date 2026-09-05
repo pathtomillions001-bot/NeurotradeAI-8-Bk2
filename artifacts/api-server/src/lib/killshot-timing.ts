@@ -167,10 +167,18 @@ export function evaluateTiming(input: TimingInput): TimingResult {
   const gapTerm = gapInformative ? clamp(1 - Math.abs(gapRatio - 1) / 1.4, 0, 1) : 0.6;
 
   // 4 — feed freshness
+  //
+  // An UNKNOWN tick age is not evidence of a stale feed. When the transport does
+  // not stamp arrivals (a simulated or replayed feed, or a symbol whose first
+  // tick has not landed yet) the age comes back non-finite, and treating that as
+  // "the feed has stalled" would veto every entry forever — a refusal dressed up
+  // as caution. Unknown is scored neutrally and never objects; a genuinely
+  // stalled feed reports a large FINITE age and is still caught.
   const medianGap = Math.max(0.2, medianTickGapSeconds);
-  const feedLagRatio = secondsSinceLastTick / medianGap;
-  const feedOk = feedLagRatio <= TIMING.maxFeedLagRatio;
-  const feedTerm = clamp(1 - Math.max(0, feedLagRatio - 1) / 2, 0, 1);
+  const feedAgeKnown = Number.isFinite(secondsSinceLastTick);
+  const feedLagRatio = feedAgeKnown ? secondsSinceLastTick / medianGap : 0;
+  const feedOk = !feedAgeKnown || feedLagRatio <= TIMING.maxFeedLagRatio;
+  const feedTerm = feedAgeKnown ? clamp(1 - Math.max(0, feedLagRatio - 1) / 2, 0, 1) : 0.6;
 
   // 5 — evidence independence
   const cadenceOk = ticksSinceLastShot >= minSpacing;

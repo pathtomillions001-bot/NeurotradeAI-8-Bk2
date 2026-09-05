@@ -39,7 +39,7 @@ export interface BotCardData {
   nominalPayout: string;
   /** Pre-locked bots analyse once, then freeze their pair for the session. */
   preLocked?: boolean;
-  /** One-shot bots lock one market + one contract and wait for the perfect tick. */
+  /** One-shot bots lock one market + one contract and wait for the one shot. */
   oneShot?: boolean;
   session: BotSessionStatus | null;
 }
@@ -77,49 +77,74 @@ export interface BotSessionStatus {
     recoveryDepthP95: number;
     signals: string[];
   };
+  /** Kill-Shot only: the market has changed and the user must re-analyse. */
+  needsRescan?: boolean;
   /**
-   * Apex only: the frozen lock (market + the user's single contract) and the
-   * read the scan produced when it chose that market.
+   * Kill-Shot only: the frozen lock (market + the user's single contract) and
+   * the out-of-sample measurement that chose it.
    */
-  apexLock?: {
+  killshotLock?: {
     symbol: string;
     displayName: string;
     contract: string;
     certainty: string;
+    verdict: string;
     confidence: number;
     payout: number;
     breakEven: number;
-    /** Replayed accuracy of the entry rule on this market's own history. */
-    replayWinRate: number;
-    replayShots: number;
-    replayFireRate: number;
-    /** 1 − P(the recovery ladder breaks) over the projection horizon. */
+    /** Accuracy of the frozen rule on ticks the fit never saw. */
+    oosWinRate: number;
+    oosWinRateLower: number;
+    oosShots: number;
+    oosTicks: number;
+    edgePerDollar: number;
+    evidenceE: number;
+    brierSkill: number;
+    tau: number;
     ladderSafety: number;
     ladderLimit: number;
-    ladderHorizon: number;
     expectedShotsToBreak: number;
-    /** ξ = P(L|L)/P(L) on the replayed shots, and its 95 % upper bound. */
     xi: number;
-    xiUpper: number;
+    pairsBefore: number;
+    pairsAfter: number;
+    forced: boolean;
     signals: string[];
   };
-  /** Apex only: what the bot is waiting for right now. */
+  /** Kill-Shot only: what the bot is waiting for right now. */
   watch?: {
     phase: "watching" | "armed" | "firing" | "settling";
     confidence: number;
-    /** Conditional P(win | current context) and the bar it must clear. */
-    condP: number;
-    condLower: number;
+    verdict: string;
+    /** Calibrated P(win) at the live context, the decision statistic and the raw edge. */
+    p: number;
+    z: number;
+    edgeZ: number;
     bar: number;
-    marginPP: number;
+    tau: number;
+    marginZ: number;
+    leader: string;
     contextOrder: number;
     contextCount: number;
+    regimeHot: number;
+    experts: Array<{ name: string; p: number; n: number; weight: number }>;
     blockers: string[];
     ticksWatched: number;
     setupsRejected: number;
-    /** Page–Hinkley drift guard on the locked market. */
-    drift: { ph: number; threshold: number; fired: boolean; consecutive: number };
-    /** Entry-timing layer. */
+    health: {
+      ph: number;
+      threshold: number;
+      fired: boolean;
+      consecutive: number;
+      needsRescan: boolean;
+      note: string;
+    };
+    shield: {
+      lossRun: number;
+      barBoost: number;
+      ticksSinceLoss: number;
+      coolTicks: number;
+      active: boolean;
+    };
     entry: {
       ready: boolean;
       score: number;

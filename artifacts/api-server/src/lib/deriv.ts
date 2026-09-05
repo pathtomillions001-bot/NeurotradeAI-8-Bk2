@@ -603,8 +603,20 @@ export function analyzeTrend(prices: number[]) {
 }
 
 // ── Persistent Tick Manager ───────────────────────────────────────────────────
-const TICK_BUFFER_SIZE = 500;
-const DIGIT_BUFFER_SIZE = 300;
+//
+// BUFFER DEPTH IS AN ANALYSIS PARAMETER, NOT A MEMORY DETAIL.
+//
+// A 300-digit ring buffer silently caps every statistical bot in the codebase:
+// a walk-forward replay with a 120-tick burn-in then has ~180 decisions to make,
+// and any gate that asks for "24 qualifying shots" can never be satisfied no
+// matter how good the market is. Ten thousand digits across twenty symbols is
+// 200k numbers — a rounding error in memory — and it is the difference between
+// a bot that can be judged and a bot that can only ever say "gathering
+// evidence". See `lib/killshot-analysis.ts` for what the depth buys.
+/** Ticks the simulated feed pre-seeds per market when Deriv is unreachable. */
+const SIM_SEED_TICKS = 3_000;
+const TICK_BUFFER_SIZE = 5_000;
+const DIGIT_BUFFER_SIZE = 10_000;
 
 // ── Simulated price parameters ────────────────────────────────────────────────
 const SIM_PARAMS: Record<string, { base: number; vol: number }> = {
@@ -1057,6 +1069,11 @@ class DerivTickManager extends EventEmitter {
     if (prices.length > TICK_BUFFER_SIZE) prices.shift();
     this.tickBuffers.set(market.symbol, prices);
     this.latestPrices.set(market.symbol, rounded);
+    // The simulated feed must LOOK like a feed: engines that check tick
+    // freshness before entering read this timestamp, and leaving it unset makes
+    // the age infinite, which reads as a permanently stalled market and blocks
+    // every timing layer in the app whenever Deriv is unreachable.
+    this.lastTickMs.set(market.symbol, Date.now());
 
     if (market.digitEnabled) {
       const digit = extractLastDigit(rounded, market.pipSize);
@@ -1074,16 +1091,26 @@ class DerivTickManager extends EventEmitter {
     this.usingSimulated = true;
     logger.info("TickManager: starting simulated prices (no live symbols available)");
 
+    // Seed a DEEP history, not a token one.
+    //
+    // Simulated mode is what runs whenever the public WS is unreachable, and the
+    // analysis bots now measure themselves on a train/test split of a few
+    // thousand digits. Seeding 150 ticks per market left them permanently unable
+    // to say anything at all: the round-robin below hands each market roughly one
+    // tick per second, so reaching a judgeable window would take hours. This
+    // costs a few milliseconds at startup and makes the offline mode behave like
+    // the live one.
     for (const market of DERIV_MARKETS) {
       const params = SIM_PARAMS[market.symbol];
       if (!params || !market.digitEnabled) continue;
       this.simPrices.set(market.symbol, params.base);
       let price = params.base;
-      for (let i = 0; i < 150; i++) {
+      for (let i = 0; i < SIM_SEED_TICKS; i++) {
         const delta = price * params.vol * this.gaussianRandom();
         price = Math.max(price * 0.5, price + delta);
         this.pushSimulatedTick(market, price);
       }
+      this.simPrices.set(market.symbol, price);
     }
 
     let idx = 0;
@@ -1171,6 +1198,163 @@ export async function getTickHistory(symbol: string, count = 50): Promise<number
     /* ignore */
   }
   return [];
+}
+
+// ── Deep digit history ────────────────────────────────────────────────────────
+//
+// WHY THIS EXISTS
+// ───────────────
+// The live ring buffer only holds what has arrived since the process started.
+// A bot that must MEASURE its own entry rule before it risks money needs a few
+// thousand digits on the first scan, not after an hour of warm-up. Deriv's
+// `ticks_history` serves the last 4999 ticks in a single call (5000 is rejected
+// outright), so one request per market gives a bot ~4999 digits immediately.
+//
+// The result is cached per symbol and topped up from the live buffer, so the
+// analysis always sees "deep history + everything that has happened since".
+
+const DEEP_HISTORY_MAX = 4999;
+const DEEP_HISTORY_TTL_MS = 90_000;
+/** One history request may not hold a scan up for longer than this. */
+const DEEP_HISTORY_TIMEOUT_MS = 6_000;
+/**
+ * When the history endpoint is unreachable, STOP ASKING for a while.
+ *
+ * A scan walks 19 markets, so a per-request timeout is paid 19 times over: at 15
+ * seconds each that is a four-minute "scan" that was never going to return
+ * anything but the live buffer. After a few consecutive failures the feed is
+ * declared unavailable and every caller degrades immediately, which turns the
+ * same scan into a few seconds and an honest message.
+ */
+const DEEP_HISTORY_FAILURES_BEFORE_BACKOFF = 2;
+const DEEP_HISTORY_BACKOFF_MS = 60_000;
+
+let deepHistoryFailures = 0;
+let deepHistoryBlockedUntil = 0;
+
+function deepHistoryUnavailable(): boolean {
+  return Date.now() < deepHistoryBlockedUntil;
+}
+
+function noteDeepHistoryFailure() {
+  deepHistoryFailures++;
+  if (deepHistoryFailures >= DEEP_HISTORY_FAILURES_BEFORE_BACKOFF) {
+    deepHistoryBlockedUntil = Date.now() + DEEP_HISTORY_BACKOFF_MS;
+  }
+}
+
+function noteDeepHistorySuccess() {
+  deepHistoryFailures = 0;
+  deepHistoryBlockedUntil = 0;
+}
+
+interface DeepHistoryEntry {
+  digits: number[];
+  fetchedAt: number;
+  /** Length of the live digit buffer at the moment the history was fetched. */
+  liveLenAtFetch: number;
+  inFlight?: Promise<number[]> | null;
+}
+
+const deepHistoryCache = new Map<string, DeepHistoryEntry>();
+
+async function requestDeepDigits(symbol: string, count: number): Promise<number[]> {
+  const market = getMarketInfo(symbol);
+  if (!market?.digitEnabled) return [];
+  const msg = await tickManager.request(
+    {
+      ticks_history: symbol,
+      count: Math.min(DEEP_HISTORY_MAX, Math.max(100, Math.floor(count))),
+      end: "latest",
+      style: "ticks",
+    },
+    DEEP_HISTORY_TIMEOUT_MS,
+  );
+  const prices: unknown[] | undefined = msg?.history?.prices;
+  if (!Array.isArray(prices) || prices.length === 0) return [];
+  return prices
+    .map((p) => extractLastDigit(Number(p), market.pipSize))
+    .filter((d) => Number.isInteger(d) && d >= 0 && d <= 9);
+}
+
+/**
+ * Deepest digit history available for a market, most-recent-last.
+ *
+ * Order of preference:
+ *   1. a cached `ticks_history` pull (≤ 4999 digits) topped up with every live
+ *      digit that has arrived since the pull,
+ *   2. a fresh pull when the cache is cold or stale,
+ *   3. the live ring buffer alone if the public WS cannot serve history (e.g.
+ *      the feed is running on simulated prices).
+ *
+ * Never throws and never blocks longer than the WS request timeout — a scan
+ * that cannot reach Deriv degrades to the live buffer instead of failing.
+ */
+export async function getDeepDigits(symbol: string, count = DEEP_HISTORY_MAX): Promise<number[]> {
+  const want = Math.min(DEEP_HISTORY_MAX, Math.max(100, Math.floor(count)));
+  const live = tickManager.getDigits(symbol, DEEP_HISTORY_MAX);
+  const cached = deepHistoryCache.get(symbol);
+
+  const merge = (entry: DeepHistoryEntry): number[] => {
+    const grown = Math.max(0, live.length - entry.liveLenAtFetch);
+    const tail = grown > 0 ? live.slice(-grown) : [];
+    return [...entry.digits, ...tail].slice(-want);
+  };
+
+  if (cached && Date.now() - cached.fetchedAt < DEEP_HISTORY_TTL_MS && cached.digits.length > 0) {
+    return merge(cached);
+  }
+  // The feed has already refused this recently — do not pay the timeout again.
+  if (deepHistoryUnavailable()) {
+    if (cached && cached.digits.length > 0) return merge(cached);
+    return live.slice(-want);
+  }
+  if (cached?.inFlight) {
+    try { await cached.inFlight; } catch { /* fall through */ }
+    const settled = deepHistoryCache.get(symbol);
+    if (settled && settled.digits.length > 0) return merge(settled);
+    return live.slice(-want);
+  }
+
+  const entry: DeepHistoryEntry = cached ?? { digits: [], fetchedAt: 0, liveLenAtFetch: 0 };
+  const liveLenAtFetch = live.length;
+  entry.inFlight = requestDeepDigits(symbol, want)
+    .then((digits) => {
+      if (digits.length > 0) {
+        entry.digits = digits;
+        entry.fetchedAt = Date.now();
+        entry.liveLenAtFetch = liveLenAtFetch;
+        noteDeepHistorySuccess();
+      } else {
+        noteDeepHistoryFailure();
+      }
+      entry.inFlight = null;
+      deepHistoryCache.set(symbol, entry);
+      return digits;
+    })
+    .catch(() => {
+      noteDeepHistoryFailure();
+      entry.inFlight = null;
+      return [];
+    });
+  deepHistoryCache.set(symbol, entry);
+
+  const fetched = await entry.inFlight;
+  if (fetched && fetched.length > 0) return merge(entry);
+  return live.slice(-want);
+}
+
+/** Drop the cached deep history so the next read re-pulls from Deriv. */
+export function invalidateDeepDigits(symbol?: string) {
+  if (symbol) deepHistoryCache.delete(symbol);
+  else deepHistoryCache.clear();
+  deepHistoryFailures = 0;
+  deepHistoryBlockedUntil = 0;
+}
+
+/** True when deep history is being skipped because the feed keeps refusing it. */
+export function deepHistoryDegraded(): boolean {
+  return deepHistoryUnavailable();
 }
 
 // ── Account / auth types ──────────────────────────────────────────────────────

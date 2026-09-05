@@ -25,7 +25,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "apex";
+  family: SpecialistFamily | "duallock" | "killshot";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -41,9 +41,9 @@ export interface BotDefinition {
    */
   preLocked?: boolean;
   /**
-   * Bots that lock ONE market + ONE user-chosen contract, then simply wait for
-   * the market, the context and the tick to all agree (the Apex One-Shot
-   * Sniper). The UI renders a dedicated console for these.
+   * Bots that lock ONE market + ONE user-chosen contract, then wait for health,
+   * edge, the post-loss shield and the tick to all agree (the Kill-Shot Oracle).
+   * The UI renders a dedicated console for these.
    */
   oneShot?: boolean;
   icon: string;
@@ -240,39 +240,39 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalPayout: "1.23–1.40× · 1.95–2.43×",
   },
   {
-    id: "apex",
-    name: "Apex One-Shot Sniper",
-    code: "BOT-APEX",
-    family: "apex",
+    id: "killshot",
+    name: "Kill-Shot Oracle",
+    code: "BOT-KILLSHOT",
+    family: "killshot",
     contractLabel: "One contract · your choice",
-    tagline: "Analyse once · lock · wait for the one shot",
+    tagline: "Measure the rule · lock the market · one shot",
     description:
-      "The certainty engine. You name ONE contract — Over 7, Under 2, Matches, Even or Odd (never both sides of a pair) — and the AI analyses every digit market and LOCKS the single best one for it. From that moment there is no market switching and no rotation, exactly like the Barrier Architect in locked mode; the bot simply waits, for as long as it takes, until the market, the context and the tick all agree, and then takes one shot. It does not price a promised win rate — it replays its own entry rule over each market's real digit history and reports what that rule actually produced.",
+      "The certainty engine, rebuilt. You name ONE contract — Over 7, Under 2, Matches, Even or Odd (never both sides of a pair) — and the AI pulls 4 999 real digits from every market, fits a five-model ensemble on the first half, then MEASURES its own entry rule on the second half it has never seen. The market with the best out-of-sample expectancy is LOCKED: no switching, no rotation, exactly like the Barrier Architect in locked mode. It does not quote a promised win rate; it quotes what the rule actually did on unseen data, and how its losses arrived.",
     edge: [
-      "WALK-FORWARD REPLAY OF THE LIVE ENTRY RULE — the exact conditional rule the engine fires on is replayed tick-by-tick over each market's own history using only information available at that tick, so the quoted accuracy is measured on the decisions this bot really makes instead of on a statistic computed over the whole stream",
-      "EXACT LADDER-RUIN PROBABILITY — the debt-driven recovery ladder grows geometrically (debt(k) = stake·(1+a)^(k−1)), so ladderDepthLimit solves in closed form for k*, the number of consecutive losses your stake, payout, markup, stake cap and stop loss can absorb, and finite Markov chain imbedding (Fu & Koutras) then gives P(a deeper run occurs) exactly — no Monte Carlo, no normal approximation",
-      "CONSECUTIVE-LOSS MARKOV CHAIN as the objective, not a diagnostic — ξ = P(L|L)/P(L) is fitted to the REPLAYED SHOTS and gated on its one-sided 95% upper bound, so only demonstrated clustering is refused; a market that pairs its losses is vetoed however high its win rate, because depth (not accuracy) is what ruins a ladder",
-      "CLOSED-FORM MEAN TIME TO LADDER BREAK — E[T_k] = [1 + r(1−q^(k−1))/(1−q)] / (r·q^(k−1)) for the fitted 2-state chain, so the console can say '≈240 shots before this ladder breaks' rather than only quoting a probability",
-      "CONDITIONAL ENTRY, because the marginal can never carry it — every Deriv digit contract pays below its fair rate (Over 1 pays 1.23× against an 80% fair rate), so an unbiased stream is always −EV and the only honest edge is P(win | the digits that just came), estimated by a variable-order Markov model with Krichevsky–Trofimov mixing: a hot market is carried by the marginal term and a hot context by the deeper ones, under one rule",
-      "MARKOV STATE TIMING — the same loss chain is used as an entry filter: if P(win | last tick lost) beats P(win | last tick won) by more than its own standard error the bot waits for the post-loss state, and vice versa. A genuine timing edge measured on the model that gates consecutive losses",
-      "ANYTIME-VALID CONFIDENCE SEQUENCE (betting test supermartingale + Ville's inequality) — a bot that re-tests every tick and fires when the test passes will fire on pure noise eventually; this lower bound is valid simultaneously at every tick, including at the data-dependent moment the bot chooses to fire",
-      "WALD SPRT on the market stream, H₁ = break-even + 2 ABSOLUTE points — the provably minimum-expected-sample-size test for 'be certain, take as long as you like'. A relative δ is a known trap: on Over 0 it puts H₁ at 97%, a rate no digit stream reaches, so the test could only abandon",
-      "PAGE–HINKLEY DRIFT GUARD — a locked market cannot be rotated out of, so a sustained fall in its realised win rate stops the bot firing and, if it persists, ends the session and asks for a fresh analysis. It never quietly moves market",
-      "Pearson χ² block homogeneity plus an explicit drift slope, and multi-horizon concordance across 60/120/240/480 ticks — hundreds of ticks of accumulated evidence only mean something if they came from one regime",
-      "Benjamini–Hochberg FDR across every market × digit examined plus a log(#candidates) surcharge on the SPRT threshold — the locked market must be genuinely exceptional, not the luckiest of dozens",
-      "THREE EXPLICIT CERTAINTY BARS (Elite / Strict / Balanced) instead of one hidden threshold — the previous version of this bot hard-coded a single severe bar and the practical result was a bot that never traded, which is indistinguishable from a broken one. The bar is now a user decision and every gate is printed when it blocks",
-      "RECOVERY IS SNIPED TOO, on the same shared ledger and the same debt-driven stake formula as every other bot in this section — a recovery trade waits for all three gates, because a hurried recovery is how a two-loss streak becomes a five-loss streak",
+      "MEASURED OUT OF SAMPLE, NOT BACKTESTED — the ensemble, the calibration and the entry threshold are fitted on the first half of each market's history and every number you are shown comes from the second half, which the fit never touched. In-sample and out-of-sample accuracy are printed side by side so over-fitting is visible rather than hidden",
+      "4 999 DIGITS PER MARKET, PULLED ON DEMAND — the predecessor analysed a 300-digit ring buffer, so a walk-forward with a burn-in had ~180 decisions and could never satisfy its own 24-shot requirement. That was arithmetic, not fussiness. Deep history from Deriv's ticks_history is now fetched per market before anything is computed",
+      "THE ENTRY BAR IS A SELF-REFERENTIAL QUANTILE, NOT A CONSTANT — the live edge is standardised against the model's own trailing readings and compared to its top ~1.5% / 2.5% / 4% quantile, so SELECTIVITY is the design parameter and the rule keeps producing measurable shots in every regime. A fixed 'LCB ≥ break-even + 0.5pp' fires constantly on Even and never on Over 0, because its distance from break-even is a function of the contract's variance, not of setup quality",
+      "FIVE ESTIMATORS WITH A REGRET BOUND — forgetting Dirichlet (drifting marginal), context-tree mixing to order 4 with Krichevsky–Trofimov estimators (competes with the best fixed-order Markov model in hindsight), a 2-state chain on the outcome series, a Kaplan–Meier renewal hazard for narrow win sets, and a 2-state HMM regime filter run forward tick by tick. Hedge / multiplicative weights on the log-loss aggregates them: the mixture cannot be much worse than whichever model was right",
+      "PLATT CALIBRATION + BRIER SKILL — a fused score is not a probability until it is calibrated against observed frequencies. The logistic map is fitted on the training half by Newton–Raphson; its slope is the model's own confession, collapsing toward zero when the context carries no information. A market with no conditional skill is REFUSED with that number printed, instead of being sold an invented edge",
+      "EVIDENCE IS AN ANYTIME-VALID e-VALUE ON THE SHOTS — a betting test supermartingale with Ville's inequality, valid simultaneously at every tick including the data-dependent one the bot fires on. Critically it tests the SHOT SEQUENCE, not the market-wide tick stream: the previous bot's SPRT asked whether the whole market beat break-even, needed thousands more ticks to answer, and blocked every candidate while it waited",
+      "EXACT LADDER-RUIN PROBABILITY — the shared recovery ladder grows geometrically, debt(k) = stake·(1+a)^(k−1) with a = (1+markup)/(payout−1), so k* (the consecutive losses your stake, payout, markup, cap and stop loss can absorb) solves in closed form, and finite Markov chain imbedding (Fu & Koutras 1994) then gives P(a deeper run occurs) exactly — no Monte Carlo, no normal approximation",
+      "THE POST-LOSS SHIELD, SIMULATED BEFORE IT IS TRUSTED — after every loss the entry bar rises by a fixed number of σ per step of the run and a tick cool-down is enforced. The scan replays that exact rule over the out-of-sample shots and reports what it did: loss pairs before → after, and the shots it cost. 'No consecutive losses' becomes a measured number instead of a promise",
+      "CONSECUTIVE-LOSS MARKOV CHAIN AS THE OBJECTIVE — ξ = P(L|L)/P(L) is fitted to the out-of-sample shots and gated on the one-sided z of q against p, not on ξ itself: when losses are rare, ξ's bound is wide from sampling noise alone and an absolute ceiling would veto every high-win-rate contract",
+      "DETECTABILITY IS PRICED — S = (break-even − fair) / √(fair·(1−fair)) is the hurdle's per-shot signal-to-noise, and (1.645/S)² is how many shots it takes to prove an edge that size. Over 0 scores 0.058, the highest in the family: the contract most traders think is 'easy' is the one that needs the FEWEST shots to certify, and the console says so",
+      "FOUR VERDICTS, NOT A WALL — CERTIFIED / QUALIFIED / WATCH / REFUSED. The scan always returns a ranking and the single best market available with the exact reason it fell short; a WATCH market can still be locked deliberately. Only REFUSED is absolute, and it means the measured out-of-sample expectancy is negative",
+      "LOCKED MEANS LOCKED, AND IT TELLS YOU WHEN IT BREAKS — the symbol is a const captured once; no branch can move it. A Page–Hinkley detector plus a live re-read of the verdict raises RESCAN REQUIRED, holds fire, and after five consecutive flags ends the session and asks for a fresh analysis. It never quietly changes market",
+      "SAME SHARED RECOVERY AS EVERY OTHER BOT — one account-global ledger, one debt-driven stake formula, one single-executor arbiter. A recovery shot carries one extra step of post-loss tightening: the debt is already geometric, so a hurried recovery entry is the exact mechanism that turns two losses into five",
     ],
     accent: "sky",
-    icon: "zap",
+    icon: "crosshair",
     oneShot: true,
     hasSides: false,
     hasDigitLock: true,
-    digitLockHelp: "For Matches you may name the digit or leave it to the AI — it scores all ten in every digit market and locks the strongest.",
+    digitLockHelp: "For Matches you may name the digit or leave it to the AI — it scores all ten in every market and Benjamini–Hochberg runs across the whole 190-candidate family.",
     sides: [
       { id: "both", label: "Your single contract", contracts: ["DIGITOVER", "DIGITUNDER", "DIGITMATCH", "DIGITEVEN", "DIGITODD"], desc: "You choose exactly one — over, under, matches, even or odd" },
     ],
-    nominalWinRate: "replayed, not promised",
+    nominalWinRate: "measured out of sample",
     nominalPayout: "1.09–8.93×",
   },
 ];

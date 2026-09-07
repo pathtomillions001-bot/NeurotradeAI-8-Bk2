@@ -108,8 +108,12 @@ export interface FamilyDeploySpec {
   botId: FamilyBotId;
   family: FamilyKind;
   side: FamilySide;
-  /** Locked digit (over/under requires it; match/differ optional). */
+  /** Match/differ only: a locked digit (optional — the AI may pick). */
   digit?: number;
+  /** Over/Under only: the digit traded for Over. */
+  overDigit?: number;
+  /** Over/Under only: the digit traded for Under. */
+  underDigit?: number;
   /** Match/differ only: let the AI pick the best digit(s). */
   aiDigit: boolean;
   certainty: Certainty;
@@ -185,6 +189,8 @@ export interface FamilyStatus {
     family: FamilyKind;
     side: FamilySide;
     digit?: number;
+    overDigit?: number;
+    underDigit?: number;
     aiDigit: boolean;
     certainty: Certainty;
     stake: number;
@@ -243,11 +249,13 @@ function preScreenDigits(digits: number[], kind: "match" | "differ", k = 3): num
 export function contractsFor(spec: FamilyDeploySpec, digits: number[]): ShotContract[] {
   const out: ShotContract[] = [];
   if (spec.family === "overunder") {
-    if ((spec.side === "over" || spec.side === "both") && spec.digit !== undefined) {
-      out.push({ kind: "over", digit: spec.digit });
+    const overD = spec.overDigit ?? spec.digit;
+    const underD = spec.underDigit ?? spec.digit;
+    if ((spec.side === "over" || spec.side === "both") && overD !== undefined) {
+      out.push({ kind: "over", digit: overD });
     }
-    if ((spec.side === "under" || spec.side === "both") && spec.digit !== undefined) {
-      out.push({ kind: "under", digit: spec.digit });
+    if ((spec.side === "under" || spec.side === "both") && underD !== undefined) {
+      out.push({ kind: "under", digit: underD });
     }
   } else if (spec.family === "parity") {
     if (spec.side === "even" || spec.side === "both") out.push({ kind: "even" });
@@ -268,13 +276,14 @@ export function contractsFor(spec: FamilyDeploySpec, digits: number[]): ShotCont
 
 /** Contract sovereignty: may this session fire this contract, regardless of digits? */
 function allowedContract(spec: FamilyDeploySpec, c: ShotContract): boolean {
-  if (spec.digit !== undefined && c.digit !== undefined && c.digit !== spec.digit) return false;
   switch (spec.family) {
-    case "overunder":
+    case "overunder": {
       if (c.kind !== "over" && c.kind !== "under") return false;
-      if (spec.side === "over") return c.kind === "over";
-      if (spec.side === "under") return c.kind === "under";
-      return true;
+      if (spec.side === "over" && c.kind !== "over") return false;
+      if (spec.side === "under" && c.kind !== "under") return false;
+      const want = c.kind === "over" ? (spec.overDigit ?? spec.digit) : (spec.underDigit ?? spec.digit);
+      return want === undefined || c.digit === want;
+    }
     case "parity":
       if (c.kind !== "even" && c.kind !== "odd") return false;
       if (spec.side === "even") return c.kind === "even";
@@ -282,6 +291,7 @@ function allowedContract(spec: FamilyDeploySpec, c: ShotContract): boolean {
       return true;
     case "matchdiffer":
       if (c.kind !== "match" && c.kind !== "differ") return false;
+      if (spec.digit !== undefined && c.digit !== undefined && c.digit !== spec.digit) return false;
       if (spec.side === "match") return c.kind === "match";
       if (spec.side === "differ") return c.kind === "differ";
       return true;
@@ -428,6 +438,8 @@ export function getStatus(): FamilyStatus {
           family: cfg.spec.family,
           side: cfg.spec.side,
           digit: cfg.spec.digit,
+          overDigit: cfg.spec.overDigit,
+          underDigit: cfg.spec.underDigit,
           aiDigit: cfg.spec.aiDigit,
           certainty: cfg.spec.certainty,
           stake: cfg.stake,

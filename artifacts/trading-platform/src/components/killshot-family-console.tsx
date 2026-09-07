@@ -19,7 +19,7 @@ import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { useGetSettings } from "@workspace/api-client-react";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
-import { ACCENTS, BOT_ICON, SCAN_MARKETS } from "@/lib/bots";
+import { ACCENTS, BOT_ICON } from "@/lib/bots";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
 type Family = "overunder" | "parity" | "matchdiffer";
@@ -95,14 +95,9 @@ function Stat({ label: lbl, value, tone }: { label: string; value: string; tone?
   );
 }
 
-function digitRange(family: Family, side: string): number[] {
-  if (family === "overunder") {
-    if (side === "over") return [0, 1, 2, 3, 4, 5, 6, 7, 8];
-    if (side === "under") return [1, 2, 3, 4, 5, 6, 7, 8, 9];
-    return [1, 2, 3, 4, 5, 6, 7, 8];
-  }
-  return [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
-}
+const OVER_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+const UNDER_DIGITS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const ALL_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSession }: {
   bot: BotCardData | null;
@@ -120,13 +115,13 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   const { data: settings } = useGetSettings();
 
   const family: Family = bot?.killShotFamily ?? "overunder";
-  const [side, setSide] = useState<string>(family === "overunder" ? "both"
-    : family === "parity" ? "both" : "both");
-  const [digit, setDigit] = useState<number>(family === "overunder" ? 4 : 5);
+  const [side, setSide] = useState<string>("both");
+  const [digit, setDigit] = useState<number>(5);
+  const [overDigit, setOverDigit] = useState<number>(4);
+  const [underDigit, setUnderDigit] = useState<number>(6);
   const [aiDigit, setAiDigit] = useState(true);
   const [certainty, setCertainty] = useState<Certainty>("balanced");
   const [marketMode, setMarketMode] = useState<"locked" | "switching">("locked");
-  const [lockedSymbol, setLockedSymbol] = useState<string>(SCAN_MARKETS[1]!.symbol);
   const [config, setConfig] = useState({ stake: 1, takeProfit: 10, stopLoss: 5, maxRecoverySteps: 3 });
   const set = <K extends keyof typeof config>(k: K, v: number) =>
     setConfig(prev => ({ ...prev, [k]: v }));
@@ -142,7 +137,14 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   }, [settings]);
 
   const isRunning = session?.running === true && session?.botId === bot?.id;
-  useEffect(() => { if (isRunning) setStep("running"); }, [isRunning]);
+  useEffect(() => {
+    if (isRunning) {
+      setStep("running");
+      const m = (session?.config as any)?.marketMode;
+      if (m === "locked" || m === "switching") setMarketMode(m);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning]);
   useEffect(() => {
     if (!open) return;
     setScanResult(null);
@@ -194,23 +196,23 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
 
   const contractLabel = () => {
     if (family === "parity") return sideLabels[side]!;
-    if (family === "matchdiffer") {
-      const d = aiDigit ? "AI picks" : String(digit);
-      return `${sideLabels[side]!}${side !== "both" ? ` · ${d}` : ` · ${d}`}`;
+    if (family === "overunder") {
+      if (side === "over") return `Over ${overDigit}`;
+      if (side === "under") return `Under ${underDigit}`;
+      return `Over ${overDigit} · Under ${underDigit}`;
     }
-    return `${sideLabels[side]!} · digit ${digit}`;
+    const d = aiDigit ? "AI picks" : String(digit);
+    return `${sideLabels[side]!} · ${d}`;
   };
 
   const buildBody = () => {
     const body: Record<string, unknown> = { botId: bot.id, side, certainty, ...config };
-    if (family !== "parity") {
-      if (family === "matchdiffer" && aiDigit) {
-        // no digit → AI picks
-      } else {
-        body.digit = digit;
-      }
+    if (family === "overunder") {
+      if (side === "over" || side === "both") body.overDigit = overDigit;
+      if (side === "under" || side === "both") body.underDigit = underDigit;
+    } else if (family === "matchdiffer" && !aiDigit) {
+      body.digit = digit;
     }
-    if (marketMode === "locked") body.lockedSymbol = lockedSymbol;
     return body;
   };
 
@@ -235,7 +237,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
     } finally { setLoading(false); }
   };
 
-  const handleStart = async (c: Candidate) => {
+  const handleStart = async (c: Candidate, mode: "locked" | "switching") => {
     setLoading(true);
     try {
       const res = await fetch("/api/bots/family/start", {
@@ -243,19 +245,21 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...buildBody(),
-          marketMode,
+          marketMode: mode,
           symbol: c.symbol,
           contract: c.contract,
           card: c.card,
           analysis: c,
+          ...(mode === "locked" ? { lockedSymbol: c.symbol } : {}),
         }),
       });
       const data = await res.json();
       if (!res.ok) { toast.error(data.error ?? "Failed to start"); return; }
       onSession(data.status);
+      setMarketMode(mode);
       setStep("running");
       toast.success(
-        marketMode === "locked"
+        mode === "locked"
           ? `🔒 Locked on ${c.displayName} — the edge may move, the market won't`
           : `🔁 Deployed on ${c.displayName} — auto-switching when it cools`,
       );
@@ -340,20 +344,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
             {/* CONFIG */}
             {step === "config" && (
               <div className="p-4 space-y-4">
-                <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-1.5`}>
-                  <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
-                    How this bot works
-                  </p>
-                  <p className="text-[10px] text-muted-foreground leading-relaxed">
-                    Same measurement as the Kill-Shot Oracle — a five-model ensemble fitted and then{" "}
-                    <span className="text-white/80">measured on ticks it never saw</span>. In a{" "}
-                    <span className="text-white/80">locked market</span> the edge may move (a better{" "}
-                    {family === "parity" ? "side" : "digit"} in the same market); with{" "}
-                    <span className="text-white/80">auto-switching</span> it moves to a better market. Runs to
-                    your stop, target or until you stop it.
-                  </p>
-                </div>
-
                 {/* Side */}
                 <div className="space-y-1.5">
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Side</p>
@@ -369,69 +359,71 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                   </div>
                 </div>
 
-                {/* Digit (over/under + match/differ) */}
-                {family === "matchdiffer" && (
-                  <button onClick={() => setAiDigit(v => !v)}
-                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11px] text-left transition-colors ${
-                      aiDigit ? `${a.activeBg} border ${a.activeBorder}` : "bg-white/[0.03] border border-white/5"}`}>
-                    <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${
-                      aiDigit ? `${a.dot} border-transparent` : "border-white/20"}`}>
-                      {aiDigit && <span className="text-[8px] text-black font-bold">✓</span>}
-                    </span>
-                    <span className={aiDigit ? a.text : "text-muted-foreground"}>Let the AI pick the best digit</span>
-                  </button>
-                )}
-                {(family === "overunder" || (family === "matchdiffer" && !aiDigit)) && (
-                  <div className="space-y-1.5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Digit</p>
-                    <div className="grid grid-cols-5 gap-1">
-                      {digitRange(family, side).map(d => (
-                        <button key={d} onClick={() => setDigit(d)}
-                          className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
-                            digit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                              : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
-                          {d}
-                        </button>
-                      ))}
-                    </div>
+                {/* Digits — Over/Under picks its own digit per side */}
+                {family === "overunder" && (
+                  <div className="space-y-2">
+                    {(side === "over" || side === "both") && (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Over digit</p>
+                        <div className="grid grid-cols-5 gap-1">
+                          {OVER_DIGITS.map(d => (
+                            <button key={d} onClick={() => setOverDigit(d)}
+                              className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
+                                overDigit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
+                                  : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
+                              {d}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {(side === "under" || side === "both") && (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Under digit</p>
+                        <div className="grid grid-cols-5 gap-1">
+                          {UNDER_DIGITS.map(d => (
+                            <button key={d} onClick={() => setUnderDigit(d)}
+                              className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
+                                underDigit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
+                                  : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
+                              {d}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
-                {/* Market mode */}
-                <div className="space-y-1.5">
-                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Market mode</p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <button onClick={() => setMarketMode("locked")}
-                      className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
-                        marketMode === "locked" ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                          : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
-                      <Lock className="w-3 h-3" /> Locked market
+                {/* Digit (match/differ) */}
+                {family === "matchdiffer" && (
+                  <>
+                    <button onClick={() => setAiDigit(v => !v)}
+                      className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11px] text-left transition-colors ${
+                        aiDigit ? `${a.activeBg} border ${a.activeBorder}` : "bg-white/[0.03] border border-white/5"}`}>
+                      <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${
+                        aiDigit ? `${a.dot} border-transparent` : "border-white/20"}`}>
+                        {aiDigit && <span className="text-[8px] text-black font-bold">✓</span>}
+                      </span>
+                      <span className={aiDigit ? a.text : "text-muted-foreground"}>Let the AI pick the best digit</span>
                     </button>
-                    <button onClick={() => setMarketMode("switching")}
-                      className={`flex items-center justify-center gap-1.5 px-2 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
-                        marketMode === "switching" ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                          : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
-                      <Shuffle className="w-3 h-3" /> Auto-switch
-                    </button>
-                  </div>
-                  {marketMode === "locked" ? (
-                    <div className="space-y-1">
-                      <p className="text-[9px] text-muted-foreground/70">
-                        The market stays fixed — only the edge inside it may change.
-                      </p>
-                      <select value={lockedSymbol} onChange={e => setLockedSymbol(e.target.value)}
-                        className="w-full h-8 px-2 rounded-lg text-[11px] bg-black/30 border border-white/10 text-white outline-none">
-                        {SCAN_MARKETS.map(m => (
-                          <option key={m.symbol} value={m.symbol} className="bg-[#0a1120]">{m.name}</option>
-                        ))}
-                      </select>
-                    </div>
-                  ) : (
-                    <p className="text-[9px] text-muted-foreground/70">
-                      The bot re-measures all markets and moves to a better one when this cools.
-                    </p>
-                  )}
-                </div>
+                    {!aiDigit && (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Digit</p>
+                        <div className="grid grid-cols-5 gap-1">
+                          {ALL_DIGITS.map(d => (
+                            <button key={d} onClick={() => setDigit(d)}
+                              className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
+                                digit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
+                                  : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
+                              {d}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
 
                 {/* Proof */}
                 <div className="space-y-1.5">
@@ -495,11 +487,16 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                 {scanResult.best && scanResult.suitable ? (
                   <>
                     <CandidateCard c={scanResult.best} />
-                    <Button onClick={() => handleStart(scanResult.best!)} disabled={loading}
-                            className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                      <Target className="w-4 h-4 mr-2" />
-                      {marketMode === "locked" ? `Lock ${scanResult.best.displayName} & deploy` : "Deploy — auto-switching"}
-                    </Button>
+                    <div className="space-y-2">
+                      <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
+                              className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
+                        <Lock className="w-4 h-4 mr-2" /> Trade Locked on {scanResult.best.displayName}
+                      </Button>
+                      <Button onClick={() => handleStart(scanResult.best!, "switching")} disabled={loading}
+                              variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
+                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Trade with Smart Market Switching
+                      </Button>
+                    </div>
                   </>
                 ) : scanResult.bestAvailable && scanResult.bestAvailable.edgePerDollar > 0 ? (
                   <>
@@ -508,10 +505,16 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                       This setup did not clear the full bar but its measured expectancy is positive. Starting it is a
                       deliberate choice — the bot will keep re-measuring and move on if it cools.
                     </p>
-                    <Button onClick={() => handleStart(scanResult.bestAvailable!)} disabled={loading}
-                            className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                      <Target className="w-4 h-4 mr-2" /> Start anyway
-                    </Button>
+                    <div className="space-y-2">
+                      <Button onClick={() => handleStart(scanResult.bestAvailable!, "locked")} disabled={loading}
+                              className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
+                        <Lock className="w-4 h-4 mr-2" /> Lock {scanResult.bestAvailable.displayName} anyway
+                      </Button>
+                      <Button onClick={() => handleStart(scanResult.bestAvailable!, "switching")} disabled={loading}
+                              variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
+                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Start with Smart Market Switching
+                      </Button>
+                    </div>
                   </>
                 ) : (
                   <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-2 text-center">

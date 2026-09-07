@@ -555,12 +555,35 @@ function parseFamilySpec(botId: string, body: any):
 
   if (family === "overunder") {
     if (!["over", "under", "both"].includes(side)) return { ok: false, error: "side must be over, under or both" };
-    const d = Number(body?.digit);
-    if (!Number.isInteger(d) || d < 0 || d > 9) return { ok: false, error: "digit must be an integer 0–9" };
-    if (side === "over" && d > 8) return { ok: false, error: "Over 9 can never win — choose 0–8" };
-    if (side === "under" && d < 1) return { ok: false, error: "Under 0 can never win — choose 1–9" };
-    if (side === "both" && (d < 1 || d > 8)) return { ok: false, error: "For both sides the digit must be 1–8" };
-    return { ok: true, spec: { botId: botId as killshotFamily.FamilyBotId, family, side, digit: d, aiDigit: false, certainty: parseCertainty(body?.certainty) } };
+    const num = (raw: unknown): number | undefined => {
+      if (raw === undefined || raw === null || raw === "") return undefined;
+      const n = Number(raw);
+      return Number.isInteger(n) ? n : undefined;
+    };
+    const overD = num(body?.overDigit) ?? num(body?.digit);
+    const underD = num(body?.underDigit) ?? num(body?.digit);
+    if (side === "over" || side === "both") {
+      if (overD === undefined || overD < 0 || overD > 8) {
+        return { ok: false, error: "overDigit must be an integer 0–8 (Over 9 can never win)" };
+      }
+    }
+    if (side === "under" || side === "both") {
+      if (underD === undefined || underD < 1 || underD > 9) {
+        return { ok: false, error: "underDigit must be an integer 1–9 (Under 0 can never win)" };
+      }
+    }
+    return {
+      ok: true,
+      spec: {
+        botId: botId as killshotFamily.FamilyBotId,
+        family,
+        side,
+        overDigit: overD,
+        underDigit: underD,
+        aiDigit: false,
+        certainty: parseCertainty(body?.certainty),
+      },
+    };
   }
 
   if (family === "parity") {

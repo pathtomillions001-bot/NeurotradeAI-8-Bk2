@@ -79,12 +79,13 @@ const RISK = { baseStake: 1, markupPercent: 10, maxStake: 500, stopLoss: 5 };
 // CONTRACT VOCABULARY — one side, never both
 // ═══════════════════════════════════════════════════════════════════════════
 
-test("contract vocabulary covers exactly the five one-sided choices", () => {
+test("contract vocabulary covers exactly the six one-sided choices", () => {
   assert.deepEqual(Object.keys(KILLSHOT_CONTRACT_TYPE).sort(),
-    ["even", "match", "odd", "over", "under"]);
+    ["differ", "even", "match", "odd", "over", "under"]);
   assert.equal(KILLSHOT_CONTRACT_TYPE.over, "DIGITOVER");
   assert.equal(KILLSHOT_CONTRACT_TYPE.under, "DIGITUNDER");
   assert.equal(KILLSHOT_CONTRACT_TYPE.match, "DIGITMATCH");
+  assert.equal(KILLSHOT_CONTRACT_TYPE.differ, "DIGITDIFF");
   assert.equal(KILLSHOT_CONTRACT_TYPE.even, "DIGITEVEN");
   assert.equal(KILLSHOT_CONTRACT_TYPE.odd, "DIGITODD");
 });

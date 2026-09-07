@@ -22,6 +22,7 @@ import {
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import * as killshot from "../lib/killshot-engine";
+import * as killshotFamily from "../lib/killshot-family-engine";
 import { validateShotContract, shotLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -179,6 +180,7 @@ router.get("/", (req, res) => {
   const status = visibleStatus(req.sessionId);
   const dual = visibleDualStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
+  const fam = visibleFamilyStatus(req.sessionId);
   res.json({
     bots: BOT_CATALOG.map(bot => {
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
@@ -187,13 +189,18 @@ router.get("/", (req, res) => {
       if (bot.id === killshot.KILLSHOT_BOT_ID) {
         return { ...bot, session: shot.running ? shot : null };
       }
+      if (bot.killShotFamily) {
+        return { ...bot, session: fam.running && fam.botId === bot.id ? fam : null };
+      }
       return { ...bot, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: dual.running
       ? dualLock.DUAL_LOCK_BOT_ID
       : shot.running
         ? killshot.KILLSHOT_BOT_ID
-        : (status.running ? status.botId : null),
+        : fam.running
+          ? (fam.botId ?? null)
+          : (status.running ? status.botId : null),
   });
 });
 
@@ -526,6 +533,188 @@ router.post("/killshot/stop", (req, res) => {
   res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
 });
 
+// ── Kill-Shot Family Oracles (Over/Under · Even/Odd · Matches/Differs) ────────
+//
+// Three bots that borrow the Kill-Shot Oracle's measurement unchanged and apply
+// it to a whole contract family. Unlike the one-shot Oracle they never dead-end:
+// in locked mode the EDGE rotates inside the frozen market, in switching mode the
+// MARKET rotates to the next best — either way the session runs to TP/SL/stop.
+
+function visibleFamilyStatus(sessionId: string) {
+  const status = killshotFamily.getStatus();
+  const owner = killshotFamily.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, deployed: undefined, familyWatch: undefined };
+}
+
+function parseFamilySpec(botId: string, body: any):
+  { ok: true; spec: killshotFamily.FamilyDeploySpec } | { ok: false; error: string } {
+  const family = killshotFamily.familyForBot(botId);
+  if (!family) return { ok: false, error: "Unknown bot" };
+  const side = body?.side;
+
+  if (family === "overunder") {
+    if (!["over", "under", "both"].includes(side)) return { ok: false, error: "side must be over, under or both" };
+    const num = (raw: unknown): number | undefined => {
+      if (raw === undefined || raw === null || raw === "") return undefined;
+      const n = Number(raw);
+      return Number.isInteger(n) ? n : undefined;
+    };
+    const overD = num(body?.overDigit) ?? num(body?.digit);
+    const underD = num(body?.underDigit) ?? num(body?.digit);
+    if (side === "over" || side === "both") {
+      if (overD === undefined || overD < 0 || overD > 8) {
+        return { ok: false, error: "overDigit must be an integer 0–8 (Over 9 can never win)" };
+      }
+    }
+    if (side === "under" || side === "both") {
+      if (underD === undefined || underD < 1 || underD > 9) {
+        return { ok: false, error: "underDigit must be an integer 1–9 (Under 0 can never win)" };
+      }
+    }
+    return {
+      ok: true,
+      spec: {
+        botId: botId as killshotFamily.FamilyBotId,
+        family,
+        side,
+        overDigit: overD,
+        underDigit: underD,
+        aiDigit: false,
+        certainty: parseCertainty(body?.certainty),
+      },
+    };
+  }
+
+  if (family === "parity") {
+    if (!["even", "odd", "both"].includes(side)) return { ok: false, error: "side must be even, odd or both" };
+    return { ok: true, spec: { botId: botId as killshotFamily.FamilyBotId, family, side, aiDigit: false, certainty: parseCertainty(body?.certainty) } };
+  }
+
+  // matchdiffer
+  if (!["match", "differ", "both"].includes(side)) return { ok: false, error: "side must be match, differ or both" };
+  const hasDigit = body?.digit !== undefined && body?.digit !== null && body?.digit !== "";
+  let digit: number | undefined;
+  if (hasDigit) {
+    const d = Number(body?.digit);
+    if (!Number.isInteger(d) || d < 0 || d > 9) return { ok: false, error: "digit must be an integer 0–9" };
+    digit = d;
+  }
+  return {
+    ok: true,
+    spec: { botId: botId as killshotFamily.FamilyBotId, family, side, digit, aiDigit: !hasDigit, certainty: parseCertainty(body?.certainty) },
+  };
+}
+
+router.get("/family/status", (req, res) => {
+  res.json(visibleFamilyStatus(req.sessionId));
+});
+
+/** Measure every market for this bot's family and return a compact ranking. */
+router.post("/family/scan", async (req, res): Promise<void> => {
+  const parsed = parseFamilySpec(String(req.body?.botId ?? ""), req.body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  try {
+    const risk = await killshotRisk(req.sessionId, req.body);
+    const result = await killshotFamily.scanForFamily(req.sessionId, parsed.spec, risk);
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Kill-Shot family scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/family/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const parsed = parseFamilySpec(String(body.botId ?? ""), body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+
+  const contract = validateShotContract(body.contract);
+  if (!contract.ok) {
+    res.status(400).json({ error: contract.error });
+    return;
+  }
+
+  let lockedSymbol: string | undefined;
+  if (marketMode === "locked") {
+    if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
+      res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+      return;
+    }
+    if (!isAutomatedMarket(body.lockedSymbol)) {
+      res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
+      return;
+    }
+    lockedSymbol = body.lockedSymbol;
+  }
+
+  const card = body.card ?? body.analysis?.card;
+  if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
+    res.status(400).json({ error: "Run the analysis first — the measured model card is required before this bot can deploy" });
+    return;
+  }
+
+  const existingOwner = killshotFamily.getOwnerSessionId();
+  if (killshotFamily.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+    return;
+  }
+
+  const result = await killshotFamily.startSession({
+    ownerSessionId: req.sessionId,
+    botId: parsed.spec.botId,
+    spec: parsed.spec,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    marketMode,
+    lockedSymbol,
+    symbol: market.symbol,
+    displayName: market.displayName,
+    contract: contract.contract,
+    card,
+    lockedAnalysis: body.analysis,
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
+});
+
+router.post("/family/stop", (req, res) => {
+  const owner = killshotFamily.getOwnerSessionId();
+  if (killshotFamily.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  killshotFamily.stopSession();
+  res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
+});
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
@@ -533,6 +722,8 @@ router.get("/status", (req, res) => {
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
   if (shot.running) { res.json(shot); return; }
+  const fam = visibleFamilyStatus(req.sessionId);
+  if (fam.running) { res.json(fam); return; }
   res.json(visibleStatus(req.sessionId));
 });
 

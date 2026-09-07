@@ -174,11 +174,11 @@ import {
   regularizedIncompleteBeta,
   payoutForBarrier,
 } from "./specialist-analysis";
-import { EVEN_ODD_PAYOUT, MATCH_PAYOUT } from "./payouts";
+import { EVEN_ODD_PAYOUT, MATCH_PAYOUT, DIFF_PAYOUT } from "./payouts";
 
 // ── Contract vocabulary ───────────────────────────────────────────────────────
 
-export type ShotKind = "over" | "under" | "match" | "even" | "odd";
+export type ShotKind = "over" | "under" | "match" | "differ" | "even" | "odd";
 
 export interface ShotContract {
   kind: ShotKind;
@@ -190,17 +190,19 @@ export const KILLSHOT_CONTRACT_TYPE: Record<ShotKind, string> = {
   over: "DIGITOVER",
   under: "DIGITUNDER",
   match: "DIGITMATCH",
+  differ: "DIGITDIFF",
   even: "DIGITEVEN",
   odd: "DIGITODD",
 };
 
 export function shotLabel(c: ShotContract): string {
   switch (c.kind) {
-    case "over":  return `Over ${c.digit}`;
-    case "under": return `Under ${c.digit}`;
-    case "match": return c.digit === undefined ? "Matches (AI picks the digit)" : `Matches ${c.digit}`;
-    case "even":  return "Even";
-    case "odd":   return "Odd";
+    case "over":   return `Over ${c.digit}`;
+    case "under":  return `Under ${c.digit}`;
+    case "match":  return c.digit === undefined ? "Matches (AI picks the digit)" : `Matches ${c.digit}`;
+    case "differ": return c.digit === undefined ? "Differs (AI picks the digit)" : `Differs ${c.digit}`;
+    case "even":   return "Even";
+    case "odd":    return "Odd";
   }
 }
 
@@ -209,11 +211,12 @@ export function shotWinSet(c: ShotContract): Set<number> {
   const s = new Set<number>();
   for (let d = 0; d <= 9; d++) {
     switch (c.kind) {
-      case "over":  if (c.digit !== undefined && d > c.digit) s.add(d); break;
-      case "under": if (c.digit !== undefined && d < c.digit) s.add(d); break;
-      case "match": if (d === c.digit) s.add(d); break;
-      case "even":  if (d % 2 === 0) s.add(d); break;
-      case "odd":   if (d % 2 === 1) s.add(d); break;
+      case "over":   if (c.digit !== undefined && d > c.digit) s.add(d); break;
+      case "under":  if (c.digit !== undefined && d < c.digit) s.add(d); break;
+      case "match":  if (d === c.digit) s.add(d); break;
+      case "differ": if (d !== c.digit) s.add(d); break;
+      case "even":   if (d % 2 === 0) s.add(d); break;
+      case "odd":    if (d % 2 === 1) s.add(d); break;
     }
   }
   return s;
@@ -225,6 +228,7 @@ export function shotPayout(c: ShotContract): number {
     case "over":  return payoutForBarrier("DIGITOVER", c.digit ?? 4);
     case "under": return payoutForBarrier("DIGITUNDER", c.digit ?? 5);
     case "match": return MATCH_PAYOUT;
+    case "differ": return DIFF_PAYOUT;
     case "even":
     case "odd":   return EVEN_ODD_PAYOUT;
   }
@@ -242,13 +246,13 @@ export function shotBreakEven(c: ShotContract): number {
  */
 export function validateShotContract(raw: any): { ok: true; contract: ShotContract } | { ok: false; error: string } {
   const kind = raw?.kind;
-  if (!["over", "under", "match", "even", "odd"].includes(kind)) {
-    return { ok: false, error: "kind must be one of: over, under, match, even, odd" };
+  if (!["over", "under", "match", "differ", "even", "odd"].includes(kind)) {
+    return { ok: false, error: "kind must be one of: over, under, match, differ, even, odd" };
   }
   if (kind === "even" || kind === "odd") return { ok: true, contract: { kind } };
   const digit = raw?.digit;
-  if (kind === "match" && (digit === undefined || digit === null || digit === "")) {
-    return { ok: true, contract: { kind: "match" } };
+  if ((kind === "match" || kind === "differ") && (digit === undefined || digit === null || digit === "")) {
+    return { ok: true, contract: { kind } };
   }
   const d = Number(digit);
   if (!Number.isInteger(d) || d < 0 || d > 9) return { ok: false, error: `${kind} requires an integer digit 0–9` };

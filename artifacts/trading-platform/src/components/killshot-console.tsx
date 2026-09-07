@@ -322,7 +322,7 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
   const watch = session?.watch;
   const lock = session?.killshotLock;
 
-  /** The measurement card — the same layout whether the verdict is good or bad. */
+  /** The measurement card — one verdict, one measured line, a few key stats. */
   const MeasurementCard = ({ c }: { c: Candidate }) => {
     const v = VERDICT_TONE[c.verdict];
     const t = c.walk.test;
@@ -344,13 +344,9 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
               {(t.winRate * 100).toFixed(1)}%
             </span>
             <span className="text-[10px] font-mono text-muted-foreground">
-              over {t.nShots} shots · floor {(t.winRateLower * 100).toFixed(1)}% · break-even {(c.breakEven * 100).toFixed(1)}%
+              over {t.nShots} shots · break-even {(c.breakEven * 100).toFixed(1)}%
             </span>
           </div>
-          <p className="text-[9px] font-mono text-muted-foreground/70 mt-1">
-            in-sample was {(c.walk.train.winRate * 100).toFixed(1)}% over {c.walk.train.nShots} shots
-            {" — "}the gap between the two is the over-fitting you would otherwise pay for
-          </p>
         </div>
 
         <div className="grid grid-cols-2 gap-1.5">
@@ -361,24 +357,9 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
           <Stat label="Evidence (e-value)"
                 value={t.evidence.peak >= 1000 ? `${(t.evidence.peak / 1000).toFixed(1)}k` : t.evidence.peak.toFixed(1)}
                 tone={t.evidence.peak >= 12 ? "text-green-400" : "text-amber-300"} />
-          <Stat label="Calibration skill"
-                value={`${(c.walk.platt.brierSkill * 100).toFixed(2)}%`}
-                tone={c.walk.platt.brierSkill > 0 ? "text-green-400" : "text-red-400"} />
-          <Stat label="Entry bar τ" value={`${c.walk.tau.toFixed(2)}σ`} />
-          <Stat label="Selectivity" value={`${(t.fireRate * 100).toFixed(2)}% of ticks`} />
           <Stat label="Ladder safety"
                 value={`${(c.ladder.safety * 100).toFixed(1)}%`}
                 tone={c.ladder.safety >= 0.85 ? "text-green-400" : "text-amber-300"} />
-          <Stat label="Absorbs"
-                value={`${c.ladder.limit} loss${c.ladder.limit === 1 ? "" : "es"} in a row`}
-                tone={c.ladder.limit >= 3 ? "text-green-400" : "text-amber-300"} />
-          <Stat label="Loss pairs (shield)"
-                value={`${c.walk.shield.pairsBefore} → ${c.walk.shield.pairsAfter}`}
-                tone={c.walk.shield.pairsAfter <= c.walk.shield.pairsBefore ? "text-green-400" : "text-amber-300"} />
-          <Stat label="Loss pairing ξ" value={c.walk.test.chain.xi.toFixed(2)}
-                tone={c.walk.test.chain.xi <= 1 ? "text-green-400" : "text-amber-300"} />
-          <Stat label="History used" value={`${c.samples.toLocaleString()} digits`} />
-          <Stat label="Kelly at floor" value={`${(c.kellyFraction * 100).toFixed(1)}%`} />
         </div>
       </div>
     );
@@ -590,13 +571,6 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                   <>
                     <MeasurementCard c={scanResult.best} />
 
-                    <div className="rounded-xl bg-black/25 border border-white/5 p-2.5 space-y-1">
-                      <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">Evidence stack</p>
-                      {scanResult.best.signals.filter(s => !s.startsWith("⛔")).slice(0, 8).map((s, i) => (
-                        <p key={i} className="text-[10px] font-mono text-muted-foreground leading-relaxed">· {s}</p>
-                      ))}
-                    </div>
-
                     <Button onClick={() => handleStart(scanResult.best!)} disabled={loading}
                             className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
                       <Target className="w-4 h-4 mr-2" />
@@ -605,24 +579,15 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                   </>
                 ) : (
                   <div className="space-y-3">
-                    <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-2">
+                    <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-1.5">
                       <div className="flex items-center gap-2">
                         <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
                         <p className="text-xs font-semibold text-amber-300">
-                          Nothing Certified at the {certainty.charAt(0).toUpperCase() + certainty.slice(1)} Bar
+                          No certified market at the {certainty.charAt(0).toUpperCase() + certainty.slice(1)} bar
                         </p>
                       </div>
-                      <p className="text-[11px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
-                      {scanResult.bestAvailable && scanResult.bestAvailable.blockers.length > 0 && (
-                        <div className="space-y-0.5 pt-1">
-                          {scanResult.bestAvailable.blockers.slice(0, 4).map((b, i) => (
-                            <p key={i} className="text-[10px] font-mono text-amber-200/70 leading-relaxed">⛔ {b}</p>
-                          ))}
-                        </div>
-                      )}
-                      <p className="text-[9px] font-mono text-muted-foreground/60 pt-1">
-                        {scanResult.historyDepth.toLocaleString()} digits per market · {scanResult.marketsScanned} markets ·
-                        {" "}{scanResult.detect.note}
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        {scanResult.bestAvailable?.blockers?.[0] ?? "The strongest market didn't gather enough proof yet."}
                       </p>
                     </div>
 
@@ -634,12 +599,12 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                           confirmForce ? (
                             <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
                               <p className="text-[11px] text-amber-200 leading-relaxed">
-                                This market did not clear the {certainty} bar. Its measured expectancy is
-                                {" "}<span className="font-mono font-bold">
+                                It didn't clear the {certainty} bar — measured{" "}
+                                <span className="font-mono font-bold">
                                   {scanResult.bestAvailable.edgePerDollar >= 0 ? "+" : ""}
                                   {(scanResult.bestAvailable.edgePerDollar * 100).toFixed(2)}%
-                                </span>{" "}per $1 on {scanResult.bestAvailable.walk.test.nShots} unseen shots.
-                                Locking it is a deliberate decision, not a recommendation.
+                                </span>{" "}
+                                per $1. Locking it is your call, not a recommendation.
                               </p>
                               <div className="flex gap-2">
                                 <Button onClick={() => setConfirmForce(false)} variant="outline"
@@ -751,9 +716,9 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                   </div>
                 </div>
 
-                {/* THE SCOPE — four gates, each its own row */}
+                {/* THE SCOPE — four gates, one compact status */}
                 {isRunning && watch && (
-                  <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2.5`}>
+                  <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
                     <div className="flex items-center justify-between">
                       <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text} flex items-center gap-1.5`}>
                         {watch.phase === "watching" ? <Eye className="w-3 h-3" /> : <Crosshair className="w-3 h-3" />}
@@ -766,92 +731,30 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                       </span>
                     </div>
 
-                    {/* Gate 1 — health */}
-                    <div className="rounded-lg border border-white/10 bg-black/30 p-2 space-y-1">
-                      <div className="flex items-center justify-between">
-                        <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">1 · Market health</p>
-                        <span className={`text-[9px] font-mono font-bold ${
-                          watch.health.needsRescan ? "text-red-400" : watch.blockers.length === 0 ? "text-green-400" : "text-amber-300"
-                        }`}>
-                          {watch.verdict?.toUpperCase() ?? "—"} · PH {watch.health.ph.toFixed(1)}/{watch.health.threshold}
-                        </span>
-                      </div>
-                      {watch.blockers.length > 0
-                        ? watch.blockers.map((b, i) => (
-                            <p key={i} className="text-[10px] font-mono text-amber-200/70 leading-relaxed">· {b}</p>
-                          ))
-                        : <p className="text-[10px] font-mono text-muted-foreground">Live read still matches the locked measurement.</p>}
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      {watch.entry.reason
+                        || watch.health.note
+                        || (watch.blockers.length > 0 ? watch.blockers[0] : "Waiting for the edge and the tick to agree.")}
+                    </p>
+
+                    <div className="h-2 rounded-full bg-black/40 overflow-hidden">
+                      <div className={`h-full ${watch.marginZ >= 0 ? "bg-green-400" : a.dot} transition-all duration-700`}
+                           style={{ width: `${Math.max(2, Math.min(100, watch.bar > 0 ? (watch.z / watch.bar) * 100 : 0))}%` }} />
                     </div>
 
-                    {/* Gate 2 — edge */}
-                    <div className="rounded-lg border border-white/10 bg-black/30 p-2 space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">2 · Edge</p>
-                        <span className={`text-[9px] font-mono font-bold ${watch.marginZ >= 0 ? "text-green-400" : "text-amber-300"}`}>
-                          {watch.z.toFixed(2)}σ / {watch.bar.toFixed(2)}σ
-                        </span>
-                      </div>
-                      <div className="h-2 rounded-full bg-black/40 overflow-hidden">
-                        <div className={`h-full ${watch.marginZ >= 0 ? "bg-green-400" : a.dot} transition-all duration-700`}
-                             style={{ width: `${Math.max(2, Math.min(100, watch.bar > 0 ? (watch.z / watch.bar) * 100 : 0))}%` }} />
-                      </div>
-                      <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
-                        P(win|context) {(watch.p * 100).toFixed(1)}% · raw edge {watch.edgeZ?.toFixed(2) ?? "—"}σ · lead model {watch.leader} (order {watch.contextOrder}, n {watch.contextCount}) · regime hot {(watch.regimeHot * 100).toFixed(0)}%
-                      </p>
-                      {watch.experts.length > 0 && (
-                        <div className="flex flex-wrap gap-1">
-                          {watch.experts.map(e => (
-                            <span key={e.name} className="text-[8px] font-mono px-1 py-0.5 rounded bg-white/5 text-muted-foreground/70">
-                              {e.name.replace("-", " ")} {(e.p * 100).toFixed(0)}% ·w{(e.weight * 100).toFixed(0)}
-                            </span>
-                          ))}
-                        </div>
-                      )}
+                    <div className="grid grid-cols-4 gap-1.5">
+                      <Stat label="Health" value={watch.health.needsRescan ? "ALERT" : "OK"}
+                            tone={watch.health.needsRescan ? "text-red-400" : "text-green-400"} />
+                      <Stat label="Edge" value={`${watch.z.toFixed(2)}σ / ${watch.bar.toFixed(2)}σ`}
+                            tone={watch.marginZ >= 0 ? "text-green-400" : "text-amber-300"} />
+                      <Stat label="Shield" value={watch.shield.active ? `+${watch.shield.barBoost.toFixed(1)}σ` : "idle"}
+                            tone={watch.shield.active ? "text-amber-300" : "text-green-400"} />
+                      <Stat label="Tick" value={`${watch.entry.score}/100`}
+                            tone={watch.entry.ready ? "text-green-400" : "text-amber-300"} />
                     </div>
-
-                    {/* Gate 3 — post-loss shield */}
-                    <div className={`rounded-lg border p-2 space-y-1 ${
-                      watch.shield.active ? "border-amber-500/30 bg-amber-500/[0.06]" : "border-white/10 bg-black/30"
-                    }`}>
-                      <div className="flex items-center justify-between">
-                        <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">3 · Post-loss shield</p>
-                        <span className={`text-[9px] font-mono font-bold ${watch.shield.active ? "text-amber-300" : "text-green-400"}`}>
-                          {watch.shield.active ? `+${watch.shield.barBoost.toFixed(2)}σ` : "IDLE"}
-                        </span>
-                      </div>
-                      <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
-                        {watch.shield.active
-                          ? `Loss run ${watch.shield.lossRun} — bar raised ${watch.shield.barBoost.toFixed(2)}σ, cool-down ${Math.min(watch.shield.ticksSinceLoss, watch.shield.coolTicks)}/${watch.shield.coolTicks} ticks. This is the rule the scan simulated.`
-                          : "No open loss run. The shield engages the moment a shot misses."}
-                      </p>
-                    </div>
-
-                    {/* Gate 4 — the tick */}
-                    <div className="rounded-lg border border-white/10 bg-black/30 p-2 space-y-1.5">
-                      <div className="flex items-center justify-between">
-                        <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">4 · Entry tick</p>
-                        <span className={`text-[9px] font-mono font-bold ${watch.entry.ready ? "text-green-400" : "text-amber-300"}`}>
-                          {watch.entry.score}/100
-                        </span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-black/40 overflow-hidden">
-                        <div className={`h-full transition-all duration-500 ${watch.entry.ready ? "bg-green-400" : "bg-amber-400"}`}
-                             style={{ width: `${Math.max(2, watch.entry.score)}%` }} />
-                      </div>
-                      <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
-                        {watch.entry.reason || "Waiting for the health and edge gates to clear first."}
-                      </p>
-                      <div className="grid grid-cols-2 gap-1.5">
-                        <Stat label="Short-run momentum"
-                              value={`${watch.entry.momentumPP >= 0 ? "+" : ""}${watch.entry.momentumPP.toFixed(1)}pp`}
-                              tone={watch.entry.momentumPP >= 0 ? "text-green-400" : "text-amber-300"} />
-                        <Stat label="Renewal position" value={`${watch.entry.gapRatio.toFixed(2)}× due`} />
-                        <Stat label="Favoured state"
-                              value={watch.entry.preferredState === "none" ? "neutral" : watch.entry.preferredState}
-                              tone={watch.entry.preferredState === "none" ? undefined : a.text} />
-                        <Stat label="Frozen τ" value={`${watch.tau.toFixed(2)}σ`} />
-                      </div>
-                    </div>
+                    <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">
+                      P(win|context) {(watch.p * 100).toFixed(1)}% · τ {watch.tau.toFixed(2)}σ
+                    </p>
                   </div>
                 )}
 
@@ -867,16 +770,9 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                       <Stat label="Verdict at lock" value={lock.verdict.toUpperCase()}
                             tone={lock.verdict === "certified" ? "text-green-400" : "text-sky-300"} />
                       <Stat label="Out-of-sample" value={`${(lock.oosWinRate * 100).toFixed(1)}% / ${lock.oosShots}`} tone="text-green-400" />
-                      <Stat label="Measured on" value={`${lock.oosTicks.toLocaleString()} unseen ticks`} />
                       <Stat label="Expectancy / $1"
                             value={`${lock.edgePerDollar >= 0 ? "+" : ""}${(lock.edgePerDollar * 100).toFixed(2)}%`}
                             tone={lock.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"} />
-                      <Stat label="e-value" value={lock.evidenceE >= 1000 ? `${(lock.evidenceE / 1000).toFixed(1)}k` : lock.evidenceE.toFixed(1)} />
-                      <Stat label="Ladder safety" value={`${(lock.ladderSafety * 100).toFixed(1)}%`} tone={a.text} />
-                      <Stat label="Absorbs" value={`${lock.ladderLimit} in a row`} />
-                      <Stat label="Loss pairs (shield)" value={`${lock.pairsBefore} → ${lock.pairsAfter}`} tone="text-green-400" />
-                      <Stat label="Loss pairing ξ" value={lock.xi.toFixed(2)}
-                            tone={lock.xi <= 1 ? "text-green-400" : "text-amber-300"} />
                     </div>
                   </div>
                 )}

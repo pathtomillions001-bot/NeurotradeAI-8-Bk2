@@ -11,7 +11,10 @@ import type { SpecialistFamily } from "./specialist-analysis";
 
 export type BotSideMode = "both" | "primary" | "secondary";
 
-export type BotAccent = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky";
+export type BotAccent = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange";
+
+/** The three Kill-Shot Oracle variants (each owns one contract family). */
+export type KillShotFamily = "overunder" | "parity" | "matchdiffer";
 
 export interface BotSideOption {
   id: BotSideMode;
@@ -46,6 +49,12 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   oneShot?: boolean;
+  /**
+   * Kill-Shot Oracle variants that own a whole contract family and support
+   * market-switching (auto-rescan) or a locked market whose EDGE may rotate.
+   * The UI renders a dedicated console for these.
+   */
+  killShotFamily?: KillShotFamily;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -274,6 +283,81 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "measured out of sample",
     nominalPayout: "1.09–8.93×",
+  },
+  {
+    id: "ks-overunder",
+    name: "Over/Under Oracle",
+    code: "BOT-KS-OVERUNDER",
+    family: "killshot",
+    killShotFamily: "overunder",
+    contractLabel: "Over / Under",
+    tagline: "Kill-Shot measurement · one digit, your side",
+    description:
+      "The Kill-Shot Oracle's measurement applied to Over/Under. Pick one digit and choose Over only, Under only, or both. Run it locked to a single market (the edge may move, the market won't) or let it switch to the best market when this one cools — either way it keeps trading until your stop, target or you stop it.",
+    edge: [
+      "Same five-model ensemble and out-of-sample walk-forward as the Kill-Shot Oracle",
+      "Over only, Under only, or both — your digit, your side",
+      "Locked market or auto-switching: the edge rotates, never a dead-end rescan",
+    ],
+    accent: "teal",
+    icon: "hash",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Over / Under", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Pick a digit and Over only, Under only, or both" },
+    ],
+    nominalWinRate: "10–90%",
+    nominalPayout: "1.09–8.93×",
+  },
+  {
+    id: "ks-parity",
+    name: "Even/Odd Oracle",
+    code: "BOT-KS-PARITY",
+    family: "killshot",
+    killShotFamily: "parity",
+    contractLabel: "Even / Odd",
+    tagline: "Kill-Shot measurement · parity, your side",
+    description:
+      "The Kill-Shot Oracle's measurement applied to Even/Odd. Choose Even only, Odd only, or both. Lock one market and let the edge rotate inside it, or allow market switching when the current one cools — it runs to your stop, target or until you stop it.",
+    edge: [
+      "Same five-model ensemble and out-of-sample walk-forward as the Kill-Shot Oracle",
+      "Even only, Odd only, or both",
+      "Locked market or auto-switching: the edge rotates, never a dead-end rescan",
+    ],
+    accent: "fuchsia",
+    icon: "scale",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Even / Odd", contracts: ["DIGITEVEN", "DIGITODD"], desc: "Even only, Odd only, or both" },
+    ],
+    nominalWinRate: "≈50%",
+    nominalPayout: "1.95×",
+  },
+  {
+    id: "ks-matchdiff",
+    name: "Matches/Differs Oracle",
+    code: "BOT-KS-MATCHDIFF",
+    family: "killshot",
+    killShotFamily: "matchdiffer",
+    contractLabel: "Matches / Differs",
+    tagline: "Kill-Shot measurement · hot or cold digit",
+    description:
+      "The Kill-Shot Oracle's measurement applied to Matches and Differs. Trade Matches, Differs, or both, with your own digit or let the AI pick. Locked to one market the bot moves to the next best digit in that same market; in switching mode it moves to the next best market — until your stop, target or you stop it.",
+    edge: [
+      "Same five-model ensemble and out-of-sample walk-forward as the Kill-Shot Oracle",
+      "Matches, Differs, or both — your digit or the AI's pick",
+      "Locked market or auto-switching: the edge rotates, never a dead-end rescan",
+    ],
+    accent: "orange",
+    icon: "crosshair",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Matches / Differs", contracts: ["DIGITMATCH", "DIGITDIFF"], desc: "Matches, Differs, or both — your digit or the AI's" },
+    ],
+    nominalWinRate: "≈11% / ≈90%",
+    nominalPayout: "8.93× / 1.09×",
   },
 ];
 

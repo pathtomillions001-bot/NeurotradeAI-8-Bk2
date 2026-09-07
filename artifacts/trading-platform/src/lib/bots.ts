@@ -9,7 +9,7 @@
 
 import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
 
-export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky";
+export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange";
 
 export interface BotSideOption {
   id: "both" | "primary" | "secondary";
@@ -41,6 +41,8 @@ export interface BotCardData {
   preLocked?: boolean;
   /** One-shot bots lock one market + one contract and wait for the one shot. */
   oneShot?: boolean;
+  /** Kill-Shot Oracle variants that own a whole contract family. */
+  killShotFamily?: "overunder" | "parity" | "matchdiffer";
   session: BotSessionStatus | null;
 }
 
@@ -205,6 +207,31 @@ export interface BotSessionStatus {
     marketMode?: string;
     lockedSymbol?: string;
   };
+  /** Kill-Shot family bots: the active (possibly rotated) lock. */
+  deployed?: {
+    symbol: string;
+    displayName: string;
+    contract: string;
+    verdict: string;
+    confidence: number;
+    edgePerDollar: number;
+    oosWinRate: number;
+    oosShots: number;
+    breakEven: number;
+    payout: number;
+  };
+  /** Kill-Shot family bots: compact live watch state. */
+  familyWatch?: {
+    phase: "watching" | "armed" | "firing" | "settling";
+    p: number;
+    z: number;
+    bar: number;
+    reason: string;
+    switched: boolean;
+    confidence: number;
+    verdict: string;
+    ticksWatched: number;
+  };
 }
 
 /**
@@ -346,6 +373,57 @@ export const ACCENTS: Record<AccentKey, {
     solidBtn: "bg-rose-600 hover:bg-rose-500",
     focusBorder: "focus:border-rose-500/50",
     cardGlow: "shadow-rose-950/40",
+  },
+  teal: {
+    text: "text-teal-300",
+    dot: "bg-teal-400",
+    grad: "from-teal-600 to-cyan-700",
+    iconBg: "bg-teal-500/15",
+    iconBorder: "border border-teal-500/30",
+    badgeBg: "bg-teal-500/20",
+    activeBg: "bg-teal-500/15",
+    activeBorder: "border-teal-500/50",
+    panelBg: "bg-teal-500/[0.06]",
+    panelBorder: "border-teal-500/20",
+    headerGrad: "from-teal-950/50 via-cyan-950/25 to-transparent",
+    outlineBtn: "border-teal-500/30 text-teal-300 hover:bg-teal-500/10",
+    solidBtn: "bg-teal-600 hover:bg-teal-500",
+    focusBorder: "focus:border-teal-500/50",
+    cardGlow: "shadow-teal-950/40",
+  },
+  fuchsia: {
+    text: "text-fuchsia-300",
+    dot: "bg-fuchsia-400",
+    grad: "from-fuchsia-600 to-purple-700",
+    iconBg: "bg-fuchsia-500/15",
+    iconBorder: "border border-fuchsia-500/30",
+    badgeBg: "bg-fuchsia-500/20",
+    activeBg: "bg-fuchsia-500/15",
+    activeBorder: "border-fuchsia-500/50",
+    panelBg: "bg-fuchsia-500/[0.06]",
+    panelBorder: "border-fuchsia-500/20",
+    headerGrad: "from-fuchsia-950/50 via-purple-950/25 to-transparent",
+    outlineBtn: "border-fuchsia-500/30 text-fuchsia-300 hover:bg-fuchsia-500/10",
+    solidBtn: "bg-fuchsia-600 hover:bg-fuchsia-500",
+    focusBorder: "focus:border-fuchsia-500/50",
+    cardGlow: "shadow-fuchsia-950/40",
+  },
+  orange: {
+    text: "text-orange-300",
+    dot: "bg-orange-400",
+    grad: "from-orange-600 to-amber-600",
+    iconBg: "bg-orange-500/15",
+    iconBorder: "border border-orange-500/30",
+    badgeBg: "bg-orange-500/20",
+    activeBg: "bg-orange-500/15",
+    activeBorder: "border-orange-500/50",
+    panelBg: "bg-orange-500/[0.06]",
+    panelBorder: "border-orange-500/20",
+    headerGrad: "from-orange-950/50 via-amber-950/25 to-transparent",
+    outlineBtn: "border-orange-500/30 text-orange-300 hover:bg-orange-500/10",
+    solidBtn: "bg-orange-600 hover:bg-orange-500",
+    focusBorder: "focus:border-orange-500/50",
+    cardGlow: "shadow-orange-950/40",
   },
 };
 

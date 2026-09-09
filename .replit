@@ -30,7 +30,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pnpm --filter @workspace/api-server run dev"
+args = "corepack pnpm --filter @workspace/api-server run dev"
 waitForPort = 8080
 
 [workflows.workflow.metadata]
@@ -42,7 +42,7 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "PORT=21210 pnpm --filter @workspace/trading-platform run dev"
+args = "PORT=21210 corepack pnpm --filter @workspace/trading-platform run dev"
 waitForPort = 21210
 
 [workflows.workflow.metadata]

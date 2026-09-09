@@ -17,6 +17,7 @@ import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
 import Bots from "./pages/bots";
+import MarketIntelligence from "./pages/market-intelligence";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30000 } },
@@ -125,8 +126,11 @@ function Router() {
   // Never block the /connect route — OAuth callbacks land here and need to
   // reach the Connect component directly (even before an account exists).
   const isConnectPage = location === "/connect" || location.startsWith("/connect?");
+  // Market Intelligence uses Deriv's public live candle feed and is useful
+  // before a trading account is connected. It remains signal-only.
+  const isMarketIntelligencePage = location === "/market-intelligence";
 
-  if (showLanding && !isConnectPage) {
+  if (showLanding && !isConnectPage && !isMarketIntelligencePage) {
     return <LandingPage onEnter={() => { dismiss(); setLocation("/connect"); }} />;
   }
 
@@ -143,6 +147,7 @@ function Router() {
         <Route path="/settings" component={Settings} />
         <Route path="/connect" component={Connect} />
         <Route path="/risk-calculator" component={RiskCalculator} />
+        <Route path="/market-intelligence" component={MarketIntelligence} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

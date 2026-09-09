@@ -8,6 +8,7 @@ import aiRouter from "./ai";
 import settingsRouter from "./settings";
 import speedAiRouter from "./speed-ai";
 import botsRouter from "./bots";
+import marketIntelligenceRouter from "./market-intelligence";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,8 @@ router.use("/ai", aiRouter);
 router.use("/settings", settingsRouter);
 router.use("/speed-ai", speedAiRouter);
 router.use("/bots", botsRouter);
+// Independent institutional-style, candle-based analysis surface. It does not
+// share the legacy options/digit engine, its caches, or its simulation fallback.
+router.use("/market-intelligence", marketIntelligenceRouter);
 
 export default router;

@@ -23,6 +23,7 @@ import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
+import * as twinHedge from "../lib/twin-hedge-engine";
 import { validateShotContract, shotLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -181,6 +182,7 @@ router.get("/", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
+  const twin = visibleTwinStatus(req.sessionId);
   res.json({
     bots: BOT_CATALOG.map(bot => {
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
@@ -192,6 +194,9 @@ router.get("/", (req, res) => {
       if (bot.killShotFamily) {
         return { ...bot, session: fam.running && fam.botId === bot.id ? fam : null };
       }
+      if (bot.twinHedge) {
+        return { ...bot, session: twin.running ? twin : null };
+      }
       return { ...bot, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: dual.running
@@ -200,7 +205,9 @@ router.get("/", (req, res) => {
         ? killshot.KILLSHOT_BOT_ID
         : fam.running
           ? (fam.botId ?? null)
-          : (status.running ? status.botId : null),
+          : twin.running
+            ? (twin.botId ?? null)
+            : (status.running ? status.botId : null),
   });
 });
 
@@ -715,6 +722,144 @@ router.post("/family/stop", (req, res) => {
   res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
 });
 
+// ── Twin-Hedge Edge (11th bot) ────────────────────────────────────────────────
+//
+// Executes an Over + Under pair on the SAME market at the SAME tick with an
+// adaptive stake skew on the favoured side. Its own lifecycle because a pair,
+// not a single contract, is the unit being analysed and executed.
+
+function visibleTwinStatus(sessionId: string) {
+  const status = twinHedge.getStatus();
+  const owner = twinHedge.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, deployed: undefined, twinWatch: undefined };
+}
+
+function parseTwinContract(body: any): { ok: true; contract: { overDigit: number; underDigit: number } } | { ok: false; error: string } {
+  const overDigit = Number(body?.overDigit);
+  const underDigit = Number(body?.underDigit);
+  if (!Number.isInteger(overDigit) || overDigit < 0 || overDigit > 8) {
+    return { ok: false, error: "overDigit must be an integer 0–8 (Over 9 can never win)" };
+  }
+  if (!Number.isInteger(underDigit) || underDigit < 1 || underDigit > 9) {
+    return { ok: false, error: "underDigit must be an integer 1–9 (Under 0 can never win)" };
+  }
+  return { ok: true, contract: { overDigit, underDigit } };
+}
+
+router.get("/twin/status", (req, res) => {
+  res.json(visibleTwinStatus(req.sessionId));
+});
+
+router.post("/twin/scan", async (req, res): Promise<void> => {
+  const parsed = parseTwinContract(req.body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const certainty = parseTwinCertainty(req.body?.certainty);
+  const targetEv = Number(req.body?.targetEvPerDollar);
+  const spec: twinHedge.TwinDeploySpec = {
+    contract: parsed.contract,
+    certainty,
+    targetEvPerDollar: Number.isFinite(targetEv) && targetEv > 0 ? targetEv : 0.01,
+  };
+  try {
+    const result = await twinHedge.scanForTwin(req.sessionId, spec, { stake: Number(req.body?.stake) > 0 ? Number(req.body.stake) : 1 });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Twin-Hedge scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/twin/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const parsed = parseTwinContract(body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+  let lockedSymbol: string | undefined;
+  if (marketMode === "locked") {
+    if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
+      res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+      return;
+    }
+    if (!isAutomatedMarket(body.lockedSymbol)) {
+      res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
+      return;
+    }
+    lockedSymbol = body.lockedSymbol;
+  }
+
+  const card = body.card ?? body.analysis?.card;
+  if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
+    res.status(400).json({ error: "Run the analysis first — the measured model card is required before this bot can deploy" });
+    return;
+  }
+
+  const existingOwner = twinHedge.getOwnerSessionId();
+  if (twinHedge.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+    return;
+  }
+
+  const result = await twinHedge.startSession({
+    ownerSessionId: req.sessionId,
+    botId: twinHedge.TWIN_BOT_ID,
+    spec: {
+      contract: parsed.contract,
+      certainty: parseTwinCertainty(body.certainty),
+      targetEvPerDollar: Number(body.targetEvPerDollar) > 0 ? Number(body.targetEvPerDollar) : 0.01,
+    },
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    marketMode,
+    lockedSymbol,
+    symbol: market.symbol,
+    displayName: market.displayName,
+    card,
+    lockedAnalysis: body.analysis,
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
+});
+
+router.post("/twin/stop", (req, res) => {
+  const owner = twinHedge.getOwnerSessionId();
+  if (twinHedge.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  twinHedge.stopSession();
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
+});
+
+function parseTwinCertainty(raw: unknown): "elite" | "strict" | "balanced" {
+  return raw === "elite" || raw === "strict" ? raw : "balanced";
+}
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
@@ -724,6 +869,8 @@ router.get("/status", (req, res) => {
   if (shot.running) { res.json(shot); return; }
   const fam = visibleFamilyStatus(req.sessionId);
   if (fam.running) { res.json(fam); return; }
+  const twin = visibleTwinStatus(req.sessionId);
+  if (twin.running) { res.json(twin); return; }
   res.json(visibleStatus(req.sessionId));
 });
 

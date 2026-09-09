@@ -18,6 +18,7 @@ import { BotConsole } from "@/components/bot-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
 import { KillShotFamilyConsole } from "@/components/killshot-family-console";
+import { TwinHedgeConsole } from "@/components/twin-hedge-console";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
@@ -258,7 +259,7 @@ export default function Bots() {
             AI Bot Arena
           </h1>
           <p className="text-sm text-muted-foreground mt-0.5">
-            Single-contract specialists — each one spends its whole analysis budget on one trade type
+            Specialist bots — each one spends its whole analysis budget on one trade type, including the twin-leg pair bot
           </p>
         </div>
 
@@ -333,13 +334,22 @@ export default function Bots() {
       )}
 
       {/* ── Console ────────────────────────────────────────────────────── */}
-      {/* Four consoles for four lifecycles:
+      {/* Five consoles for five lifecycles:
+          · twinHedge             — two legs, one market, same tick (adaptive skew)
           · killShotFamily        — family oracle (locked or auto-switching)
           · oneShot (Kill-Shot)   — choose one contract → AI locks one market → wait
           · preLocked (Dual-Lock) — scan once → freeze the pair → run non-stop
           · everything else       — configure per trade */}
       <AnimatePresence>
-        {openBot?.killShotFamily ? (
+        {openBot?.twinHedge ? (
+          <TwinHedgeConsole
+            bot={openBot}
+            open={openBotId !== null}
+            onOpenChange={open => { if (!open) setOpenBotId(null); }}
+            session={liveSession}
+            onSession={setSession}
+          />
+        ) : openBot?.killShotFamily ? (
           <KillShotFamilyConsole
             bot={openBot}
             open={openBotId !== null}

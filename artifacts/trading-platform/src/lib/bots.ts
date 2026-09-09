@@ -7,9 +7,9 @@
  * giving each specialist its own hue.
  */
 
-import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
+import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Layers } from "lucide-react";
 
-export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange";
+export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
 
 export interface BotSideOption {
   id: "both" | "primary" | "secondary";
@@ -43,6 +43,8 @@ export interface BotCardData {
   oneShot?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
+  /** Twin-Hedge Edge — two legs, one market, same tick. */
+  twinHedge?: boolean;
   session: BotSessionStatus | null;
 }
 
@@ -231,6 +233,41 @@ export interface BotSessionStatus {
     confidence: number;
     verdict: string;
     ticksWatched: number;
+  };
+  /** Twin-Hedge bot: the pair currently deployed. */
+  twinDeployed?: {
+    symbol: string;
+    displayName: string;
+    contract: string;
+    verdict: string;
+    confidence: number;
+    edgePerDollar: number;
+    oosWinRate: number;
+    oosShots: number;
+    primary: "over" | "under";
+    bias: number;
+    overPayout: number;
+    underPayout: number;
+    netOnWinPerBase: number;
+    netOnLossPerBase: number;
+  };
+  /** Twin-Hedge bot: live pair watch / both-leg stakes. */
+  twinWatch?: {
+    phase: "watching" | "armed" | "firing" | "settling";
+    pOver: number;
+    pUnder: number;
+    primary: "over" | "under";
+    bias: number;
+    edgePerBase: number;
+    z: number;
+    bar: number;
+    reason: string;
+    switched: boolean;
+    confidence: number;
+    verdict: string;
+    ticksWatched: number;
+    overStake: number;
+    underStake: number;
   };
 }
 
@@ -425,6 +462,23 @@ export const ACCENTS: Record<AccentKey, {
     focusBorder: "focus:border-orange-500/50",
     cardGlow: "shadow-orange-950/40",
   },
+  lime: {
+    text: "text-lime-300",
+    dot: "bg-lime-400",
+    grad: "from-lime-600 to-emerald-600",
+    iconBg: "bg-lime-500/15",
+    iconBorder: "border border-lime-500/30",
+    badgeBg: "bg-lime-500/20",
+    activeBg: "bg-lime-500/15",
+    activeBorder: "border-lime-500/50",
+    panelBg: "bg-lime-500/[0.06]",
+    panelBorder: "border-lime-500/20",
+    headerGrad: "from-lime-950/50 via-emerald-950/25 to-transparent",
+    outlineBtn: "border-lime-500/30 text-lime-300 hover:bg-lime-500/10",
+    solidBtn: "bg-lime-600 hover:bg-lime-500",
+    focusBorder: "focus:border-lime-500/50",
+    cardGlow: "shadow-lime-950/40",
+  },
 };
 
 export const BOT_ICON: Record<string, typeof Hash> = {
@@ -436,6 +490,7 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   lock: Lock,
   target: Target,
   zap: Zap,
+  layers: Layers,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

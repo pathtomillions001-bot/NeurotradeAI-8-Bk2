@@ -11,7 +11,7 @@ import type { SpecialistFamily } from "./specialist-analysis";
 
 export type BotSideMode = "both" | "primary" | "secondary";
 
-export type BotAccent = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange";
+export type BotAccent = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
 
 /** The three Kill-Shot Oracle variants (each owns one contract family). */
 export type KillShotFamily = "overunder" | "parity" | "matchdiffer";
@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot";
+  family: SpecialistFamily | "duallock" | "killshot" | "twin";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -55,6 +55,8 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
+  /** Twin-Hedge Edge — places TWO complementary legs on the SAME tick. */
+  twinHedge?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -358,6 +360,36 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "≈11% / ≈90%",
     nominalPayout: "8.93× / 1.09×",
+  },
+  {
+    id: "twin-hedge",
+    name: "Twin-Hedge Edge",
+    code: "BOT-TWINHEDGE",
+    family: "twin",
+    twinHedge: true,
+    contractLabel: "Over + Under pair",
+    tagline: "Both legs · one market · same tick",
+    description:
+      "Executes Over A and Under B at the SAME tick on the SAME market — never split, never one without the other. The AI reads the digit stream and places a small, capped stake-skew on the side it expects to win, so a correct call nets a profit (the winning leg out-pays the hedge leg) and a wrong call leaves a loss the shared recovery ledger buys back. You name the pair: Over 4/Under 5 (the complementary 50/50), or any same-payout / overlapping pair such as Over 7/Under 2, Over 6/Under 3, Over 8/Under 1, Over 2/Under 8, Over 1/Under 9.",
+    edge: [
+      "BOTH LEGS, SAME TICK — the Over and Under contracts are opened in parallel (Promise.all) and settle in the same tick window; switching may re-choose the market between shots but a pair-shot is never split across two markets",
+      "FOUR-REGION OUTCOME MODEL — overOnly / underOnly / both / none is measured directly, so a complementary pair (exactly one leg always wins) is treated differently from a pair with a dead zone",
+      "ADAPTIVE STAKE SKEW — the smallest bias (2–35%) on the favoured side that makes the pair +EV at the model's reading; bigger edge ⇒ smaller bias required, so it is genuinely 'slightly increased', not an over-bet",
+      "FIVE-EXPERT DIGIT ENSEMBLE — forgetting Dirichlet, context-tree mixing to order 4, a 4-state outcome chain, a renewal hazard and a 2-state regime filter, fused with hedge-multiplicative weights",
+      "OUT-OF-SAMPLE JOINT EV — the walk-forward trains on the first half and MEASURES the net $ per $1 base on the second half the fit never saw; a pair with a dead zone is refused when the shots do not support it",
+      "SELF-REFERENTIAL ENTRY BAR — the edge is standardised against the model's own trailing readings, so selectivity is a design parameter (Balanced ~8%, Strict ~5%, Elite ~3%) and every market yields measurable pair shots",
+      "OVER/UNDER ORACLE TIMING — momentum, Markov-state preference, renewal position, feed freshness and shot spacing are gated on the favoured leg before either contract is placed",
+      "SHARED RECOVERY — the account-global ledger records the REALISED NET loss of the pair-shot and sizes the next pair-shot so a winning favoured leg repays the debt plus the bot markup",
+    ],
+    accent: "lime",
+    icon: "layers",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Over + Under pair", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Both legs are always executed together" },
+    ],
+    nominalWinRate: "joint, measured",
+    nominalPayout: "skewed pair",
   },
 ];
 

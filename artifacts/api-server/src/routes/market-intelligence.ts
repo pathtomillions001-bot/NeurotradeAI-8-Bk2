@@ -4,6 +4,7 @@ import { accountsTable, db } from "@workspace/db";
 import {
   categoryLabel,
   getLiveCandles,
+  getLiveTicks,
   getLiveMarketSymbols,
   isFreshCandleFeed,
   LiveMarketDataUnavailable,
@@ -115,11 +116,12 @@ router.post("/analyze", async (req, res): Promise<void> => {
     }
 
     const higherTimeframeSeconds = higherTimeframeFor(timeframeSeconds);
-    const [primary, higher] = await Promise.all([
+    const [primary, higher, tickTape] = await Promise.all([
       getLiveCandles(symbol.symbol, timeframeSeconds, 360),
       higherTimeframeSeconds === timeframeSeconds
         ? getLiveCandles(symbol.symbol, timeframeSeconds, 360)
         : getLiveCandles(symbol.symbol, higherTimeframeSeconds, 360),
+      getLiveTicks(symbol.symbol, 5_000),
     ]);
     if (!isFreshCandleFeed(primary.candles, timeframeSeconds) || !isFreshCandleFeed(higher.candles, higherTimeframeSeconds)) {
       res.status(503).json({
@@ -142,6 +144,7 @@ router.post("/analyze", async (req, res): Promise<void> => {
       symbol,
       candles: primary.candles,
       higherCandles: higher.candles,
+      ticks: tickTape.ticks,
       timeframeSeconds,
       higherTimeframeSeconds,
       balance,
@@ -169,8 +172,10 @@ router.get("/signals", async (req, res): Promise<void> => {
     const history = getHistory(req.sessionId).slice(0, limit);
     // Only refresh open signals. This uses live candles and never marks an
     // outcome from a local timer or simulated price.
-    const refreshed = await Promise.all(history.map(async (signal) => {
-      if (signal.outcome !== "OPEN") return signal;
+    const refreshed = await Promise.all(history.map(async (signal, index) => {
+      // Bound live refresh work so a signal tape with many open entries cannot
+      // create a connection storm. The newest eight are enough for the desk.
+      if (signal.outcome !== "OPEN" || index >= 8) return signal;
       try {
         const live = await getLiveCandles(signal.symbol, signal.timeframeSeconds, 360);
         return evaluateSignalOutcome(signal, live.candles);

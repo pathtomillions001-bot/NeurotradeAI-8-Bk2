@@ -1,6 +1,12 @@
-import type { LiveCandle, LiveMarketSymbol } from "./cfd-market-data";
+import type { LiveCandle, LiveMarketSymbol, LiveTick } from "./cfd-market-data";
 
+/**
+ * Advanced signal desk timeframes. One minute is supported by requesting one
+ * minute candles from Deriv; higher timeframes are fetched independently so a
+ * lower-timeframe setup cannot override a conflicting macro structure.
+ */
 export const INTELLIGENCE_TIMEFRAMES = [
+  { value: 60, label: "1m" },
   { value: 300, label: "5m" },
   { value: 900, label: "15m" },
   { value: 3600, label: "1h" },
@@ -19,34 +25,39 @@ export interface StrategyVote {
   evidence: string;
 }
 
-export interface IndicatorSnapshot {
+export interface AdvancedAnalytics {
   price: number;
-  ema20: number;
-  ema50: number;
-  ema200: number;
-  rsi14: number;
-  macd: number;
-  macdSignal: number;
-  atr14: number;
-  atrPercent: number;
-  adx14: number;
-  bollingerUpper: number;
-  bollingerLower: number;
-  bollingerWidthPercent: number;
+  returnMeanPercent: number;
+  realizedVolatilityPercent: number;
+  volatilityRegimeRatio: number;
+  returnZScore: number;
+  autocorrelation1: number;
+  hurstExponent: number;
+  permutationEntropy: number;
+  quantile05: number;
+  quantile95: number;
   support: number;
   resistance: number;
-  returnMeanPercent: number;
-  returnVolatilityPercent: number;
-  returnZScore: number;
+  macroStructure: "BULLISH" | "BEARISH" | "BALANCED";
+  microStructure: "BULLISH" | "BEARISH" | "BALANCED";
+  breakOfStructure: "BUY" | "SELL" | "NONE";
+  changeOfCharacter: "BUY" | "SELL" | "NONE";
+  liquiditySweep: "BUY_REVERSAL" | "SELL_REVERSAL" | "NONE";
+  displacement: "BUY" | "SELL" | "NONE";
+  reversalScore: number;
+  deltaProxy: number;
+  signedVolumeProxy: number;
+  tickImbalance: number;
+  tickRatePerMinute: number;
+  orderflowQuality: "TICK_PROXY" | "INSUFFICIENT";
 }
 
 export interface MarkovSnapshot {
   sampleSize: number;
-  upAfterUp: number;
-  upAfterDown: number;
+  state: "STRONG_DOWN" | "DOWN" | "FLAT" | "UP" | "STRONG_UP";
   nextUpProbability: number;
   nextDownProbability: number;
-  state: "UP" | "DOWN" | "FLAT";
+  transitionEntropy: number;
   signal: IntelligenceSignal;
 }
 
@@ -96,8 +107,8 @@ export interface MarketIntelligenceResult {
   regime: "TREND" | "RANGE" | "HIGH_VOLATILITY" | "LOW_VOLATILITY" | "INSUFFICIENT_DATA";
   higherTimeframeBias: IntelligenceSignal;
   higherTimeframeAgreement: boolean;
-  indicators: IndicatorSnapshot;
-  higherIndicators: IndicatorSnapshot;
+  analytics: AdvancedAnalytics;
+  higherAnalytics: AdvancedAnalytics;
   markov: MarkovSnapshot;
   monteCarlo: MonteCarloSnapshot;
   strategies: StrategyVote[];
@@ -114,6 +125,7 @@ export interface IntelligenceInput {
   symbol: LiveMarketSymbol;
   candles: LiveCandle[];
   higherCandles: LiveCandle[];
+  ticks: LiveTick[];
   timeframeSeconds: number;
   higherTimeframeSeconds: number;
   balance: number;
@@ -131,203 +143,312 @@ function round(value: number, decimals = 6): number {
   return Math.round(value * factor) / factor;
 }
 
-function sma(values: number[], period: number): number {
-  const slice = values.slice(-period);
-  return slice.length ? slice.reduce((sum, value) => sum + value, 0) / slice.length : 0;
+function mean(values: number[]): number {
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
-function stddev(values: number[], period: number): number {
-  const slice = values.slice(-period);
-  if (slice.length < 2) return 0;
-  const mean = slice.reduce((sum, value) => sum + value, 0) / slice.length;
-  return Math.sqrt(slice.reduce((sum, value) => sum + (value - mean) ** 2, 0) / slice.length);
+function std(values: number[]): number {
+  if (values.length < 2) return 0;
+  const average = mean(values);
+  return Math.sqrt(mean(values.map((value) => (value - average) ** 2)));
 }
 
-function ema(values: number[], period: number): number {
+function quantile(values: number[], q: number): number {
   if (!values.length) return 0;
-  const k = 2 / (period + 1);
-  let result = values[0];
-  for (let i = 1; i < values.length; i++) result = values[i] * k + result * (1 - k);
-  return result;
+  const sorted = [...values].sort((a, b) => a - b);
+  const position = (sorted.length - 1) * q;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
 }
 
-function rsi(values: number[], period = 14): number {
-  if (values.length <= period) return 50;
-  let gains = 0;
-  let losses = 0;
-  for (let i = values.length - period; i < values.length; i++) {
-    const diff = values[i] - values[i - 1];
-    if (diff > 0) gains += diff;
-    else losses += Math.abs(diff);
-  }
-  if (losses === 0) return gains === 0 ? 50 : 100;
-  return 100 - 100 / (1 + gains / losses);
-}
-
-function atr(candles: LiveCandle[], period = 14): number {
-  const tr: number[] = [];
-  for (let i = 1; i < candles.length; i++) {
-    const previousClose = candles[i - 1].close;
-    tr.push(Math.max(
-      candles[i].high - candles[i].low,
-      Math.abs(candles[i].high - previousClose),
-      Math.abs(candles[i].low - previousClose),
-    ));
-  }
-  return sma(tr, period);
-}
-
-function adx(candles: LiveCandle[], period = 14): number {
-  if (candles.length < period * 2 + 1) return 0;
-  const trs: number[] = [];
-  const plus: number[] = [];
-  const minus: number[] = [];
-  for (let i = 1; i < candles.length; i++) {
-    const current = candles[i];
-    const previous = candles[i - 1];
-    trs.push(Math.max(current.high - current.low, Math.abs(current.high - previous.close), Math.abs(current.low - previous.close)));
-    const upMove = current.high - previous.high;
-    const downMove = previous.low - current.low;
-    plus.push(upMove > downMove && upMove > 0 ? upMove : 0);
-    minus.push(downMove > upMove && downMove > 0 ? downMove : 0);
-  }
-  const dx: number[] = [];
-  for (let i = period; i < trs.length; i++) {
-    const trSum = trs.slice(i - period + 1, i + 1).reduce((sum, value) => sum + value, 0) || 1e-12;
-    const plusDi = 100 * plus.slice(i - period + 1, i + 1).reduce((sum, value) => sum + value, 0) / trSum;
-    const minusDi = 100 * minus.slice(i - period + 1, i + 1).reduce((sum, value) => sum + value, 0) / trSum;
-    dx.push(100 * Math.abs(plusDi - minusDi) / Math.max(plusDi + minusDi, 1e-12));
-  }
-  return clamp(sma(dx, period), 0, 100);
-}
-
-function macd(values: number[]): { value: number; signal: number } {
-  if (!values.length) return { value: 0, signal: 0 };
-  const fast = ema(values, 12);
-  const slow = ema(values, 26);
-  const point = fast - slow;
-  // Rebuild the MACD line to calculate a genuine 9-period signal line.
-  const line: number[] = [];
-  for (let i = 26; i <= values.length; i++) line.push(ema(values.slice(0, i), 12) - ema(values.slice(0, i), 26));
-  return { value: point, signal: ema(line, 9) };
-}
-
-function trueRangePercent(candles: LiveCandle[]): number {
-  const latest = candles[candles.length - 1];
-  return latest?.close ? (atr(candles) / latest.close) * 100 : 0;
-}
-
-function returns(candles: LiveCandle[]): number[] {
+function logReturns(candles: LiveCandle[]): number[] {
   const result: number[] = [];
   for (let i = 1; i < candles.length; i++) {
-    if (candles[i - 1].close > 0) result.push(Math.log(candles[i].close / candles[i - 1].close));
+    if (candles[i - 1].close > 0 && candles[i].close > 0) result.push(Math.log(candles[i].close / candles[i - 1].close));
   }
   return result;
 }
 
-function calculateIndicators(candles: LiveCandle[]): IndicatorSnapshot {
-  const closes = candles.map((candle) => candle.close);
-  const latest = candles[candles.length - 1]?.close ?? 0;
-  const volatility = stddev(closes, 20);
-  const middle = sma(closes, 20);
-  const atrValue = atr(candles);
-  const recentReturns = returns(candles).slice(-100);
-  const returnMean = recentReturns.length ? recentReturns.reduce((sum, value) => sum + value, 0) / recentReturns.length : 0;
-  const returnVol = stddev(recentReturns, recentReturns.length);
-  const latestReturn = recentReturns[recentReturns.length - 1] ?? 0;
-  const recentSwing = candles.slice(-50);
-  const macdValue = macd(closes);
+function autocorrelation(values: number[], lag = 1): number {
+  if (values.length <= lag + 2) return 0;
+  const average = mean(values);
+  const denominator = values.reduce((sum, value) => sum + (value - average) ** 2, 0);
+  if (!denominator) return 0;
+  let numerator = 0;
+  for (let i = lag; i < values.length; i++) numerator += (values[i] - average) * (values[i - lag] - average);
+  return clamp(numerator / denominator, -1, 1);
+}
+
+/** R/S slope estimate. This is a regime descriptor, not a future guarantee. */
+function hurstExponent(values: number[]): number {
+  if (values.length < 48) return 0.5;
+  const points: Array<{ x: number; y: number }> = [];
+  for (const size of [8, 16, 32, 48]) {
+    if (size > values.length) continue;
+    const ranges: number[] = [];
+    for (let offset = 0; offset + size <= values.length; offset += size) {
+      const block = values.slice(offset, offset + size);
+      const average = mean(block);
+      let cumulative = 0;
+      let high = -Infinity;
+      let low = Infinity;
+      for (const value of block) {
+        cumulative += value - average;
+        high = Math.max(high, cumulative);
+        low = Math.min(low, cumulative);
+      }
+      const scale = std(block);
+      if (scale > 0) ranges.push((high - low) / scale);
+    }
+    if (ranges.length) points.push({ x: Math.log(size), y: Math.log(mean(ranges)) });
+  }
+  if (points.length < 2) return 0.5;
+  const xBar = mean(points.map((point) => point.x));
+  const yBar = mean(points.map((point) => point.y));
+  const denominator = points.reduce((sum, point) => sum + (point.x - xBar) ** 2, 0);
+  const slope = denominator ? points.reduce((sum, point) => sum + (point.x - xBar) * (point.y - yBar), 0) / denominator : 0.5;
+  return clamp(slope, 0, 1);
+}
+
+/** Three-state entropy: directional sequence complexity from live candles. */
+function permutationEntropy(values: number[]): number {
+  if (values.length < 4) return 1;
+  const counts = [0, 0, 0];
+  for (let i = 1; i < values.length; i++) {
+    const change = values[i] - values[i - 1];
+    counts[change > 0 ? 2 : change < 0 ? 0 : 1]++;
+  }
+  const total = values.length - 1;
+  const entropy = counts.reduce((sum, count) => {
+    if (!count) return sum;
+    const p = count / total;
+    return sum - p * Math.log2(p);
+  }, 0);
+  return clamp(entropy / Math.log2(3), 0, 1);
+}
+
+function tickFlow(ticks: LiveTick[], timeframeSeconds: number): Pick<AdvancedAnalytics, "deltaProxy" | "signedVolumeProxy" | "tickImbalance" | "tickRatePerMinute" | "orderflowQuality"> {
+  const recent = ticks.slice(-3000);
+  let up = 0;
+  let down = 0;
+  let unchanged = 0;
+  let signedMove = 0;
+  let absoluteMove = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const move = recent[i].price - recent[i - 1].price;
+    if (move > 0) up++;
+    else if (move < 0) down++;
+    else unchanged++;
+    signedMove += move;
+    absoluteMove += Math.abs(move);
+  }
+  const directional = up + down;
+  const durationMinutes = Math.max((recent[recent.length - 1]?.epoch - recent[0]?.epoch) / 60, timeframeSeconds / 60, 1);
   return {
-    price: round(latest),
-    ema20: round(ema(closes, 20)),
-    ema50: round(ema(closes, 50)),
-    ema200: round(ema(closes, 200)),
-    rsi14: round(rsi(closes), 2),
-    macd: round(macdValue.value),
-    macdSignal: round(macdValue.signal),
-    atr14: round(atrValue),
-    atrPercent: round(trueRangePercent(candles), 4),
-    adx14: round(adx(candles), 2),
-    bollingerUpper: round(middle + volatility * 2),
-    bollingerLower: round(middle - volatility * 2),
-    bollingerWidthPercent: round(latest ? (volatility * 4 / latest) * 100 : 0, 4),
-    support: round(Math.min(...recentSwing.map((candle) => candle.low))),
-    resistance: round(Math.max(...recentSwing.map((candle) => candle.high))),
-    returnMeanPercent: round(returnMean * 100, 5),
-    returnVolatilityPercent: round(returnVol * 100, 5),
-    returnZScore: round(returnVol > 0 ? (latestReturn - returnMean) / returnVol : 0, 3),
+    // Deriv public ticks do not expose exchange-traded size or an order book.
+    // These are explicitly proxies, never labelled as institutional volume.
+    deltaProxy: round(directional ? (up - down) / directional : 0, 4),
+    signedVolumeProxy: round(absoluteMove ? signedMove / absoluteMove : 0, 4),
+    tickImbalance: round((up - down) / Math.max(up + down + unchanged, 1), 4),
+    tickRatePerMinute: round(recent.length / durationMinutes, 2),
+    orderflowQuality: recent.length >= 100 ? "TICK_PROXY" : "INSUFFICIENT",
   };
 }
 
-function directionFromIndicators(indicators: IndicatorSnapshot): IntelligenceSignal {
-  const bullish = indicators.ema20 > indicators.ema50 && indicators.ema50 >= indicators.ema200 && indicators.macd >= indicators.macdSignal;
-  const bearish = indicators.ema20 < indicators.ema50 && indicators.ema50 <= indicators.ema200 && indicators.macd <= indicators.macdSignal;
-  if (bullish) return "BUY";
-  if (bearish) return "SELL";
-  return "NO_TRADE";
+type Swing = { index: number; price: number; kind: "HIGH" | "LOW" };
+
+function fractalSwings(candles: LiveCandle[], radius: number): Swing[] {
+  const swings: Swing[] = [];
+  for (let i = radius; i < candles.length - radius; i++) {
+    const current = candles[i];
+    const left = candles.slice(i - radius, i);
+    const right = candles.slice(i + 1, i + radius + 1);
+    if (current.high > Math.max(...left.map((candle) => candle.high), ...right.map((candle) => candle.high))) swings.push({ index: i, price: current.high, kind: "HIGH" });
+    if (current.low < Math.min(...left.map((candle) => candle.low), ...right.map((candle) => candle.low))) swings.push({ index: i, price: current.low, kind: "LOW" });
+  }
+  return swings.sort((a, b) => a.index - b.index);
+}
+
+function structuralDirection(swings: Swing[]): "BULLISH" | "BEARISH" | "BALANCED" {
+  const highs = swings.filter((swing) => swing.kind === "HIGH").slice(-3);
+  const lows = swings.filter((swing) => swing.kind === "LOW").slice(-3);
+  const higherHighs = highs.length >= 2 && highs[highs.length - 1].price > highs[highs.length - 2].price;
+  const higherLows = lows.length >= 2 && lows[lows.length - 1].price > lows[lows.length - 2].price;
+  const lowerHighs = highs.length >= 2 && highs[highs.length - 1].price < highs[highs.length - 2].price;
+  const lowerLows = lows.length >= 2 && lows[lows.length - 1].price < lows[lows.length - 2].price;
+  if (higherHighs && higherLows) return "BULLISH";
+  if (lowerHighs && lowerLows) return "BEARISH";
+  return "BALANCED";
+}
+
+function liquidityLevels(swings: Swing[], price: number): { support: number; resistance: number } {
+  const lows = swings.filter((swing) => swing.kind === "LOW").map((swing) => swing.price).filter((level) => level < price);
+  const highs = swings.filter((swing) => swing.kind === "HIGH").map((swing) => swing.price).filter((level) => level > price);
+  return {
+    support: lows.length ? Math.max(...lows) : price,
+    resistance: highs.length ? Math.min(...highs) : price,
+  };
+}
+
+function structureEvents(candles: LiveCandle[], microSwings: Swing[], macroSwings: Swing[]): Pick<AdvancedAnalytics, "breakOfStructure" | "changeOfCharacter" | "liquiditySweep" | "displacement" | "reversalScore"> {
+  const latest = candles[candles.length - 1];
+  const prior = candles.slice(-20, -1);
+  const priorHigh = Math.max(...prior.map((candle) => candle.high));
+  const priorLow = Math.min(...prior.map((candle) => candle.low));
+  const recentRange = mean(candles.slice(-30).map((candle) => candle.high - candle.low));
+  const lastRange = latest.high - latest.low;
+  const breakOfStructure = latest.close > priorHigh ? "BUY" : latest.close < priorLow ? "SELL" : "NONE";
+  const macroDirection = structuralDirection(macroSwings);
+  const changeOfCharacter = breakOfStructure === "BUY" && macroDirection === "BEARISH" ? "BUY" : breakOfStructure === "SELL" && macroDirection === "BULLISH" ? "SELL" : "NONE";
+  const lastHigh = Math.max(...microSwings.filter((swing) => swing.kind === "HIGH").slice(-4).map((swing) => swing.price), -Infinity);
+  const lastLow = Math.min(...microSwings.filter((swing) => swing.kind === "LOW").slice(-4).map((swing) => swing.price), Infinity);
+  const liquiditySweep = latest.low < lastLow && latest.close > lastLow ? "BUY_REVERSAL" : latest.high > lastHigh && latest.close < lastHigh ? "SELL_REVERSAL" : "NONE";
+  const displacement = lastRange > recentRange * 1.8 && Math.abs(latest.close - latest.open) / Math.max(lastRange, 1e-12) > 0.6 ? (latest.close > latest.open ? "BUY" : "SELL") : "NONE";
+  const reversalScore = clamp((liquiditySweep !== "NONE" ? 0.45 : 0) + (changeOfCharacter !== "NONE" ? 0.3 : 0) + (Math.abs(latest.close - latest.open) < lastRange * 0.25 ? 0.1 : 0), 0, 1);
+  return { breakOfStructure, changeOfCharacter, liquiditySweep, displacement, reversalScore: round(reversalScore, 3) };
+}
+
+function advancedAnalytics(candles: LiveCandle[], ticks: LiveTick[], timeframeSeconds: number): AdvancedAnalytics {
+  const closes = candles.map((candle) => candle.close);
+  const latest = candles[candles.length - 1]?.close ?? 0;
+  const returns = logReturns(candles).slice(-240);
+  const averageReturn = mean(returns);
+  const volatility = std(returns);
+  const currentWindow = returns.slice(-20);
+  const longVolatility = std(returns);
+  const volatilityRatio = longVolatility ? std(currentWindow) / longVolatility : 1;
+  const lastReturn = returns[returns.length - 1] ?? 0;
+  const microSwings = fractalSwings(candles, 2);
+  const macroSwings = fractalSwings(candles, 8);
+  const levels = liquidityLevels(macroSwings, latest);
+  const flow = tickFlow(ticks, timeframeSeconds);
+  const events = structureEvents(candles, microSwings, macroSwings);
+  const recentRange = candles.slice(-40);
+  const rangePrices = recentRange.flatMap((candle) => [candle.high, candle.low]);
+  return {
+    price: round(latest),
+    returnMeanPercent: round(averageReturn * 100, 5),
+    realizedVolatilityPercent: round(volatility * 100, 5),
+    volatilityRegimeRatio: round(volatilityRatio, 3),
+    returnZScore: round(volatility ? (lastReturn - averageReturn) / volatility : 0, 3),
+    autocorrelation1: round(autocorrelation(returns), 3),
+    hurstExponent: round(hurstExponent(returns), 3),
+    permutationEntropy: round(permutationEntropy(closes), 3),
+    quantile05: round(quantile(returns, 0.05) * 100, 5),
+    quantile95: round(quantile(returns, 0.95) * 100, 5),
+    support: round(levels.support || Math.min(...rangePrices)),
+    resistance: round(levels.resistance || Math.max(...rangePrices)),
+    macroStructure: structuralDirection(macroSwings),
+    microStructure: structuralDirection(microSwings),
+    ...events,
+    ...flow,
+  };
 }
 
 function markov(candles: LiveCandle[]): MarkovSnapshot {
   const closes = candles.map((candle) => candle.close);
-  const changes = closes.slice(1).map((close, index) => {
-    const previous = closes[index];
-    const relative = previous ? (close - previous) / previous : 0;
-    return relative > 0.00005 ? 1 : relative < -0.00005 ? -1 : 0;
-  }).slice(-200);
-  let upAfterUp = 1, totalAfterUp = 2, upAfterDown = 1, totalAfterDown = 2;
-  for (let i = 1; i < changes.length; i++) {
-    if (changes[i - 1] === 1) {
-      totalAfterUp++;
-      if (changes[i] === 1) upAfterUp++;
-    } else if (changes[i - 1] === -1) {
-      totalAfterDown++;
-      if (changes[i] === 1) upAfterDown++;
-    }
+  const returns = logReturns(candles).slice(-300);
+  const scale = Math.max(std(returns), 1e-12);
+  const states = returns.map((value) => value > scale * 0.5 ? 2 : value > scale * 0.08 ? 1 : value < -scale * 0.5 ? -2 : value < -scale * 0.08 ? -1 : 0);
+  const counts = new Map<number, { up: number; down: number; total: number }>();
+  for (let i = 0; i < states.length - 1; i++) {
+    const state = states[i];
+    const next = states[i + 1];
+    const current = counts.get(state) ?? { up: 1, down: 1, total: 2 };
+    current.total++;
+    if (next > 0) current.up++;
+    if (next < 0) current.down++;
+    counts.set(state, current);
   }
-  const last = changes[changes.length - 1] ?? 0;
-  const nextUpProbability = last === 1 ? upAfterUp / totalAfterUp : last === -1 ? upAfterDown / totalAfterDown : (upAfterUp + upAfterDown) / (totalAfterUp + totalAfterDown);
-  const sampleSize = changes.filter((change) => change !== 0).length;
-  const signal = nextUpProbability >= 0.56 ? "BUY" : nextUpProbability <= 0.44 ? "SELL" : "NO_TRADE";
+  const currentState = states[states.length - 1] ?? 0;
+  const transition = counts.get(currentState) ?? { up: 1, down: 1, total: 2 };
+  const nextUpProbability = transition.up / transition.total;
+  const nextDownProbability = transition.down / transition.total;
+  const transitionEntropy = -(nextUpProbability * Math.log2(nextUpProbability) + nextDownProbability * Math.log2(nextDownProbability) + Math.max(1 - nextUpProbability - nextDownProbability, 1e-12) * Math.log2(Math.max(1 - nextUpProbability - nextDownProbability, 1e-12))) / Math.log2(3);
   return {
-    sampleSize,
-    upAfterUp: round(upAfterUp / totalAfterUp, 3),
-    upAfterDown: round(upAfterDown / totalAfterDown, 3),
+    sampleSize: states.length,
+    state: currentState === 2 ? "STRONG_UP" : currentState === 1 ? "UP" : currentState === -2 ? "STRONG_DOWN" : currentState === -1 ? "DOWN" : "FLAT",
     nextUpProbability: round(nextUpProbability, 3),
-    nextDownProbability: round(1 - nextUpProbability, 3),
-    state: last === 1 ? "UP" : last === -1 ? "DOWN" : "FLAT",
-    signal,
+    nextDownProbability: round(nextDownProbability, 3),
+    transitionEntropy: round(clamp(transitionEntropy, 0, 1), 3),
+    signal: nextUpProbability >= 0.57 ? "BUY" : nextDownProbability >= 0.57 ? "SELL" : "NO_TRADE",
   };
 }
 
-function monteCarlo(
-  candles: LiveCandle[],
-  side: "BUY" | "SELL",
-  entry: number,
-  stopLoss: number,
-  takeProfit: number,
-  steps: number,
-  paths = 2000,
-): MonteCarloSnapshot {
-  const samples = returns(candles).slice(-240).filter((value) => Number.isFinite(value) && Math.abs(value) < 0.25);
+function higherBias(analytics: AdvancedAnalytics): IntelligenceSignal {
+  if (analytics.macroStructure === "BULLISH" && analytics.microStructure !== "BEARISH") return "BUY";
+  if (analytics.macroStructure === "BEARISH" && analytics.microStructure !== "BULLISH") return "SELL";
+  return "NO_TRADE";
+}
+
+function regimeOf(analytics: AdvancedAnalytics, candleCount: number): MarketIntelligenceResult["regime"] {
+  if (candleCount < 220) return "INSUFFICIENT_DATA";
+  if (analytics.volatilityRegimeRatio >= 1.8) return "HIGH_VOLATILITY";
+  if (analytics.hurstExponent >= 0.58 && Math.abs(analytics.autocorrelation1) >= 0.08) return "TREND";
+  if (analytics.hurstExponent <= 0.44 || analytics.permutationEntropy >= 0.92) return "RANGE";
+  if (analytics.volatilityRegimeRatio <= 0.55) return "LOW_VOLATILITY";
+  return "RANGE";
+}
+
+function strategyVotes(
+  analytics: AdvancedAnalytics,
+  higher: AdvancedAnalytics,
+  mk: MarkovSnapshot,
+  regime: MarketIntelligenceResult["regime"],
+): StrategyVote[] {
+  const macro = higher.macroStructure === "BULLISH" ? "BUY" : higher.macroStructure === "BEARISH" ? "SELL" : "NO_TRADE" as const;
+  const micro = analytics.microStructure === "BULLISH" ? "BUY" : analytics.microStructure === "BEARISH" ? "SELL" : "NO_TRADE" as const;
+  const reversal = analytics.liquiditySweep === "BUY_REVERSAL" || analytics.changeOfCharacter === "BUY" ? "BUY" : analytics.liquiditySweep === "SELL_REVERSAL" || analytics.changeOfCharacter === "SELL" ? "SELL" : "NO_TRADE" as const;
+  const displacement: IntelligenceSignal = analytics.displacement === "NONE" ? "NO_TRADE" : analytics.displacement;
+  const delta = analytics.deltaProxy > 0.12 && analytics.signedVolumeProxy > 0.08 ? "BUY" : analytics.deltaProxy < -0.12 && analytics.signedVolumeProxy < -0.08 ? "SELL" : "NO_TRADE" as const;
+  const statistical = analytics.returnZScore <= -1.5 && analytics.hurstExponent < 0.5 ? "BUY" : analytics.returnZScore >= 1.5 && analytics.hurstExponent < 0.5 ? "SELL" : "NO_TRADE" as const;
+  const structureScore = (direction: "BUY" | "SELL" | "NO_TRADE") => direction === "NO_TRADE" ? 0 : 65 + Math.abs(analytics.reversalScore * 35);
+  return [
+    { name: "Macro / micro fractal structure", stance: macro === micro ? macro : "NO_TRADE", score: macro === micro && macro !== "NO_TRADE" ? 100 : 45, weight: 0.22, evidence: `Macro ${higher.macroStructure}; micro ${analytics.microStructure}` },
+    { name: "Liquidity sweep reversal", stance: reversal, score: reversal === "NO_TRADE" ? 0 : structureScore(reversal), weight: 0.18, evidence: `${analytics.liquiditySweep.replaceAll("_", " ")} · CHoCH ${analytics.changeOfCharacter}` },
+    { name: "Displacement continuation", stance: displacement, score: displacement === "NO_TRADE" ? 0 : 78, weight: 0.14, evidence: `Break ${analytics.breakOfStructure}; displacement ${displacement}` },
+    { name: "Tick delta / signed-flow proxy", stance: delta, score: delta === "NO_TRADE" ? 0 : 72, weight: 0.14, evidence: `Delta ${analytics.deltaProxy.toFixed(3)} · signed movement ${analytics.signedVolumeProxy.toFixed(3)}` },
+    { name: "Statistical mean-reversion", stance: statistical, score: statistical === "NO_TRADE" ? 0 : 70, weight: 0.12, evidence: `z ${analytics.returnZScore.toFixed(2)} · H ${analytics.hurstExponent.toFixed(2)}` },
+    { name: "Markov state transition", stance: mk.signal, score: Math.abs(mk.nextUpProbability - 0.5) * 200, weight: 0.10, evidence: `${(mk.nextUpProbability * 100).toFixed(1)}% up transition · entropy ${mk.transitionEntropy.toFixed(2)}` },
+    { name: "Volatility / entropy regime", stance: regime === "TREND" || regime === "HIGH_VOLATILITY" ? macro : "NO_TRADE", score: regime === "INSUFFICIENT_DATA" ? 0 : 60, weight: 0.10, evidence: `${regime.replaceAll("_", " ")} · volatility ratio ${analytics.volatilityRegimeRatio.toFixed(2)}` },
+  ];
+}
+
+function defaultUnitsPerLot(symbol: LiveMarketSymbol): number {
+  if (symbol.category === "forex") return 100_000;
+  if (symbol.category === "commodities") return 100;
+  return 1;
+}
+
+export function timeframeLabel(seconds: number): string {
+  return INTELLIGENCE_TIMEFRAMES.find((timeframe) => timeframe.value === seconds)?.label ?? `${Math.round(seconds / 60)}m`;
+}
+
+export function higherTimeframeFor(seconds: number): number {
+  if (seconds <= 60) return 300;
+  if (seconds <= 300) return 900;
+  if (seconds <= 900) return 3600;
+  if (seconds <= 3600) return 14400;
+  return 86400;
+}
+
+function monteCarlo(candles: LiveCandle[], side: "BUY" | "SELL", entry: number, stopLoss: number, takeProfit: number, steps: number, paths = 2000): MonteCarloSnapshot {
+  const samples = logReturns(candles).slice(-240).filter((value) => Number.isFinite(value) && Math.abs(value) < 0.25);
+  if (samples.length < 30) return { paths: 0, steps, tpBeforeSl: 0, slBeforeTp: 0, neither: 1, method: "Unavailable: fewer than 30 live return observations" };
   let tpBeforeSl = 0;
   let slBeforeTp = 0;
   let neither = 0;
-  if (samples.length < 30 || !entry || !stopLoss || !takeProfit) {
-    return { paths: 0, steps, tpBeforeSl: 0, slBeforeTp: 0, neither: 1, method: "Unavailable: fewer than 30 live return observations" };
-  }
   for (let path = 0; path < paths; path++) {
     let price = entry;
     let outcome: "TP" | "SL" | null = null;
     for (let step = 0; step < steps; step++) {
-      const sample = samples[Math.floor(Math.random() * samples.length)];
-      price *= Math.exp(sample);
-      if (side === "BUY") {
-        if (price >= takeProfit) { outcome = "TP"; break; }
-        if (price <= stopLoss) { outcome = "SL"; break; }
-      } else {
-        if (price <= takeProfit) { outcome = "TP"; break; }
-        if (price >= stopLoss) { outcome = "SL"; break; }
-      }
+      price *= Math.exp(samples[Math.floor(Math.random() * samples.length)]);
+      const tp = side === "BUY" ? price >= takeProfit : price <= takeProfit;
+      const sl = side === "BUY" ? price <= stopLoss : price >= stopLoss;
+      if (tp) { outcome = "TP"; break; }
+      if (sl) { outcome = "SL"; break; }
     }
     if (outcome === "TP") tpBeforeSl++;
     else if (outcome === "SL") slBeforeTp++;
@@ -339,112 +460,48 @@ function monteCarlo(
     tpBeforeSl: round(tpBeforeSl / paths, 3),
     slBeforeTp: round(slBeforeTp / paths, 3),
     neither: round(neither / paths, 3),
-    method: "Bootstrap resampling of the latest live log returns; not a price forecast",
+    method: "Bootstrap resampling of live log returns; scenario analysis, not a price forecast",
   };
 }
 
-function higherTimeframeBias(indicators: IndicatorSnapshot): IntelligenceSignal {
-  const trend = indicators.ema20 - indicators.ema50;
-  const longTrend = indicators.ema50 - indicators.ema200;
-  if (trend > 0 && longTrend >= 0 && indicators.macd >= indicators.macdSignal) return "BUY";
-  if (trend < 0 && longTrend <= 0 && indicators.macd <= indicators.macdSignal) return "SELL";
-  return "NO_TRADE";
-}
-
-function defaultUnitsPerLot(symbol: LiveMarketSymbol): number {
-  if (symbol.category === "forex") return 100_000;
-  if (symbol.category === "commodities") return 100;
-  return 1;
-}
-
-function formatDuration(seconds: number): string {
-  if (seconds >= 86400) return `${Math.round(seconds / 86400)} day${seconds >= 172800 ? "s" : ""}`;
-  if (seconds >= 3600) return `${Math.round(seconds / 3600)} hour${seconds >= 7200 ? "s" : ""}`;
-  return `${Math.round(seconds / 60)} minute${seconds >= 120 ? "s" : ""}`;
-}
-
-export function timeframeLabel(seconds: number): string {
-  return INTELLIGENCE_TIMEFRAMES.find((timeframe) => timeframe.value === seconds)?.label ?? formatDuration(seconds);
-}
-
-export function higherTimeframeFor(seconds: number): number {
-  if (seconds <= 300) return 900;
-  if (seconds <= 900) return 3600;
-  if (seconds <= 3600) return 14400;
-  return 86400;
-}
-
-function buildStrategyVotes(
-  indicators: IndicatorSnapshot,
-  higher: IndicatorSnapshot,
-  mk: MarkovSnapshot,
-  regime: MarketIntelligenceResult["regime"],
-): StrategyVote[] {
-  const trend = indicators.ema20 > indicators.ema50 && indicators.ema50 >= indicators.ema200 ? "BUY" : indicators.ema20 < indicators.ema50 && indicators.ema50 <= indicators.ema200 ? "SELL" : "NO_TRADE";
-  const momentum = indicators.macd > indicators.macdSignal && indicators.rsi14 < 72 ? "BUY" : indicators.macd < indicators.macdSignal && indicators.rsi14 > 28 ? "SELL" : "NO_TRADE";
-  const meanReversion = indicators.rsi14 <= 30 && indicators.price <= indicators.bollingerLower ? "BUY" : indicators.rsi14 >= 70 && indicators.price >= indicators.bollingerUpper ? "SELL" : "NO_TRADE";
-  const breakout = indicators.price > indicators.resistance - indicators.atr14 * 0.15 ? "BUY" : indicators.price < indicators.support + indicators.atr14 * 0.15 ? "SELL" : "NO_TRADE";
-  const statistical = indicators.returnZScore < -1.2 ? "BUY" : indicators.returnZScore > 1.2 ? "SELL" : "NO_TRADE";
-  const votes: StrategyVote[] = [
-    { name: "Multi-timeframe trend", stance: higherTimeframeBias(higher), score: 100, weight: 0.24, evidence: `Higher timeframe bias: ${higherTimeframeBias(higher)}` },
-    { name: "EMA structure", stance: trend, score: clamp(Math.abs(indicators.ema20 - indicators.ema50) / Math.max(indicators.atr14, 1e-12) * 20, 0, 100), weight: 0.18, evidence: `EMA20 ${trend === "BUY" ? "above" : trend === "SELL" ? "below" : "not aligned with"} EMA50/200` },
-    { name: "MACD momentum", stance: momentum, score: clamp(Math.abs(indicators.macd - indicators.macdSignal) / Math.max(indicators.atr14, 1e-12) * 100, 0, 100), weight: 0.16, evidence: `MACD ${momentum === "BUY" ? "positive" : momentum === "SELL" ? "negative" : "mixed"}; RSI ${indicators.rsi14.toFixed(1)}` },
-    { name: "RSI / Bollinger mean reversion", stance: meanReversion, score: meanReversion === "NO_TRADE" ? 0 : 80, weight: 0.12, evidence: `RSI ${indicators.rsi14.toFixed(1)} and price location versus bands` },
-    { name: "Market structure breakout", stance: breakout, score: breakout === "NO_TRADE" ? 0 : 75, weight: 0.12, evidence: `Range ${round(indicators.support)} — ${round(indicators.resistance)}` },
-    { name: "Markov transition", stance: mk.signal, score: Math.abs(mk.nextUpProbability - 0.5) * 200, weight: 0.10, evidence: `${(mk.nextUpProbability * 100).toFixed(1)}% next-up probability from ${mk.sampleSize} live states` },
-    { name: "Statistical return edge", stance: statistical, score: clamp(Math.abs(indicators.returnZScore) * 35, 0, 100), weight: 0.08, evidence: `Latest return z-score ${indicators.returnZScore.toFixed(2)}` },
-  ];
-  return votes.map((vote) => ({ ...vote, score: round(vote.score, 1), evidence: regime === "RANGE" && vote.name === "Market structure breakout" ? `${vote.evidence}; range regime reduces breakout weight` : vote.evidence }));
-}
-
 export function analyzeLiveMarket(input: IntelligenceInput): MarketIntelligenceResult {
-  const minRequired = 220;
-  const indicators = calculateIndicators(input.candles);
-  const higherIndicators = calculateIndicators(input.higherCandles);
-  const dataFreshnessSeconds = Math.max(0, Math.round(Date.now() / 1000 - input.candles[input.candles.length - 1].epoch));
-  const regime: MarketIntelligenceResult["regime"] = input.candles.length < minRequired
-    ? "INSUFFICIENT_DATA"
-    : indicators.adx14 >= 25 && indicators.atrPercent >= 0.35
-      ? "HIGH_VOLATILITY"
-      : indicators.adx14 >= 22
-        ? "TREND"
-        : indicators.atrPercent <= 0.08
-          ? "LOW_VOLATILITY"
-          : "RANGE";
+  const primary = advancedAnalytics(input.candles, input.ticks, input.timeframeSeconds);
+  const higher = advancedAnalytics(input.higherCandles, input.ticks, input.higherTimeframeSeconds);
   const markovSnapshot = markov(input.candles);
-  const higherBias = higherTimeframeBias(higherIndicators);
-  const strategies = buildStrategyVotes(indicators, higherIndicators, markovSnapshot, regime);
-  const buyScore = strategies.reduce((sum, vote) => sum + (vote.stance === "BUY" ? vote.weight * Math.max(vote.score, 35) : vote.stance === "SELL" ? -vote.weight * Math.max(vote.score, 35) : 0), 0);
-  const rawScore = clamp(50 + buyScore, 0, 100);
-  const trendDirection = directionFromIndicators(indicators);
-  const modelDirection: IntelligenceSignal = rawScore >= 58 ? "BUY" : rawScore <= 42 ? "SELL" : trendDirection;
-  const higherAgreement = modelDirection !== "NO_TRADE" && higherBias === modelDirection;
-  const confidence = round(clamp(50 + Math.abs(rawScore - 50) * 1.4 + (higherAgreement ? 8 : -10), 0, 99), 1);
+  const regime = regimeOf(primary, input.candles.length);
+  const higherTimeframeBias = higherBias(higher);
+  const strategies = strategyVotes(primary, higher, markovSnapshot, regime);
+  const signedScore = strategies.reduce((sum, strategy) => {
+    const direction = strategy.stance === "BUY" ? 1 : strategy.stance === "SELL" ? -1 : 0;
+    return sum + direction * strategy.weight * (strategy.score / 100);
+  }, 0);
+  const modelDirection: IntelligenceSignal = signedScore >= 0.16 ? "BUY" : signedScore <= -0.16 ? "SELL" : "NO_TRADE";
+  const higherTimeframeAgreement = modelDirection !== "NO_TRADE" && modelDirection === higherTimeframeBias;
+  const dataFreshnessSeconds = Math.max(0, Math.round(Date.now() / 1000 - input.candles[input.candles.length - 1].epoch));
+  const confidence = round(clamp(50 + Math.abs(signedScore) * 42 + (higherTimeframeAgreement ? 9 : -9) + (primary.orderflowQuality === "TICK_PROXY" ? 3 : -8), 0, 99), 1);
   const guards: string[] = [];
-  if (input.candles.length < minRequired) guards.push(`Need at least ${minRequired} live candles for the long EMA and walk-forward statistics`);
-  if (!higherAgreement) guards.push("Primary and higher timeframe are not aligned; no signal is promoted");
+  if (input.candles.length < 220) guards.push("At least 220 live candles are required for structural and statistical evidence");
+  if (input.ticks.length < 100) guards.push("At least 100 live ticks are required for the tick-flow proxy");
+  if (!higherTimeframeAgreement) guards.push("Micro and higher-timeframe structure are not aligned");
   if (regime === "INSUFFICIENT_DATA") guards.push("Insufficient live data");
-  if (regime === "LOW_VOLATILITY") guards.push("Volatility is too low for a clean risk-defined setup");
-  if (markovSnapshot.sampleSize < 30) guards.push("Markov state sample is below the 30-observation minimum");
+  if (regime === "LOW_VOLATILITY") guards.push("Current realized volatility is too compressed for a clean risk-defined setup");
+  if (primary.permutationEntropy > 0.96) guards.push("Directional entropy is too high; the tape is statistically noisy");
   if (dataFreshnessSeconds > input.timeframeSeconds * 3 + 120) guards.push("Latest Deriv candle is stale");
 
-  const signal: IntelligenceSignal =
-    guards.length === 0 && confidence >= 60 && modelDirection !== "NO_TRADE" && (regime === "TREND" || regime === "HIGH_VOLATILITY" || regime === "RANGE")
-      ? modelDirection
-      : "NO_TRADE";
-  const entry = indicators.price;
-  const atrDistance = Math.max(indicators.atr14 * 1.25, entry * 0.0001);
-  const swingDistance = signal === "BUY" ? entry - indicators.support : indicators.resistance - entry;
-  const stopDistance = signal === "NO_TRADE" ? 0 : Math.max(atrDistance, Math.min(Math.max(swingDistance, atrDistance), atrDistance * 3));
+  const signal: IntelligenceSignal = guards.length === 0 && confidence >= 62 && modelDirection !== "NO_TRADE" ? modelDirection : "NO_TRADE";
+  const entry = primary.price;
+  const volatilityDistance = Math.max(entry * Math.abs(primary.realizedVolatilityPercent) / 100 * 2.2, entry * 0.0001);
+  const structuralDistance = signal === "BUY" ? entry - primary.support : primary.resistance - entry;
+  const stopDistance = signal === "NO_TRADE" ? 0 : Math.max(volatilityDistance, Math.min(Math.max(structuralDistance, volatilityDistance), volatilityDistance * 3));
   const stopLoss = signal === "BUY" ? entry - stopDistance : signal === "SELL" ? entry + stopDistance : null;
-  const takeProfit = signal === "BUY" ? entry + stopDistance * 2 : signal === "SELL" ? entry - stopDistance * 2 : null;
+  const takeProfit = signal === "BUY" ? entry + Math.max(stopDistance * 2, primary.resistance > entry ? primary.resistance - entry : 0) : signal === "SELL" ? entry - Math.max(stopDistance * 2, primary.support < entry ? entry - primary.support : 0) : null;
   const expectedDurationSeconds = input.timeframeSeconds * (regime === "TREND" ? 4 : 2);
   const validitySeconds = input.timeframeSeconds * (regime === "HIGH_VOLATILITY" ? 2 : 3);
-  const riskPercent = clamp(Number.isFinite(input.riskPercent) ? input.riskPercent : 0.5, 0.1, 2);
   const balance = Math.max(0, input.balance);
+  const riskPercent = clamp(Number.isFinite(input.riskPercent) ? input.riskPercent : 0.5, 0.1, 2);
   const unitsPerLot = input.unitsPerLot && input.unitsPerLot > 0 ? input.unitsPerLot : defaultUnitsPerLot(input.symbol);
-  const riskAmount = balance * (riskPercent / 100);
-  const recommendedLotSize = signal === "NO_TRADE" || !stopDistance || !unitsPerLot ? 0 : round(riskAmount / (stopDistance * unitsPerLot), 4);
+  const riskAmount = balance * riskPercent / 100;
+  const recommendedLotSize = signal === "NO_TRADE" || !stopDistance ? 0 : round(riskAmount / (stopDistance * unitsPerLot), 4);
   const positionSizing: PositionSizing = {
     balance: round(balance, 2),
     riskPercent: round(riskPercent, 2),
@@ -457,17 +514,17 @@ export function analyzeLiveMarket(input: IntelligenceInput): MarketIntelligenceR
     basis: "indicative",
   };
   const steps = Math.max(2, Math.round(expectedDurationSeconds / input.timeframeSeconds));
-  const mc = signal === "NO_TRADE" ? { paths: 0, steps, tpBeforeSl: 0, slBeforeTp: 0, neither: 1, method: "Not run because the ensemble did not promote a live signal" } : monteCarlo(input.candles, signal, entry, stopLoss!, takeProfit!, steps);
-  const modelProbability = signal === "BUY" ? mc.tpBeforeSl : signal === "SELL" ? mc.tpBeforeSl : 0;
+  const mc = signal === "NO_TRADE" ? { paths: 0, steps, tpBeforeSl: 0, slBeforeTp: 0, neither: 1, method: "Not run because advanced guardrails did not promote a live signal" } : monteCarlo(input.candles, signal, entry, stopLoss!, takeProfit!, steps);
+  const modelProbability = signal === "NO_TRADE" ? 0 : mc.tpBeforeSl;
   const rationale = [
-    `${strategies.filter((strategy) => strategy.stance === signal).length} of ${strategies.length} live-data strategy modules point ${signal === "NO_TRADE" ? "away from a trade" : signal}`,
-    `Regime: ${regime}; ADX ${indicators.adx14.toFixed(1)}; ATR ${indicators.atrPercent.toFixed(3)}%`,
-    `Higher timeframe ${timeframeLabel(input.higherTimeframeSeconds)} bias: ${higherBias}`,
-    signal === "NO_TRADE" ? "Capital is preserved when timeframe, regime, or freshness guards disagree" : `Risk is defined at ${round(stopDistance)} with a minimum 1:2 reward-to-risk target`,
+    `${strategies.filter((strategy) => strategy.stance === signal).length} of ${strategies.length} advanced modules point ${signal === "NO_TRADE" ? "away from a trade" : signal}`,
+    `Structure: macro ${primary.macroStructure}, micro ${primary.microStructure}; BOS ${primary.breakOfStructure}; CHoCH ${primary.changeOfCharacter}`,
+    `Realized volatility ${primary.realizedVolatilityPercent.toFixed(4)}%; Hurst ${primary.hurstExponent.toFixed(2)}; entropy ${primary.permutationEntropy.toFixed(2)}`,
+    signal === "NO_TRADE" ? "Capital is preserved when structure, order-flow proxy, probability, and timeframe guards disagree" : `Entry and risk levels are derived from liquidity structure and realized volatility with minimum 1:2 R:R`,
   ];
   const generatedAt = new Date().toISOString();
   return {
-    id: `${input.symbol}-${input.timeframeSeconds}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `${input.symbol.symbol}-${input.timeframeSeconds}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     generatedAt,
     feed: "DERIV_LIVE",
     symbol: input.symbol.symbol,
@@ -486,13 +543,17 @@ export function analyzeLiveMarket(input: IntelligenceInput): MarketIntelligenceR
     entry: round(entry),
     stopLoss: stopLoss == null ? null : round(stopLoss),
     takeProfit: takeProfit == null ? null : round(takeProfit),
-    riskReward: signal === "NO_TRADE" ? null : 2,
+    riskReward: signal === "NO_TRADE" ? null : round(
+      (signal === "BUY" ? takeProfit! - entry : entry - takeProfit!) /
+      Math.max(signal === "BUY" ? entry - stopLoss! : stopLoss! - entry, 1e-12),
+      2,
+    ),
     positionSizing,
     regime,
-    higherTimeframeBias: higherBias,
-    higherTimeframeAgreement: higherAgreement,
-    indicators,
-    higherIndicators,
+    higherTimeframeBias,
+    higherTimeframeAgreement,
+    analytics: primary,
+    higherAnalytics: higher,
     markov: markovSnapshot,
     monteCarlo: mc,
     strategies,
@@ -513,12 +574,8 @@ export function evaluateSignalOutcome(signal: MarketIntelligenceResult, candles:
     if (Date.now() > new Date(signal.validUntil).getTime()) return { ...signal, outcome: "EXPIRED", outcomeAt: new Date().toISOString(), outcomePrice: candles[candles.length - 1]?.close ?? null };
     return signal;
   }
-  const hitTp = signal.signal === "BUY"
-    ? since.some((candle) => candle.high >= (signal.takeProfit ?? Number.POSITIVE_INFINITY))
-    : since.some((candle) => candle.low <= (signal.takeProfit ?? Number.NEGATIVE_INFINITY));
-  const hitSl = signal.signal === "BUY"
-    ? since.some((candle) => candle.low <= (signal.stopLoss ?? Number.NEGATIVE_INFINITY))
-    : since.some((candle) => candle.high >= (signal.stopLoss ?? Number.POSITIVE_INFINITY));
+  const hitTp = signal.signal === "BUY" ? since.some((candle) => candle.high >= (signal.takeProfit ?? Number.POSITIVE_INFINITY)) : since.some((candle) => candle.low <= (signal.takeProfit ?? Number.NEGATIVE_INFINITY));
+  const hitSl = signal.signal === "BUY" ? since.some((candle) => candle.low <= (signal.stopLoss ?? Number.NEGATIVE_INFINITY)) : since.some((candle) => candle.high >= (signal.stopLoss ?? Number.POSITIVE_INFINITY));
   const outcome: IntelligenceOutcome = hitTp && hitSl ? "AMBIGUOUS" : hitTp ? "TP" : hitSl ? "SL" : Date.now() > new Date(signal.validUntil).getTime() ? "EXPIRED" : "OPEN";
   return outcome === "OPEN" ? signal : { ...signal, outcome, outcomeAt: new Date().toISOString(), outcomePrice: candles[candles.length - 1]?.close ?? null };
 }

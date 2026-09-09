@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 
 const TIMEFRAMES = [
+  { value: 60, label: "1m" },
   { value: 300, label: "5m" },
   { value: 900, label: "15m" },
   { value: 3600, label: "1h" },
@@ -68,21 +69,31 @@ type Signal = {
   regime: string;
   higherTimeframeBias: "BUY" | "SELL" | "NO_TRADE";
   higherTimeframeAgreement: boolean;
-  indicators: {
+  analytics: {
     price: number;
-    ema20: number;
-    ema50: number;
-    ema200: number;
-    rsi14: number;
-    macd: number;
-    macdSignal: number;
-    atr14: number;
-    atrPercent: number;
-    adx14: number;
-    bollingerWidthPercent: number;
+    returnMeanPercent: number;
+    realizedVolatilityPercent: number;
+    volatilityRegimeRatio: number;
+    returnZScore: number;
+    autocorrelation1: number;
+    hurstExponent: number;
+    permutationEntropy: number;
+    quantile05: number;
+    quantile95: number;
     support: number;
     resistance: number;
-    returnZScore: number;
+    macroStructure: string;
+    microStructure: string;
+    breakOfStructure: string;
+    changeOfCharacter: string;
+    liquiditySweep: string;
+    displacement: string;
+    reversalScore: number;
+    deltaProxy: number;
+    signedVolumeProxy: number;
+    tickImbalance: number;
+    tickRatePerMinute: number;
+    orderflowQuality: string;
   };
   markov: { sampleSize: number; nextUpProbability: number; nextDownProbability: number; state: string; signal: string };
   monteCarlo: { paths: number; steps: number; tpBeforeSl: number; slBeforeTp: number; neither: number; method: string };
@@ -233,8 +244,8 @@ export default function MarketIntelligence() {
         <div className="mx-auto flex max-w-[1600px] flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <div className="mb-1 flex items-center gap-2 text-[10px] font-bold uppercase tracking-[0.24em] text-cyan-300"><Activity className="h-3.5 w-3.5" /> NeuroTrade / Market Intelligence</div>
-            <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Live institutional-style signal desk</h1>
-            <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-400">Multi-timeframe candle analysis for Deriv markets. Trend, momentum, statistical, Markov and Monte Carlo modules are combined, then risk guards can veto a weak setup.</p>
+            <h1 className="text-2xl font-semibold tracking-tight md:text-3xl">Advanced quantitative signal desk</h1>
+            <p className="mt-1 max-w-3xl text-xs leading-relaxed text-slate-400">Multi-timeframe live-candle analysis using fractal structure, liquidity behavior, reversal math, realized distributions, Markov states, entropy, volatility regimes, and a clearly labelled tick-flow proxy.</p>
           </div>
           <div className="flex items-center gap-2 self-start rounded-md border border-emerald-400/20 bg-emerald-400/5 px-3 py-2 text-[10px] font-mono uppercase tracking-wider text-emerald-300 lg:self-auto"><span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-300" /> Live feed only · signal mode</div>
         </div>
@@ -269,7 +280,7 @@ export default function MarketIntelligence() {
           <Card className="border-cyan-300/15 bg-[#0a1119]"><CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-sm font-medium"><ShieldCheck className="h-4 w-4 text-emerald-300" /> Risk & sizing</CardTitle><p className="text-[11px] text-muted-foreground">Indicative sizing only — confirm Deriv contract specifications.</p></CardHeader><CardContent>{currentSignal ? <div className="space-y-3"><div className="rounded-lg border border-emerald-400/20 bg-emerald-400/5 p-3"><div className="text-[10px] uppercase tracking-widest text-emerald-300/80">Recommended lot size</div><div className="mt-1 font-mono text-3xl font-semibold text-emerald-200">{currentSignal.positionSizing.recommendedLotSize ? currentSignal.positionSizing.recommendedLotSize.toFixed(4) : "—"}</div><div className="mt-1 text-[10px] text-muted-foreground">{currentSignal.positionSizing.basis} · {currentSignal.positionSizing.unitsPerLot.toLocaleString()} units/lot</div></div><div className="grid grid-cols-2 gap-2"><Metric label="Account balance" value={formatNumber(currentSignal.positionSizing.balance, 2)} /><Metric label="Risk amount" value={formatNumber(currentSignal.positionSizing.riskAmount, 2)} /><Metric label="Risk %" value={`${currentSignal.positionSizing.riskPercent.toFixed(2)}%`} /><Metric label="SL distance" value={formatNumber(currentSignal.positionSizing.stopDistance)} /></div><div className="rounded border border-border bg-background/40 p-2 text-[10px] leading-relaxed text-muted-foreground"><span className="font-bold text-slate-300">Formula: </span>{currentSignal.positionSizing.formula}<br /><span className="text-amber-300/80">This tool does not place orders and must not be used as a guarantee of loss containment.</span></div></div> : <div className="py-14 text-center text-xs text-muted-foreground">Sizing appears with a live analysis. Enter balance and risk first.</div>}</CardContent></Card>
         </div>
 
-        {currentSignal && <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]"><Card className="border-cyan-300/15 bg-[#0a1119]"><CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-sm font-medium"><Layers3 className="h-4 w-4 text-violet-300" /> Ensemble evidence</CardTitle><p className="text-[11px] text-muted-foreground">Transparent modules; disagreement is a reason to stand aside.</p></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-[11px]"><thead className="border-b border-border text-[9px] uppercase tracking-widest text-muted-foreground"><tr><th className="pb-2 font-medium">Module</th><th className="pb-2 font-medium">Stance</th><th className="pb-2 font-medium">Score</th><th className="pb-2 font-medium">Evidence</th></tr></thead><tbody>{currentSignal.strategies.map((strategy) => <tr key={strategy.name} className="border-b border-border/40"><td className="py-2 font-medium text-slate-300">{strategy.name}</td><td className={`py-2 font-mono font-bold ${strategy.stance === "BUY" ? "text-emerald-300" : strategy.stance === "SELL" ? "text-rose-300" : "text-muted-foreground"}`}>{strategy.stance}</td><td className="py-2 font-mono text-cyan-200">{strategy.score.toFixed(1)}</td><td className="py-2 text-muted-foreground">{strategy.evidence}</td></tr>)}</tbody></table></div></CardContent></Card><Card className="border-cyan-300/15 bg-[#0a1119]"><CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-sm font-medium"><Target className="h-4 w-4 text-amber-300" /> Probability & guardrails</CardTitle></CardHeader><CardContent className="space-y-2.5 text-xs"><div className="grid grid-cols-2 gap-2"><Metric label="Markov next up" value={`${(currentSignal.markov.nextUpProbability * 100).toFixed(1)}%`} /><Metric label="Markov states" value={currentSignal.markov.sampleSize.toString()} /><Metric label="RSI 14" value={currentSignal.indicators.rsi14.toFixed(1)} /><Metric label="ADX 14" value={currentSignal.indicators.adx14.toFixed(1)} /></div><div className="rounded border border-border bg-background/40 p-3 text-[10px] leading-relaxed text-muted-foreground"><div className="mb-1 font-bold uppercase tracking-widest text-slate-300">Why this result?</div>{currentSignal.rationale.map((item) => <div key={item} className="mb-1 last:mb-0">• {item}</div>)}</div>{currentSignal.guards.length > 0 && <div className="rounded border border-amber-400/25 bg-amber-400/5 p-3 text-[10px] text-amber-200"><div className="mb-1 font-bold uppercase tracking-widest">Vetoes</div>{currentSignal.guards.map((guard) => <div key={guard} className="mb-1 last:mb-0">• {guard}</div>)}</div>}<div className="text-[10px] text-muted-foreground">Monte Carlo uses bootstrap resampling of live returns and is scenario analysis, not a promise of future performance.</div></CardContent></Card></div>}
+        {currentSignal && <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,0.85fr)]"><Card className="border-cyan-300/15 bg-[#0a1119]"><CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-sm font-medium"><Layers3 className="h-4 w-4 text-violet-300" /> Ensemble evidence</CardTitle><p className="text-[11px] text-muted-foreground">Transparent modules; disagreement is a reason to stand aside.</p></CardHeader><CardContent><div className="overflow-x-auto"><table className="w-full min-w-[620px] text-left text-[11px]"><thead className="border-b border-border text-[9px] uppercase tracking-widest text-muted-foreground"><tr><th className="pb-2 font-medium">Module</th><th className="pb-2 font-medium">Stance</th><th className="pb-2 font-medium">Score</th><th className="pb-2 font-medium">Evidence</th></tr></thead><tbody>{currentSignal.strategies.map((strategy) => <tr key={strategy.name} className="border-b border-border/40"><td className="py-2 font-medium text-slate-300">{strategy.name}</td><td className={`py-2 font-mono font-bold ${strategy.stance === "BUY" ? "text-emerald-300" : strategy.stance === "SELL" ? "text-rose-300" : "text-muted-foreground"}`}>{strategy.stance}</td><td className="py-2 font-mono text-cyan-200">{strategy.score.toFixed(1)}</td><td className="py-2 text-muted-foreground">{strategy.evidence}</td></tr>)}</tbody></table></div></CardContent></Card><Card className="border-cyan-300/15 bg-[#0a1119]"><CardHeader className="pb-2"><CardTitle className="flex items-center gap-2 text-sm font-medium"><Target className="h-4 w-4 text-amber-300" /> Probability & guardrails</CardTitle></CardHeader><CardContent className="space-y-2.5 text-xs"><div className="grid grid-cols-2 gap-2 md:grid-cols-3"><Metric label="Markov next up" value={`${(currentSignal.markov.nextUpProbability * 100).toFixed(1)}%`} /><Metric label="Markov states" value={currentSignal.markov.sampleSize.toString()} /><Metric label="Hurst exponent" value={currentSignal.analytics.hurstExponent.toFixed(2)} /><Metric label="Entropy" value={currentSignal.analytics.permutationEntropy.toFixed(2)} /><Metric label="Delta proxy" value={currentSignal.analytics.deltaProxy.toFixed(3)} /><Metric label="SVolume proxy" value={currentSignal.analytics.signedVolumeProxy.toFixed(3)} /></div><div className="rounded border border-border bg-background/40 p-3 text-[10px] leading-relaxed text-muted-foreground"><div className="mb-1 font-bold uppercase tracking-widest text-slate-300">Why this result?</div>{currentSignal.rationale.map((item) => <div key={item} className="mb-1 last:mb-0">• {item}</div>)}</div>{currentSignal.guards.length > 0 && <div className="rounded border border-amber-400/25 bg-amber-400/5 p-3 text-[10px] text-amber-200"><div className="mb-1 font-bold uppercase tracking-widest">Vetoes</div>{currentSignal.guards.map((guard) => <div key={guard} className="mb-1 last:mb-0">• {guard}</div>)}</div>}<div className="text-[10px] text-muted-foreground">Monte Carlo uses bootstrap resampling of live returns and is scenario analysis, not a promise of future performance.</div></CardContent></Card></div>}
 
         <Card className="border-cyan-300/15 bg-[#0a1119]"><CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2"><div><CardTitle className="flex items-center gap-2 text-sm font-medium"><Clock3 className="h-4 w-4 text-cyan-300" /> Recent signal tape</CardTitle><p className="mt-1 text-[11px] text-muted-foreground">Only signals generated by this independent live-candle desk. Outcomes are checked against fresh Deriv candles.</p></div><button onClick={() => signalsQuery.refetch()} className="text-muted-foreground hover:text-foreground"><RefreshCw className={`h-4 w-4 ${signalsQuery.isFetching ? "animate-spin" : ""}`} /></button></CardHeader><CardContent>{(signalsQuery.data?.signals?.length ?? 0) === 0 ? <div className="py-8 text-center text-xs text-muted-foreground">No signal history yet.</div> : <div className="overflow-x-auto"><table className="w-full min-w-[760px] text-left text-[11px]"><thead className="border-b border-border text-[9px] uppercase tracking-widest text-muted-foreground"><tr><th className="pb-2 font-medium">Time</th><th className="pb-2 font-medium">Market</th><th className="pb-2 font-medium">TF</th><th className="pb-2 font-medium">Signal</th><th className="pb-2 font-medium">Confidence</th><th className="pb-2 font-medium">Entry</th><th className="pb-2 font-medium">Outcome</th><th className="pb-2"></th></tr></thead><tbody>{signalsQuery.data?.signals.map((item) => <tr key={item.id} className="border-b border-border/40"><td className="py-2 font-mono text-muted-foreground">{timeAgo(item.generatedAt)}</td><td className="py-2"><div className="font-medium">{item.displayName}</div><div className="font-mono text-[9px] text-muted-foreground">{item.symbol}</div></td><td className="py-2 font-mono text-slate-300">{item.timeframeLabel}</td><td className="py-2"><SignalBadge signal={item.signal} /></td><td className="py-2 font-mono text-cyan-200">{item.confidence.toFixed(1)}%</td><td className="py-2 font-mono">{formatNumber(item.entry)}</td><td className="py-2"><OutcomeBadge outcome={item.outcome} /></td><td className="py-2 text-right"><button onClick={() => setSelectedSignal(item)} className="text-[10px] text-cyan-300 hover:text-cyan-100">Inspect</button></td></tr>)}</tbody></table></div>}</CardContent></Card>
 

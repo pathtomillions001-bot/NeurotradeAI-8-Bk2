@@ -39,6 +39,11 @@ export interface LiveCandle {
   close: number;
 }
 
+export interface LiveTick {
+  epoch: number;
+  price: number;
+}
+
 export class LiveMarketDataUnavailable extends Error {
   readonly code = "LIVE_MARKET_DATA_UNAVAILABLE";
 
@@ -211,6 +216,30 @@ export async function getLiveCandles(
     .sort((a: LiveCandle, b: LiveCandle) => a.epoch - b.epoch);
   if (candles.length < 50) throw new LiveMarketDataUnavailable("Deriv returned too few candles for a defensible analysis");
   return { candles, fetchedAt: Date.now(), symbol, granularity };
+}
+
+export async function getLiveTicks(
+  symbol: string,
+  count = 5_000,
+): Promise<{ ticks: LiveTick[]; fetchedAt: number; symbol: string }> {
+  const response = await requestDeriv<any>(
+    {
+      ticks_history: symbol,
+      end: "latest",
+      count: Math.max(100, Math.min(5_000, Math.floor(count))),
+      style: "ticks",
+      adjust_start_time: 1,
+    },
+    (message, reqId) => message?.msg_type === "history" || (message?.req_id === reqId && message?.history),
+  );
+  const prices = Array.isArray(response.history?.prices) ? response.history.prices : [];
+  const times = Array.isArray(response.history?.times) ? response.history.times : [];
+  const ticks = prices
+    .map((price: unknown, index: number) => ({ epoch: Number(times[index]), price: Number(price) }))
+    .filter((tick: LiveTick) => Number.isFinite(tick.epoch) && Number.isFinite(tick.price) && tick.price > 0)
+    .sort((a: LiveTick, b: LiveTick) => a.epoch - b.epoch);
+  if (ticks.length < 100) throw new LiveMarketDataUnavailable("Deriv returned too few live ticks for microstructure analysis");
+  return { ticks, fetchedAt: Date.now(), symbol };
 }
 
 export function isFreshCandleFeed(candles: LiveCandle[], granularity: number, nowMs = Date.now()): boolean {

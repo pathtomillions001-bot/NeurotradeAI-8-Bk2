@@ -1,0 +1,29 @@
+# Railway config for the API service (@workspace/api-server).
+#
+# HOW TO ATTACH (Railway dashboard → this service → Settings):
+#   Config-as-code path:  /artifacts/api-server/railway.toml
+#   Root Directory:       leave EMPTY (shared pnpm monorepo — must install from repo root)
+#
+# Do NOT set Root Directory to artifacts/api-server — that breaks workspace:* and catalog: deps.
+
+[build]
+builder = "RAILPACK"
+buildCommand = "pnpm --filter @workspace/api-server build"
+watchPatterns = [
+  "/artifacts/api-server/**",
+  "/lib/db/**",
+  "/lib/api-zod/**",
+  "/lib/api-spec/**",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+  "/.npmrc",
+]
+
+[deploy]
+startCommand = "pnpm --filter @workspace/api-server start"
+# healthcheck hits Express after the /api mount
+healthcheckPath = "/api/healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

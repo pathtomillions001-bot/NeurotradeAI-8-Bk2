@@ -1,0 +1,29 @@
+# Railway config for the web service (@workspace/trading-platform).
+#
+# HOW TO ATTACH (Railway dashboard → this service → Settings):
+#   Config-as-code path:  /artifacts/trading-platform/railway.toml
+#   Root Directory:       leave EMPTY (shared pnpm monorepo — must install from repo root)
+#
+# Do NOT set Root Directory to artifacts/trading-platform — that makes Railpack fall
+# back to npm and fail on "catalog:" / "workspace:*" protocol URLs.
+
+[build]
+builder = "RAILPACK"
+buildCommand = "pnpm --filter @workspace/trading-platform build"
+watchPatterns = [
+  "/artifacts/trading-platform/**",
+  "/lib/api-client-react/**",
+  "/lib/api-spec/**",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+  "/.npmrc",
+]
+
+[deploy]
+startCommand = "pnpm --filter @workspace/trading-platform start"
+# SPA + /api reverse-proxy (see scripts/serve-production.mjs)
+healthcheckPath = "/"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

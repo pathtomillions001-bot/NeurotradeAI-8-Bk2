@@ -229,7 +229,20 @@ let poolInstance: any;
 let dbInstance: NodePgDatabase<typeof schema>;
 
 if (useExternalPostgres) {
-  poolInstance = new Pool({ connectionString: process.env.DATABASE_URL });
+  // Railway / managed Postgres. Prefer DATABASE_URL from the plugin.
+  // SSL is commonly required on managed hosts; rejectUnauthorized:false is the
+  // usual serverless-friendly default when the provider uses a private CA.
+  const needsSsl =
+    process.env.PGSSL === "true" ||
+    process.env.DATABASE_SSL === "true" ||
+    /railway\.app|rlwy\.net|amazonaws\.com|supabase\.co|neon\.tech/i.test(
+      process.env.DATABASE_URL ?? "",
+    );
+
+  poolInstance = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+  });
   dbInstance = drizzlePg(poolInstance, { schema });
 } else {
   // Use embedded PGlite with persistent disk storage

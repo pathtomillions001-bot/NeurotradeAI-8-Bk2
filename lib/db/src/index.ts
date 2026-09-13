@@ -226,21 +226,19 @@ const useExternalPostgres = Boolean(
 );
 
 let poolInstance: any;
+let pgliteInstance: PGlite | null = null;
 let dbInstance: NodePgDatabase<typeof schema>;
 
 /**
- * Resolves once the idempotent INIT_DDL has been applied to the backing
- * database. Callers that need tables/columns to exist (API bootstrap, health
- * checks) should await this before their first query.
+ * Resolves once the idempotent INIT_DDL has been applied (or definitively
+ * attempted) against the backing database. Callers that need tables/columns
+ * to exist should await this before their first query.
  *
  * WHY: on Railway the API runtime container has no pnpm/drizzle-kit, so the
  * previous "run drizzle-kit push at boot" strategy silently failed and every
  * settings/accounts/markets query died with `relation "settings" does not
  * exist`. Running the CREATE TABLE IF NOT EXISTS DDL directly over the pool
  * guarantees the schema exists regardless of build tooling availability.
- *
- * This never rejects — a failed DDL logs loudly but does not crash startup;
- * individual routes will surface the underlying DB error instead.
  */
 let resolveSchemaReady!: () => void;
 export const schemaReady: Promise<void> = new Promise<void>((resolve) => {
@@ -262,18 +260,6 @@ if (useExternalPostgres) {
     connectionString: process.env.DATABASE_URL,
     ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
   });
-  // Apply the idempotent DDL on external Postgres too — Railway/managed hosts
-  // have no drizzle-kit at runtime, so this is the only guaranteed schema path.
-  poolInstance
-    .query(INIT_DDL)
-    .then(() => {
-      console.log("[db] Initial DDL applied to external Postgres");
-      resolveSchemaReady();
-    })
-    .catch((err: unknown) => {
-      console.error("[db] Failed to apply initial DDL to external Postgres:", err);
-      resolveSchemaReady();
-    });
   dbInstance = drizzlePg(poolInstance, { schema });
 } else {
   // Use embedded PGlite with persistent disk storage
@@ -283,14 +269,7 @@ if (useExternalPostgres) {
   } catch {}
 
   const pglite = new PGlite(dbDir);
-  // Execute initial DDL synchronously or on startup
-  pglite
-    .exec(INIT_DDL)
-    .then(() => resolveSchemaReady())
-    .catch((err: unknown) => {
-      console.error("Failed to execute initial PGlite DDL:", err);
-      resolveSchemaReady();
-    });
+  pgliteInstance = pglite;
 
   poolInstance = {
     async query(text: string, params?: any[]) {
@@ -310,6 +289,55 @@ if (useExternalPostgres) {
 
   dbInstance = drizzlePglite(pglite, { schema }) as unknown as NodePgDatabase<typeof schema>;
 }
+
+/** Applies the idempotent INIT_DDL. Safe to call repeatedly. */
+async function applySchemaDdl(): Promise<void> {
+  if (useExternalPostgres) {
+    await poolInstance.query(INIT_DDL);
+  } else {
+    await pgliteInstance!.exec(INIT_DDL);
+  }
+}
+
+/**
+ * Keep retrying the DDL until it succeeds, then resolve schemaReady.
+ *
+ * WHY a retry loop: the first boot attempt can hit a transient Postgres outage
+ * (on Railway a simultaneous redeploy produced `connect ETIMEDOUT …:5432` for
+ * minutes). A one-shot DDL then left the schema permanently missing even after
+ * the network recovered, so settings/accounts/markets stayed broken until a
+ * manual redeploy. Retrying in the background self-heals as soon as Postgres
+ * answers.
+ */
+let ddlSucceeded = false;
+async function ddlRetryLoop(): Promise<void> {
+  let attempt = 0;
+  while (!ddlSucceeded) {
+    attempt++;
+    try {
+      await applySchemaDdl();
+      ddlSucceeded = true;
+      console.log(
+        attempt === 1
+          ? "[db] Initial DDL applied"
+          : `[db] Initial DDL applied after ${attempt} attempts`,
+      );
+      resolveSchemaReady();
+    } catch (err) {
+      if (attempt === 1) resolveSchemaReady(); // don't block routes on a dead DB
+      const waitMs = Math.min(30_000, 5_000 * attempt);
+      console.error(
+        `[db] DDL attempt ${attempt} failed — retrying in ${Math.round(waitMs / 1000)}s:`,
+        err instanceof Error ? err.message : err,
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+void ddlRetryLoop().catch((err) => {
+  console.error("[db] DDL retry loop crashed:", err);
+  resolveSchemaReady();
+});
 
 export const pool = poolInstance;
 export const db = dbInstance;

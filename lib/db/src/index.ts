@@ -228,6 +228,25 @@ const useExternalPostgres = Boolean(
 let poolInstance: any;
 let dbInstance: NodePgDatabase<typeof schema>;
 
+/**
+ * Resolves once the idempotent INIT_DDL has been applied to the backing
+ * database. Callers that need tables/columns to exist (API bootstrap, health
+ * checks) should await this before their first query.
+ *
+ * WHY: on Railway the API runtime container has no pnpm/drizzle-kit, so the
+ * previous "run drizzle-kit push at boot" strategy silently failed and every
+ * settings/accounts/markets query died with `relation "settings" does not
+ * exist`. Running the CREATE TABLE IF NOT EXISTS DDL directly over the pool
+ * guarantees the schema exists regardless of build tooling availability.
+ *
+ * This never rejects — a failed DDL logs loudly but does not crash startup;
+ * individual routes will surface the underlying DB error instead.
+ */
+let resolveSchemaReady!: () => void;
+export const schemaReady: Promise<void> = new Promise<void>((resolve) => {
+  resolveSchemaReady = resolve;
+});
+
 if (useExternalPostgres) {
   // Railway / managed Postgres. Prefer DATABASE_URL from the plugin.
   // SSL is commonly required on managed hosts; rejectUnauthorized:false is the
@@ -243,6 +262,18 @@ if (useExternalPostgres) {
     connectionString: process.env.DATABASE_URL,
     ...(needsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
   });
+  // Apply the idempotent DDL on external Postgres too — Railway/managed hosts
+  // have no drizzle-kit at runtime, so this is the only guaranteed schema path.
+  poolInstance
+    .query(INIT_DDL)
+    .then(() => {
+      console.log("[db] Initial DDL applied to external Postgres");
+      resolveSchemaReady();
+    })
+    .catch((err: unknown) => {
+      console.error("[db] Failed to apply initial DDL to external Postgres:", err);
+      resolveSchemaReady();
+    });
   dbInstance = drizzlePg(poolInstance, { schema });
 } else {
   // Use embedded PGlite with persistent disk storage
@@ -253,9 +284,13 @@ if (useExternalPostgres) {
 
   const pglite = new PGlite(dbDir);
   // Execute initial DDL synchronously or on startup
-  pglite.exec(INIT_DDL).catch((err: unknown) => {
-    console.error("Failed to execute initial PGlite DDL:", err);
-  });
+  pglite
+    .exec(INIT_DDL)
+    .then(() => resolveSchemaReady())
+    .catch((err: unknown) => {
+      console.error("Failed to execute initial PGlite DDL:", err);
+      resolveSchemaReady();
+    });
 
   poolInstance = {
     async query(text: string, params?: any[]) {

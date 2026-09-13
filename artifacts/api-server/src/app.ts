@@ -14,12 +14,16 @@ import { loadCalibrationCache } from "./lib/calibration";
 import { loadRecoveryStateFromDb, resumeEngineIfEnabled, forceDayReset } from "./routes/ai";
 import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
-import { pool, db, marketWinRatesTable } from "@workspace/db";
+import { pool, db, marketWinRatesTable, schemaReady } from "@workspace/db";
 import { browserSession } from "./lib/session";
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables or columns are missing. */
 async function bootstrapDb() {
   try {
+    // The embedded DDL (CREATE TABLE IF NOT EXISTS …) must finish before we
+    // probe information_schema — on Railway the runtime has no pnpm/drizzle-kit,
+    // so this in-process DDL is the only guaranteed schema path.
+    await schemaReady;
     const { rows } = await pool.query(
       `SELECT
         (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'settings')           AS settings_exists,
@@ -27,19 +31,30 @@ async function bootstrapDb() {
         (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'accounts' AND column_name = 'bearer_token') AS bearer_col_exists,
         (SELECT numeric_precision FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'recovery_multiplier') AS recovery_multiplier_precision,
         (SELECT numeric_scale FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'recovery_multiplier') AS recovery_multiplier_scale,
-        (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'bot_recovery_markup') AS bot_markup_col_exists`
+        (SELECT COUNT(*) FROM information_schema.columns  WHERE table_schema = 'public' AND table_name = 'settings' AND column_name = 'bot_recovery_markup') AS bot_markup_col_exists,
+        (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'trades')            AS trades_exists,
+        (SELECT COUNT(*) FROM information_schema.tables   WHERE table_schema = 'public' AND table_name = 'accounts')           AS accounts_exists`
     );
     const settingsExists   = Number(rows[0].settings_exists) > 0;
     const adaptiveExists   = Number(rows[0].adaptive_exists) > 0;
     const bearerColExists  = Number(rows[0].bearer_col_exists) > 0;
     const botMarkupColExists = Number(rows[0].bot_markup_col_exists) > 0;
+    const tradesExists     = Number(rows[0].trades_exists) > 0;
+    const accountsExists   = Number(rows[0].accounts_exists) > 0;
     const recoveryMultiplierWideEnough =
       Number(rows[0].recovery_multiplier_precision) >= 20 &&
       Number(rows[0].recovery_multiplier_scale) >= 4;
 
     // Push whenever a required table/column is missing or the legacy NUMERIC(4,2)
     // multiplier column would still reject an unrestricted Manual value.
-    if (!(settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough && botMarkupColExists)) {
+    // Trades and accounts are created by the in-process DDL; only attempt the
+    // drizzle-kit push when core tables exist but a specific column is missing.
+    if (!(settingsExists && adaptiveExists && bearerColExists && recoveryMultiplierWideEnough && botMarkupColExists && tradesExists && accountsExists)) {
+      if (!(tradesExists && accountsExists && settingsExists)) {
+        logger.warn(
+          "Core tables missing — in-process DDL should have created them; check DB connectivity/permissions",
+        );
+      }
       logger.warn("DB schema out of date — running schema push");
       try {
         const root = resolve(import.meta.dirname, "../../../../");

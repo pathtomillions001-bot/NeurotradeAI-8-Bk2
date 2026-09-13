@@ -140,11 +140,16 @@ That preserves cookies and SSE without CORS pain.
 
 On first boot with `DATABASE_URL` set, the API:
 
-1. Runs `pnpm --filter @workspace/db run push` when tables/columns are missing (`bootstrapDb` in `app.ts`).
-2. Applies session-isolation `ALTER`/`CREATE INDEX` statements.
+1. **Applies the full idempotent DDL in-process** (`@workspace/db` runs
+   `CREATE TABLE IF NOT EXISTS … ADD COLUMN IF NOT EXISTS …` over the pool).
+   This requires no build tooling and works on Railway's runtime container.
+2. Still attempts `pnpm --filter @workspace/db run push` (drizzle-kit) when a
+   specific column drift is detected — harmless if unavailable.
+3. Applies session-isolation `ALTER`/`CREATE INDEX` statements.
 
 Ensure `DATABASE_URL` is present **before** the first healthy deploy.  
-If push fails, check API logs for `DB schema push`.
+If the schema is still missing, check API logs for
+`[db] Failed to apply initial DDL to external Postgres`.
 
 ---
 
@@ -186,6 +191,60 @@ pnpm run start:web
 6. **Don’t deploy `mockup-sandbox`.**
 
 ---
+
+## Why "worked on Replit but broken on Railway" (the big one)
+
+The most common failure: **every API call fails at once** — settings don't save,
+Deriv accounts can't be linked, market data never appears. On Replit everything
+ran in one process with `vite dev` proxying to the API. On Railway the web
+service proxies `/api` to the api service, and the API talks to Postgres. Three
+things must all be true:
+
+1. **The Postgres schema must exist.** The Railway *runtime* container has no
+   pnpm/drizzle-kit, so the old "run `drizzle-kit push` at boot" strategy
+   silently failed and every query died with `relation "settings" does not
+   exist`. **Fixed in code**: `@workspace/db` now applies the full idempotent
+   `CREATE TABLE IF NOT EXISTS` DDL directly over the pool on boot for external
+   Postgres — no build tooling required.
+2. **`API_UPSTREAM` must be set on the web service** to the api service's
+   private URL (e.g. `http://api.railway.internal:8080`). If it's missing the
+   proxy defaults to `127.0.0.1:8080` inside the web container → 502 on every
+   `/api` call.
+3. **Deriv OAuth config** (see the Deriv checklist below).
+
+### One-URL verification
+
+Open `https://<your-web-domain>/api/healthz`. It now returns diagnostics:
+
+```json
+{
+  "status": "ok",
+  "db": { "ok": true, "external": true, "tablesMissing": [] },
+  "deriv": { "appIdConfigured": true },
+  "tickFeed": { "connected": true, "liveSymbols": 19, "totalSymbols": 19 }
+}
+```
+
+- `db.ok: false` / `tablesMissing` non-empty → check api logs for
+  `[db] Failed to apply initial DDL` (usually `DATABASE_URL` missing or the
+  Postgres service not linked to the api service via
+  `${{Postgres.DATABASE_URL}}`).
+- `deriv.appIdConfigured: false` → "Sign in with Deriv" will 503.
+- `tickFeed.connected: false` for minutes → Railway egress to
+  `wss://api.derivws.com` blocked or Deriv outage (the app falls back to
+  simulated prices).
+
+### Deriv OAuth checklist (Railway-specific)
+
+1. `DERIV_APP_ID` variable on the **api** service (alphanumeric id from
+   app.deriv.com/apps).
+2. `VITE_DERIV_APP_ID` variable on the **web** service — **rebuild** web after
+   changing it (Vite bakes it at build time; a restart is not enough).
+3. At app.deriv.com/apps → your app → add the Railway URL as an allowed
+   **redirect URL**: `https://<your-web-domain>/connect`. The Replit URL that
+   used to work will no longer match after the move.
+4. Users must open the **web** public domain only (same-origin `/api`), never
+   the api public URL — otherwise session cookies break.
 
 ## Troubleshooting
 

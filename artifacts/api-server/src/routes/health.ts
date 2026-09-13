@@ -31,14 +31,26 @@ router.get("/healthz", async (_req, res) => {
     tablesMissing: string[];
     error?: string;
   } = { ok: false, external: false, tablesMissing: [] };
+  const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
+      ),
+    ]);
+
   try {
-    await schemaReady;
-    const { rows } = await pool.query(
-      `SELECT
-        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'settings') AS settings,
-        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'accounts') AS accounts,
-        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'trades')   AS trades,
-        (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive`
+    await withTimeout(schemaReady, 3000, "schemaReady");
+    const { rows } = await withTimeout(
+      pool.query(
+        `SELECT
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'settings') AS settings,
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'accounts') AS accounts,
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'trades')   AS trades,
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive`,
+      ),
+      3000,
+      "db healthz query",
     );
     const missing: string[] = [];
     if (Number(rows[0].settings) === 0) missing.push("settings");

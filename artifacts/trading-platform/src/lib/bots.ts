@@ -91,6 +91,10 @@ export interface BotSessionStatus {
     symbol: string;
     displayName: string;
     contract: string;
+    /** The plan's contracts, individually labelled. */
+    contracts: string[];
+    /** "locked" (default) or user-allowed "switching". */
+    marketMode: string;
     certainty: string;
     verdict: string;
     confidence: number;

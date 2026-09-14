@@ -340,61 +340,69 @@ export interface TwinCertaintySpec {
   minSpacing: number;
 }
 
-/** Deliberately looser than the Kill-Shot Oracle — this bot is a volume/edge bot. */
+/**
+ * Deliberately looser than the Kill-Shot Oracle — this bot is a volume/edge
+ * bot. These bars were tuned far too tight (the pair edge cleared on almost no
+ * ticks even at Balanced, so the bot took no trades). The shot-rate quantile is
+ * the primary "pair edge" lever: a higher `targetShotRate` lowers the
+ * self-referential tau, so more ticks clear the bar. The certification floors
+ * (shots / EV / evidence / confidence) were lifted in step so more markets
+ * deploy and the live gate re-arms faster after a loss.
+ */
 export const TWIN_CERTAINTY: Record<TwinCertainty, TwinCertaintySpec> = {
   elite: {
     id: "elite",
     label: "Elite",
-    targetShotRate: 0.03,
-    minShots: 16,
-    minEvPerDollar: 0.02,
-    minEvLower: 0.004,
-    minEvidenceE: 8,
-    minLadderSafety: 0.8,
-    maxClusterZ: 1.28,
-    minClusterGapPP: 2,
-    minConfidence: 74,
-    postLossTightening: 0.65,
-    postLossCoolTicks: 22,
-    minSpacing: 12,
+    targetShotRate: 0.07,
+    minShots: 10,
+    minEvPerDollar: 0.008,
+    minEvLower: 0,
+    minEvidenceE: 3,
+    minLadderSafety: 0.7,
+    maxClusterZ: 1.645,
+    minClusterGapPP: 3,
+    minConfidence: 58,
+    postLossTightening: 0.5,
+    postLossCoolTicks: 16,
+    minSpacing: 6,
     blurb:
-      "Top ~3% of ticks. 16+ out-of-sample pair shots, +2% EV per $1 base, 8× evidence.",
+      "Top ~7% of ticks. 10+ out-of-sample pair shots, positive EV, 3× evidence.",
   },
   strict: {
     id: "strict",
     label: "Strict",
-    targetShotRate: 0.05,
-    minShots: 10,
-    minEvPerDollar: 0.006,
+    targetShotRate: 0.11,
+    minShots: 7,
+    minEvPerDollar: 0.002,
     minEvLower: 0,
-    minEvidenceE: 3,
-    minLadderSafety: 0.65,
-    maxClusterZ: 1.645,
+    minEvidenceE: 2,
+    minLadderSafety: 0.55,
+    maxClusterZ: 1.96,
     minClusterGapPP: 3,
-    minConfidence: 62,
-    postLossTightening: 0.5,
-    postLossCoolTicks: 16,
-    minSpacing: 10,
+    minConfidence: 48,
+    postLossTightening: 0.4,
+    postLossCoolTicks: 12,
+    minSpacing: 5,
     blurb:
-      "Top ~5% of ticks. 10+ out-of-sample pair shots, measurable positive EV, 3× evidence.",
+      "Top ~11% of ticks. 7+ out-of-sample pair shots, measurable positive EV, 2× evidence.",
   },
   balanced: {
     id: "balanced",
     label: "Balanced",
-    targetShotRate: 0.08,
-    minShots: 6,
+    targetShotRate: 0.18,
+    minShots: 5,
     minEvPerDollar: 0,
     minEvLower: 0,
-    minEvidenceE: 1.4,
-    minLadderSafety: 0.5,
+    minEvidenceE: 1.2,
+    minLadderSafety: 0.45,
     maxClusterZ: 2.33,
     minClusterGapPP: 4,
-    minConfidence: 50,
-    postLossTightening: 0.35,
-    postLossCoolTicks: 10,
-    minSpacing: 8,
+    minConfidence: 40,
+    postLossTightening: 0.3,
+    postLossCoolTicks: 8,
+    minSpacing: 4,
     blurb:
-      "Top ~8% of ticks. Most shots, honest positive out-of-sample EV — the loosest bar.",
+      "Top ~18% of ticks. Most shots, honest positive out-of-sample EV — the loosest bar.",
   },
 };
 

@@ -24,7 +24,7 @@ import * as dualLock from "../lib/dual-lock-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
 import * as twinHedge from "../lib/twin-hedge-engine";
-import { validateShotContract, shotLabel, type Certainty } from "../lib/killshot-analysis";
+import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
@@ -435,22 +435,23 @@ function parseCertainty(raw: unknown): Certainty {
 }
 
 /**
- * Analyse every digit-enabled market for the user's ONE chosen contract and
- * return the full ranking — including the best market available when nothing is
+ * Analyse every digit-enabled market for the user's PLAN — any combination of
+ * contracts (both sides of a pair allowed) — and return the full ranking, the
+ * per-market deployments, and the best market available even when nothing is
  * CERTIFIED, so the client can offer a deliberate lock instead of a dead end.
  *
- * When the contract is Matches with no digit, all ten digits are scored in every
- * market and Benjamini–Hochberg runs across the whole 190-candidate family.
+ * An AI Matches/Differs fans out to all ten digits in every market and
+ * Benjamini–Hochberg runs across the whole plan × market × digit family.
  */
 router.post("/killshot/scan", async (req, res): Promise<void> => {
-  const parsed = validateShotContract(req.body?.contract);
+  const parsed = validateShotPlan(req.body?.contracts ?? req.body?.contract);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
   }
   try {
     const risk = await killshotRisk(req.sessionId, req.body);
-    const result = await killshot.scanForMarket(req.sessionId, parsed.contract, parseCertainty(req.body?.certainty), risk);
+    const result = await killshot.scanForMarket(req.sessionId, parsed.contracts, parseCertainty(req.body?.certainty), risk);
     res.json(result);
   } catch (err) {
     logger.error({ err }, "Kill-Shot scan failed");
@@ -461,23 +462,18 @@ router.post("/killshot/scan", async (req, res): Promise<void> => {
 router.post("/killshot/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
 
-  const parsed = validateShotContract(body.contract);
+  const parsed = validateShotPlan(body.contracts ?? body.contract);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
   }
-  // A Matches digit must be resolved (by the user or by the scan) before the
-  // contract can be frozen — the engine will not choose one mid-session.
-  if (parsed.contract.kind === "match" && parsed.contract.digit === undefined) {
-    res.status(400).json({ error: "Run the scan first so the AI can select the Matches digit" });
-    return;
-  }
+  // An AI Matches/Differs digit is NOT resolved before deployment: the bot is
+  // allowed to change it live with the market. Only the market is locked.
 
-  // The market is LOCKED for the session — there is no hunt mode — so it must be
-  // named, and it must be one the scan is allowed to look at.
+  // The market must be named, and it must be one the scan is allowed to look at.
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
   if (!requested || !isAutomatedMarket(requested)) {
-    res.status(400).json({ error: "Run the analysis first — this bot deploys only onto a market it has locked" });
+    res.status(400).json({ error: "Run the analysis first — this bot deploys only onto a market it has measured" });
     return;
   }
   const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
@@ -489,14 +485,12 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "stake must be ≥ 0.35" });
     return;
   }
+  // The measured model cards are what make the live rule identical to the
+  // measured one. Without them there is nothing to deploy — the analysis IS the
+  // product. Accept the per-contract `cards` map (a plan) or a single `card`.
+  const cards = (body.cards && typeof body.cards === "object") ? body.cards : {};
 
-  // The model card is what makes the live rule identical to the measured one.
-  // Without it there is nothing to deploy — the analysis IS the product.
-  const card = body.card ?? body.analysis?.card;
-  if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
-    res.status(400).json({ error: "Run the analysis first — the measured model card is required before this bot can deploy" });
-    return;
-  }
+  const marketMode: "locked" | "switching" = body.marketMode === "switching" ? "switching" : "locked";
 
   const existingOwner = killshot.getOwnerSessionId();
   if (killshot.isRunning() && existingOwner && existingOwner !== req.sessionId) {
@@ -508,14 +502,15 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     ownerSessionId: req.sessionId,
     symbol: market.symbol,
     displayName: market.displayName,
-    contract: parsed.contract,
+    contracts: parsed.contracts,
     certainty: parseCertainty(body.certainty),
     stake: body.stake,
     stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
     takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
     maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
     maxShots: Math.max(0, Math.min(100, Number(body.maxShots) || 0)),
-    card,
+    marketMode,
+    cards,
     lockedAnalysis: body.analysis,
     forced: body.forced === true,
   });
@@ -524,7 +519,7 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     return;
   }
   logger.info(
-    { symbol: market.symbol, contract: shotLabel(parsed.contract), certainty: parseCertainty(body.certainty), forced: body.forced === true },
+    { symbol: market.symbol, contracts: shotPlanLabel(parsed.contracts), certainty: parseCertainty(body.certainty), marketMode, forced: body.forced === true },
     "Kill-Shot deployed",
   );
   res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });

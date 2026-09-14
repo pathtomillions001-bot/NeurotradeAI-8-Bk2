@@ -84,11 +84,17 @@ import {
   SCAN_WINDOW,
   MIN_HISTORY,
   IDENTITY_PLATT,
+  expandPlan,
+  shotKey,
+  shotPlanLabel,
+  planAnchor,
   type KillShotCandidate,
   type Certainty,
   type ShotContract,
+  type ShotPlan,
   type ModelCard,
   type ExpertReading,
+  type LiveEntry,
 } from "./killshot-analysis";
 import { evaluateTiming } from "./killshot-timing";
 
@@ -115,13 +121,21 @@ const MAX_BAR_BOOST = 2.5;
 
 // ── Config / status ───────────────────────────────────────────────────────────
 
+export type KillShotMarketMode = "locked" | "switching";
+
 export interface KillShotConfig {
   ownerSessionId?: string;
-  /** The market the scan locked. FROZEN for the whole session. */
+  /** The market the scan locked — the starting point, frozen unless switching. */
   symbol: string;
   displayName: string;
-  /** FROZEN contract — exactly one side, never both. */
-  contract: ShotContract;
+  /**
+   * The user's PLAN — any combination of contracts. Both sides of a pair are
+   * legal now (Even+Odd, Over A+Under B, a mix, or a single contract). The bot
+   * trades BETWEEN them in the same locked market, firing the strongest ready
+   * setup each tick. A Matches/Differs left to the AI re-resolves its digit
+   * live — the lock is on the MARKET, never on the digit.
+   */
+  contracts: ShotPlan;
   certainty: Certainty;
   stake: number;
   stopLoss: number;
@@ -129,18 +143,42 @@ export interface KillShotConfig {
   maxRecoverySteps: number;
   /** Stop after this many shots (0 = until TP/SL). */
   maxShots: number;
-  /** The frozen model card — the rule the walk-forward measured. */
-  card: ModelCard;
-  /** Pre-deploy analysis, kept for the UI and the journal. */
+  /** Locked (default) — the market never moves — or user-allowed switching. */
+  marketMode: KillShotMarketMode;
+  /**
+   * Measured model cards for the starting market, keyed by `shotKey` of each
+   * EXPANDED digit contract. For an AI Matches/Differs this is all ten digits —
+   * that is what lets the AI change the digit live without re-measuring.
+   */
+  cards: Record<string, ModelCard>;
+  /** Pre-deploy analysis (the plan's strongest read), kept for the UI/journal. */
   lockedAnalysis?: KillShotCandidate;
   /** True when the user deliberately locked a market that was only WATCH. */
   forced?: boolean;
 }
 
+/** One runnable contract inside a plan: an expanded digit contract + its card. */
+interface ActiveContract {
+  contract: ShotContract;
+  card: ModelCard;
+}
+/** A leg of the plan: the contract the user chose, with its measured digits. */
+interface ActiveLeg {
+  planContract: ShotContract;
+  /** True when the AI resolves the digit live (Matches/Differs without a digit). */
+  isAI: boolean;
+  contracts: ActiveContract[];
+}
+
 export interface KillShotLockInfo {
   symbol: string;
   displayName: string;
+  /** The plan, as a single label (every contract the bot may trade between). */
   contract: string;
+  /** The plan's contracts, individually labelled. */
+  contracts: string[];
+  /** Locked (default) or user-allowed market switching. */
+  marketMode: string;
   certainty: string;
   verdict: string;
   confidence: number;
@@ -240,13 +278,27 @@ export interface KillShotStatus {
   currentContractType?: string;
   lastResult?: "won" | "lost";
   message?: string;
-  config?: Omit<KillShotConfig, "ownerSessionId" | "lockedAnalysis" | "card">;
+  config?: Omit<KillShotConfig, "ownerSessionId" | "lockedAnalysis" | "cards">;
   killshotLock?: KillShotLockInfo;
   watch?: KillShotWatch;
 }
 
+/** A market's deployment of the plan: its best read + every measured card. */
+export interface KillShotMarketView {
+  symbol: string;
+  displayName: string;
+  /** This market's strongest (market, contract) read — for the UI list. */
+  best: KillShotCandidate;
+  /** Measured cards for every expanded contract on this market (for /start). */
+  cards: Record<string, ModelCard>;
+  deployable: boolean;
+  /** Best out-of-sample expectancy on this market (drives the ranking). */
+  edgePerDollar: number;
+}
+
 export interface KillShotScanResult {
   suitable: boolean;
+  /** The single strongest (market, contract) read across the whole plan. */
   best: KillShotCandidate | null;
   /** The best market available even when nothing is CERTIFIED. Never null when any market could be judged. */
   bestAvailable: KillShotCandidate | null;
@@ -256,8 +308,12 @@ export interface KillShotScanResult {
   marketsScanned: number;
   /** Digits actually available per market — makes data starvation visible. */
   historyDepth: number;
-  /** Contract-level facts that do not depend on any market. */
+  /** Contract-level facts that do not depend on any market (the plan's anchor). */
   detect: ReturnType<typeof detectability>;
+  /** The user's plan, echoed back. */
+  contracts: ShotPlan;
+  /** Per-market deployments — the UI's market list and what /start consumes. */
+  markets: KillShotMarketView[];
 }
 
 // ── Session state ─────────────────────────────────────────────────────────────
@@ -355,15 +411,18 @@ function lockInfo(cfg: KillShotConfig | null): KillShotLockInfo | undefined {
   const walk = a?.walk;
   const test = walk?.test;
   const num = (v: unknown, fallback = 0): number => (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+  const anchor = planAnchor(cfg.contracts);
   return {
     symbol: cfg.symbol,
     displayName: cfg.displayName,
-    contract: shotLabel(cfg.contract),
+    contract: shotPlanLabel(cfg.contracts),
+    contracts: cfg.contracts.map(shotLabel),
+    marketMode: cfg.marketMode,
     certainty: cfg.certainty,
     verdict: a?.verdict ?? "—",
     confidence: num(a?.confidence),
-    payout: num(a?.payout, shotPayout(cfg.contract)),
-    breakEven: num(a?.breakEven, cfg.card.breakEven),
+    payout: num(a?.payout, shotPayout(anchor)),
+    breakEven: num(a?.breakEven, 1 / shotPayout(anchor)),
     oosWinRate: num(test?.winRate),
     oosWinRateLower: num(test?.winRateLower),
     oosShots: num(test?.nShots),
@@ -371,7 +430,7 @@ function lockInfo(cfg: KillShotConfig | null): KillShotLockInfo | undefined {
     edgePerDollar: num(a?.edgePerDollar),
     evidenceE: num(test?.evidence?.peak, 1),
     brierSkill: num(walk?.platt?.brierSkill),
-    tau: cfg.card.tau,
+    tau: num(a?.card?.tau),
     ladderSafety: num(a?.ladder?.safety),
     ladderLimit: num(a?.ladder?.limit),
     expectedShotsToBreak: num(a?.ladder?.expectedShotsToBreak),
@@ -400,8 +459,9 @@ export function getStatus(): KillShotStatus {
     ? {
         symbol: cfg.symbol,
         displayName: cfg.displayName,
-        contract: cfg.contract,
+        contracts: cfg.contracts,
         certainty: cfg.certainty,
+        marketMode: cfg.marketMode,
         stake: cfg.stake,
         stopLoss: cfg.stopLoss,
         takeProfit: cfg.takeProfit,
@@ -449,45 +509,56 @@ export function stopSession() {
 
 // ── Pre-deploy scan ───────────────────────────────────────────────────────────
 
+/** One market's measurement of the whole plan. */
+interface PlanMarketMeasurement {
+  symbol: string;
+  displayName: string;
+  /** Measured cards for every expanded contract on this market (keyed by shotKey). */
+  cards: Record<string, ModelCard>;
+  /** This market's ranked (market, contract) candidates, BH-screened globally. */
+  candidates: KillShotCandidate[];
+  best: KillShotCandidate | null;
+  deployable: boolean;
+  /** This market's best out-of-sample expectancy (−∞ when it could not be judged). */
+  edgePerDollar: number;
+}
+
 /**
- * Score every digit-enabled market for the user's ONE contract.
+ * Measure the user's PLAN on every digit-enabled market.
  *
- * DEPTH FIRST. Each market is pulled to 4999 digits through
- * `getDeepDigits()` before anything is computed. The previous bot analysed a
- * 300-digit ring buffer and could therefore never satisfy its own shot-count
- * gate; the fix is not a looser gate, it is 16× the evidence.
- *
- * When the user chose Matches WITHOUT naming a digit, all ten digits are scored
- * in every market and Benjamini–Hochberg runs across the full 190-candidate
- * family, so the winner cannot be a lucky argmax.
+ * DEPTH FIRST — each market is pulled to 4999 digits before anything is
+ * computed. Every contract in the plan is scored on every market (an AI
+ * Matches/Differs fans out to all ten digits), and Benjamini–Hochberg runs
+ * across the WHOLE plan × market × digit family, so the winner cannot be a
+ * lucky argmax. This is the single routine both the pre-deploy scan and the
+ * in-session market switching re-use, so a rotation is a fresh, honest
+ * measurement — never a drift of a stale rule.
  */
-export async function scanForMarket(
+async function measurePlanMarkets(
   ownerSessionId: string | undefined,
-  contract: ShotContract,
+  contracts: ShotPlan,
   certainty: Certainty,
   risk: { stake: number; markupPercent: number; maxStake: number; stopLoss: number },
-): Promise<KillShotScanResult> {
+  broadcast: boolean,
+): Promise<{ markets: PlanMarketMeasurement[]; ranked: KillShotCandidate[]; best: KillShotCandidate | null; deepest: number }> {
   const spec = certaintySpec(certainty);
   const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
-  const contracts: ShotContract[] = contract.kind === "match" && contract.digit === undefined
-    ? Array.from({ length: 10 }, (_, d) => ({ kind: "match" as const, digit: d }))
-    : [contract];
-  const detect = detectability(contract.kind === "match" && contract.digit === undefined ? { kind: "match", digit: 0 } : contract);
-
+  const expanded = expandPlan(contracts);
   const all: KillShotCandidate[] = [];
   let deepest = 0;
 
   for (let i = 0; i < markets.length; i++) {
-    const market = markets[i];
-    broadcastSSE("bot_scan_progress", {
-      botId: KILLSHOT_BOT_ID,
-      scanning: market.displayName,
-      symbol: market.symbol,
-      scanned: i,
-      total: markets.length,
-      results: screenCandidates(all).slice(0, 8),
-    }, ownerSessionId);
-
+    const market = markets[i]!;
+    if (broadcast) {
+      broadcastSSE("bot_scan_progress", {
+        botId: KILLSHOT_BOT_ID,
+        scanning: market.displayName,
+        symbol: market.symbol,
+        scanned: i,
+        total: markets.length,
+        results: screenCandidates(all).slice(0, 8),
+      }, ownerSessionId);
+    }
     let digits: number[] = [];
     try {
       digits = await getDeepDigits(market.symbol, SCAN_WINDOW);
@@ -496,7 +567,7 @@ export async function scanForMarket(
     }
     deepest = Math.max(deepest, digits.length);
 
-    for (const c of contracts) {
+    for (const c of expanded) {
       const cand = evaluateCandidate(market.symbol, market.displayName, digits, c, {
         certainty: spec.id,
         baseStake: risk.stake,
@@ -511,17 +582,81 @@ export async function scanForMarket(
   }
 
   const ranked = screenCandidates(all);
-  broadcastSSE("bot_scan_progress", {
-    botId: KILLSHOT_BOT_ID,
-    scanning: null, symbol: null,
-    scanned: markets.length, total: markets.length,
-    results: ranked.slice(0, 8),
-  }, ownerSessionId);
+  if (broadcast) {
+    broadcastSSE("bot_scan_progress", {
+      botId: KILLSHOT_BOT_ID,
+      scanning: null, symbol: null,
+      scanned: markets.length, total: markets.length,
+      results: ranked.slice(0, 8),
+    }, ownerSessionId);
+  }
 
-  if (ranked.length === 0) {
+  // Group the globally-screened candidates by market, keeping the original
+  // market order, and build each market's card map + best read.
+  const byMarket = new Map<string, KillShotCandidate[]>();
+  for (const c of ranked) {
+    const arr = byMarket.get(c.symbol) ?? [];
+    arr.push(c);
+    byMarket.set(c.symbol, arr);
+  }
+  const perMarket: PlanMarketMeasurement[] = markets.map(m => {
+    const cands = byMarket.get(m.symbol) ?? [];
+    const best = cands[0] ?? null;
+    const cards: Record<string, ModelCard> = {};
+    for (const c of cands) cards[shotKey(c.contract)] = c.card;
+    return {
+      symbol: m.symbol,
+      displayName: m.displayName,
+      cards,
+      candidates: cands,
+      best,
+      deployable: best?.deployable ?? false,
+      edgePerDollar: best?.edgePerDollar ?? Number.NEGATIVE_INFINITY,
+    };
+  });
+
+  return { markets: perMarket, ranked, best: ranked[0] ?? null, deepest };
+}
+
+/**
+ * Score every digit-enabled market for the user's PLAN. Returns the plan's
+ * strongest single read, the best market available even when nothing is
+ * CERTIFIED, and a per-market deployment (cards + best) the client can lock.
+ */
+export async function scanForMarket(
+  ownerSessionId: string | undefined,
+  contracts: ShotPlan,
+  certainty: Certainty,
+  risk: { stake: number; markupPercent: number; maxStake: number; stopLoss: number },
+): Promise<KillShotScanResult> {
+  const spec = certaintySpec(certainty);
+  const detect = detectability(planAnchor(contracts));
+  const { markets, ranked, best, deepest } = await measurePlanMarkets(ownerSessionId, contracts, certainty, risk, true);
+
+  const verdictRank: Record<string, number> = { certified: 0, qualified: 1, watch: 2, refused: 3 };
+  const marketViews: KillShotMarketView[] = markets
+    .filter(m => m.best)
+    .map(m => ({
+      symbol: m.symbol,
+      displayName: m.displayName,
+      best: m.best!,
+      cards: m.cards,
+      deployable: m.deployable,
+      edgePerDollar: m.edgePerDollar,
+    }))
+    .sort((a, b) => {
+      const ra = verdictRank[a.best.verdict] ?? 3;
+      const rb = verdictRank[b.best.verdict] ?? 3;
+      if (ra !== rb) return ra - rb;
+      if (Math.abs(a.edgePerDollar - b.edgePerDollar) > 0.002) return b.edgePerDollar - a.edgePerDollar;
+      if (Math.abs(a.best.ladder.safety - b.best.ladder.safety) > 0.01) return b.best.ladder.safety - a.best.ladder.safety;
+      return b.best.confidence - a.best.confidence;
+    });
+
+  if (!best) {
     return {
       suitable: false, best: null, bestAvailable: null, allScored: [], certainty: spec.id,
-      marketsScanned: markets.length, historyDepth: deepest, detect,
+      marketsScanned: markets.length, historyDepth: deepest, detect, contracts, markets: [],
       reason:
         `No market could be judged yet — this bot needs ${MIN_HISTORY}+ digits per market to split into a fit half and a ` +
         `measurement half, and the deepest history available right now is ${deepest}. ` +
@@ -533,7 +668,6 @@ export async function scanForMarket(
     };
   }
 
-  const best = ranked[0];
   const suitable = best.deployable;
   const reason = suitable
     ? describeLock(best, spec.label)
@@ -543,12 +677,14 @@ export async function scanForMarket(
     suitable,
     best: suitable ? best : null,
     bestAvailable: best,
-    allScored: ranked.slice(0, 24),
+    allScored: ranked.slice(0, 40),
     reason,
     certainty: spec.id,
     marketsScanned: markets.length,
     historyDepth: deepest,
     detect,
+    contracts,
+    markets: marketViews,
   };
 }
 
@@ -624,6 +760,29 @@ function sanitiseCard(raw: ModelCard, contract: ShotContract, spec: ReturnType<t
   };
 }
 
+/**
+ * Build the runnable legs of a plan from its measured cards. Each leg is the
+ * contract the user chose; an AI Matches/Differs carries all ten measured
+ * digit contracts so the AI can change the digit live. A leg with no measured
+ * cards is dropped (it would have no rule to run).
+ */
+function buildLegs(contracts: ShotPlan, cards: Record<string, ModelCard>): ActiveLeg[] {
+  const legs: ActiveLeg[] = [];
+  for (const planContract of contracts) {
+    const isAI = (planContract.kind === "match" || planContract.kind === "differ") && planContract.digit === undefined;
+    const expanded = isAI
+      ? Array.from({ length: 10 }, (_, d) => ({ kind: planContract.kind as "match" | "differ", digit: d }))
+      : [planContract];
+    const acs: ActiveContract[] = [];
+    for (const ec of expanded) {
+      const card = cards[shotKey(ec)];
+      if (card && Number.isFinite(card.tau)) acs.push({ contract: ec, card });
+    }
+    if (acs.length > 0) legs.push({ planContract, isAI, contracts: acs });
+  }
+  return legs;
+}
+
 // ── Session start ─────────────────────────────────────────────────────────────
 
 export async function startSession(config: KillShotConfig): Promise<{ ok: boolean; error?: string }> {
@@ -645,17 +804,29 @@ export async function startSession(config: KillShotConfig): Promise<{ ok: boolea
   if (!isAutomatedMarket(config.symbol)) return fail(`${config.symbol} cannot be traded by this bot`);
   const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === config.symbol);
   if (!market || !market.digitEnabled) return fail("This bot needs a digit-enabled market");
-  if (config.contract.kind === "match" && config.contract.digit === undefined) {
-    return fail("The Matches digit must be resolved by the scan before deployment");
+  if (!Array.isArray(config.contracts) || config.contracts.length === 0) {
+    return fail("Choose at least one contract to trade");
   }
-  if (!config.card || !Number.isFinite(Number(config.card.tau))) {
-    return fail("Run the analysis first — this bot only deploys a rule it has measured");
+  // Every contract in the plan must carry a measured card for the starting
+  // market (an AI Matches/Differs needs all ten digit cards). No card means
+  // there is no measured rule to run for that contract.
+  const spec = certaintySpec(config.certainty);
+  const expanded = expandPlan(config.contracts);
+  for (const c of expanded) {
+    const card = config.cards?.[shotKey(c)];
+    if (!card || !Number.isFinite(Number(card.tau))) {
+      return fail("Run the analysis first — every contract in your plan needs a measured model card for the locked market");
+    }
   }
-  // The card decides what the live rule DOES, so it is normalised before it is
-  // frozen: a malformed field would otherwise surface as a crashed loop rather
-  // than a refusal, and the session's own spec is the right fallback.
-  config = { ...config, card: sanitiseCard(config.card, config.contract, certaintySpec(config.certainty)) };
+  // Each card decides what the live rule DOES for its contract, so it is
+  // normalised before it is frozen: a malformed field would otherwise surface
+  // as a crashed loop rather than a refusal, and the session's own spec is the
+  // right fallback.
+  const cards: Record<string, ModelCard> = {};
+  for (const c of expanded) cards[shotKey(c)] = sanitiseCard(config.cards[shotKey(c)]!, c, spec);
+  config = { ...config, cards };
 
+  const switching = config.marketMode === "switching";
   session = {
     ...freshSession(),
     running: true,
@@ -663,15 +834,16 @@ export async function startSession(config: KillShotConfig): Promise<{ ok: boolea
     config,
     currentStake: config.stake,
     message:
-      `Locked on ${config.displayName} · ${shotLabel(config.contract)} · ${certaintySpec(config.certainty).label}. ` +
+      `${switching ? "🔁 Deployed" : "🔒 Locked"} on ${config.displayName} · ${shotPlanLabel(config.contracts)} · ${spec.label}. ` +
+      `${switching ? "The AI may rotate markets to chase the strongest setup." : "The market will not change."} ` +
       `No trade on deploy — the bot holds until health, edge, shield and tick all agree.`,
   };
 
   logger.info({
     symbol: config.symbol,
-    contract: shotLabel(config.contract),
+    contracts: shotPlanLabel(config.contracts),
     certainty: config.certainty,
-    tau: config.card.tau,
+    marketMode: config.marketMode,
     verdict: config.lockedAnalysis?.verdict,
     forced: config.forced === true,
   }, "Kill-Shot session starting");
@@ -722,32 +894,41 @@ async function runLoop(config: KillShotConfig) {
     ? Number(accounts[0].balance)
     : Number.POSITIVE_INFINITY;
 
-  // ── WHAT IS FROZEN ─────────────────────────────────────────────────────────
-  // Captured once, never reassigned. There is no branch anywhere below that can
-  // move this session to another market, another contract, or another rule.
-  const LOCKED_SYMBOL: string = config.symbol;
-  const LOCKED_NAME: string = config.displayName;
-  const LOCKED_CONTRACT: ShotContract = { ...config.contract };
-  const LOCKED_TYPE = KILLSHOT_CONTRACT_TYPE[LOCKED_CONTRACT.kind];
-  const LOCKED_WINSET = shotWinSet(LOCKED_CONTRACT);
-  const CARD: ModelCard = { ...config.card };
+  // ── WHAT IS ACTIVE ─────────────────────────────────────────────────────────
+  // The PLAN (the user's set of contracts) and the market it starts on. In
+  // locked mode the market never moves — the one rule this bot is known for. In
+  // switching mode, and only because the user allowed it, the market may rotate
+  // to chase the strongest setup. Either way, an AI Matches/Differs re-resolves
+  // its digit LIVE. The per-contract rule, timing and execution are the SAME
+  // primitives the scan measured; only the selection layer is new.
   const SPEC = certaintySpec(config.certainty);
-  const BREAK_EVEN = CARD.breakEven;
+  const ANCHOR: ShotContract = planAnchor(config.contracts);
+  const ANCHOR_WINSET = shotWinSet(ANCHOR);
+  const ANCHOR_BREAK_EVEN = 1 / shotPayout(ANCHOR);
+  const SWITCHING = config.marketMode === "switching";
+  const PLAN_LABEL = shotPlanLabel(config.contracts);
+
+  let activeSymbol: string = config.symbol;
+  let activeName: string = config.displayName;
+  let legs: ActiveLeg[] = buildLegs(config.contracts, config.cards);
 
   let timingWaitTicks = 0;
   let ticksSinceLastShot = Number.POSITIVE_INFINITY;
   let ticksSinceLoss = Number.POSITIVE_INFINITY;
   let lossRun = 0;
   let lastDigitCount = 0;
+  let rebaseline = false;
   let lastReadAt = 0;
+  let lastReanalyzeAt = Date.now();
   // The live read is always the SERVER's own, never the client's copy of the
-  // scan: the first pass through the loop re-evaluates the locked market before
+  // scan: the first pass through the loop re-evaluates the market before
   // anything can fire. The posted analysis is display material only.
   let cachedRead: KillShotCandidate | null = null;
   let healthEvals = 0;
   let consecutiveErrors = 0;
 
-  session.watch.tau = CARD.tau;
+  const REANALYZE_MS = 30_000; // switching re-measure cadence
+  const SWITCH_MARGIN = 0.01;  // $/base edge advantage that justifies rotating
 
   while (session.running && !session.stopRequested) {
     try {
@@ -769,20 +950,62 @@ async function runLoop(config: KillShotConfig) {
 
       const inRecovery = recoveryEngine.isInRecovery();
 
+      // ── SWITCHING: re-measure the plan and rotate to a clearly better market ─
+      // A rotation is a fresh, honest measurement of the whole plan (not a drift
+      // of a stale rule). It only moves to a market that is clearly better on
+      // out-of-sample edge, or when the current market's edge has gone negative.
+      if (SWITCHING && Date.now() - lastReanalyzeAt >= REANALYZE_MS) {
+        lastReanalyzeAt = Date.now();
+        try {
+          const re = await measurePlanMarkets(undefined, config.contracts, config.certainty, {
+            stake: config.stake,
+            markupPercent: botRecoveryMarkup,
+            maxStake,
+            stopLoss: config.stopLoss,
+          }, false);
+          const target = re.best;
+          if (target) {
+            const targetMkt = re.markets.find(m => m.symbol === target.symbol);
+            const activeMkt = re.markets.find(m => m.symbol === activeSymbol);
+            const activeEdge = activeMkt?.edgePerDollar ?? Number.NEGATIVE_INFINITY;
+            const shouldRotate = target.symbol !== activeSymbol &&
+              (target.edgePerDollar - activeEdge > SWITCH_MARGIN || activeEdge <= 0);
+            if (shouldRotate && targetMkt && Object.keys(targetMkt.cards).length > 0) {
+              activeSymbol = targetMkt.symbol;
+              activeName = targetMkt.displayName;
+              legs = buildLegs(config.contracts, targetMkt.cards);
+              session.currentMarket = targetMkt.displayName;
+              session.message = `🔁 Rotated to ${targetMkt.displayName} — chasing the strongest setup (${(target.edgePerDollar * 100).toFixed(2)}% per $1).`;
+              healthEvals = 0;
+              cachedRead = null;
+              lastReadAt = 0;
+              rebaseline = true;
+              broadcast();
+            }
+          }
+        } catch { /* rotation is best-effort; the session keeps the current market */ }
+      }
+
       // ── Tick accounting ────────────────────────────────────────────────────
-      const digits = await getDeepDigits(LOCKED_SYMBOL, SCAN_WINDOW);
-      if (digits.length !== lastDigitCount) {
-        const delta = Math.max(0, digits.length - lastDigitCount);
-        session.watch.ticksWatched += delta;
-        if (Number.isFinite(ticksSinceLastShot)) ticksSinceLastShot += delta;
-        if (Number.isFinite(ticksSinceLoss)) ticksSinceLoss += delta;
+      const digits = await getDeepDigits(activeSymbol, SCAN_WINDOW);
+      if (rebaseline || digits.length !== lastDigitCount) {
+        if (!rebaseline && digits.length > lastDigitCount) {
+          const delta = digits.length - lastDigitCount;
+          session.watch.ticksWatched += delta;
+          if (Number.isFinite(ticksSinceLastShot)) ticksSinceLastShot += delta;
+          if (Number.isFinite(ticksSinceLoss)) ticksSinceLoss += delta;
+        }
         lastDigitCount = digits.length;
+        rebaseline = false;
       }
 
       // ── GATE 1: HEALTH — is this still the market that was analysed? ───────
+      // Pinned to the plan's ANCHOR contract: the market moved away from the
+      // regime it was measured in when the anchor's realised win rate falls (a
+      // Page–Hinkley regime break) or its live expectancy turns clearly negative.
       if (Date.now() - lastReadAt >= REREAD_INTERVAL_MS) {
         lastReadAt = Date.now();
-        const read = evaluateCandidate(LOCKED_SYMBOL, LOCKED_NAME, digits, LOCKED_CONTRACT, {
+        const read = evaluateCandidate(activeSymbol, activeName, digits, ANCHOR, {
           certainty: SPEC.id,
           baseStake: config.stake,
           markupPercent: botRecoveryMarkup,
@@ -795,27 +1018,14 @@ async function runLoop(config: KillShotConfig) {
           session.watch.verdict = read.verdict;
           session.watch.blockers = read.blockers.slice(0, 3);
         }
-        // The drift detector runs on the raw win series of the locked contract,
-        // independently of the candidate evaluation, so it keeps working even
-        // when the window is too short for a full re-read. It looks at the
-        // RECENT past: a fall that happened before this session began is part of
-        // the history the lock was measured on, not news.
-        const wins = digits.slice(-HEALTH_WINDOW).map(d => (LOCKED_WINSET.has(d) ? 1 : 0));
+        const wins = digits.slice(-HEALTH_WINDOW).map(d => (ANCHOR_WINSET.has(d) ? 1 : 0));
         const ph = pageHinkley(wins);
 
-        // What counts as "the market has changed" is deliberately narrow. A
-        // verdict is a composite of a dozen things, several of which (ladder
-        // depth, clustering z, FDR) are properties of the SESSION rather than of
-        // the market, and it flips on sampling noise when a market sits near the
-        // bar. Only two things justify holding fire on a locked market: a
-        // detected regime break, or an expectancy that has gone clearly negative
-        // — point estimate below break-even AND the lower bound below it by more
-        // than the tolerance the user's own certainty level allows.
         const test = cachedRead?.walk.test;
         const measurable = (test?.nShots ?? 0) >= 8;
         const expectancyGone = measurable
           && (cachedRead?.edgePerDollar ?? 0) < 0
-          && (test?.winRateLower ?? 0) < BREAK_EVEN - SPEC.shortfallTolerance;
+          && (test?.winRateLower ?? 0) < ANCHOR_BREAK_EVEN - SPEC.shortfallTolerance;
         const degraded = ph.fired || expectancyGone;
         healthEvals = degraded ? healthEvals + 1 : 0;
         const alerting = healthEvals >= RESCAN_ALERT_EVALS;
@@ -826,40 +1036,40 @@ async function runLoop(config: KillShotConfig) {
           consecutive: healthEvals,
           needsRescan: alerting,
           note: ph.fired
-            ? `Realised win rate on ${LOCKED_NAME} has fallen away from its locked baseline (Page–Hinkley ${ph.ph.toFixed(1)}/${ph.threshold} over the last ${Math.min(HEALTH_WINDOW, digits.length)} ticks).`
+            ? `Realised win rate on ${activeName} has fallen away from its baseline (Page–Hinkley ${ph.ph.toFixed(1)}/${ph.threshold} over the last ${Math.min(HEALTH_WINDOW, digits.length)} ticks).`
             : expectancyGone
-              ? `The locked market's live re-measurement has turned negative: ${test!.nShots} shots at ${(test!.winRate * 100).toFixed(1)}% (floor ${(test!.winRateLower * 100).toFixed(1)}%) against a ${(BREAK_EVEN * 100).toFixed(1)}% break-even.`
+              ? `The market's live re-measurement has turned negative: ${test!.nShots} shots at ${(test!.winRate * 100).toFixed(1)}% (floor ${(test!.winRateLower * 100).toFixed(1)}%) against a ${(ANCHOR_BREAK_EVEN * 100).toFixed(1)}% break-even.`
               : "",
         };
-        session.needsRescan = alerting;
+        // Locked: the market is held and the user is TOLD, then the session ends.
+        // Switching: the rotation above already handles a better market, so a
+        // drift here is surfaced but never hard-stops the session.
+        if (!SWITCHING) session.needsRescan = alerting;
       }
 
       if (!cachedRead) {
         session.watch.phase = "watching";
-        session.message = `Building history on ${LOCKED_NAME} — ${digits.length}/${MIN_HISTORY} digits before the locked rule can be re-checked.`;
+        session.message = `Building history on ${activeName} — ${digits.length}/${MIN_HISTORY} digits before the plan can be re-checked.`;
         broadcast();
         await sleep(1500);
         continue;
       }
 
-      // ── THE RESCAN ALERT ───────────────────────────────────────────────────
-      // The market is locked, so a market that has changed is handled by holding
-      // fire and TELLING THE USER, never by rotating. After enough consecutive
-      // flags the session ends and asks for a fresh analysis.
-      if (session.watch.health.needsRescan) {
+      // ── THE RESCAN ALERT (locked mode only) ────────────────────────────────
+      if (!SWITCHING && session.watch.health.needsRescan) {
         session.watch.phase = "watching";
         timingWaitTicks = 0;
         if (healthEvals >= RESCAN_HALT_EVALS) {
           session.running = false;
           session.needsRescan = true;
           session.message =
-            `🛑 RESCAN REQUIRED — ${LOCKED_NAME} is no longer the market this session was locked to. ` +
+            `🛑 RESCAN REQUIRED — ${activeName} is no longer the market this session was locked to. ` +
             `${session.watch.health.note} The lock is never moved silently, so the session has ended: re-run the analysis to pick a fresh market.`;
           broadcast();
           return;
         }
         session.message =
-          `⚠️ RESCAN REQUIRED — holding fire on ${LOCKED_NAME}. ${session.watch.health.note} ` +
+          `⚠️ RESCAN REQUIRED — holding fire on ${activeName}. ${session.watch.health.note} ` +
           `No market switching: stop and re-analyse, or wait — if the market recovers the bot resumes on its own (${healthEvals}/${RESCAN_HALT_EVALS}).`;
         broadcast();
         await sleep(2000);
@@ -871,69 +1081,79 @@ async function runLoop(config: KillShotConfig) {
       // The live re-read's verdict is displayed, never re-imposed. Certification
       // is a DEPLOYMENT decision the user already made on measured evidence; if
       // it were re-run as a live gate, every marginal market would spend its life
-      // flickering across the bar and the bot would be un-tradeable for exactly
-      // the reason its predecessor was. What the re-read is for is detecting that
-      // the market has CHANGED (handled above), and everything else is left to
-      // the frozen rule: the edge bar, the post-loss shield and the tick.
+      // flickering across the bar. What the re-read is for is detecting that the
+      // market has CHANGED (handled above), and everything else is left to the
+      // measured rule: the edge bar, the post-loss shield and the tick.
 
-      // ── GATE 2 + 3: EDGE, with the post-loss SHIELD applied ────────────────
-      // The shield is the rule the scan simulated: after a loss the bar rises by
-      // `postLossTightening` σ per step of the run, and a cool-down is enforced.
-      // Recovery shots inherit one extra step of tightening on top — the debt is
-      // already geometric, so the last thing it needs is a hurried entry.
+      // ── GATE 2 + 3: EDGE + SHIELD — pick the strongest ready setup ─────────
+      // Every contract in the plan (every digit for an AI Matches/Differs) is
+      // measured with its OWN frozen card and the SAME post-loss shield. The bot
+      // fires the single strongest ready setup — so it trades BETWEEN the
+      // user's contracts, and an AI digit re-resolves live, tick by tick.
       const barBoost = Math.min(
         MAX_BAR_BOOST,
-        CARD.postLossTightening * (lossRun + (inRecovery ? 1 : 0)),
+        SPEC.postLossTightening * (lossRun + (inRecovery ? 1 : 0)),
       );
-      const entry = evaluateLiveEntry(digits, LOCKED_WINSET, CARD, {
-        barBoost,
-        ticksSinceLoss,
-      });
-      session.watch.p = entry.p;
-      session.watch.z = entry.z;
-      session.watch.edgeZ = entry.edgeZ;
-      session.watch.bar = entry.bar;
-      session.watch.tau = entry.tau;
-      session.watch.marginZ = entry.marginZ;
-      session.watch.leader = entry.leader;
-      session.watch.contextOrder = entry.contextOrder;
-      session.watch.contextCount = entry.contextCount;
-      session.watch.regimeHot = entry.regimeHot;
-      session.watch.experts = entry.experts;
+      let lead: { ac: ActiveContract; entry: LiveEntry } | null = null;
+      let ready: { ac: ActiveContract; entry: LiveEntry } | null = null;
+      for (const leg of legs) {
+        for (const ac of leg.contracts) {
+          const e = evaluateLiveEntry(digits, shotWinSet(ac.contract), ac.card, { barBoost, ticksSinceLoss });
+          if (!lead || e.marginZ > lead.entry.marginZ) lead = { ac, entry: e };
+          if (e.ready && (!ready || e.marginZ > ready.entry.marginZ)) ready = { ac, entry: e };
+        }
+      }
+      if (lead) {
+        session.watch.p = lead.entry.p;
+        session.watch.z = lead.entry.z;
+        session.watch.edgeZ = lead.entry.edgeZ;
+        session.watch.bar = lead.entry.bar;
+        session.watch.tau = lead.entry.tau;
+        session.watch.marginZ = lead.entry.marginZ;
+        session.watch.leader = lead.entry.leader;
+        session.watch.contextOrder = lead.entry.contextOrder;
+        session.watch.contextCount = lead.entry.contextCount;
+        session.watch.regimeHot = lead.entry.regimeHot;
+        session.watch.experts = lead.entry.experts;
+      }
       session.watch.shield = {
         lossRun,
         barBoost: Math.round(barBoost * 100) / 100,
         ticksSinceLoss: Number.isFinite(ticksSinceLoss) ? ticksSinceLoss : 999,
-        coolTicks: CARD.postLossCoolTicks,
+        coolTicks: SPEC.postLossCoolTicks,
         active: barBoost > 0,
       };
+      session.currentContractType = lead ? shotLabel(lead.ac.contract) : PLAN_LABEL;
 
-      if (!entry.ready) {
+      if (!ready) {
         session.watch.phase = "watching";
         timingWaitTicks = 0;
         session.watch.entry = {
-          ready: false, score: 0, waitTicks: 0, reason: entry.reason,
+          ready: false, score: 0, waitTicks: 0, reason: lead?.entry.reason ?? "measuring the plan",
           momentumPP: 0, gapRatio: 0, preferredState: "none", stateEdgePP: 0,
         };
         session.watch.setupsRejected++;
         session.message = inRecovery
-          ? `🎯 Recovery armed — waiting for a qualifying edge. ${entry.reason}`
-          : `👁 Watching ${LOCKED_NAME} · live read ${cachedRead.verdict.toUpperCase()} ${cachedRead.confidence}/100 · ${entry.reason}`;
+          ? `🎯 Recovery armed — waiting for a qualifying edge. ${lead?.entry.reason ?? ""}`
+          : `👁 Watching ${activeName} · live read ${cachedRead.verdict.toUpperCase()} ${cachedRead.confidence}/100 · ${lead?.entry.reason ?? "measuring"}`;
         broadcast();
         await sleep(900);
         continue;
       }
+      const FIRE = ready.ac;
+      const entry = ready.entry;
 
-      // ── GATE 4: is THIS the tick? ──────────────────────────────────────────
+      // ── GATE 4: is THIS the tick? (for the chosen contract) ────────────────
       session.watch.phase = "armed";
+      const FIRE_WINSET = shotWinSet(FIRE.contract);
       const timing = evaluateTiming({
         digits,
-        winSet: LOCKED_WINSET,
-        secondsSinceLastTick: tickManager.getTickAgeSeconds(LOCKED_SYMBOL),
-        medianTickGapSeconds: LOCKED_SYMBOL.startsWith("1HZ") ? 1 : 2,
+        winSet: FIRE_WINSET,
+        secondsSinceLastTick: tickManager.getTickAgeSeconds(activeSymbol),
+        medianTickGapSeconds: activeSymbol.startsWith("1HZ") ? 1 : 2,
         ticksSinceLastShot,
         waitedTicks: timingWaitTicks,
-        minSpacing: CARD.minSpacing,
+        minSpacing: FIRE.card.minSpacing,
       });
       session.watch.entry = {
         ready: timing.ready,
@@ -951,7 +1171,7 @@ async function runLoop(config: KillShotConfig) {
         session.watch.setupsRejected++;
         session.message = inRecovery
           ? `🎯 Recovery armed (edge ${entry.z.toFixed(2)}σ) — ${timing.reason}`
-          : `⏳ Armed on ${LOCKED_NAME} · edge ${entry.z.toFixed(2)}σ vs ${entry.bar.toFixed(2)}σ bar — ${timing.reason}`;
+          : `⏳ Armed on ${activeName} · ${shotLabel(FIRE.contract)} · edge ${entry.z.toFixed(2)}σ vs ${entry.bar.toFixed(2)}σ bar — ${timing.reason}`;
         broadcast();
         await sleep(900);
         continue;
@@ -959,31 +1179,33 @@ async function runLoop(config: KillShotConfig) {
       timingWaitTicks = 0;
       broadcast();
 
-      // Lock integrity — re-asserted immediately before every buy.
-      if (LOCKED_CONTRACT.kind !== config.contract.kind
-          || LOCKED_CONTRACT.digit !== config.contract.digit
-          || LOCKED_SYMBOL !== config.symbol
-          || !isAutomatedMarket(LOCKED_SYMBOL)) {
+      // Lock integrity — re-asserted immediately before every buy: the market
+      // must still be tradeable, and the chosen contract must be one the user
+      // actually put in the plan (a resolved AI digit belongs to its plan entry).
+      const inPlan = config.contracts.some(c =>
+        c.kind === FIRE.contract.kind && (c.digit === undefined || c.digit === FIRE.contract.digit));
+      if (!isAutomatedMarket(activeSymbol) || !inPlan) {
         session.running = false;
         session.message = "⚠️ Lock integrity check failed — session halted before firing";
-        logger.error({ LOCKED_SYMBOL, LOCKED_CONTRACT, config }, "Kill-Shot lock violation");
+        logger.error({ activeSymbol, fire: FIRE.contract, config }, "Kill-Shot lock violation");
         broadcast();
         return;
       }
 
-      const barrier = LOCKED_CONTRACT.kind === "even" || LOCKED_CONTRACT.kind === "odd"
+      const FIRE_TYPE = KILLSHOT_CONTRACT_TYPE[FIRE.contract.kind];
+      const barrier = FIRE.contract.kind === "even" || FIRE.contract.kind === "odd"
         ? undefined
-        : LOCKED_CONTRACT.digit;
+        : FIRE.contract.digit;
 
       const payoutQuote = await resolveRecoveryPayout({
-        symbol: LOCKED_SYMBOL,
-        contractType: LOCKED_TYPE,
+        symbol: activeSymbol,
+        contractType: FIRE_TYPE,
         barrier,
         duration: 1,
         durationUnit: "t",
         currency,
       });
-      const payout = payoutQuote.payoutMultiplier || shotPayout(LOCKED_CONTRACT);
+      const payout = payoutQuote.payoutMultiplier || shotPayout(FIRE.contract);
 
       if (inRecovery) {
         try {
@@ -1004,27 +1226,27 @@ async function runLoop(config: KillShotConfig) {
       const sharedStep = recoveryEngine.getState().recoveryStep;
       session.watch.phase = "firing";
       session.currentStake = stake;
-      session.currentMarket = LOCKED_NAME;
-      session.currentContractType = shotLabel(LOCKED_CONTRACT);
+      session.currentMarket = activeName;
+      session.currentContractType = shotLabel(FIRE.contract);
       session.message = inRecovery
-        ? `🎯 KILL SHOT [Recovery R${sharedStep}] ${shotLabel(LOCKED_CONTRACT)} on ${LOCKED_NAME} · $${stake.toFixed(2)} · edge ${entry.z.toFixed(2)}σ · P ${(entry.p * 100).toFixed(1)}%`
-        : `🎯 KILL SHOT ${shotLabel(LOCKED_CONTRACT)} on ${LOCKED_NAME} · $${stake.toFixed(2)} · edge ${entry.z.toFixed(2)}σ vs ${entry.bar.toFixed(2)}σ bar · P ${(entry.p * 100).toFixed(1)}%`;
+        ? `🎯 KILL SHOT [Recovery R${sharedStep}] ${shotLabel(FIRE.contract)} on ${activeName} · $${stake.toFixed(2)} · edge ${entry.z.toFixed(2)}σ · P ${(entry.p * 100).toFixed(1)}%`
+        : `🎯 KILL SHOT ${shotLabel(FIRE.contract)} on ${activeName} · $${stake.toFixed(2)} · edge ${entry.z.toFixed(2)}σ vs ${entry.bar.toFixed(2)}σ bar · P ${(entry.p * 100).toFixed(1)}%`;
       broadcast();
 
-      const reason = `[${BOT_NAME}${inRecovery ? " RECOVERY" : ""}] ${shotLabel(LOCKED_CONTRACT)} on ${LOCKED_NAME} · ` +
-        `${SPEC.label} · live verdict ${cachedRead.verdict} ${cachedRead.confidence}/100 · ` +
-        `edge ${entry.z.toFixed(2)}σ vs bar ${entry.bar.toFixed(2)}σ (τ ${CARD.tau.toFixed(2)}, boost ${barBoost.toFixed(2)}) · ` +
+      const reason = `[${BOT_NAME}${inRecovery ? " RECOVERY" : ""}] ${shotLabel(FIRE.contract)} on ${activeName} · ` +
+        `${SPEC.label} · ${SWITCHING ? "switching" : "locked"} · live read ${cachedRead.verdict} ${cachedRead.confidence}/100 · ` +
+        `edge ${entry.z.toFixed(2)}σ vs bar ${entry.bar.toFixed(2)}σ (τ ${entry.tau.toFixed(2)}, boost ${barBoost.toFixed(2)}) · ` +
         `P(win|context) ${(entry.p * 100).toFixed(1)}% from ${entry.leader} (order ${entry.contextOrder}, n ${entry.contextCount}), regime hot ${(entry.regimeHot * 100).toFixed(0)}% · ` +
-        `out-of-sample rule: ${cachedRead.walk.test.nShots} shots at ${(cachedRead.walk.test.winRate * 100).toFixed(1)}% on ${cachedRead.walk.testTicks} unseen ticks, e-value ${cachedRead.walk.test.evidence.peak.toFixed(1)} · ` +
+        `plan ${PLAN_LABEL} · out-of-sample rule: ${cachedRead.walk.test.nShots} shots at ${(cachedRead.walk.test.winRate * 100).toFixed(1)}% on ${cachedRead.walk.testTicks} unseen ticks, e-value ${cachedRead.walk.test.evidence.peak.toFixed(1)} · ` +
         `ladder safety ${(cachedRead.ladder.safety * 100).toFixed(1)}% (limit ${cachedRead.ladder.limit}) · ` +
         `entry ${timing.score}/100 (${timing.components.preferredState === "none" ? "state neutral" : timing.components.preferredState}, renewal ${timing.components.gapRatio.toFixed(2)}×) · ` +
         `watched ${session.watch.ticksWatched} ticks, declined ${session.watch.setupsRejected} setups`;
 
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
-        symbol: LOCKED_SYMBOL,
-        displayName: LOCKED_NAME,
-        contractType: LOCKED_TYPE,
+        symbol: activeSymbol,
+        displayName: activeName,
+        contractType: FIRE_TYPE,
         barrier: barrier ?? null,
         stake: String(Math.round(stake * 100) / 100),
         direction: "hold",
@@ -1040,14 +1262,14 @@ async function runLoop(config: KillShotConfig) {
       // ── Execute ────────────────────────────────────────────────────────────
       let won: boolean;
       let profit: number;
-      let entryPrice = tickManager.getLatestPrice(LOCKED_SYMBOL) ?? 0;
+      let entryPrice = tickManager.getLatestPrice(activeSymbol) ?? 0;
       let exitPrice = entryPrice;
 
       if (isLive) {
         try {
           const liveResult = await executeLiveTrade(token!, {
-            symbol: LOCKED_SYMBOL,
-            contractType: LOCKED_TYPE,
+            symbol: activeSymbol,
+            contractType: FIRE_TYPE,
             stake: Math.round(stake * 100) / 100,
             duration: 1,
             durationUnit: "t",
@@ -1081,16 +1303,16 @@ async function runLoop(config: KillShotConfig) {
         // Paper mode settles against the market's REAL next digit — the digit
         // stream is this bot's entire thesis, so a coin flip would be meaningless.
         session.watch.phase = "settling";
-        const before = tickManager.getDigits(LOCKED_SYMBOL, 1)[0];
+        const before = tickManager.getDigits(activeSymbol, 1)[0];
         let digit = before;
         for (let i = 0; i < 40; i++) {
           await sleep(120);
-          const d = tickManager.getDigits(LOCKED_SYMBOL, 1)[0];
+          const d = tickManager.getDigits(activeSymbol, 1)[0];
           if (d !== undefined && d !== before) { digit = d; break; }
           digit = d;
         }
         const d = digit ?? 0;
-        won = LOCKED_WINSET.has(d);
+        won = FIRE_WINSET.has(d);
         profit = won ? stake * (payout - 1) : -stake;
       }
 
@@ -1113,7 +1335,7 @@ async function runLoop(config: KillShotConfig) {
       }
 
       // The ONE shared ledger — same call, same semantics, as every other bot.
-      recoveryEngine.recordOutcome(won, profit, stake, config.maxRecoverySteps, LOCKED_TYPE, payout);
+      recoveryEngine.recordOutcome(won, profit, stake, config.maxRecoverySteps, FIRE_TYPE, payout);
 
       if (inRecovery) {
         session.consecutiveRecoveryLosses = won ? 0 : session.consecutiveRecoveryLosses + 1;
@@ -1149,23 +1371,23 @@ async function runLoop(config: KillShotConfig) {
       }
 
       // The next shot must earn its own evidence: reset the timing state and the
-      // shot clock, keep the lock. Only the evidence is discarded, never the market.
+      // shot clock. Only the evidence is discarded — the plan and the market stay.
       session.watch = {
         ...freshWatch(),
         ticksWatched: session.watch.ticksWatched,
         setupsRejected: session.watch.setupsRejected,
         confidence: cachedRead.confidence,
         verdict: cachedRead.verdict,
-        tau: CARD.tau,
+        tau: entry.tau,
         health: session.watch.health,
       };
       ticksSinceLastShot = 0;
       timingWaitTicks = 0;
       lastReadAt = 0; // force a fresh market read before the next shot
       session.message = won
-        ? `✅ Shot landed — +$${profit.toFixed(2)}. ${session.winCount}/${session.tradeCount} this session, deepest loss run ${session.deepestLossRun}. Back to watching.`
-        : `❌ Shot missed — −$${Math.abs(profit).toFixed(2)} (run ${session.currentLossRun}/${cachedRead.ladder.limit}). ` +
-          `Post-loss shield engaged: bar +${(CARD.postLossTightening * lossRun).toFixed(2)}σ and a ${CARD.postLossCoolTicks}-tick cool-down before the next shot is even considered.`;
+        ? `✅ ${shotLabel(FIRE.contract)} landed — +$${profit.toFixed(2)}. ${session.winCount}/${session.tradeCount} this session, deepest loss run ${session.deepestLossRun}. Back to watching.`
+        : `❌ ${shotLabel(FIRE.contract)} missed — −$${Math.abs(profit).toFixed(2)} (run ${session.currentLossRun}/${cachedRead.ladder.limit}). ` +
+          `Post-loss shield engaged: bar +${(SPEC.postLossTightening * lossRun).toFixed(2)}σ and a ${SPEC.postLossCoolTicks}-tick cool-down before the next shot is even considered.`;
       broadcast();
 
       // ── Boundaries ─────────────────────────────────────────────────────────

@@ -261,6 +261,80 @@ export function validateShotContract(raw: any): { ok: true; contract: ShotContra
   return { ok: true, contract: { kind, digit: d } };
 }
 
+// ── Contract PLANS — the user's freedom to pick any combination ──────────────
+//
+// The single-contract product rule ("exactly one side, never both") is replaced
+// by a PLAN: a non-empty set of contracts the user may trade BETWEEN, in the
+// same (locked) market. Both sides of a pair are now legal — Even+Odd,
+// Over A+Under B, a mix, or a single contract. Each contract in the plan is
+// still scored and executed by the SAME per-contract machinery; the plan only
+// adds a selection layer on top. This is deliberately additive: `validateShotContract`,
+// `evaluateCandidate`, `evaluateLiveEntry` and `screenCandidates` are unchanged.
+
+/** A plan is a non-empty set of contracts the user may fire between. */
+export type ShotPlan = ShotContract[];
+
+/** A stable key identifying a contract within a plan (and its measured card). */
+export function shotKey(c: ShotContract): string {
+  const digit =
+    c.kind === "match" || c.kind === "differ"
+      ? c.digit === undefined
+        ? "AI"
+        : String(c.digit)
+      : c.digit === undefined
+        ? ""
+        : String(c.digit);
+  return `${c.kind}:${digit}`;
+}
+
+/**
+ * Expand a plan into the concrete digit contracts that must be scored.
+ * A Matches/Differs left to the AI fans out to all ten digits (the AI resolves
+ * the digit LIVE during the session); every other contract passes through.
+ */
+export function expandPlan(contracts: ShotContract[]): ShotContract[] {
+  const out: ShotContract[] = [];
+  for (const c of contracts) {
+    if ((c.kind === "match" || c.kind === "differ") && c.digit === undefined) {
+      for (let d = 0; d <= 9; d++) out.push({ kind: c.kind, digit: d });
+    } else {
+      out.push(c);
+    }
+  }
+  return out;
+}
+
+/**
+ * Validate a whole plan: a non-empty, de-duplicated set of individually valid
+ * contracts. Duplicates are refused (there is nothing to gain from naming the
+ * same contract twice); BOTH sides of a pair are now explicitly allowed.
+ */
+export function validateShotPlan(raw: any): { ok: true; contracts: ShotContract[] } | { ok: false; error: string } {
+  const list = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  if (list.length === 0) return { ok: false, error: "Choose at least one contract to trade" };
+  const seen = new Set<string>();
+  const contracts: ShotContract[] = [];
+  for (const entry of list) {
+    const v = validateShotContract(entry);
+    if (!v.ok) return v;
+    const k = shotKey(v.contract);
+    if (seen.has(k)) return { ok: false, error: `You already chose ${shotLabel(v.contract)}` };
+    seen.add(k);
+    contracts.push(v.contract);
+  }
+  return { ok: true, contracts };
+}
+
+/** A plan label for the UI and the journal. */
+export function shotPlanLabel(contracts: ShotContract[]): string {
+  return contracts.map(shotLabel).join("  +  ");
+}
+
+/** The contract the plan is anchored on for market-health monitoring. */
+export function planAnchor(contracts: ShotContract[]): ShotContract {
+  return contracts[0]!;
+}
+
 // ── Numeric helpers ───────────────────────────────────────────────────────────
 
 function clampIndex(v: number, lo: number, hi: number): number {

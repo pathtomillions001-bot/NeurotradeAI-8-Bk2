@@ -182,12 +182,14 @@ export default function Connect() {
   }, []);
 
   // ── Surface Deriv app configuration problems (bad or missing app id) ──────
-  // The healthz endpoint probes auth.deriv.com and reports whether
-  // DERIV_APP_ID is actually registered. Without this, users just see a
-  // generic failure when the server's app id is wrong.
+  // The healthz endpoint probes auth.deriv.com — including THIS page's exact
+  // OAuth redirect URL — and reports whether the app id and redirect URL are
+  // actually registered. Without this, users just get bounced to Deriv's own
+  // "We couldn't find that page" error page with no explanation.
   useEffect(() => {
     const BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
-    fetch(`${BASE}/api/healthz`)
+    const redirectUri = encodeURIComponent(buildRedirectUri());
+    fetch(`${BASE}/api/healthz?redirect_uri=${redirectUri}`)
       .then((r) => (r.ok ? r.json() : null))
       .then((health: {
         deriv?: {
@@ -196,13 +198,14 @@ export default function Connect() {
         };
       } | null) => {
         const deriv = health?.deriv;
+        const oauth = deriv?.oauthClient;
         if (deriv && !deriv.appIdConfigured) {
           setOauthConfigWarning(
             "Deriv sign-in is not configured on the server yet (DERIV_APP_ID is missing). " +
             "Manual PAT tokens will also be rejected until it is set.",
           );
-        } else if (deriv?.oauthClient?.status === "unregistered") {
-          setOauthConfigWarning(deriv.oauthClient.detail ?? null);
+        } else if (oauth?.status === "unregistered" || oauth?.status === "redirect_mismatch") {
+          setOauthConfigWarning(oauth.detail ?? null);
         }
       })
       .catch(() => { /* diagnostics only — never block the page */ });

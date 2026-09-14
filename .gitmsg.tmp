@@ -1,0 +1,10 @@
+﻿fix(isolation): per-account engine arbiter + OAuth callback fix
+
+- Engine arbiter is now keyed by account session id instead of a global
+  singleton: each connected Deriv account runs its autonomous engine,
+  bots and journal fully independently, even in the same browser/laptop.
+- All engines (speed-ai, bot, dual-lock, killshot, killshot-family,
+  twin-hedge) register ownership under the account session, so enabling
+  autonomous trading in one account can never disable another's.
+- healthz reports per-ownership state; connect page surfaces OAuth
+  callback errors.

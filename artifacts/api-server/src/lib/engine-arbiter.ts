@@ -1,78 +1,75 @@
 /**
- * Trading Execution Arbiter
+ * Trading Execution Arbiter — SESSION-SCOPED
  *
- * ONE account = ONE recovery ledger = ONE executing engine at a time.
+ * ONE ACCOUNT = ONE recovery ledger = ONE executing engine at a time — but
+ * DIFFERENT accounts run completely independently. The ownership lock is keyed
+ * by account session (browser session id): an autonomous engine trading on
+ * account A never blocks (or is blocked by) a NeuroAI FAB session or a
+ * specialist bot trading on account B, even when both apps are open in the
+ * same browser or the same Google account.
  *
- * Root cause of the "normal/recovery mix-up" incident: the main autonomous
- * engine (`runAutonomousLoop` in routes/ai.ts) and the NeuroAI FAB engine
- * (`runLoop` in lib/speed-ai-engine.ts) could trade the same Deriv account
- * simultaneously while each tracked its own private recovery state. Every win
- * or loss was only visible to the engine that placed it, so the merged account
- * journal looked schizophrenic: normal trades appeared while one engine was in
- * recovery (they belonged to the other engine), and a fully-covering recovery
- * win did not stop the other engine's recovery trades (its debt was still open).
+ * Root cause of the "normal/recovery mix-up" incident (within ONE account):
+ * the main autonomous engine (`runAutonomousLoop` in routes/ai.ts) and the
+ * NeuroAI FAB engine (`runLoop` in lib/speed-ai-engine.ts) could trade the
+ * same Deriv account simultaneously while each tracked its own private
+ * recovery state. Every win or loss was only visible to the engine that placed
+ * it, so the merged account journal looked schizophrenic. Recovery debt is
+ * account-level, so exactly one engine may execute against each account's
+ * ledger at any moment. Ownership only blocks TRADE EXECUTION — status
+ * endpoints, scanning, and analysis always work.
  *
- * Recovery debt is account-level: there is exactly one shared recovery ledger
- * (`lib/agents/recovery-engine.ts`), and this module enforces that exactly one
- * engine may execute against it at any moment. Ownership only blocks TRADE
- * EXECUTION — status endpoints, scanning, and analysis always work.
+ * Three executors share each per-session lock: the main autonomous engine
+ * (`autonomous`), the NeuroAI Quantum FAB (`neuroai`) and the specialist AI
+ * bots (`bots`).
  *
- * Three executors share this lock: the main autonomous engine (`autonomous`),
- * the NeuroAI Quantum FAB (`neuroai`), and the specialist AI bots (`bots` —
- * one bot session at a time). They all share the live ledger and must not
- * execute together.
+ * Session resolution: an explicit `sessionId` argument wins; otherwise the
+ * AsyncLocalStorage browser-session context is used (set for every request by
+ * the browserSession middleware and for every engine loop via runWithSession);
+ * calls with no context at all (e.g. tests) share the legacy global bucket,
+ * preserving the pre-multi-account behaviour.
  */
 
 import { getBrowserSessionId } from "./session";
 
 export type TradingOwner = "autonomous" | "neuroai" | "bots";
 
-/**
- * One execution lock PER CONNECTED ACCOUNT (browser session), not one per
- * process. The original single global meant an engine running on Deriv
- * account A blocked every engine on Deriv account B with "another engine is
- * trading this account" — even though they trade different accounts with
- * different recovery ledgers.
- *
- * Within one account the rule is unchanged: exactly one of the three
- * executors may trade at a time. The ambient session (request context or an
- * explicitly wrapped engine loop — see runWithSessionId) selects the lock,
- * so no call site needed to change.
- */
-const activeOwnerBySession = new Map<string, TradingOwner>();
+const ownersBySession = new Map<string, TradingOwner>();
 
-function sessionKey(): string {
-  return getBrowserSessionId();
+function scopeKey(sessionId?: string): string {
+  if (sessionId) return sessionId;
+  const contextual = getBrowserSessionId();
+  return contextual && contextual !== "legacy" ? contextual : "legacy";
 }
 
 /**
- * Take trading ownership for `owner`. Idempotent for the current owner.
- * Returns false when the other engine already owns execution.
+ * Take trading ownership for `owner` on `sessionId`'s account. Idempotent for
+ * the current owner of that account. Returns false when another engine already
+ * owns execution on THAT account (other accounts are unaffected).
  */
-export function acquireTradingOwnership(owner: TradingOwner): boolean {
-  const key = sessionKey();
-  const activeOwner = activeOwnerBySession.get(key) ?? null;
-  if (activeOwner === null || activeOwner === owner) {
-    activeOwnerBySession.set(key, owner);
+export function acquireTradingOwnership(owner: TradingOwner, sessionId?: string): boolean {
+  const key = scopeKey(sessionId);
+  const active = ownersBySession.get(key) ?? null;
+  if (active === null || active === owner) {
+    ownersBySession.set(key, owner);
     return true;
   }
   return false;
 }
 
-/** Give up trading ownership. Only the current owner can release it. */
-export function releaseTradingOwnership(owner: TradingOwner): void {
-  const key = sessionKey();
-  if (activeOwnerBySession.get(key) === owner) activeOwnerBySession.delete(key);
+/** Give up trading ownership on `sessionId`'s account. Only the current owner can release it. */
+export function releaseTradingOwnership(owner: TradingOwner, sessionId?: string): void {
+  const key = scopeKey(sessionId);
+  if (ownersBySession.get(key) === owner) ownersBySession.delete(key);
 }
 
-/** Which engine currently owns trade execution, if any. */
-export function currentTradingOwner(): TradingOwner | null {
-  return activeOwnerBySession.get(sessionKey()) ?? null;
+/** Which engine currently owns trade execution on `sessionId`'s account, if any. */
+export function currentTradingOwner(sessionId?: string): TradingOwner | null {
+  return ownersBySession.get(scopeKey(sessionId)) ?? null;
 }
 
-/** True when `owner` holds the execution lock right now. */
-export function hasTradingOwnership(owner: TradingOwner): boolean {
-  return activeOwnerBySession.get(sessionKey()) === owner;
+/** True when `owner` holds the execution lock on `sessionId`'s account right now. */
+export function hasTradingOwnership(owner: TradingOwner, sessionId?: string): boolean {
+  return ownersBySession.get(scopeKey(sessionId)) === owner;
 }
 
 /** Human-readable owner label for error messages and UI toasts. */

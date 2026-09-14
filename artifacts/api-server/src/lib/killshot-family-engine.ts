@@ -55,8 +55,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
-import { registerLiveBot } from "./live-registry";
+import { runWithSession } from "./session";
 import {
   evaluateCandidate,
   evaluateLiveEntry,
@@ -376,12 +375,7 @@ function freshSession(): SessionState {
   };
 }
 
-// One independent session per connected Deriv account (browser session).
-// Every `session.foo` line below is untouched — the proxy routes each access
-// to the calling session's own state. Whole-state resets go through
-// replaceSession(); the runLoop chain is wrapped in the owner's context.
-const { state: session, replace: replaceSession } =
-  createSessionScoped<SessionState>(freshSession);
+let session: SessionState = freshSession();
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -578,7 +572,7 @@ export async function startSession(config: FamilyConfig): Promise<{ ok: boolean;
   const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === config.symbol);
   if (!market || !market.digitEnabled) return fail("This bot needs a digit-enabled market");
 
-  replaceSession({
+  session = {
     ...freshSession(),
     running: true,
     sessionId: `bot_family_${Date.now()}`,
@@ -593,7 +587,7 @@ export async function startSession(config: FamilyConfig): Promise<{ ok: boolean;
     message: config.marketMode === "locked"
       ? `Locked on ${config.displayName} — the edge may move, the market will not.`
       : `Deployed on ${config.displayName} — will move to a better market when this one cools.`,
-  });
+  };
 
   logger.info({
     botId: config.botId,
@@ -605,18 +599,15 @@ export async function startSession(config: FamilyConfig): Promise<{ ok: boolean;
   }, "Kill-Shot family session starting");
   broadcast();
 
-  // Publish to the cross-session live registry (lib/live-registry.ts).
-  registerLiveBot("killshot-family", () => getStatus());
-
-  // Pin the whole loop chain to the owner's session context so every
-  // session-scoped store it touches resolves to this account.
-  const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
-  runWithSessionId(loopSessionId, () => runLoop(config).catch(err => {
-    logger.error({ err }, "Kill-Shot family runLoop error");
-    session.running = false;
-    session.message = `⚠️ ${friendlyErrorMessage(err)}`;
-    broadcast();
-  }).finally(() => releaseTradingOwnership("bots")));
+  // Bind this engine's account session into AsyncLocalStorage — see engine-arbiter.
+  runWithSession(config.ownerSessionId ?? "legacy", () =>
+    runLoop(config).catch(err => {
+      logger.error({ err }, "Kill-Shot family runLoop error");
+      session.running = false;
+      session.message = `⚠️ ${friendlyErrorMessage(err)}`;
+      broadcast();
+    }).finally(() => releaseTradingOwnership("bots"))
+  );
 
   return { ok: true };
 }

@@ -17,21 +17,28 @@ const router: IRouter = Router();
 // 401 (PAT auth requires a valid registered Deriv-App-ID). Probe the endpoint
 // here so `GET /api/healthz` reports the real status instantly.
 
-type OauthClientStatus = "ok" | "not_configured" | "unregistered" | "unknown";
+type OauthClientStatus = "ok" | "not_configured" | "unregistered" | "redirect_mismatch" | "unknown";
 
 interface OauthClientProbe {
   status: OauthClientStatus;
   detail?: string;
+  redirectUri?: string;
   checkedAt: string;
 }
 
-let oauthClientProbeCache: { value: OauthClientProbe; expiresAt: number } | null = null;
-const OAUTH_PROBE_TTL_MS = 5 * 60 * 1000;
+const oauthClientProbeCache = new Map<string, { value: OauthClientProbe; expiresAt: number }>();
+const OAUTH_PROBE_TTL_MS = 60 * 1000;
 
-async function probeDerivOauthClient(appId: string, authBase: string): Promise<OauthClientProbe> {
+async function probeDerivOauthClient(
+  appId: string,
+  authBase: string,
+  redirectUri?: string,
+): Promise<OauthClientProbe> {
   const checkedAt = new Date().toISOString();
-  if (oauthClientProbeCache && oauthClientProbeCache.expiresAt > Date.now()) {
-    return oauthClientProbeCache.value;
+  const cacheKey = `${appId}|${redirectUri ?? "dummy"}`;
+  const cached = oauthClientProbeCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
   }
 
   let value: OauthClientProbe;
@@ -41,7 +48,7 @@ async function probeDerivOauthClient(appId: string, authBase: string): Promise<O
     const params = new URLSearchParams({
       response_type: "code",
       client_id: appId,
-      redirect_uri: "https://example.com/callback",
+      redirect_uri: redirectUri ?? "https://example.com/callback",
       scope: "trade",
       state: "healthz-probe",
       code_challenge: "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
@@ -54,21 +61,36 @@ async function probeDerivOauthClient(appId: string, authBase: string): Promise<O
       });
       // Deriv responds with a 302 to an error page when the request is
       // rejected. error=invalid_client means the app id itself is not
-      // registered. Any other error (e.g. about this probe's dummy redirect
-      // URI) still proves the client exists, so it counts as "ok".
+      // registered. When probing with the app's REAL redirect URL (supplied by
+      // the Connect page), ANY other error (typically invalid_request about
+      // redirect_uri) is a genuine configuration problem every user will hit
+      // on "Sign in with Deriv" — Deriv bounces them to its own
+      // "We couldn't find that page" error page.
       const location = res.headers.get("location") ?? "";
       const errMatch = /[?&]error=([^&]+)/.exec(location);
-      if (errMatch && decodeURIComponent(errMatch[1]!) === "invalid_client") {
+      const errorCode = errMatch ? decodeURIComponent(errMatch[1]!) : null;
+      if (errorCode === "invalid_client") {
         value = {
           status: "unregistered",
           detail:
             `Deriv does not recognize DERIV_APP_ID "${appId}". Register the app at ` +
-            "https://app.deriv.com/apps, add this site's /connect URL (e.g. " +
-            "https://neuro-trade.site/connect) as an allowed redirect URL, then update " +
-            "DERIV_APP_ID on the api service (and VITE_DERIV_APP_ID on web) and redeploy.",
+            "https://app.deriv.com/apps, then update DERIV_APP_ID on the api service " +
+            "(and VITE_DERIV_APP_ID on web) and redeploy.",
+          checkedAt,
+        };
+      } else if (errorCode && redirectUri) {
+        value = {
+          status: "redirect_mismatch",
+          detail:
+            `Deriv rejected the redirect URL ${redirectUri} (${errorCode}). Open ` +
+            "https://app.deriv.com/apps → your app → redirect URLs and add " +
+            `${redirectUri} EXACTLY as written (https, no trailing slash), then try again.`,
+          redirectUri,
           checkedAt,
         };
       } else {
+        // Dummy-URI probe (no redirect_uri supplied — e.g. Railway healthcheck):
+        // any non-invalid_client error still proves the client exists.
         value = { status: "ok", checkedAt };
       }
     } catch {
@@ -80,7 +102,7 @@ async function probeDerivOauthClient(appId: string, authBase: string): Promise<O
     }
   }
 
-  oauthClientProbeCache = { value, expiresAt: Date.now() + OAUTH_PROBE_TTL_MS };
+  oauthClientProbeCache.set(cacheKey, { value, expiresAt: Date.now() + OAUTH_PROBE_TTL_MS });
   return value;
 }
 
@@ -99,7 +121,7 @@ async function probeDerivOauthClient(appId: string, authBase: string): Promise<O
  *    OAuth "Sign in with Deriv").
  *  - tickFeed — whether the Deriv public WebSocket is delivering live ticks.
  */
-router.get("/healthz", async (_req, res) => {
+router.get("/healthz", async (req, res) => {
   const base = HealthCheckResponse.parse({ status: "ok" });
 
   // ── DB diagnostics ────────────────────────────────────────────────────────
@@ -150,8 +172,16 @@ router.get("/healthz", async (_req, res) => {
   }
 
   // ── Deriv config diagnostics ─────────────────────────────────────────────
+  // The Connect page passes ?redirect_uri=<its exact OAuth redirect URL> so the
+  // probe verifies the REAL registration state users hit on "Sign in with Deriv".
   const { APP_ID, DERIV_AUTH_BASE } = await import("../lib/deriv");
-  const oauthClient = await probeDerivOauthClient(APP_ID, DERIV_AUTH_BASE);
+  const redirectUriParam = typeof req.query["redirect_uri"] === "string"
+    ? (req.query["redirect_uri"] as string)
+    : undefined;
+  const safeRedirectUri = redirectUriParam && /^https:\/\//.test(redirectUriParam)
+    ? redirectUriParam
+    : undefined;
+  const oauthClient = await probeDerivOauthClient(APP_ID, DERIV_AUTH_BASE, safeRedirectUri);
 
   res.json({
     ...base,
@@ -182,10 +212,10 @@ router.get("/healthz", async (_req, res) => {
   if (!dbDiag.ok) {
     logger.warn({ db: dbDiag }, "Healthz reports missing DB tables — schema bootstrap did not complete");
   }
-  if (oauthClient.status === "unregistered") {
+  if (oauthClient.status === "unregistered" || oauthClient.status === "redirect_mismatch") {
     logger.warn(
-      { appId: APP_ID, detail: oauthClient.detail },
-      "Healthz: DERIV_APP_ID is not a registered Deriv OAuth client — Sign in with Deriv and PAT connects will fail",
+      { appId: APP_ID, oauth: oauthClient },
+      `Healthz: Deriv OAuth configuration problem (${oauthClient.status}) — Sign in with Deriv will fail`,
     );
   }
 });

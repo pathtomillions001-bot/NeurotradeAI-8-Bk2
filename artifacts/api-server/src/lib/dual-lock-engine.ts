@@ -54,8 +54,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
-import { registerLiveBot } from "./live-registry";
+import { runWithSession } from "./session";
 import {
   evaluateMarket,
   screenAndRank,
@@ -238,12 +237,7 @@ function freshSession(): SessionState {
   };
 }
 
-// One independent session per connected Deriv account (browser session).
-// Every `session.foo` line below is untouched — the proxy routes each access
-// to the calling session's own state. Whole-state resets go through
-// replaceSession(); the runLoop chain is wrapped in the owner's context.
-const { state: session, replace: replaceSession } =
-  createSessionScoped<SessionState>(freshSession);
+let session: SessionState = freshSession();
 
 const BOT_NAME = "Dual-Lock Range Sentinel";
 
@@ -430,14 +424,14 @@ export async function startSession(config: DualLockConfig): Promise<{ ok: boolea
   }
   if (!isAutomatedMarket(config.symbol)) return fail(`${config.symbol} cannot be traded by this bot`);
 
-  replaceSession({
+  session = {
     ...freshSession(),
     running: true,
     sessionId: `bot_duallock_${Date.now()}`,
     config,
     currentStake: config.stake,
     message: `Locked on ${config.displayName}: ${contractLabel(config.normal)} normal → ${contractLabel(config.recovery)} recovery. Starting continuous execution…`,
-  });
+  };
 
   logger.info({
     symbol: config.symbol,
@@ -447,18 +441,15 @@ export async function startSession(config: DualLockConfig): Promise<{ ok: boolea
   }, "Dual-Lock session starting");
   broadcast();
 
-  // Publish to the cross-session live registry (lib/live-registry.ts).
-  registerLiveBot("dual-lock", () => getStatus());
-
-  // Pin the whole loop chain to the owner's session context so every
-  // session-scoped store it touches resolves to this account.
-  const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
-  runWithSessionId(loopSessionId, () => runLoop(config).catch(err => {
-    logger.error({ err }, "Dual-Lock runLoop error");
-    session.running = false;
-    session.message = `⚠️ ${friendlyErrorMessage(err)}`;
-    broadcast();
-  }).finally(() => releaseTradingOwnership("bots")));
+  // Bind this engine's account session into AsyncLocalStorage — see engine-arbiter.
+  runWithSession(config.ownerSessionId ?? "legacy", () =>
+    runLoop(config).catch(err => {
+      logger.error({ err }, "Dual-Lock runLoop error");
+      session.running = false;
+      session.message = `⚠️ ${friendlyErrorMessage(err)}`;
+      broadcast();
+    }).finally(() => releaseTradingOwnership("bots"))
+  );
 
   return { ok: true };
 }

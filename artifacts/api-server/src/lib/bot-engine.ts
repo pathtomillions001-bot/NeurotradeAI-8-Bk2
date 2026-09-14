@@ -61,8 +61,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
-import { registerLiveBot } from "./live-registry";
+import { runWithSession } from "./session";
 import {
   antiPatternPenalty,
   botPrecisionScore,
@@ -170,7 +169,7 @@ interface AntiPatternRecord {
 // step come from the shared account ledger. What is local: the anti-pattern
 // memory used by the sniper gate's decaying penalty, and display counters.
 
-interface BotSessionState {
+let session: {
   running: boolean;
   sessionId: string | null;
   config: BotConfig | null;
@@ -195,33 +194,22 @@ interface BotSessionState {
   lastSide?: BotContractType;
   /** Digit traded last (match/differ bots) — feeds the digit hysteresis. */
   lastDigit?: number;
-}
-
-function freshSessionState(): BotSessionState {
-  return {
-    running: false,
-    sessionId: null,
-    config: null,
-    totalProfit: 0,
-    tradeCount: 0,
-    winCount: 0,
-    lossCount: 0,
-    currentStake: 0,
-    patternTrades: [],
-    consecutiveRecoveryLosses: 0,
-    topMarkets: [],
-    stopRequested: false,
-    lastEntropyBits: 3.32,
-    lastEv: 0,
-  };
-}
-
-// One independent bot session per connected Deriv account (browser session).
-// Every `session.foo` line below is untouched — the proxy routes each access
-// to the calling session's own state. Whole-state resets go through
-// replaceSession(); the runLoop chain is wrapped in the owner's context.
-const { state: session, replace: replaceSession } =
-  createSessionScoped<BotSessionState>(freshSessionState);
+} = {
+  running: false,
+  sessionId: null,
+  config: null,
+  totalProfit: 0,
+  tradeCount: 0,
+  winCount: 0,
+  lossCount: 0,
+  currentStake: 0,
+  patternTrades: [],
+  consecutiveRecoveryLosses: 0,
+  topMarkets: [],
+  stopRequested: false,
+  lastEntropyBits: 3.32,
+  lastEv: 0,
+};
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -317,7 +305,7 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
   // always belongs to whichever engine is running.
   resetSignalValue();
 
-  replaceSession({
+  session = {
     running:      true,
     sessionId:    `bot_${config.botId}_${Date.now()}`,
     config,
@@ -336,7 +324,7 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
     lastEntropyBits: 3.32,
     lastEv: 0,
     lastDigit: undefined,
-  });
+  };
 
   // Self-learning calibration: load this bot's own trade history so its
   // probabilities are calibrated against its own track record from the very
@@ -352,22 +340,17 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
   logger.info({ config, inheritedRecovery: sharedRecovery.inRecovery }, "Specialist bot session starting");
   broadcast();
 
-  // Publish to the cross-session live registry (lib/live-registry.ts).
-  registerLiveBot("specialist", () => getStatus());
-
-  // Pin the whole loop chain (plus its error/finally handlers) to the
-  // owner's session context so every session-scoped store it touches
-  // resolves to this account — deterministically, regardless of call-site
-  // context.
-  const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
-  runWithSessionId(loopSessionId, () => runLoop(config).catch(err => {
-    logger.error({ err }, "Specialist bot runLoop error");
-    session.running = false;
-    session.message = `⚠️ ${friendlyErrorMessage(err)}`;
-    broadcast();
-  }).finally(() => {
-    releaseTradingOwnership("bots");
-  }));
+  // Bind this engine's account session into AsyncLocalStorage — see engine-arbiter.
+  runWithSession(config.ownerSessionId ?? "legacy", () =>
+    runLoop(config).catch(err => {
+      logger.error({ err }, "Specialist bot runLoop error");
+      session.running = false;
+      session.message = `⚠️ ${friendlyErrorMessage(err)}`;
+      broadcast();
+    }).finally(() => {
+      releaseTradingOwnership("bots");
+    })
+  );
 
   return { ok: true };
 }

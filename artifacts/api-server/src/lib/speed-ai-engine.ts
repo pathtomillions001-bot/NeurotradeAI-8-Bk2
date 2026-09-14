@@ -63,9 +63,8 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
+import { runWithSession } from "./session";
 import type { RecoveryTradeRecord } from "./speed-recovery-state";
-import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
-import { registerLiveBot } from "./live-registry";
 
 export { recordRecoveryOutcome } from "./speed-recovery-state";
 export type { SpeedRecoveryState } from "./speed-recovery-state";
@@ -181,7 +180,7 @@ export interface SpeedAIStatus {
 // for the sniper gate's decaying penalty) and a display counter. Neither of
 // these decides normal-vs-recovery mode or stake size.
 
-interface SpeedAISessionState {
+let session: {
   running: boolean;
   sessionId: string | null;
   config: SpeedAIConfig | null;
@@ -202,34 +201,22 @@ interface SpeedAISessionState {
   stopRequested: boolean;
   lastEntropyBits: number;
   lastEv: number;
-}
-
-function freshSessionState(): SpeedAISessionState {
-  return {
-    running: false,
-    sessionId: null,
-    config: null,
-    totalProfit: 0,
-    tradeCount: 0,
-    winCount: 0,
-    lossCount: 0,
-    currentStake: 0,
-    patternTrades: [],
-    consecutiveRecoveryLosses: 0,
-    topMarkets: [],
-    stopRequested: false,
-    lastEntropyBits: 3.32,
-    lastEv: 0,
-  };
-}
-
-// One independent FAB session per connected Deriv account (browser session).
-// Every `session.foo` line below is untouched — the proxy routes each access
-// to the calling session's own state, so two accounts run two fully
-// independent FAB sessions in one process. Whole-state resets go through
-// replaceSession(); the runLoop chain is wrapped in the owner's context.
-const { state: session, replace: replaceSession } =
-  createSessionScoped<SpeedAISessionState>(freshSessionState);
+} = {
+  running: false,
+  sessionId: null,
+  config: null,
+  totalProfit: 0,
+  tradeCount: 0,
+  winCount: 0,
+  lossCount: 0,
+  currentStake: 0,
+  patternTrades: [],
+  consecutiveRecoveryLosses: 0,
+  topMarkets: [],
+  stopRequested: false,
+  lastEntropyBits: 3.32,
+  lastEv: 0,
+};
 
 // ── Mathematical & Statistical Subsystems ─────────────────────────────────────
 
@@ -1452,31 +1439,6 @@ function broadcast() {
   const ownerSessionId = session.config?.ownerSessionId;
   if (!ownerSessionId) return;
   broadcastSSE("speed_ai_update", getStatus(), ownerSessionId);
-  // Also publish on the shared `bot_update` stream so the layout's live
-  // indicator (which listens to bot_update) sees the NeuroAI FAB session
-  // exactly like any other engine. The payload carries botId so consumers
-  // that filter by bot ignore it, and the live registry's /live poll picks
-  // it up for the owning account only.
-  broadcastSSE("bot_update", liveBotStatus(), ownerSessionId);
-}
-
-/** The NeuroAI FAB session expressed as a LiveBotStatus for the registry. */
-function liveBotStatus() {
-  const s = getStatus();
-  return {
-    running: s.running,
-    botId: "neuroai",
-    botName: "NeuroAI Quantum FAB",
-    totalProfit: s.totalProfit,
-    tradeCount: s.tradeCount,
-    winCount: s.winCount,
-    lossCount: s.lossCount,
-    inRecovery: s.inRecovery,
-    recoveryStep: s.recoveryStep,
-    currentMarket: s.currentMarket,
-    currentContractType: s.currentContractType,
-    message: s.message,
-  };
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -1560,7 +1522,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
   // markets as it trades.
   resetSignalValue();
 
-  replaceSession({
+  session = {
     running:      true,
     sessionId:    `neuro_${Date.now()}`,
     config,
@@ -1578,29 +1540,24 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
       : "Initializing Quantum Analysis Engine…",
     lastEntropyBits: 3.32,
     lastEv: 0,
-  });
+  };
 
   logger.info({ config, inheritedRecovery: sharedRecovery.inRecovery, inheritedDebt: sharedRecovery.unrecoveredAmount }, "NeuroAI FAB session starting");
   broadcast();
 
-  // Pin the whole loop chain (plus its error/finally handlers) to the
-  // owner's session context so every session-scoped store it touches
-  // (session state, recovery ledger, signal pools, arbiter lock) resolves to
-  // this account — deterministically, regardless of call-site context.
-  const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
-  // Publish to the cross-session live registry (lib/live-registry.ts) so the
-  // global live indicator lists this account's NeuroAI session like any
-  // other engine. The registration is namespaced to THIS account's session,
-  // so a session running under another Deriv account is never shown here.
-  runWithSessionId(loopSessionId, () => registerLiveBot("neuroai", liveBotStatus));
-  runWithSessionId(loopSessionId, () => runLoop(config).catch(err => {
-    logger.error({ err }, "NeuroAI FAB runLoop error");
-    session.running = false;
-    session.message = `⚠️ ${friendlyErrorMessage(err)}`;
-    broadcast();
-  }).finally(() => {
-    releaseTradingOwnership("neuroai");
-  }));
+  // Bind this engine's account session into AsyncLocalStorage so the trading
+  // arbiter, recovery ledger and journal helpers inside the loop (and its
+  // timers) always resolve THIS account's session — never another account's.
+  runWithSession(config.ownerSessionId ?? "legacy", () =>
+    runLoop(config).catch(err => {
+      logger.error({ err }, "NeuroAI FAB runLoop error");
+      session.running = false;
+      session.message = `⚠️ ${friendlyErrorMessage(err)}`;
+      broadcast();
+    }).finally(() => {
+      releaseTradingOwnership("neuroai");
+    })
+  );
 
   return { ok: true };
 }

@@ -63,7 +63,7 @@ export interface TradingSettings {
   riskAmountType?: TradingSettingsRiskAmountType;
   riskAmountValue?: number;
   /**
-     * Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+     * Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
      * @minimum 0
      * @maximum 100
      */

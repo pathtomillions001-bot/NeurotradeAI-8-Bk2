@@ -258,6 +258,46 @@ export interface TradeInput {
   durationUnit?: TradeInputDurationUnit;
 }
 
+export type BulkTradeInputDirection = typeof BulkTradeInputDirection[keyof typeof BulkTradeInputDirection];
+
+
+export const BulkTradeInputDirection = {
+  up: 'up',
+  down: 'down',
+} as const;
+
+export type BulkTradeInputDurationUnit = typeof BulkTradeInputDurationUnit[keyof typeof BulkTradeInputDurationUnit];
+
+
+export const BulkTradeInputDurationUnit = {
+  t: 't',
+  s: 's',
+  m: 'm',
+  h: 'h',
+  d: 'd',
+} as const;
+
+export interface BulkTradeInput {
+  symbol: string;
+  contractType: string;
+  stake: number;
+  direction: BulkTradeInputDirection;
+  barrier?: number | null;
+  isAutonomous?: boolean;
+  duration?: number;
+  durationUnit?: BulkTradeInputDurationUnit;
+  /**
+     * @minimum 2
+     * @maximum 10
+     */
+  count: number;
+}
+
+export interface BulkTradeResult {
+  trades: Trade[];
+  count: number;
+}
+
 export interface TradeStats {
   totalTrades: number;
   wonTrades: number;
@@ -530,7 +570,7 @@ export interface TradingSettings {
   riskAmountType?: TradingSettingsRiskAmountType;
   riskAmountValue?: number;
   /**
-     * Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+     * Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
      * @minimum 0
      * @maximum 100
      */
@@ -595,7 +635,7 @@ export interface TradingSettingsInput {
   riskAmountType?: TradingSettingsInputRiskAmountType;
   riskAmountValue?: number;
   /**
-     * Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
+     * Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
      * @minimum 0
      * @maximum 100
      */

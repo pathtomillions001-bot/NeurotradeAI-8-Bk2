@@ -470,6 +470,28 @@ export const ExecuteTradeBody = zod.object({
 
 
 /**
+ * Places `count` identical contracts as ONE logical entry: a single shared trading session opens every leg on the same tick and the batch is settled in one sweep, so no individual order is delayed relative to the others.
+ * @summary Execute a bulk of identical trades — all legs open and settle simultaneously
+ */
+export const executeBulkTradesBodyCountMin = 2;
+export const executeBulkTradesBodyCountMax = 10;
+
+
+
+export const ExecuteBulkTradesBody = zod.object({
+  "symbol": zod.string(),
+  "contractType": zod.string(),
+  "stake": zod.number(),
+  "direction": zod.enum(['up', 'down']),
+  "barrier": zod.number().nullish(),
+  "isAutonomous": zod.boolean().optional(),
+  "duration": zod.number().optional(),
+  "durationUnit": zod.enum(['t', 's', 'm', 'h', 'd']).optional(),
+  "count": zod.number().min(executeBulkTradesBodyCountMin).max(executeBulkTradesBodyCountMax)
+})
+
+
+/**
  * @summary Get a single trade by ID
  */
 export const GetTradeParams = zod.object({
@@ -890,7 +912,7 @@ export const GetSettingsResponse = zod.object({
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
-  "botRecoveryMarkup": zod.number().min(getSettingsResponseBotRecoveryMarkupMin).max(getSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
+  "botRecoveryMarkup": zod.number().min(getSettingsResponseBotRecoveryMarkupMin).max(getSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 
 
@@ -933,7 +955,7 @@ export const UpdateSettingsBody = zod.object({
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
-  "botRecoveryMarkup": zod.number().min(updateSettingsBodyBotRecoveryMarkupMin).max(updateSettingsBodyBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
+  "botRecoveryMarkup": zod.number().min(updateSettingsBodyBotRecoveryMarkupMin).max(updateSettingsBodyBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 
 export const updateSettingsResponseBotRecoveryMarkupMin = 0;
@@ -973,7 +995,7 @@ export const UpdateSettingsResponse = zod.object({
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
-  "botRecoveryMarkup": zod.number().min(updateSettingsResponseBotRecoveryMarkupMin).max(updateSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the five specialist AI bots (AI Bot section) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
+  "botRecoveryMarkup": zod.number().min(updateSettingsResponseBotRecoveryMarkupMin).max(updateSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 
 

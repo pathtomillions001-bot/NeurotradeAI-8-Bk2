@@ -2123,19 +2123,13 @@ async function runLoop(config: SpeedAIConfig) {
     consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++;
-      logger.error({ err, consecutiveErrors }, "NeuroAI runLoop stability catch");
-      session.message = consecutiveErrors > 3
-        ? `Engine stabilizing… retry ${consecutiveErrors}/5`
-        : "Stabilizing engine — retrying…";
+      logger.error({ err, consecutiveErrors }, "NeuroAI runLoop stability catch — keeping the session alive");
+      // The NeuroAI FAB session must never stop itself on transient errors.
+      // It only stops on TP, SL, consecutive-loss limit, or a manual stop.
+      // Back off (capped) and keep retrying until the engine recovers.
+      session.message = `Engine stabilizing… retry ${consecutiveErrors} — the session will keep running`;
       broadcast();
-      await sleep(Math.min(2000, 500 * consecutiveErrors));
-      if (consecutiveErrors >= 5) {
-        session.running = false;
-        session.message = "Engine paused for stability check — please restart";
-        broadcast();
-        logger.error("NeuroAI halted after 5 consecutive errors");
-        return;
-      }
+      await sleep(Math.min(15000, 500 * consecutiveErrors));
       continue;
     }
   }

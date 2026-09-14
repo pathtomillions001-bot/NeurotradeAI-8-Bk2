@@ -486,44 +486,44 @@ export default function Connect() {
   return (
     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="p-4 md:p-8 max-w-2xl mx-auto space-y-6">
       <Dialog open={riskOpen} onOpenChange={(open) => { if (!riskSaving) setRiskOpen(open); }}>
-        <DialogContent className="max-w-lg overflow-hidden border-cyan-400/25 bg-[#080d18]/95 p-0 shadow-[0_0_80px_rgba(34,211,238,0.16)] backdrop-blur-2xl">
+        <DialogContent className="max-w-md overflow-hidden border-cyan-400/25 bg-[#080d18]/95 p-0 shadow-[0_0_60px_rgba(34,211,238,0.14)] backdrop-blur-2xl">
           <div className="relative">
-            <div className="pointer-events-none absolute inset-x-0 top-0 h-32 bg-gradient-to-b from-cyan-400/10 to-transparent" />
-            <div className="pointer-events-none absolute -right-20 -top-20 h-48 w-48 rounded-full bg-violet-500/10 blur-3xl" />
+            <div className="pointer-events-none absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-cyan-400/10 to-transparent" />
+            <div className="pointer-events-none absolute -right-16 -top-16 h-40 w-40 rounded-full bg-violet-500/10 blur-3xl" />
 
-            <div className="relative p-6 md:p-7">
+            <div className="relative p-5 md:p-6">
               <DialogHeader className="text-left">
-                <div className="mb-3 flex items-center gap-3">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-amber-300/25 bg-amber-400/10 shadow-[0_0_24px_rgba(251,191,36,0.12)]">
-                    <AlertTriangle className="h-5 w-5 text-amber-300" />
+                <div className="mb-2.5 flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-amber-300/25 bg-amber-400/10 shadow-[0_0_20px_rgba(251,191,36,0.12)]">
+                    <AlertTriangle className="h-4 w-4 text-amber-300" />
                   </div>
                   <div>
-                    <div className="mb-1 font-mono text-[10px] uppercase tracking-[0.28em] text-cyan-300/70">Pre-flight protocol</div>
-                    <DialogTitle className="text-xl font-semibold tracking-tight text-white">Trading risk acknowledgment</DialogTitle>
+                    <div className="mb-1 font-mono text-[9px] uppercase tracking-[0.26em] text-cyan-300/70">Pre-flight protocol</div>
+                    <DialogTitle className="text-lg font-semibold tracking-tight text-white">Trading risk acknowledgment</DialogTitle>
                   </div>
                 </div>
-                <DialogDescription className="text-sm leading-relaxed text-slate-400">
+                <DialogDescription className="text-[13px] leading-relaxed text-slate-400">
                   Before linking your account, confirm that you understand the risks of manual and automated derivatives trading.
                 </DialogDescription>
               </DialogHeader>
 
-              <div className="my-5 grid gap-2.5">
+              <div className="my-4 grid gap-2">
                 {[
                   { icon: TrendingDown, title: "Capital is at risk", text: "Synthetic options can result in rapid losses, including your full stake." },
                   { icon: Activity, title: "AI is not a guarantee", text: "Signals, confidence scores, and automated execution cannot guarantee profit." },
                   { icon: LockKeyhole, title: "You remain in control", text: "Review limits, use a demo account first, and stop an engine whenever needed." },
                 ].map(({ icon: Icon, title, text }) => (
-                  <div key={title} className="flex gap-3 rounded-xl border border-white/[0.07] bg-white/[0.035] p-3.5">
+                  <div key={title} className="flex gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.035] p-3">
                     <Icon className="mt-0.5 h-4 w-4 shrink-0 text-cyan-300" />
                     <div>
                       <div className="text-xs font-semibold text-slate-100">{title}</div>
-                      <p className="mt-1 text-[11px] leading-relaxed text-slate-400">{text}</p>
+                      <p className="mt-0.5 text-[11px] leading-relaxed text-slate-400">{text}</p>
                     </div>
                   </div>
                 ))}
               </div>
 
-              <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-cyan-300/15 bg-cyan-300/[0.04] p-4 transition-colors hover:bg-cyan-300/[0.065]">
+              <label className="flex cursor-pointer items-start gap-2.5 rounded-lg border border-cyan-300/15 bg-cyan-300/[0.04] p-3 transition-colors hover:bg-cyan-300/[0.065]">
                 <Checkbox
                   checked={riskChecked}
                   onCheckedChange={(checked) => setRiskChecked(checked === true)}
@@ -534,7 +534,7 @@ export default function Connect() {
                 </span>
               </label>
 
-              <div className="mt-5 flex gap-3">
+              <div className="mt-4 flex gap-2.5">
                 <Button type="button" variant="ghost" className="flex-1 text-slate-400" disabled={riskSaving} onClick={() => setRiskOpen(false)}>
                   Not now
                 </Button>

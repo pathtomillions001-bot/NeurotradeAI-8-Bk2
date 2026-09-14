@@ -24,6 +24,9 @@ const queryClient = new QueryClient({
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 
+/** Persisted landing-page dismissal — survives refreshes so deep routes stay put. */
+const LANDING_DISMISSED_KEY = "neurotrade_landing_dismissed";
+
 function getApiUrl(path: string) {
   return `${BASE}/api${path}`;
 }
@@ -96,8 +99,10 @@ function useMidnightReset() {
 }
 
 function useLandingGate() {
-  const [dismissed, setDismissed] = useState(false);
-  const { data: account } = useQuery({
+  const [dismissed, setDismissed] = useState(() => {
+    try { return localStorage.getItem(LANDING_DISMISSED_KEY) === "1"; } catch { return false; }
+  });
+  const { data: account, isLoading } = useQuery({
     queryKey: ["account-gate"],
     queryFn: async () => {
       const r = await fetch(getApiUrl("/auth/account"));
@@ -112,9 +117,18 @@ function useLandingGate() {
 
   const dismiss = () => {
     setDismissed(true);
+    try { localStorage.setItem(LANDING_DISMISSED_KEY, "1"); } catch { /* non-critical */ }
   };
 
-  return { showLanding: !dismissed && !hasAccount, dismiss };
+  // Refresh-safe: the landing page is a FIRST-VISIT funnel, not a route guard.
+  // 1. Once dismissed (persisted in localStorage) the gate never fires again —
+  //    refreshing on Journal/Markets/Bots keeps the user on that page.
+  // 2. While the account query is still loading we don't know whether an
+  //    account exists, so we render the route the URL says instead of
+  //    bouncing the user to the landing page and back.
+  const showLanding = !dismissed && !hasAccount && !isLoading;
+
+  return { showLanding, dismiss };
 }
 
 function Router() {

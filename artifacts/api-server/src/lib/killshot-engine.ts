@@ -1194,16 +1194,12 @@ async function runLoop(config: KillShotConfig) {
       consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++;
-      logger.error({ err, consecutiveErrors }, "Kill-Shot stability catch");
-      session.message = `Stabilizing engine — retry ${consecutiveErrors}/5`;
+      logger.error({ err, consecutiveErrors }, "Kill-Shot stability catch — keeping the session alive");
+      // Never self-stop on transient errors — the session only stops on TP,
+      // SL, or a manual stop. Back off (capped) and keep retrying.
+      session.message = `Engine stabilizing… retry ${consecutiveErrors} — the session will keep running`;
       broadcast();
-      await sleep(Math.min(3000, 600 * consecutiveErrors));
-      if (consecutiveErrors >= 5) {
-        session.running = false;
-        session.message = "Engine paused for a stability check — please restart";
-        broadcast();
-        return;
-      }
+      await sleep(Math.min(15000, 600 * consecutiveErrors));
     }
   }
 

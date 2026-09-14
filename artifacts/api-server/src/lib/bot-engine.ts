@@ -1259,19 +1259,14 @@ async function runLoop(config: BotConfig) {
       consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++;
-      logger.error({ err, consecutiveErrors }, "Specialist bot runLoop stability catch");
-      session.message = consecutiveErrors > 3
-        ? `Engine stabilizing… retry ${consecutiveErrors}/5`
-        : "Stabilizing engine — retrying…";
+      logger.error({ err, consecutiveErrors }, "Specialist bot runLoop stability catch — keeping the session alive");
+      // A bot session must NEVER stop itself on transient errors — it only
+      // stops on TP, SL, or a manual stop by the user. Page navigation,
+      // refreshes and load bursts on the server cause brief DB/WS hiccups;
+      // back off (capped) and keep retrying until the engine recovers.
+      session.message = `Engine stabilizing… retry ${consecutiveErrors} — the session will keep running`;
       broadcast();
-      await sleep(Math.min(2000, 500 * consecutiveErrors));
-      if (consecutiveErrors >= 5) {
-        session.running = false;
-        session.message = "Engine paused for stability check — please restart";
-        broadcast();
-        logger.error("Specialist bot halted after 5 consecutive errors");
-        return;
-      }
+      await sleep(Math.min(15000, 500 * consecutiveErrors));
       continue;
     }
   }

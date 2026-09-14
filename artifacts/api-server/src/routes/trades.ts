@@ -3,7 +3,7 @@ import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
-import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getJournalManager, isAutomatedMarket } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, executeLiveTrade, executeBulkLiveTrades, waitForContractResult, waitForBulkContractResults, getLiveBalance, getJournalManager, isAutomatedMarket } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
@@ -618,6 +618,329 @@ router.post("/", async (req, res): Promise<void> => {
   }
 
   res.status(201).json(formatTrade(trade));
+});
+
+// ── Bulk trade execution — N identical legs, opened + settled SIMULTANEOUSLY ──
+//
+// One request → ONE OTP handshake → ONE shared WebSocket → all proposals fired
+// back-to-back → all buys on the same tick → ONE settlement sweep. The old
+// client-side approach fired N independent POST /trades in parallel; each one
+// did its own OTP handshake + WS + proposal + buy + result-poll, so Deriv's
+// rate limiter delayed legs 2..N and they opened on LATER ticks (and their
+// results trickled in seconds apart). Bulk legs are one logical entry: they
+// open together, close together, and settle together.
+router.post("/bulk", async (req, res): Promise<void> => {
+  const parseResult = ExecuteTradeBody.safeParse(req.body);
+  if (!parseResult.success) {
+    res.status(400).json({ error: "Invalid trade parameters" });
+    return;
+  }
+  const count = Number((req.body as { count?: unknown })?.count);
+  if (!Number.isInteger(count) || count < 2 || count > 10) {
+    res.status(400).json({ error: "count must be an integer between 2 and 10" });
+    return;
+  }
+
+  const { symbol, contractType, stake, direction, isAutonomous, duration, durationUnit } = parseResult.data;
+  const requestBarrier = parseResult.data.barrier ?? undefined;
+
+  const account = await getActiveAccount(req.sessionId);
+  const accounts = account ? [account] : [];
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
+  const balance = account ? Number(account.balance) : DEMO_BALANCE;
+  const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
+  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
+
+  if (stake > balance * (maxRisk / 100) * 5) {
+    res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${(balance * maxRisk / 100 * 5).toFixed(2)}` });
+    return;
+  }
+  if (stake <= 0) {
+    res.status(400).json({ error: "Stake must be greater than 0" });
+    return;
+  }
+
+  const market = DERIV_MARKETS.find((m) => m.symbol === symbol);
+  const displayName = market?.displayName ?? symbol;
+  if (isAutonomous && !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: `${displayName} is manual-only and cannot be executed by an AI engine` });
+    return;
+  }
+
+  const token = account?.bearerToken ?? account?.token ?? null;
+  const currency = account?.currency ?? "USD";
+  const isLiveTrade = !paperTradeMode && !!token;
+
+  // ── AI context: run ONCE for the whole batch (all legs are identical) ──────
+  const preferredContractTypes = [contractType];
+  const tradingSettings = buildTradingSettingsForManual(settings.length > 0 ? settings[0] : null, preferredContractTypes);
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const todayTrades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, req.sessionId),
+    sql`${tradesTable.createdAt} >= ${today}`,
+  ));
+  const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
+  const daily = buildDailyStatsForManual(closedToday);
+
+  const prices = tickManager.getTicks(symbol, 100);
+  const digits = market?.digitEnabled ? tickManager.getDigits(symbol, 300) : [];
+
+  const ctx: ScanContext = {
+    symbol,
+    displayName,
+    category: market?.category ?? "synthetic",
+    prices,
+    digits,
+    balance,
+    settings: tradingSettings,
+    daily,
+    token,
+    currency,
+  };
+
+  let analysis;
+  let savedCoordinatorOutput: Awaited<ReturnType<typeof runCoordinator>> | null = null;
+  try {
+    savedCoordinatorOutput = await runCoordinator(ctx);
+    analysis = buildLegacyAnalysis(savedCoordinatorOutput);
+  } catch (err) {
+    logger.warn({ err, symbol }, "Coordinator failed for bulk trade — using defaults");
+    analysis = {
+      calibratedConfidence: 55,
+      winProbability: 55,
+      expectedValue: 0,
+      payoutMultiplier: 1.92,
+      breakevenWinRate: 52.08,
+      riskScore: 50,
+      reasoning: "Manual bulk trade (coordinator unavailable)",
+      digitBarrier: requestBarrier,
+      recommendedDuration: duration ?? 5,
+    };
+  }
+
+  const tradeDuration = duration ?? (analysis as any).recommendedDuration ?? 5;
+  const isDigit = contractType.includes("DIGIT");
+
+  const defaultBarrier = contractType === "DIGITOVER" ? 5 : contractType === "DIGITUNDER" ? 4 : undefined;
+  const barrier = isDigit
+    ? (requestBarrier ?? (analysis as any).digitBarrier ?? defaultBarrier)
+    : undefined;
+
+  const winProbability: number = (analysis as any).winProbability ?? 55;
+  const payoutQuote = await resolveRecoveryPayout({
+    symbol,
+    contractType,
+    barrier,
+    duration: tradeDuration,
+    durationUnit: durationUnit ?? "t",
+    currency,
+  });
+  const payoutMultiplier = payoutQuote.source === "live"
+    ? payoutQuote.payoutMultiplier
+    : getFallbackPayout(contractType, barrier);
+  const payout = stake * payoutMultiplier;
+  const liveStake = Math.round(stake * 100) / 100;
+
+  logger.info({
+    symbol, contractType, stake: liveStake, barrier, duration: tradeDuration,
+    count, isLiveTrade, paperTradeMode, token: token ? "present" : "absent",
+  }, "Manual BULK trade request — executing all legs simultaneously");
+
+  // ── Journal every leg up front (all "open" in the same instant) ────────────
+  const openTrades: typeof tradesTable.$inferSelect[] = [];
+  for (let i = 0; i < count; i++) {
+    const [row] = await db.insert(tradesTable).values({
+      sessionId: req.sessionId,
+      symbol,
+      displayName,
+      contractType,
+      barrier: barrier ?? null,
+      stake: String(liveStake),
+      direction,
+      status: "open",
+      aiConfidence: String(winProbability),
+      aiRiskScore: String((analysis as any).riskScore ?? 50),
+      isAutonomous: isAutonomous ?? false,
+      agentReasoning: `[${isLiveTrade ? "LIVE" : token ? "PAPER" : "DEMO"} BULK] ${(analysis as any).reasoning ?? "Manual bulk trade"}`,
+      duration: tradeDuration,
+      durationUnit: durationUnit ?? "t",
+    }).returning();
+    openTrades.push(row);
+  }
+
+  const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
+  recoveryEngine.setPersistenceSession(req.sessionId);
+
+  const settleTradeRow = async (
+    row: typeof tradesTable.$inferSelect,
+    opts: { won: boolean; profit: number; entryPrice: number; exitPrice: number; failed?: string },
+  ) => {
+    const status = opts.failed ? "error" : opts.won ? "won" : "lost";
+    const actualPayout = !opts.failed && opts.won ? stake + opts.profit : 0;
+    const [closedTrade] = await db.update(tradesTable).set({
+      status,
+      payout: String(actualPayout),
+      profit: String(Math.round(opts.profit * 100) / 100),
+      entryPrice: String(opts.entryPrice),
+      exitPrice: String(opts.exitPrice),
+      closedAt: new Date(),
+      agentReasoning: opts.failed
+        ? `[${isLiveTrade ? "LIVE" : "PAPER"} BULK — FAILED: ${opts.failed}] ${(analysis as any).reasoning ?? ""}`
+        : (openTrades[0]?.agentReasoning ?? null) as string,
+    }).where(eq(tradesTable.id, row.id)).returning();
+
+    if (!opts.failed) {
+      recordTradeOutcome(symbol, contractType, barrier ?? null, opts.won, opts.profit, stake);
+      if (recoveryEngine.isTrackedContract(contractType)) {
+        recoveryEngine.recordOutcome(opts.won, opts.profit, stake, maxSteps, contractType, payoutMultiplier);
+      }
+      // Fire-and-forget: Trade Intelligence analysis for this leg
+      if (savedCoordinatorOutput) {
+        analyzeCompletedTrade({
+          tradeId:      closedTrade.id,
+          symbol,
+          contractType,
+          barrier:      barrier ?? null,
+          stake,
+          won:          opts.won,
+          profit:       opts.profit,
+          output:       savedCoordinatorOutput,
+        }).catch(() => {});
+      }
+    }
+
+    broadcastSSE("trade_completed", {
+      trade: {
+        id: closedTrade.id, symbol, displayName, contractType: normalizeDerivContractType(contractType),
+        barrier: barrier ?? null, stake, payout: actualPayout,
+        profit: Math.round(opts.profit * 100) / 100, won: !opts.failed && opts.won,
+        status, duration: tradeDuration,
+        durationUnit: durationUnit ?? "t",
+        createdAt: closedTrade.createdAt.toISOString(), closedAt: new Date().toISOString(),
+        aiConfidence: winProbability, isAutonomous: isAutonomous ?? false,
+        source: isLiveTrade ? "live" : "paper",
+      }
+    }, req.sessionId);
+
+    return closedTrade;
+  };
+
+  const failAllOpen = async (errMsg: string) => {
+    for (const row of openTrades) {
+      try {
+        await db.update(tradesTable).set({
+          status: "error", profit: "0", payout: "0", closedAt: new Date(),
+          agentReasoning: `[LIVE BULK — FAILED: ${errMsg}] ${(analysis as any).reasoning ?? ""}`,
+        }).where(eq(tradesTable.id, row.id));
+      } catch { /* best-effort */ }
+    }
+  };
+
+  const closedRows: typeof tradesTable.$inferSelect[] = [];
+
+  if (isLiveTrade) {
+    try {
+      // ── Phase 1: open EVERY leg on the same tick, over one shared WS ──────
+      const legs = await executeBulkLiveTrades(token!, account!.derivAccountId ?? account!.loginId,
+        Array.from({ length: count }, () => ({
+          symbol,
+          contractType,
+          stake: liveStake,
+          duration: tradeDuration,
+          durationUnit: durationUnit ?? "t",
+          currency,
+          barrier,
+        })),
+      );
+
+      // ── Phase 2: settle EVERY leg in ONE sweep (same closing tick) ────────
+      const openedIndexes = legs
+        .map((leg, i) => (!("error" in leg) && leg.contractId > 0 ? i : -1))
+        .filter((i) => i >= 0);
+      const contractIds = openedIndexes.map((i) => (legs[i] as { contractId: number }).contractId);
+
+      const results = contractIds.length > 0
+        ? await waitForBulkContractResults(
+            token!, account!.derivAccountId ?? account!.loginId,
+            contractIds, (tradeDuration + 30) * 1000,
+          )
+        : [];
+
+      for (let i = 0; i < count; i++) {
+        const leg = legs[i]!;
+        if ("error" in leg) {
+          closedRows.push(await settleTradeRow(openTrades[i]!, {
+            won: false, profit: 0, entryPrice: 0, exitPrice: 0,
+            failed: friendlyErrorMessage(leg.error),
+          }));
+          continue;
+        }
+        const pos = openedIndexes.indexOf(i);
+        const result = results.find((r) => r.contractId === leg.contractId);
+        if (!result || result.missing) {
+          closedRows.push(await settleTradeRow(openTrades[i]!, {
+            won: false, profit: 0, entryPrice: leg.buyPrice, exitPrice: leg.buyPrice,
+            failed: "Settlement result not confirmed — check the Deriv journal",
+          }));
+          continue;
+        }
+        closedRows.push(await settleTradeRow(openTrades[i]!, {
+          won: result.won, profit: result.profit,
+          entryPrice: result.entrySpot || leg.buyPrice,
+          exitPrice: result.exitSpot || leg.buyPrice,
+        }));
+      }
+
+      // Sync live balance ONCE for the whole batch
+      try {
+        const newBalance = await getLiveBalance(token!, account?.derivAccountId ?? account?.loginId);
+        if (newBalance !== null && accounts.length > 0) {
+          await db.update(accountsTable).set({ balance: String(newBalance), updatedAt: new Date() }).where(eq(accountsTable.id, accounts[0].id));
+        }
+      } catch { /* ignore */ }
+    } catch (bulkErr) {
+      const errMsg = friendlyErrorMessage(bulkErr);
+      logger.warn({ bulkErr, symbol, count }, "Bulk live trade execution failed");
+      await failAllOpen(errMsg);
+      res.status(500).json({ error: `Bulk trade execution failed — ${errMsg}` });
+      return;
+    }
+  } else {
+    // ── Paper/demo: settle all legs immediately (no exchange involved) ──────
+    for (let i = 0; i < count; i++) {
+      const won = Math.random() < winProbability / 100;
+      const profit = won ? payout - stake : -stake;
+      const entryPrice = prices[prices.length - 1] ?? 100;
+      const exitPrice = won
+        ? direction === "up" ? entryPrice * 1.001 : entryPrice * 0.999
+        : direction === "up" ? entryPrice * 0.999 : entryPrice * 1.001;
+      closedRows.push(await settleTradeRow(openTrades[i]!, { won, profit, entryPrice, exitPrice }));
+    }
+
+    // Update simulated balance for the whole batch at once
+    try {
+      if (accounts.length > 0) {
+        const totalProfit = closedRows.reduce((s, t) => s + Number(t.profit ?? 0), 0);
+        const newBalance = Math.max(0, balance + totalProfit);
+        await db.update(accountsTable)
+          .set({ balance: String(newBalance.toFixed(2)), updatedAt: new Date() })
+          .where(eq(accountsTable.id, accounts[0].id));
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Refresh the Deriv journal once for the whole batch
+  if (isLiveTrade) {
+    const journalManager = getJournalManager(req.sessionId);
+    journalManager.once("refreshed", () => {
+      broadcastSSE("journal_refreshed", { ts: Date.now() }, req.sessionId);
+    });
+    journalManager.forceRefresh();
+  }
+
+  res.status(201).json({ trades: closedRows.map(formatTrade), count });
 });
 
 // ── Shared: compute the core stat shape from a trade list ───────────────────────

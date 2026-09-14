@@ -1375,6 +1375,9 @@ export interface LiveTradeResult {
   longcode: string;
 }
 
+/** One leg of a bulk batch: either a confirmed contract or the rejection reason. */
+export type BulkLeg = LiveTradeResult | { error: Error };
+
 export interface ContractResult {
   contractId: number;
   won: boolean;
@@ -1382,6 +1385,8 @@ export interface ContractResult {
   exitSpot: number;
   sellPrice: number;
   entrySpot: number;
+  /** True when the settlement sweep finished without finding this leg's record. */
+  missing?: boolean;
 }
 
 export interface ContractProposal {
@@ -1983,6 +1988,267 @@ export async function executeLiveTrade(
     });
 
     ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
+  });
+}
+
+// ── Bulk live trade execution (one OTP WS for the WHOLE batch) ────────────────
+/**
+ * Execute N trades SIMULTANEOUSLY over a single shared OTP WebSocket.
+ *
+ * Why this exists: firing N independent `executeLiveTrade()` calls in parallel
+ * issues N OTP handshakes + N WS connections at once, which Deriv's rate
+ * limiter throttles (503 CircuitBreakerBusy) — so some orders landed 1–4s
+ * after the rest and opened on LATER ticks. A bulk order is one logical entry:
+ * one handshake, one socket, all proposals sent back-to-back, all buys fired
+ * as soon as each proposal is confirmed. Deriv processes them in order within
+ * the same tick window, so every leg opens on the same tick.
+ *
+ * The whole batch shares one 25s deadline; if the socket dies or the deadline
+ * passes, the promise rejects and the caller settles whatever it has.
+ */
+export async function executeBulkLiveTrades(
+  bearerToken: string,
+  accountId: string,
+  params: Array<{
+    symbol: string;
+    contractType: string;
+    stake: number;
+    duration: number;
+    durationUnit: string;
+    currency: string;
+    barrier?: number | string;
+  }>,
+): Promise<BulkLeg[]> {
+  if (!bearerToken || !accountId) {
+    throw new Error(
+      "No authenticated session. Please sign in with Deriv (OAuth) to enable live trading.",
+    );
+  }
+  if (params.length === 0) return [];
+
+  // One handshake for the entire batch — no per-leg OTP rate-limit exposure.
+  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error("Bulk trade execution timeout"));
+    }, 25_000);
+
+    const results: (BulkLeg | null)[] = new Array(params.length).fill(null);
+    let finished = false;
+
+    const finish = (err?: Error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch { /* ignore */ }
+      if (err) reject(err);
+      // Any leg that never got a confirmation is reported as an error leg so
+      // the caller can settle it as "error" without losing the batch.
+      else resolve(results.map((r) => r ?? { error: new Error("Bulk trade leg unconfirmed") }));
+    };
+
+    const markSettled = () => {
+      if (results.every((r) => r !== null)) finish();
+    };
+
+    // Send a proposal for leg i, matched back by req_id.
+    const propose = (i: number) => {
+      const p = params[i]!;
+      const proposalParams: Record<string, unknown> = {
+        amount: p.stake,
+        basis: "stake",
+        contract_type: p.contractType,
+        currency: p.currency,
+        duration: p.duration,
+        duration_unit: p.durationUnit,
+        underlying_symbol: p.symbol,
+        req_id: `bulk-proposal-${i}`,
+      };
+      if (p.barrier !== undefined) proposalParams.barrier = String(p.barrier);
+      try {
+        ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
+      } catch (e) {
+        finish(e instanceof Error ? e : new Error("Failed to send bulk proposal"));
+      }
+    };
+
+    ws.on("open", () => {
+      logger.info({ count: params.length }, "executeBulkLiveTrades: sending batch proposals");
+      // Fire every proposal immediately — Deriv processes them in order on the
+      // same socket, so the legs share one entry tick.
+      for (let i = 0; i < params.length; i++) propose(i);
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+
+        if (msg.error) {
+          // An error answer references the failing req_id. Only that leg is
+          // lost; the rest of the batch continues and settles as usual.
+          const failIndex = /bulk-proposal-(\d+)|bulk-buy-(\d+)/.exec(String(msg.req_id ?? ""));
+          const err = new Error(msg.error?.message ?? "Bulk trade rejected by Deriv");
+          if (failIndex && (failIndex[1] !== undefined || failIndex[2] !== undefined)) {
+            const i = Number(failIndex[1] ?? failIndex[2]);
+            if (results[i] === null) {
+              results[i] = { error: err };
+              markSettled();
+            }
+            return;
+          }
+          logger.error({ derivError: msg.error }, "executeBulkLiveTrades: Deriv error (batch)");
+          finish(err);
+          return;
+        }
+
+        if (msg.msg_type === "proposal" && msg.proposal) {
+          const m = /bulk-proposal-(\d+)/.exec(String(msg.req_id ?? ""));
+          const i = m ? Number(m[1]) : -1;
+          const askPrice = Number(msg.proposal.ask_price ?? params[i]?.stake ?? 0);
+          const proposalId = String(msg.proposal.id ?? "");
+          if (i >= 0 && results[i] === null && proposalId) {
+            logger.info({ i, proposalId, askPrice }, "executeBulkLiveTrades: proposal confirmed — buying leg");
+            try {
+              ws.send(JSON.stringify({ buy: proposalId, price: askPrice, req_id: `bulk-buy-${i}` }));
+            } catch (e) {
+              finish(e instanceof Error ? e : new Error("Failed to send bulk buy"));
+            }
+            return;
+          }
+          if (i >= 0 && results[i] === null) {
+            // Proposal arrived without an id — that leg cannot be bought.
+            results[i] = { error: new Error("Deriv proposal missing id") };
+            markSettled();
+          }
+          return;
+        }
+
+        if (msg.msg_type === "buy" && msg.buy) {
+          const m = /bulk-buy-(\d+)/.exec(String(msg.req_id ?? ""));
+          const i = m ? Number(m[1]) : -1;
+          if (i >= 0 && results[i] === null) {
+            results[i] = {
+              contractId: msg.buy.contract_id,
+              buyPrice: Number(msg.buy.buy_price),
+              entrySpot: Number(msg.buy.start_time ?? 0),
+              longcode: msg.buy.longcode ?? "",
+            };
+            markSettled();
+          }
+        }
+      } catch (e) {
+        logger.error({ e }, "executeBulkLiveTrades: error parsing message");
+      }
+    });
+
+    ws.on("error", (err) => finish(err instanceof Error ? err : new Error("Bulk trade WebSocket error")));
+    ws.on("close", () => {
+      // Socket dropped before every leg confirmed. finish() resolves with
+      // error legs for the unconfirmed ones (or rejects on the deadline).
+      if (!finished) finish();
+    });
+  });
+}
+
+// ── Bulk contract settlement (one OTP WS polling ALL contract ids) ───────────
+/**
+ * Wait until EVERY contract in `contractIds` has settled, reporting results in
+ * ONE pass. The per-contract `waitForContractResult` opened its own OTP WS per
+ * leg and polled every 2s on its own schedule, so leg results trickled in over
+ * several seconds. Here a single socket polls the portfolio once per second and
+ * all legs — which opened on the same tick and therefore close on the same
+ * tick — are read back in the very next `profit_table` response.
+ */
+export async function waitForBulkContractResults(
+  bearerToken: string,
+  accountId: string,
+  contractIds: number[],
+  timeoutMs = 30_000,
+): Promise<ContractResult[]> {
+  if (!bearerToken || !accountId) {
+    throw new Error("No authenticated session for contract result polling");
+  }
+  if (contractIds.length === 0) return [];
+
+  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
+    const found = new Map<number, ContractResult>();
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    const tableLimit = Math.min(100, contractIds.length + 20);
+
+    const overallTimeout = setTimeout(() => finishOkPartial(), timeoutMs + 10_000);
+
+    const cleanup = () => {
+      clearTimeout(overallTimeout);
+      if (pollInterval) clearInterval(pollInterval);
+      try { ws.close(); } catch { /* ignore */ }
+    };
+
+    // Resolve with whatever settled; legs Deriv never journalued in time are
+    // reported as `missing` so the caller can settle them as errors without
+    // losing the rest of the batch.
+    const finishOkPartial = () => {
+      const results = contractIds.map((id) =>
+        found.get(id) ?? { contractId: id, won: false, profit: 0, exitSpot: 0, sellPrice: 0, entrySpot: 0, missing: true },
+      );
+      cleanup();
+      resolve(results);
+    };
+
+    const finishError = (err: Error) => { cleanup(); reject(err); };
+
+    // Every cycle sends BOTH: the portfolio tells us the contracts are still
+    // open, the profit_table returns settled prices as soon as Deriv journals
+    // them. Polling both avoids the "contract settled between two portfolio
+    // polls" race that would otherwise hang a 1-tick batch.
+    const poll = () => {
+      if (found.size >= contractIds.length) return;
+      try {
+        ws.send(JSON.stringify({ portfolio: 1 }));
+        ws.send(JSON.stringify({ profit_table: 1, limit: tableLimit, sort: "DESC" }));
+      } catch { /* ignore */ }
+    };
+
+    ws.on("open", () => {
+      poll();
+      pollInterval = setInterval(poll, 1_000);
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.error) return; // transient poll error — keep polling
+
+        if (msg.msg_type === "profit_table") {
+          const txs: any[] = msg.profit_table?.transactions ?? [];
+          for (const id of contractIds) {
+            if (found.has(id)) continue;
+            const tx = txs.find((t) => Number(t.contract_id) === id);
+            if (tx) {
+              const buyPrice = Number(tx.buy_price ?? 0);
+              const sellPrice = Number(tx.sell_price ?? 0);
+              found.set(id, {
+                contractId: id,
+                won: sellPrice - buyPrice > 0,
+                profit: sellPrice - buyPrice,
+                exitSpot: 0,
+                sellPrice,
+                entrySpot: buyPrice,
+              });
+            }
+          }
+          if (found.size >= contractIds.length) finishOkPartial();
+        }
+      } catch { /* ignore */ }
+    });
+
+    ws.on("error", (err) => finishError(err instanceof Error ? err : new Error("Settlement WebSocket error")));
+    ws.on("close", () => finishError(new Error("Settlement WebSocket closed before contracts were confirmed")));
   });
 }
 

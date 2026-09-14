@@ -263,6 +263,28 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
   }
 });
 
+/**
+ * Translate Deriv token-validation failures into actionable guidance for the
+ * connect screen. The generic 401 mapping ("Session expired") confuses users
+ * who are connecting for the FIRST time — there is no session to expire.
+ */
+function toConnectErrorMessage(message: string): string {
+  if (/invalid token format/i.test(message)) {
+    return (
+      "That token is not a Deriv Personal Access Token. Create one in your Deriv account " +
+      "(app.deriv.com → Settings → API token) with Read and Trade permissions — current tokens " +
+      "start with \"pat_\". Legacy API tokens from the old Deriv API don't work here."
+    );
+  }
+  if (/invalid or expired token/i.test(message)) {
+    return (
+      "Deriv rejected that token — it may be expired, revoked, or missing Read/Trade " +
+      "permissions. Generate a fresh Personal Access Token and try again."
+    );
+  }
+  return message;
+}
+
 router.post("/connect", async (req, res): Promise<void> => {
   if (!requireRiskAcknowledgment(req, res)) return;
 
@@ -319,7 +341,7 @@ router.post("/connect", async (req, res): Promise<void> => {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Authorization failed";
     logger.error({ err, sessionId: req.sessionId }, "Deriv connect failed");
-    res.status(400).json({ error: message });
+    res.status(400).json({ error: toConnectErrorMessage(message) });
   }
 });
 

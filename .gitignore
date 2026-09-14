@@ -44,6 +44,11 @@ Thumbs.db
 .cursor/rules/nx-rules.mdc
 .github/instructions/nx.instructions.md
 
+# Local debug artifacts (curl cookie jars, OAuth probe output — may contain session ids)
+oa2.txt
+*.cookies.txt
+cookie*.txt
+
 # Replit
 .cache/
 .local/

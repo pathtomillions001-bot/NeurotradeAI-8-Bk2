@@ -59,6 +59,7 @@ export default function Connect() {
   const [showToken, setShowToken] = useState(false);
   const [showManual, setShowManual] = useState(false);
   const [oauthPending, setOauthPending] = useState(false);
+  const [oauthConfigWarning, setOauthConfigWarning] = useState<string | null>(null);
   const [riskOpen, setRiskOpen] = useState(false);
   const [riskChecked, setRiskChecked] = useState(false);
   const [riskSaving, setRiskSaving] = useState(false);
@@ -70,6 +71,21 @@ export default function Connect() {
     if (handledRef.current) return;
     const params = new URLSearchParams(window.location.search);
 
+    // ── Deriv redirected back with an error (user cancelled, app misconfigured) ──
+    // Per Deriv's OAuth docs the error callback is `?error=...&error_description=...`
+    // — without this branch the page silently ignores a failed sign-in.
+    const oauthError = params.get("error");
+    if (oauthError) {
+      handledRef.current = true;
+      const description = params.get("error_description") ?? "";
+      const suffix = oauthError === "invalid_client"
+        ? " — the server's DERIV_APP_ID is not a registered Deriv app."
+        : "";
+      window.history.replaceState({}, "", window.location.pathname);
+      toast.error(`Deriv sign-in failed (${oauthError}): ${description || "unknown error"}${suffix}`);
+      return;
+    }
+
     // ── New OAuth2 + PKCE callback ────────────────────────────────────────────
     const code = params.get("code");
     const state = params.get("state");
@@ -77,17 +93,14 @@ export default function Connect() {
     if (code && state) {
       handledRef.current = true;
 
-      // Retrieve stored PKCE verifier for this state
+      // Retrieve stored PKCE verifier for this state (client-side fallback).
+      // The server keeps its own copy keyed by state, so a missing sessionStorage
+      // entry (fresh tab, cleared storage) is not fatal — the callback still
+      // proceeds and the server uses its stored verifier.
       const storedVerifier = sessionStorage.getItem(`pkce_verifier_${state}`);
       const storedRedirectUri = sessionStorage.getItem(`pkce_redirect_${state}`);
       sessionStorage.removeItem(`pkce_verifier_${state}`);
       sessionStorage.removeItem(`pkce_redirect_${state}`);
-
-      if (!storedVerifier) {
-        toast.error("OAuth state mismatch — please try logging in again.");
-        window.history.replaceState({}, "", window.location.pathname);
-        return;
-      }
 
       setOauthPending(true);
       window.history.replaceState({}, "", window.location.pathname);
@@ -100,7 +113,7 @@ export default function Connect() {
           code,
           state,
           redirect_uri: storedRedirectUri ?? buildRedirectUri(),
-          code_verifier: storedVerifier,
+          code_verifier: storedVerifier ?? undefined,
         }),
       })
         .then(async (r) => {
@@ -152,6 +165,33 @@ export default function Connect() {
         },
       });
     }
+  }, []);
+
+  // ── Surface Deriv app configuration problems (bad or missing app id) ──────
+  // The healthz endpoint probes auth.deriv.com and reports whether
+  // DERIV_APP_ID is actually registered. Without this, users just see a
+  // generic failure when the server's app id is wrong.
+  useEffect(() => {
+    const BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";
+    fetch(`${BASE}/api/healthz`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((health: {
+        deriv?: {
+          appIdConfigured?: boolean;
+          oauthClient?: { status?: string; detail?: string };
+        };
+      } | null) => {
+        const deriv = health?.deriv;
+        if (deriv && !deriv.appIdConfigured) {
+          setOauthConfigWarning(
+            "Deriv sign-in is not configured on the server yet (DERIV_APP_ID is missing). " +
+            "Manual PAT tokens will also be rejected until it is set.",
+          );
+        } else if (deriv?.oauthClient?.status === "unregistered") {
+          setOauthConfigWarning(deriv.oauthClient.detail ?? null);
+        }
+      })
+      .catch(() => { /* diagnostics only — never block the page */ });
   }, []);
 
   // ── Initiate OAuth2 + PKCE login ──────────────────────────────────────────
@@ -517,6 +557,20 @@ export default function Connect() {
         <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Connect Deriv Account</h1>
         <p className="text-muted-foreground mt-1 text-sm">Sign in with your Deriv account to enable live trading.</p>
       </div>
+
+      {/* Configuration problem detected via /api/healthz (bad or missing app id) */}
+      {oauthConfigWarning && (
+        <Card className="bg-destructive/10 border-destructive/40">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-sm text-destructive">
+              <AlertTriangle className="w-4 h-4" /> Deriv login is not configured yet
+            </CardTitle>
+            <CardDescription className="text-xs leading-relaxed">
+              {oauthConfigWarning}
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
       {/* Primary: OAuth2 + PKCE Login */}
       <Card className="bg-card border-primary/30 relative overflow-hidden">

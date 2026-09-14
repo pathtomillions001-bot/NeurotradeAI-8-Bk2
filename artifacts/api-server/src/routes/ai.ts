@@ -77,10 +77,65 @@ export function forceDayReset(broadcast = true, sessionId?: string): void {
  * before the first scan fires.
  */
 export async function resumeEngineIfEnabled(): Promise<void> {
-  // A server restart has no trustworthy browser owner to bind credentials to.
-  // Fail closed rather than auto-resuming an arbitrary persisted account.
-  await db.update(settingsTable).set({ autonomousEnabled: false });
-  logger.info("Autonomous auto-resume disabled for session isolation; user must restart from their browser");
+  // Account-scoped sessions make auto-resume safe: an enabled settings row
+  // belongs to a specific Deriv account, and that account's credentials are
+  // stored with it — so restarting the loop can never run on an arbitrary
+  // visitor's data. Previously this wiped autonomous_enabled for EVERY session
+  // on every deploy, which silently killed every account's bots and forced
+  // each user to restart manually from their browser.
+  try {
+    const enabled = await db.select().from(settingsTable)
+      .where(eq(settingsTable.autonomousEnabled, true))
+      .orderBy(desc(settingsTable.updatedAt));
+    if (enabled.length === 0) return;
+
+    // The autonomous executor is a singleton per process: resume the most
+    // recent owner and clear the flag for the others (their owners see
+    // "stopped" in the UI and restart from their browser when they want).
+    for (const row of enabled.slice(1)) {
+      await db.update(settingsTable).set({ autonomousEnabled: false })
+        .where(eq(settingsTable.sessionId, row.sessionId));
+      logger.info(
+        { sessionId: row.sessionId },
+        "Autonomous flag cleared on restart — another account owns the executor; restart it from your browser",
+      );
+    }
+
+    const winner = enabled[0]!;
+    const accounts = await db.select().from(accountsTable)
+      .where(eq(accountsTable.sessionId, winner.sessionId)).limit(1);
+    const token = accounts[0]?.bearerToken ?? accounts[0]?.token ?? null;
+    if (!token) {
+      await db.update(settingsTable).set({ autonomousEnabled: false })
+        .where(eq(settingsTable.sessionId, winner.sessionId));
+      logger.info(
+        { sessionId: winner.sessionId },
+        "Auto-resume skipped — that account session has no connected Deriv account",
+      );
+      return;
+    }
+
+    engineOwnerSessionId = winner.sessionId;
+    recoveryEngine.setPersistenceSession(winner.sessionId);
+    const persistedRecovery = (winner as any)?.recoveryStateJson;
+    if (persistedRecovery) {
+      try { recoveryEngine.loadState(persistedRecovery); }
+      catch { /* corrupt persisted state — start clean rather than crash */ }
+    }
+    if (winner.loopIntervalSec) loopIntervalSec = winner.loopIntervalSec;
+    engineRunning = true;
+    autonomousMode = "autonomous";
+    stopReasons = [];
+    nextScanIn = loopIntervalSec;
+    if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
+    autonomousTimer = setTimeout(runAutonomousLoop, 2000);
+    logger.info(
+      { sessionId: winner.sessionId, loopIntervalSec },
+      "Autonomous engine auto-resumed for its account session after restart",
+    );
+  } catch (err) {
+    logger.warn({ err }, "Auto-resume failed — the engine must be restarted from the browser");
+  }
 }
 
 export async function loadRecoveryStateFromDb(): Promise<void> {

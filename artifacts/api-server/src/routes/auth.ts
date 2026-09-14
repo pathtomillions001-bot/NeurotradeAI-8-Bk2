@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from "express";
-import { db, accountsTable } from "@workspace/db";
+import { randomUUID } from "node:crypto";
+import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import {
   authorizeWithDeriv,
@@ -13,8 +14,10 @@ import {
 import { ConnectDerivAccountBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import {
+  accountSessionId,
   hasRiskAcknowledgment,
   RISK_ACKNOWLEDGMENT_REQUIRED,
+  setBrowserSessionCookie,
   setRiskAcknowledgment,
 } from "../lib/session";
 
@@ -133,6 +136,71 @@ router.get("/oauth/initiate", (req, res): void => {
   res.json({ url: `${DERIV_AUTH_BASE}/oauth2/auth?${params.toString()}` });
 });
 
+/**
+ * Rotate the browser session onto a stable, account-scoped session id derived
+ * from the connected Deriv login (all of its account ids).
+ *
+ * Guarantees:
+ *  - A browser that previously held ANOTHER Deriv login never migrates or
+ *    touches that login's rows — each login's journal/settings/trades are
+ *    fully isolated, even when two Google accounts share one browser.
+ *  - The same Deriv login resolves to the same session id in every browser,
+ *    device and domain, so its data can never be orphaned by a lost cookie or
+ *    a different site URL (previously the root cause of "lost" journal data).
+ *  - An anonymous (paper-trading) browser carries its history into the
+ *    account session on first connect, and only when that account session is
+ *    brand-new — never across logins.
+ */
+async function resolveAccountSession(
+  req: Request,
+  res: Response,
+  derivAccountIds: string[],
+): Promise<string> {
+  const current = req.sessionId;
+  const target = await accountSessionId(derivAccountIds);
+  if (target === current) return current;
+  // The risk-acknowledgment cookie is signed over the session id — re-sign it
+  // for the rotated session so a connected user is never asked to accept again.
+  const wasRiskAcknowledged = hasRiskAcknowledgment(req);
+
+  const accountIds = new Set(derivAccountIds.filter(Boolean));
+  const [targetAccounts, targetSettings, targetTrades, currentAccounts] = await Promise.all([
+    db.select({ id: accountsTable.id }).from(accountsTable)
+      .where(eq(accountsTable.sessionId, target)).limit(1),
+    db.select({ id: settingsTable.id }).from(settingsTable)
+      .where(eq(settingsTable.sessionId, target)).limit(1),
+    db.select({ id: tradesTable.id }).from(tradesTable)
+      .where(eq(tradesTable.sessionId, target)).limit(1),
+    db.select().from(accountsTable).where(eq(accountsTable.sessionId, current)),
+  ]);
+  const targetHasData =
+    targetAccounts.length > 0 || targetSettings.length > 0 || targetTrades.length > 0;
+
+  // Migrate the connecting browser's history ONLY when the target account
+  // session is empty AND this session is anonymous (no linked account) or all
+  // of its linked accounts belong to this same Deriv login (legacy rows
+  // written before account-scoped sessions existed).
+  const carriesHistory = !targetHasData && (
+    currentAccounts.length === 0 ||
+    currentAccounts.every((a) => accountIds.has(a.derivAccountId ?? a.loginId))
+  );
+  if (carriesHistory) {
+    await db.update(accountsTable).set({ sessionId: target })
+      .where(eq(accountsTable.sessionId, current));
+    await db.update(settingsTable).set({ sessionId: target })
+      .where(eq(settingsTable.sessionId, current));
+    await db.update(tradesTable).set({ sessionId: target })
+      .where(eq(tradesTable.sessionId, current));
+    logger.info({ from: current, to: target }, "Session history migrated onto account-scoped session");
+  }
+
+  setBrowserSessionCookie(res, target);
+  req.sessionId = target;
+  if (wasRiskAcknowledged) setRiskAcknowledgment(res, target);
+  logger.info({ to: target }, "Browser session rotated onto account-scoped session");
+  return target;
+}
+
 async function upsertDerivAccounts(args: {
   sessionId: string;
   bearerToken: string;
@@ -244,8 +312,11 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
       }
     } catch { /* profile is best effort */ }
 
+    const accountSession = await resolveAccountSession(
+      req, res, derivAccounts.map((a) => a.account_id),
+    );
     const row = await upsertDerivAccounts({
-      sessionId: req.sessionId,
+      sessionId: accountSession,
       bearerToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
       derivAccounts,
@@ -304,8 +375,11 @@ router.post("/connect", async (req, res): Promise<void> => {
     if (derivAccounts.length > 0) {
       const preferred = derivAccounts.find((a) => a.account_type === "real" && a.status === "active")
         ?? derivAccounts[0];
+      const accountSession = await resolveAccountSession(
+        req, res, derivAccounts.map((a) => a.account_id),
+      );
       const row = await upsertDerivAccounts({
-        sessionId: req.sessionId,
+        sessionId: accountSession,
         bearerToken: token,
         derivAccounts,
         preferredId: preferred.account_id,
@@ -326,8 +400,9 @@ router.post("/connect", async (req, res): Promise<void> => {
       status: "active",
       account_type: info.is_virtual === 1 ? "demo" : "real",
     }];
+    const accountSession = await resolveAccountSession(req, res, [info.loginid]);
     const row = await upsertDerivAccounts({
-      sessionId: req.sessionId,
+      sessionId: accountSession,
       bearerToken: token,
       derivAccounts: fallbackAccounts,
       preferredId: info.loginid,
@@ -449,8 +524,17 @@ router.post("/switch-account", async (req, res): Promise<void> => {
 });
 
 router.post("/disconnect", async (req, res): Promise<void> => {
+  const wasRiskAcknowledged = hasRiskAcknowledgment(req);
   clearJournalManager(req.sessionId);
   await db.delete(accountsTable).where(eq(accountsTable.sessionId, req.sessionId));
+  // Rotate this browser onto a brand-new anonymous session so a subsequently
+  // connected DIFFERENT Deriv login can never inherit or migrate this account's
+  // scoped journal/settings/trades. The disconnected account's data stays in
+  // the database untouched and reappears the moment that login reconnects.
+  const fresh = randomUUID();
+  setBrowserSessionCookie(res, fresh);
+  req.sessionId = fresh;
+  if (wasRiskAcknowledged) setRiskAcknowledgment(res, fresh);
   res.json({ success: true, message: "Your Deriv accounts were disconnected from this browser only" });
 });
 

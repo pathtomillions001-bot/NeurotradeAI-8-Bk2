@@ -106,6 +106,8 @@ _Populate as you build — explicit user instructions worth remembering across s
 
 ## Gotchas
 
+- **Account-scoped sessions (2026-09-14)**: on connect (OAuth or PAT) the anonymous browser session is rotated onto a stable session id derived from the Deriv login's account-id set (HMAC with a server secret persisted in Postgres `server_secrets`). Different Deriv logins → different ids (full isolation even in one browser); the same login → the same id in every browser/device/domain (data always follows the account, never orphaned). `/disconnect` rotates to a fresh anonymous session. The risk-ack cookie is re-signed on rotation.
+- **Autonomous engine auto-resume**: on server start, the most recent account session with `autonomous_enabled=true` (and a connected account) resumes automatically; other enabled sessions are cleared (the executor is a singleton per process — one engine may trade at a time, by design: one recovery ledger per account).
 - **New Deriv API architecture**: The legacy `wss://ws.derivws.com/websockets/v3?app_id=<ID>` endpoint does NOT accept the new alphanumeric App IDs (returns 401). The app has been migrated to the new API:
   - **Public market data** (ticks, proposals): `wss://api.derivws.com/trading/v1/options/ws/public` — no auth required
   - **Authenticated trading**: OTP URL from `POST /trading/v1/options/accounts/{id}/otp` — no `authorize` WS message

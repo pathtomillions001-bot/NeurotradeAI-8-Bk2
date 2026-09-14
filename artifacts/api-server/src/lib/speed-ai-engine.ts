@@ -64,6 +64,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import type { RecoveryTradeRecord } from "./speed-recovery-state";
+import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
 
 export { recordRecoveryOutcome } from "./speed-recovery-state";
 export type { SpeedRecoveryState } from "./speed-recovery-state";
@@ -179,7 +180,7 @@ export interface SpeedAIStatus {
 // for the sniper gate's decaying penalty) and a display counter. Neither of
 // these decides normal-vs-recovery mode or stake size.
 
-let session: {
+interface SpeedAISessionState {
   running: boolean;
   sessionId: string | null;
   config: SpeedAIConfig | null;
@@ -200,22 +201,34 @@ let session: {
   stopRequested: boolean;
   lastEntropyBits: number;
   lastEv: number;
-} = {
-  running: false,
-  sessionId: null,
-  config: null,
-  totalProfit: 0,
-  tradeCount: 0,
-  winCount: 0,
-  lossCount: 0,
-  currentStake: 0,
-  patternTrades: [],
-  consecutiveRecoveryLosses: 0,
-  topMarkets: [],
-  stopRequested: false,
-  lastEntropyBits: 3.32,
-  lastEv: 0,
-};
+}
+
+function freshSessionState(): SpeedAISessionState {
+  return {
+    running: false,
+    sessionId: null,
+    config: null,
+    totalProfit: 0,
+    tradeCount: 0,
+    winCount: 0,
+    lossCount: 0,
+    currentStake: 0,
+    patternTrades: [],
+    consecutiveRecoveryLosses: 0,
+    topMarkets: [],
+    stopRequested: false,
+    lastEntropyBits: 3.32,
+    lastEv: 0,
+  };
+}
+
+// One independent FAB session per connected Deriv account (browser session).
+// Every `session.foo` line below is untouched — the proxy routes each access
+// to the calling session's own state, so two accounts run two fully
+// independent FAB sessions in one process. Whole-state resets go through
+// replaceSession(); the runLoop chain is wrapped in the owner's context.
+const { state: session, replace: replaceSession } =
+  createSessionScoped<SpeedAISessionState>(freshSessionState);
 
 // ── Mathematical & Statistical Subsystems ─────────────────────────────────────
 
@@ -1521,7 +1534,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
   // markets as it trades.
   resetSignalValue();
 
-  session = {
+  replaceSession({
     running:      true,
     sessionId:    `neuro_${Date.now()}`,
     config,
@@ -1539,19 +1552,24 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
       : "Initializing Quantum Analysis Engine…",
     lastEntropyBits: 3.32,
     lastEv: 0,
-  };
+  });
 
   logger.info({ config, inheritedRecovery: sharedRecovery.inRecovery, inheritedDebt: sharedRecovery.unrecoveredAmount }, "NeuroAI FAB session starting");
   broadcast();
 
-  runLoop(config).catch(err => {
+  // Pin the whole loop chain (plus its error/finally handlers) to the
+  // owner's session context so every session-scoped store it touches
+  // (session state, recovery ledger, signal pools, arbiter lock) resolves to
+  // this account — deterministically, regardless of call-site context.
+  const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
+  runWithSessionId(loopSessionId, () => runLoop(config).catch(err => {
     logger.error({ err }, "NeuroAI FAB runLoop error");
     session.running = false;
     session.message = `⚠️ ${friendlyErrorMessage(err)}`;
     broadcast();
   }).finally(() => {
     releaseTradingOwnership("neuroai");
-  });
+  }));
 
   return { ok: true };
 }

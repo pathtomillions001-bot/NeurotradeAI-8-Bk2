@@ -1,5 +1,5 @@
 /**
- * TWIN-HEDGE EDGE — analysis core of the 11th specialist bot.
+ * TWIN-HEDGE EDGE — analysis core of the 11th specialist bot (v2 volume engine).
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * THE CONTRACT
@@ -18,14 +18,13 @@
  *   none       — the digit makes BOTH legs lose (dead zone of a non-covering pair)
  *
  * A "balanced" pair (Over 4 / Under 5) is the special case where both=∅ and
- * none=∅ — exactly one leg always wins. The other user-selected pairs (Over
- * 7/Under 2, Over 6/Under 3, Over 8/Under 1, and the overlapping Over 2/Under
- * 8 and Over 1/Under 9) still trade both legs, but their EV is measured against
- * the FULL four-region outcome, so a pair with a big dead zone is refused unless
- * the model is genuinely confident it will land on a covered digit.
+ * none=∅ — exactly one leg always wins. Every other user-selected pair still
+ * trades both legs, and its EV is measured against the FULL four-region
+ * outcome, so overlap and dead zones are priced into every reading instead of
+ * being used as an excuse to refuse the pair.
  *
  * ─────────────────────────────────────────────────────────────────────────────
- * THE EDGE
+ * THE EDGE (v2 — always-on, mode-aware)
  * ─────────────────────────────────────────────────────────────────────────────
  * Fair 50/50 legs payout below 2.0 (Over 4 / Under 5 = 1.95), so betting both
  * at EQUAL stakes loses money on every tick. The edge is therefore a STAKE
@@ -35,22 +34,24 @@
  * a positive net. If the hedge side lands, the net loss is recorded and the
  * shared recovery ledger sizes the next pair-shot to recover it.
  *
- * The skew is SELF-ADAPTIVE and derived from the model's own probability: the
- * smallest skew that makes the expected net hit the target return at the model's
- * reading, bounded to keep the hedge a hedge. A model that cannot make the net
- * positive at even the maximum skew is REFUSED — that is the honest bar.
+ * v1 stacked three rare probabilistic gates (self-referential top-quantile bar
+ * × positive-analytic-EV × oracle timing), so the product almost never fired —
+ * the bot watched forever and traded never, even in Balanced mode. v2 inverts
+ * that philosophy:
  *
- * ─────────────────────────────────────────────────────────────────────────────
- * WHAT IS BORROWED FROM THE OVER/UNDER ORACLE
- * ─────────────────────────────────────────────────────────────────────────────
- *   · the walk-forward discipline — fit on the first half, MEASURE on the second
- *   · the self-referential entry bar (a quantile of the model's own trail)
- *   · the anytime-valid e-value on the shot sequence
- *   · the Page–Hinkley regime watch and the post-loss shield
- *   · the exact ladder-safety mathematics
- *   · the same shared recovery ledger / single-executor arbiter
- * The pair side (joint four-region outcome, adaptive stake skew, both-leg
- * execution) is new.
+ *   · the edge estimator is ALWAYS DEFINED (shrunk multi-window imbalance +
+ *     EMA momentum + window agreement + follow/chop regime). It never refuses;
+ *     weak readings simply produce a weak skew and a small stake scale.
+ *   · the mode (Balanced / Strict / Elite) sets the firing bar, the cadence,
+ *     the timing agreement and the skew cap — Balanced trades near-continuously
+ *     after warmup, Elite waits for a genuine measured tilt.
+ *   · timing is cadence + feed freshness + post-shot spacing + post-loss
+ *     cool-down, with an optional last-print agreement rule per mode — never a
+ *     stack of probabilistic vetoes.
+ *   · profitability comes from harvesting short-horizon imbalance with an
+ *     adaptive skew, conviction-scaled staking, the shared recovery ladder for
+ *     drawdowns, and hard session TP/SL. The walk-forward backtest paper-trades
+ *     this exact rule out of sample so the scan numbers are honest.
  */
 
 import {
@@ -62,7 +63,6 @@ import {
   wilsonLower,
   evidenceValue,
   effectiveSampleSize,
-  pageHinkley,
   ladderDepthLimit,
   ladderAbsorption,
   expectedShotsToLadderBreak,
@@ -204,7 +204,7 @@ export interface TwinLeg {
 /** The complete pair shot: both legs, same market, same tick. */
 export interface TwinPlan {
   primary: TwinSide;
-  /** stake increment on the primary side (0.02 … TWIN_MAX_BIAS). */
+  /** stake increment on the primary side (TWIN_MIN_BIAS … mode cap). */
   bias: number;
   /** The base stake BOTH leg scales are derived from. */
   baseStake: number;
@@ -318,91 +318,105 @@ export interface TwinCertaintySpec {
   id: TwinCertainty;
   label: string;
   blurb: string;
-  /** Fraction of ticks the entry rule may fire on (self-referential). */
-  targetShotRate: number;
-  /** Minimum out-of-sample pair shots before certifying. */
+  /** Ticks of history before the live gate may fire. */
+  minHistory: number;
+  /** Minimum ticks between pair-shots (cadence). */
+  minSpacing: number;
+  /** Post-loss cool-down in ticks. */
+  postLossCoolTicks: number;
+  /** How much each consecutive loss tightens the bar (gentle shield). */
+  postLossTightening: number;
+  /**
+   * Minimum analytic $ edge per $1 base to fire (Balanced = −1: always fires
+   * once warm — the skew and stake scale carry the edge instead of a veto).
+   */
+  edgeFloor: number;
+  /** Minimum |tilt| in standard errors to fire (0 = no z veto). */
+  zBar: number;
+  /** Maximum stake skew the mode may use. */
+  maxBias: number;
+  /** Last-print agreement ticks required by the timing rule (0 = none). */
+  agreeTicks: number;
+  /** Minimum out-of-sample paper shots before certifying a market. */
   minShots: number;
-  /** Minimum measured $ net per $1 base stake on unseen shots. */
-  minEvPerDollar: number;
-  /** Minimum conservative (Wilson) $ net per $1 base stake. */
-  minEvLower: number;
-  /** Anytime-valid e-value required on the shot sequence. */
-  minEvidenceE: number;
-  /** Minimum ladder safety = 1 − P(deeper run than the ladder limits). */
-  minLadderSafety: number;
-  /** One-sided z at which demonstrated loss clustering becomes a veto. */
-  maxClusterZ: number;
-  minClusterGapPP: number;
+  /** Minimum paper $ net per $1 base for CERTIFIED / QUALIFIED. */
+  minEvCertified: number;
+  minEvQualified: number;
+  /** Minimum paper $ net per $1 base before a market is REFUSED. */
+  minEvRefuse: number;
+  /** Minimum live conviction for CERTIFIED. */
+  minConvictionCertified: number;
   /** Composite confidence floor for a CERTIFIED verdict. */
   minConfidence: number;
-  postLossTightening: number;
-  postLossCoolTicks: number;
-  minSpacing: number;
 }
 
 /**
- * Deliberately looser than the Kill-Shot Oracle — this bot is a volume/edge
- * bot. These bars were tuned far too tight (the pair edge cleared on almost no
- * ticks even at Balanced, so the bot took no trades). The shot-rate quantile is
- * the primary "pair edge" lever: a higher `targetShotRate` lowers the
- * self-referential tau, so more ticks clear the bar. The certification floors
- * (shots / EV / evidence / confidence) were lifted in step so more markets
- * deploy and the live gate re-arms faster after a loss.
+ * Volume-first bars. Balanced is the "trade nonstop" mode: once the feed is
+ * warm it fires on cadence with an adaptive skew and conviction-scaled stake,
+ * and lets the hedge + recovery ladder do their job. Strict asks for a
+ * measurable tilt; Elite waits for a strong one. Nothing here can veto a flat
+ * market forever in Balanced — that was the v1 failure mode.
  */
 export const TWIN_CERTAINTY: Record<TwinCertainty, TwinCertaintySpec> = {
   elite: {
     id: "elite",
     label: "Elite",
-    targetShotRate: 0.07,
+    minHistory: 240,
+    minSpacing: 8,
+    postLossCoolTicks: 14,
+    postLossTightening: 0.25,
+    edgeFloor: 0.004,
+    zBar: 1.0,
+    maxBias: 0.35,
+    agreeTicks: 2,
     minShots: 10,
-    minEvPerDollar: 0.008,
-    minEvLower: 0,
-    minEvidenceE: 3,
-    minLadderSafety: 0.7,
-    maxClusterZ: 1.645,
-    minClusterGapPP: 3,
+    minEvCertified: 0.01,
+    minEvQualified: 0.002,
+    minEvRefuse: -0.012,
+    minConvictionCertified: 0.55,
     minConfidence: 58,
-    postLossTightening: 0.5,
-    postLossCoolTicks: 16,
-    minSpacing: 6,
     blurb:
-      "Top ~7% of ticks. 10+ out-of-sample pair shots, positive EV, 3× evidence.",
+      "Waits for a strong measured tilt. Fewest shots, biggest skew, strictest proof.",
   },
   strict: {
     id: "strict",
     label: "Strict",
-    targetShotRate: 0.11,
-    minShots: 7,
-    minEvPerDollar: 0.002,
-    minEvLower: 0,
-    minEvidenceE: 2,
-    minLadderSafety: 0.55,
-    maxClusterZ: 1.96,
-    minClusterGapPP: 3,
-    minConfidence: 48,
-    postLossTightening: 0.4,
-    postLossCoolTicks: 12,
+    minHistory: 180,
     minSpacing: 5,
+    postLossCoolTicks: 10,
+    postLossTightening: 0.2,
+    edgeFloor: 0.0,
+    zBar: 0.5,
+    maxBias: 0.3,
+    agreeTicks: 1,
+    minShots: 8,
+    minEvCertified: 0.006,
+    minEvQualified: -0.004,
+    minEvRefuse: -0.02,
+    minConvictionCertified: 0.45,
+    minConfidence: 48,
     blurb:
-      "Top ~11% of ticks. 7+ out-of-sample pair shots, measurable positive EV, 2× evidence.",
+      "Trades on a measurable tilt with last-print agreement. Balanced proof, steady cadence.",
   },
   balanced: {
     id: "balanced",
     label: "Balanced",
-    targetShotRate: 0.18,
-    minShots: 5,
-    minEvPerDollar: 0,
-    minEvLower: 0,
-    minEvidenceE: 1.2,
-    minLadderSafety: 0.45,
-    maxClusterZ: 2.33,
-    minClusterGapPP: 4,
-    minConfidence: 40,
-    postLossTightening: 0.3,
-    postLossCoolTicks: 8,
-    minSpacing: 4,
+    minHistory: 120,
+    minSpacing: 3,
+    postLossCoolTicks: 6,
+    postLossTightening: 0.15,
+    edgeFloor: -1,
+    zBar: 0,
+    maxBias: 0.22,
+    agreeTicks: 0,
+    minShots: 6,
+    minEvCertified: 0.004,
+    minEvQualified: -0.012,
+    minEvRefuse: -0.35,
+    minConvictionCertified: 0.35,
+    minConfidence: 35,
     blurb:
-      "Top ~18% of ticks. Most shots, honest positive out-of-sample EV — the loosest bar.",
+      "Trades near-continuously once warm. Adaptive skew + conviction staking harvest short-horizon imbalance.",
   },
 };
 
@@ -413,59 +427,52 @@ export function twinCertaintySpec(id?: string): TwinCertaintySpec {
   );
 }
 
-// ── The pair model (five-experts on the 10-state digit stream) ────────────────
+// ── The v2 edge estimator (always-on, shrunk, look-ahead-free) ───────────────
 
-export const TWIN_EXPERT_NAMES = [
-  "dirichlet",
-  "context-tree",
-  "outcome-chain",
-  "renewal-hazard",
-  "regime-hmm",
-] as const;
-export type TwinExpertName = (typeof TWIN_EXPERT_NAMES)[number];
-
-export interface TwinDigitReading {
-  /** Probabilities for digits 0..9 (sum ≈ 1). */
-  digits: number[];
-  pOver: number;
-  pUnder: number;
-  state: TwinStateProb;
-  /** $ net per $1 base at the chosen plan (the decision scalar). */
-  edgePerBase: number;
-  primary: TwinSide;
-  bias: number;
-  expected: number;
-  spread: number;
-  uncertainty: number;
-  /** Edge per $1 base in units of posterior + disagreement sigma. */
-  z: number;
-  /** Standardised edge in units of the model's own trailing reading. */
-  zRel: number;
-  gate: number;
-  zGate: number;
-}
-
-export interface TwinExpertReading {
-  name: TwinExpertName;
-  digits: number[];
-  weight: number;
-}
-
-interface DigitDist {
-  digits: number[];
-  state: TwinStateProb;
-}
-
-const DIRICHLET_DECAY = 0.997;
-const MAX_ORDER = 4;
-const HEDGE_ETA = 0.35;
-const Z_WINDOW = 600;
-const Z_WINDOW_MIN = 200;
-const Q_REFRESH = 25;
 export const TWIN_MAX_BIAS = 0.35;
 export const TWIN_MIN_BIAS = 0.02;
-/** Default target per-$1 base return the auto-skew aims to reach. */
+/** Default target per-$1 base return the walk-forward skew aims to reach. */
 export const TWIN_DEFAULT_TARGET_EV = 0.01;
+
+/** Trailing windows (ticks) and pseudo-counts for the shrunk over-rate. */
+const TILT_WINDOWS = [25, 100, 400] as const;
+const TILT_ALPHAS = [8, 16, 32] as const;
+const TILT_WEIGHTS = [0.5, 0.3, 0.2] as const;
+const REGION_WINDOW = 200;
+const REGION_ALPHA = 24;
+const EMA_FAST = 0.08;
+const EMA_SLOW = 0.02;
+const FOLLOW_WINDOW = 60;
+
+export interface TwinEdgeReading {
+  /** P(OVER leg wins) under the shrunk trailing digit distribution. */
+  pOver: number;
+  /** P(UNDER leg wins) under the shrunk trailing digit distribution. */
+  pUnder: number;
+  state: TwinStateProb;
+  /** Fair (uniform-digit) share of the OVER leg — the no-edge baseline. */
+  fairOver: number;
+  /** Signed imbalance vs fair after momentum blending, clamped ±0.15. */
+  tilt: number;
+  /** |tilt| in standard errors (n_eff ≈ 60). */
+  z: number;
+  /** 0.05 … 1 — drives skew size and stake scale. Never zero. */
+  conviction: number;
+  primary: TwinSide;
+  /** Mode-capped skew actually recommended for this reading. */
+  bias: number;
+  /** $ expected net per $1 base at the recommended skew. */
+  edgePerBase: number;
+  /** $ net when the favoured region wins, per $1 of base stake. */
+  netOnWinPerBase: number;
+  /** $ net when the hedge region wins, per $1 of base stake (≤ 0). */
+  netOnLossPerBase: number;
+}
+
+function shrunkRate(hits: number, n: number, prior: number, alpha: number): number {
+  if (n <= 0) return prior;
+  return (hits + alpha * prior) / (n + alpha);
+}
 
 function stateFromDigits(digits: number[], c: TwinContract): TwinStateProb {
   const p: TwinStateProb = { overOnly: 0, underOnly: 0, both: 0, none: 0 };
@@ -475,544 +482,126 @@ function stateFromDigits(digits: number[], c: TwinContract): TwinStateProb {
   }
   return p;
 }
-function normalize(xs: number[]): number[] {
-  const total = xs.reduce((a, b) => a + b, 0);
-  if (total <= 1e-12)
-    return new Array<number>(xs.length).fill(1 / Math.max(1, xs.length));
-  return xs.map((x) => Math.max(0, x) / total);
-}
-
-function pickPlan(
-  c: TwinContract,
-  state: TwinStateProb,
-  targetEv: number,
-  baseStake: number,
-): Pick<
-  Omit<TwinPlan, "overStake" | "underStake" | "overLeg" | "underLeg">,
-  | "primary"
-  | "bias"
-  | "baseStake"
-  | "edgePerBase"
-  | "netOnWinPerBase"
-  | "netOnLossPerBase"
-> {
-  const primary: TwinSide =
-    state.overOnly + state.both >= state.underOnly + state.both
-      ? "over"
-      : "under";
-  const payouts = twinPayouts(c);
-  let bestBias = TWIN_MAX_BIAS;
-  let bestEdge = -Infinity;
-  for (let bias = TWIN_MIN_BIAS; bias <= TWIN_MAX_BIAS + 1e-9; bias += 0.005) {
-    const plan = buildTwinPlan(c, primary, bias, baseStake);
-    const edge = twinExpectedNet(c, plan, state);
-    // Prefer the SMALLEST bias that clears the target — "slightly increased".
-    if (edge >= targetEv) {
-      const netOverWin = twinRegionNet(
-        c,
-        plan,
-        primary === "over" ? "overOnly" : "underOnly",
-      );
-      const netLoss = twinRegionNet(
-        c,
-        plan,
-        primary === "over" ? "underOnly" : "overOnly",
-      );
-      return {
-        primary,
-        bias,
-        baseStake,
-        edgePerBase: edge,
-        netOnWinPerBase: netOverWin,
-        netOnLossPerBase: netLoss,
-      };
-    }
-    if (edge > bestEdge) {
-      bestEdge = edge;
-      bestBias = bias;
-    }
-  }
-  const plan = buildTwinPlan(c, primary, bestBias, baseStake);
-  return {
-    primary,
-    bias: bestBias,
-    baseStake,
-    edgePerBase: bestEdge,
-    netOnWinPerBase: twinRegionNet(
-      c,
-      plan,
-      primary === "over" ? "overOnly" : "underOnly",
-    ),
-    netOnLossPerBase: twinRegionNet(
-      c,
-      plan,
-      primary === "over" ? "underOnly" : "overOnly",
-    ),
-  };
-}
 
 /**
- * Incremental, look-ahead-free digit predictor for the pair. predict() is pure;
- * observe() folds the realised digit in AFTER the prediction.
+ * One always-defined reading of the pair edge from trailing digits only.
+ * Heavy shrinkage toward the fair (uniform) baseline keeps tiny samples
+ * honest; strong recent imbalance still moves the needle through the fast
+ * window and the EMA momentum term.
  */
-export class TwinEnsemble {
-  private readonly overDigit: number;
-  private readonly underDigit: number;
-  private readonly targetEv: number;
+export function estimateTwinEdge(
+  digits: number[],
+  contract: TwinContract,
+  opts: { maxBias?: number; targetEv?: number } = {},
+): TwinEdgeReading {
+  const out = twinOutcome(contract);
+  const fairOver = out.overCount / 10;
+  const maxBias = clamp(opts.maxBias ?? TWIN_MAX_BIAS, TWIN_MIN_BIAS, TWIN_MAX_BIAS);
+  const n = digits.length;
+  const overSet = out.overWinSet;
 
-  private dirichlet = new Array<number>(10).fill(0.5);
-  private ctxCount = new Map<string, number>();
-  private ctxHits = new Map<string, number[]>();
-  private chainCounts = new Map<string, number>();
-  private gapHits = new Map<number, { hits: number[]; n: number }>();
-  private sinceState: TwinState;
-  private hmm: { pHot: number; pCold: number; stay: number; prior: number };
-  private hotBelief: number;
+  // 1) Multi-window shrunk over-rate → tilt vs fair.
+  let pCtx = 0;
+  const devs: number[] = [];
+  for (let w = 0; w < TILT_WINDOWS.length; w++) {
+    const len = Math.min(n, TILT_WINDOWS[w]);
+    let hits = 0;
+    for (let i = n - len; i < n; i++) if (overSet.has(digits[i]!)) hits++;
+    const p = shrunkRate(hits, len, fairOver, TILT_ALPHAS[w]);
+    pCtx += TILT_WEIGHTS[w] * p;
+    if (len >= 10) devs.push(p - fairOver);
+  }
+  const totalSign = Math.sign(pCtx - fairOver);
+  const agreement =
+    devs.length > 0
+      ? devs.filter((d) => d === 0 || Math.sign(d) === totalSign).length /
+        devs.length
+      : 0.5;
 
-  private digits: number[] = [];
-  private nSeen = 0;
-  private logW: number[];
-  private zHist: number[] = [];
-  private zSum = 0;
-  private zSumSq = 0;
-  private targetShotRate: number;
-  private qCache = 0;
-  private qFresh = false;
-  private basePayouts: { over: number; under: number };
-  private outcomeProbs: TwinStateProb = {
-    overOnly: 0.25,
-    underOnly: 0.25,
-    both: 0.25,
-    none: 0.25,
+  // 2) EMA momentum on the over-indicator (fast − slow).
+  let fast = fairOver;
+  let slow = fairOver;
+  const emaLen = Math.min(n, 300);
+  for (let i = n - emaLen; i < n; i++) {
+    const x = overSet.has(digits[i]!) ? 1 : 0;
+    fast += EMA_FAST * (x - fast);
+    slow += EMA_SLOW * (x - slow);
+  }
+  const momentum = emaLen >= 10 ? fast - slow : 0;
+
+  const tilt = clamp(pCtx - fairOver + 0.5 * momentum, -0.15, 0.15);
+
+  // 3) Follow/chop regime: does trailing-majority-following win lately?
+  let followHits = 0;
+  let followN = 0;
+  const fw = Math.min(n - 1, FOLLOW_WINDOW);
+  for (let i = n - fw; i < n; i++) {
+    if (i < 10) continue;
+    let h = 0;
+    const look = Math.min(15, i);
+    for (let j = i - look; j < i; j++) if (overSet.has(digits[j]!)) h++;
+    const majorityOver = h / look >= 0.5;
+    const realisedOver = overSet.has(digits[i]!);
+    if (majorityOver === realisedOver) followHits++;
+    followN++;
+  }
+  const followRate = followN > 0 ? followHits / followN : 0.5;
+  const followScore = clamp((followRate - 0.45) / 0.15, 0, 1);
+
+  // 4) Conviction: tilt magnitude + window agreement, MULTIPLIED by proven
+  // follow-through. A big tilt the stream keeps reversing (choppy /
+  // mean-reverting regime) must not command a big skew — the multiplier
+  // collapses conviction toward the floor instead of merely nudging it.
+  const base = Math.min(1, Math.abs(tilt) / 0.045);
+  const conviction = clamp(
+    (0.65 * base + 0.35 * agreement) * (0.35 + 0.65 * followScore),
+    0.05,
+    1,
+  );
+
+  // 5) Coherent region distribution from the shrunk trailing digits.
+  const rLen = Math.min(n, REGION_WINDOW);
+  const counts = new Array<number>(10).fill(0);
+  for (let i = n - rLen; i < n; i++) counts[digits[i]!]++;
+  const dist = counts.map((x) => (x + REGION_ALPHA / 10) / (rLen + REGION_ALPHA));
+  const state = stateFromDigits(dist, contract);
+  const pOver = state.overOnly + state.both;
+  const pUnder = state.underOnly + state.both;
+
+  // 6) Primary + skew. Primary follows the tilt sign; the skew grows with
+  // conviction. When the tilt is strong enough that a SMALLER skew already
+  // clears the target EV, prefer the smaller skew (cheaper hedge).
+  const primary: TwinSide = tilt >= 0 ? "over" : "under";
+  const targetEv = opts.targetEv ?? TWIN_DEFAULT_TARGET_EV;
+  let bias = clamp(TWIN_MIN_BIAS + conviction * (maxBias - TWIN_MIN_BIAS), TWIN_MIN_BIAS, maxBias);
+  for (let b = TWIN_MIN_BIAS; b <= bias + 1e-9; b += 0.01) {
+    const trial = buildTwinPlan(contract, primary, b, 1);
+    if (twinExpectedNet(contract, trial, state) >= targetEv) {
+      bias = b;
+      break;
+    }
+  }
+  bias = round(bias, 3);
+  const plan = buildTwinPlan(contract, primary, bias, 1);
+  const edgePerBase = twinExpectedNet(contract, plan, state);
+  const winRegion: TwinState = primary === "over" ? "overOnly" : "underOnly";
+  const lossRegion: TwinState = primary === "over" ? "underOnly" : "overOnly";
+
+  const se = Math.sqrt(Math.max(1e-6, fairOver * (1 - fairOver) / 60));
+  return {
+    pOver: round(pOver, 6),
+    pUnder: round(pUnder, 6),
+    state,
+    fairOver: round(fairOver, 6),
+    tilt: round(tilt, 6),
+    z: round(tilt / se, 4),
+    conviction: round(conviction, 4),
+    primary,
+    bias,
+    edgePerBase: round(edgePerBase, 6),
+    netOnWinPerBase: round(twinRegionNet(contract, plan, winRegion), 6),
+    netOnLossPerBase: round(twinRegionNet(contract, plan, lossRegion), 6),
   };
-
-  constructor(
-    c: TwinContract,
-    targetShotRate = 0.05,
-    hmm?: { pHot: number; pCold: number; stay: number; prior: number },
-    targetEv = TWIN_DEFAULT_TARGET_EV,
-  ) {
-    this.overDigit = c.overDigit;
-    this.underDigit = c.underDigit;
-    this.targetShotRate = clamp(targetShotRate, 0.001, 0.5);
-    this.targetEv = targetEv;
-    this.basePayouts = twinPayouts(c);
-    this.sinceState = "none";
-    this.hmm = hmm ?? { pHot: 0.62, pCold: 0.5, stay: 0.96, prior: 0.5 };
-    this.hotBelief = this.hmm.prior;
-    this.logW = TWIN_EXPERT_NAMES.map(() => 0);
-  }
-
-  get seen(): number {
-    return this.nSeen;
-  }
-  get statWarmth(): number {
-    return this.zHist.length;
-  }
-  get statReady(): boolean {
-    return this.zHist.length >= Z_WINDOW_MIN;
-  }
-
-  private ctxKey(order: number): string {
-    if (order === 0) return "0:";
-    const n = this.digits.length;
-    if (n < order) return "";
-    return `${order}:${this.digits.slice(n - order).join("")}`;
-  }
-
-  private readDirichlet(): DigitDist {
-    const total = this.dirichlet.reduce((a, b) => a + b, 0);
-    const digits = this.dirichlet.map((x) => x / Math.max(1e-9, total));
-    return {
-      digits,
-      state: stateFromDigits(digits, {
-        overDigit: this.overDigit,
-        underDigit: this.underDigit,
-      }),
-    };
-  }
-
-  private readContextTree(): DigitDist {
-    let wSum = 0;
-    let pSum = new Array<number>(10).fill(0);
-    for (let order = 0; order <= MAX_ORDER; order++) {
-      const key = this.ctxKey(order);
-      if (!key) continue;
-      const c = this.ctxCount.get(key) ?? 0;
-      if (order > 0 && c < 6) continue;
-      const hits = this.ctxHits.get(key);
-      const digits = new Array<number>(10).fill(0);
-      let denom = 0;
-      for (let d = 0; d < 10; d++) {
-        digits[d] = ((hits?.[d] ?? 0) + 0.5) / (c + 5);
-        denom += digits[d];
-      }
-      if (denom <= 0) continue;
-      const p = digits.map((x) => x / denom);
-      const w = (c / (c + 15)) * Math.pow(0.62, order);
-      wSum += w;
-      for (let d = 0; d < 10; d++) pSum[d] += w * p[d];
-    }
-    if (wSum <= 0) return this.readDirichlet();
-    return {
-      digits: pSum.map((x) => x / wSum),
-      state: stateFromDigits(
-        pSum.map((x) => x / wSum),
-        { overDigit: this.overDigit, underDigit: this.underDigit },
-      ),
-    };
-  }
-
-  private stateKey(state: TwinState, prev?: TwinState): string {
-    return prev === undefined ? `${state}:*` : `${prev}:${state}`;
-  }
-
-  private readOutcomeChain(): DigitDist {
-    const last =
-      this.digits.length > 0
-        ? classifyDigit(
-            this.overDigit,
-            this.underDigit,
-            this.digits[this.digits.length - 1],
-          )
-        : "none";
-    const prior = 4;
-    const p = new Array<number>(4).fill(0);
-    let total = 0;
-    for (const s of TWIN_STATES) {
-      const key = this.stateKey(s, last);
-      const count = this.chainCounts.get(key) ?? 0;
-      const marginal = this.chainCounts.get(`${s}:*`) ?? 0;
-      p[TWIN_STATES.indexOf(s)] = (count + prior * 0.25) / (marginal + prior);
-      total += p[TWIN_STATES.indexOf(s)];
-    }
-    const probs = p.map((x) => x / Math.max(1e-9, total));
-    // Distribute each state's mass across the digits of that state.
-    const digits = new Array<number>(10).fill(0);
-    const out = twinOutcome({
-      overDigit: this.overDigit,
-      underDigit: this.underDigit,
-    });
-    const buckets: Array<[TwinState, number[]]> = [
-      ["overOnly", out.overOnly],
-      ["underOnly", out.underOnly],
-      ["both", out.both],
-      ["none", out.none],
-    ];
-    for (const [state, dset] of buckets) {
-      if (dset.length === 0) continue;
-      const share = probs[TWIN_STATES.indexOf(state)] / dset.length;
-      for (const d of dset) digits[d] += share;
-    }
-    return {
-      digits,
-      state: stateFromDigits(digits, {
-        overDigit: this.overDigit,
-        underDigit: this.underDigit,
-      }),
-    };
-  }
-
-  private readRenewal(): DigitDist {
-    // Per-state renewal hazard: P(next state | ticks since last time in that state).
-    const c = { overDigit: this.overDigit, underDigit: this.underDigit };
-    const out = twinOutcome(c);
-    const weights = new Array<number>(4).fill(0);
-    for (let si = 0; si < TWIN_STATES.length; si++) {
-      const state = TWIN_STATES[si];
-      const g = this.sinceState === state ? 0 : 1 + this.distanceSince(state);
-      let hits = 0;
-      let n = 0;
-      for (let dg = -1; dg <= 1; dg++) {
-        const cell = this.gapHits.get(g + dg);
-        if (cell) {
-          hits += cell.hits[si] ?? 0;
-          n += cell.n;
-        }
-      }
-      const base = this.hmm.pCold;
-      weights[si] =
-        n >= 8 ? (hits + 6 * base) / (n + 6) : this.hmm.pCold * 0.25;
-    }
-    const total = weights.reduce((a, b) => a + b, 0) || 1;
-    const digits = new Array<number>(10).fill(0);
-    const buckets: Array<[TwinState, number[]]> = [
-      ["overOnly", out.overOnly],
-      ["underOnly", out.underOnly],
-      ["both", out.both],
-      ["none", out.none],
-    ];
-    for (let si = 0; si < TWIN_STATES.length; si++) {
-      const dset = buckets[si]![1];
-      if (dset.length === 0) continue;
-      const share = weights[si] / total / dset.length;
-      for (const d of dset) digits[d] += share;
-    }
-    return { digits, state: stateFromDigits(digits, c) };
-  }
-
-  private distanceSince(state: TwinState): number {
-    let dist = 0;
-    for (let i = this.digits.length - 1; i >= 0; i--) {
-      if (
-        classifyDigit(this.overDigit, this.underDigit, this.digits[i]) === state
-      )
-        return dist;
-      dist++;
-    }
-    return dist;
-  }
-
-  private readRegime(): DigitDist {
-    const base = this.readDirichlet();
-    const over = base.state.overOnly + base.state.both;
-    const pHotOver = Math.max(0.02, Math.min(0.98, this.hmm.pHot));
-    const pColdOver = Math.max(0.01, Math.min(0.97, this.hmm.pCold));
-    const hotNext =
-      this.hotBelief * this.hmm.stay +
-      (1 - this.hotBelief) * (1 - this.hmm.stay);
-    const predicted = hotNext * pHotOver + (1 - hotNext) * pColdOver;
-    const digits = base.digits.slice();
-    let overMass = 0;
-    for (const d of twinOverWinSet(this.overDigit)) overMass += digits[d] ?? 0;
-    if (overMass > 1e-9) {
-      const scale = clamp(predicted / overMass, 0.1, 10);
-      const overSet = twinOverWinSet(this.overDigit);
-      for (const d of overSet) digits[d] = (digits[d] ?? 0) * scale;
-      const rest =
-        digits.reduce((a, b) => a + b, 0) -
-        digits.reduce((a, b, idx) => a + (overSet.has(idx) ? b : 0), 0);
-      const underM = Math.max(1e-6, 1 - predicted);
-      const nonOver = digits.reduce(
-        (a, b, idx) => a + (overSet.has(idx) ? 0 : b),
-        0,
-      );
-      const restScale = nonOver > 1e-9 ? Math.max(0.01, underM / nonOver) : 1;
-      const outDigits = digits.map((x, idx) =>
-        overSet.has(idx) ? x : x * restScale,
-      );
-      const norm = normalize(outDigits);
-      return {
-        digits: norm,
-        state: stateFromDigits(norm, {
-          overDigit: this.overDigit,
-          underDigit: this.underDigit,
-        }),
-      };
-    }
-    return base;
-  }
-
-  private standardise(z: number): number {
-    const n = this.zHist.length;
-    if (n < Z_WINDOW_MIN) return z;
-    const mu = this.zSum / n;
-    const v = Math.max(1e-6, this.zSumSq / n - mu * mu);
-    return (z - mu) / Math.sqrt(v);
-  }
-
-  private windowGate(): number {
-    const n = this.zHist.length;
-    if (n < Z_WINDOW_MIN) return Number.POSITIVE_INFINITY;
-    if (!this.qFresh) {
-      const sorted = [...this.zHist].sort((a, b) => a - b);
-      const idx = Math.max(
-        0,
-        Math.min(n - 1, Math.floor(n * (1 - this.targetShotRate))),
-      );
-      const mu = this.zSum / n;
-      const sd = Math.sqrt(Math.max(1e-6, this.zSumSq / n - mu * mu));
-      this.qCache = (sorted[idx] - mu) / sd;
-      this.qFresh = true;
-    }
-    return this.qCache;
-  }
-
-  /** One-tick-ahead reading. Pure — never mutates. */
-  predict(baseStake = 1): TwinDigitReading {
-    const c = { overDigit: this.overDigit, underDigit: this.underDigit };
-    const readings: TwinExpertReading[] = [];
-    const dists: DigitDist[] = [
-      this.readDirichlet(),
-      this.readContextTree(),
-      this.readOutcomeChain(),
-      this.readRenewal(),
-      this.readRegime(),
-    ];
-    const maxLog = Math.max(...this.logW);
-    const exps = this.logW.map((l) => Math.exp(l - maxLog));
-    const wSum = exps.reduce((a, b) => a + b, 0) || 1;
-    const weights = exps.map((e) => e / wSum);
-
-    const fused = new Array<number>(10).fill(0);
-    let spread = 0;
-    for (let i = 0; i < dists.length; i++) {
-      readings.push({
-        name: TWIN_EXPERT_NAMES[i],
-        digits: dists[i]!.digits,
-        weight: round(weights[i], 4),
-      });
-      for (let d = 0; d < 10; d++) fused[d] += weights[i] * dists[i]!.digits[d];
-    }
-    const state = stateFromDigits(fused, c);
-    const pOver = state.overOnly + state.both;
-    const pUnder = state.underOnly + state.both;
-
-    // Expert disagreement as uncertainty (variance of per-digit predictions).
-    let varAcc = 0;
-    for (let d = 0; d < 10; d++) {
-      for (let i = 0; i < dists.length; i++)
-        varAcc += weights[i] * (dists[i]!.digits[d] - fused[d]) ** 2;
-    }
-    spread = Math.sqrt(varAcc);
-
-    const plan = pickPlan(c, state, this.targetEv, baseStake);
-    const edge = plan.edgePerBase;
-    const z = edge / Math.max(1e-5, Math.max(spread, 0.01));
-    const zRel = this.standardise(z);
-    const gate = this.windowGate();
-
-    return {
-      digits: fused.map((x) => round(x, 6)),
-      pOver: round(state.overOnly + state.both, 6),
-      pUnder: round(state.underOnly + state.both, 6),
-      state,
-      edgePerBase: round(edge, 6),
-      primary: plan.primary,
-      bias: round(plan.bias, 3),
-      expected: round(
-        twinExpectedNet(
-          c,
-          buildTwinPlan(c, plan.primary, plan.bias, baseStake),
-          state,
-        ),
-        6,
-      ),
-      spread: round(spread, 6),
-      uncertainty: round(Math.max(spread, 1e-4), 6),
-      z: round(z, 4),
-      zRel: round(zRel, 4),
-      gate: round(Number.isFinite(gate) ? gate : 0, 4),
-      zGate: round(Number.isFinite(gate) ? zRel - gate : -99, 4),
-    };
-  }
-
-  /** Fold the realised digit in AFTER predict(). */
-  observe(digit: number, reading?: TwinDigitReading) {
-    const c = { overDigit: this.overDigit, underDigit: this.underDigit };
-    const won = 0;
-    void won;
-    const state = classifyDigit(this.overDigit, this.underDigit, digit);
-
-    if (reading) {
-      this.zHist.push(reading.z);
-      this.zSum += reading.z;
-      this.zSumSq += reading.z * reading.z;
-      if (this.zHist.length > Z_WINDOW) {
-        const old = this.zHist.shift()!;
-        this.zSum -= old;
-        this.zSumSq -= old * old;
-      }
-      if (this.zHist.length % Q_REFRESH === 0) this.qFresh = false;
-      // Hedge update on the 10-class log-loss of the fused digit distribution.
-      const p = Math.max(1e-5, reading.digits[digit] ?? 1e-5);
-      const loss = -Math.log(p);
-      for (let i = 0; i < this.logW.length; i++)
-        this.logW[i] -= HEDGE_ETA * loss;
-      const maxLog = Math.max(...this.logW);
-      for (let i = 0; i < this.logW.length; i++) this.logW[i] -= maxLog;
-    }
-
-    // E1 — decayed Dirichlet over digits.
-    for (let d = 0; d < 10; d++)
-      this.dirichlet[d] = 0.5 + (this.dirichlet[d] - 0.5) * DIRICHLET_DECAY;
-    this.dirichlet[digit] += 1;
-
-    // E2 — KT context counts for every order, keyed on the context BEFORE this digit.
-    for (let order = 0; order <= MAX_ORDER; order++) {
-      const key = this.ctxKey(order);
-      if (!key) continue;
-      this.ctxCount.set(key, (this.ctxCount.get(key) ?? 0) + 1);
-      const hits = this.ctxHits.get(key) ?? new Array<number>(10).fill(0);
-      hits[digit] += 1;
-      this.ctxHits.set(key, hits);
-    }
-
-    // E3 — 4-state outcome chain.
-    const prevState =
-      this.digits.length > 0
-        ? classifyDigit(
-            this.overDigit,
-            this.underDigit,
-            this.digits[this.digits.length - 1],
-          )
-        : null;
-    this.chainCounts.set(
-      this.stateKey(state, prevState ?? undefined),
-      (this.chainCounts.get(this.stateKey(state, prevState ?? undefined)) ??
-        0) + 1,
-    );
-    this.chainCounts.set(
-      this.stateKey(state),
-      (this.chainCounts.get(this.stateKey(state)) ?? 0) + 1,
-    );
-
-    // E4 — renewal hazard per state (gap before this tick).
-    const g = this.sinceState === state ? 0 : this.distanceSince(state) + 1;
-    const cell = this.gapHits.get(g) ?? {
-      hits: new Array<number>(4).fill(0),
-      n: 0,
-    };
-    cell.hits[TWIN_STATES.indexOf(state)] += 1;
-    cell.n += 1;
-    this.gapHits.set(g, cell);
-    this.sinceState = state;
-
-    // E5 — 2-state regime filter on the "over leg wins" indicator.
-    const overSet = twinOverWinSet(this.overDigit);
-    const overWon = overSet.has(digit) ? 1 : 0;
-    const { pHot, pCold, stay } = this.hmm;
-    const hotPrior = this.hotBelief * stay + (1 - this.hotBelief) * (1 - stay);
-    const lHot = overWon === 1 ? pHot : 1 - pHot;
-    const lCold = overWon === 1 ? pCold : 1 - pCold;
-    const num = hotPrior * lHot;
-    const den = num + (1 - hotPrior) * lCold;
-    this.hotBelief = den > 1e-12 ? clamp(num / den, 1e-4, 1 - 1e-4) : hotPrior;
-
-    this.digits.push(digit);
-    if (this.digits.length > 12_000) this.digits.shift();
-    this.nSeen++;
-  }
-
-  /** Marginal over / under probability observed so far (for diagnostics). */
-  get marginalState(): TwinStateProb {
-    if (this.nSeen === 0)
-      return { overOnly: 0.25, underOnly: 0.25, both: 0.25, none: 0.25 };
-    const counts: Record<TwinState, number> = {
-      overOnly: 0,
-      underOnly: 0,
-      both: 0,
-      none: 0,
-    };
-    for (const d of this.digits)
-      counts[classifyDigit(this.overDigit, this.underDigit, d)]++;
-    const total = this.digits.length;
-    return {
-      overOnly: counts.overOnly / total,
-      underOnly: counts.underOnly / total,
-      both: counts.both / total,
-      none: counts.none / total,
-    };
-  }
-
-  setRegime(hmm: {
-    pHot: number;
-    pCold: number;
-    stay: number;
-    prior: number;
-  }): void {
-    this.hmm = hmm;
-  }
 }
 
 // ── Model card + live entry ───────────────────────────────────────────────────
@@ -1025,7 +614,9 @@ export interface TwinHmmParams {
 }
 
 export interface TwinModelCard {
+  /** z-bar the live |tilt| must clear (mode floor, tightened after losses). */
   tau: number;
+  /** Target fire cadence as a fraction of ticks (≈ 1 / minSpacing). */
   targetShotRate: number;
   hmm: TwinHmmParams;
   overDigit: number;
@@ -1037,11 +628,16 @@ export interface TwinModelCard {
   postLossCoolTicks: number;
   targetEvPerDollar: number;
   fittedOn: number;
+  /** v2 fields — the mode this card was measured for. */
+  certainty: TwinCertainty;
+  edgeFloor: number;
+  maxBias: number;
+  agreeTicks: number;
+  minHistory: number;
 }
 
 export interface TwinLiveEntry {
   ready: boolean;
-  digits: number[];
   pOver: number;
   pUnder: number;
   state: TwinStateProb;
@@ -1049,6 +645,8 @@ export interface TwinLiveEntry {
   bias: number;
   edgePerBase: number;
   expected: number;
+  conviction: number;
+  tilt: number;
   statWarmth: number;
   tau: number;
   bar: number;
@@ -1056,7 +654,11 @@ export interface TwinLiveEntry {
   reason: string;
 }
 
-/** Replay the frozen rule live from the digit prefix (same deterministic path). */
+/**
+ * Live gate. Balanced fires on cadence once the feed is warm and the
+ * post-loss cool-down has passed — the skew and stake scale (not a veto)
+ * carry the edge. Strict/Elite add the measured-tilt bar on top.
+ */
 export function evaluateTwinLiveEntry(
   digits: number[],
   contract: TwinContract,
@@ -1064,73 +666,121 @@ export function evaluateTwinLiveEntry(
   opts: { barBoost?: number; ticksSinceLoss?: number; burnIn?: number } = {},
 ): TwinLiveEntry {
   const clean = digits.filter((d) => Number.isInteger(d) && d >= 0 && d <= 9);
-  const ens = new TwinEnsemble(
-    contract,
-    card.targetShotRate,
-    card.hmm,
-    card.targetEvPerDollar,
+  const certainty: TwinCertainty =
+    card.certainty === "elite" || card.certainty === "strict" ? card.certainty : "balanced";
+  const spec = twinCertaintySpec(certainty);
+  const minHistory = Number.isFinite(card.minHistory) && card.minHistory > 0 ? card.minHistory : spec.minHistory;
+  const edgeFloor = Number.isFinite(card.edgeFloor) ? card.edgeFloor : spec.edgeFloor;
+  const maxBias = clamp(
+    Number.isFinite(card.maxBias) ? card.maxBias : spec.maxBias,
+    TWIN_MIN_BIAS,
+    TWIN_MAX_BIAS,
   );
-  const warm = Math.max(0, clean.length - 1);
-  const burnIn = Math.max(0, Math.min(opts.burnIn ?? 300, warm));
-  for (let i = 0; i < warm; i++) {
-    if (i >= burnIn) {
-      const r = ens.predict(1);
-      ens.observe(clean[i], r);
-    } else {
-      ens.observe(clean[i]);
-    }
-  }
-  const reading = ens.predict(1);
-  const boost = opts.barBoost ?? 0;
+  const reading = estimateTwinEdge(clean, contract, {
+    maxBias,
+    targetEv: Number.isFinite(card.targetEvPerDollar) ? card.targetEvPerDollar : TWIN_DEFAULT_TARGET_EV,
+  });
+
+  const boost = Math.max(0, opts.barBoost ?? 0);
   const bar = card.tau + boost;
+  const floorNow = edgeFloor + boost * 0.002;
   const cooled =
     (opts.ticksSinceLoss ?? Number.POSITIVE_INFINITY) >= card.postLossCoolTicks;
-  const enough = clean.length >= 300;
-  const warmStat = ens.statReady;
-  const z = reading.zGate;
-  const clears = z >= bar;
-  const ready =
-    enough && warmStat && cooled && clears && reading.edgePerBase > 0;
+  const enough = clean.length >= minHistory;
+  const zMag = Math.abs(reading.z);
+  const clears = zMag >= bar;
+  const richEnough = reading.edgePerBase >= floorNow;
+  const ready = enough && cooled && clears && richEnough;
 
   const reason = !enough
-    ? `building history — ${clean.length}/300 digits`
-    : !warmStat
-      ? `calibrating the live scale — ${ens.statWarmth}/200 readings before the bar means anything`
-      : !cooled
-        ? `post-loss cool-down — ${opts.ticksSinceLoss ?? 0}/${card.postLossCoolTicks} ticks`
-        : !clears
-          ? `pair edge ${z.toFixed(2)}σ under the ${bar.toFixed(2)}σ bar · P(over|ctx) ${(reading.pOver * 100).toFixed(1)}% · P(under|ctx) ${(reading.pUnder * 100).toFixed(1)}%`
-          : reading.edgePerBase <= 0
-            ? `pair edge is not positive at this reading (${(reading.edgePerBase * 100).toFixed(2)}% per $1 base)`
-            : "";
+    ? `building history — ${clean.length}/${minHistory} digits`
+    : !cooled
+      ? `post-loss cool-down — ${opts.ticksSinceLoss ?? 0}/${card.postLossCoolTicks} ticks`
+      : !clears
+        ? `tilt ${zMag.toFixed(2)}σ under the ${bar.toFixed(2)}σ bar · P(over|ctx) ${(reading.pOver * 100).toFixed(1)}% · P(under|ctx) ${(reading.pUnder * 100).toFixed(1)}%`
+        : !richEnough
+          ? `pair edge is not positive at this reading (${(reading.edgePerBase * 100).toFixed(2)}% per $1 base vs ${(floorNow * 100).toFixed(2)}% floor)`
+          : "";
 
   return {
     ready,
-    digits: reading.digits,
     pOver: reading.pOver,
     pUnder: reading.pUnder,
     state: reading.state,
     primary: reading.primary,
     bias: reading.bias,
     edgePerBase: reading.edgePerBase,
-    expected: reading.expected,
-    statWarmth: ens.statWarmth,
+    expected: reading.edgePerBase,
+    conviction: reading.conviction,
+    tilt: reading.tilt,
+    statWarmth: clean.length,
     tau: card.tau,
     bar: round(bar, 4),
-    zGate: round(z, 4),
+    zGate: round(zMag, 4),
     reason,
   };
 }
 
-// Re-export the standardisation helper for tests.
-export function twinEdgeStats(zHist: number[]): { mean: number; sd: number } {
-  if (zHist.length < 2) return { mean: 0, sd: 1 };
-  const mu = mean(zHist);
-  const v = Math.max(
-    1e-6,
-    zHist.reduce((a, b) => a + (b - mu) ** 2, 0) / zHist.length,
-  );
-  return { mean: mu, sd: Math.sqrt(v) };
+// ── Timing (cadence + freshness + agreement — never a veto stack) ────────────
+
+export interface TwinTimingInput {
+  digits: number[];
+  contract: TwinContract;
+  primary: TwinSide;
+  /** Seconds since the active market's last tick. */
+  secondsSinceLastTick: number;
+  /** Typical tick gap of the active market (1s for 1HZ, else 2s). */
+  medianTickGapSeconds: number;
+  ticksSinceLastShot: number;
+  minSpacing: number;
+  /** Last-print agreement ticks required (mode-driven, 0 = none). */
+  agreeTicks: number;
+}
+
+export interface TwinTiming {
+  ready: boolean;
+  reason: string;
+}
+
+/**
+ * The v2 timing rule: re-space shots, refuse a stale feed, and (Strict/Elite)
+ * ask the last print(s) to agree with the favoured side before firing. Three
+ * cheap checks, each legible in the console — no probabilistic veto stack.
+ */
+export function evaluateTwinTiming(input: TwinTimingInput): TwinTiming {
+  const gap = Math.max(0.5, input.medianTickGapSeconds || 2);
+  const age = Math.max(0, input.secondsSinceLastTick || 0);
+  if (age > gap * 8) {
+    return { ready: false, reason: `feed lagging — last tick ${age.toFixed(0)}s ago` };
+  }
+  const since = input.ticksSinceLastShot;
+  if (Number.isFinite(since) && since < input.minSpacing) {
+    return { ready: false, reason: `re-spacing shots — ${Math.max(0, Math.ceil(input.minSpacing - since))} tick(s) to go` };
+  }
+  const need = Math.max(0, Math.min(3, Math.floor(input.agreeTicks || 0)));
+  if (need > 0) {
+    const winSet =
+      input.primary === "over"
+        ? twinOverWinSet(input.contract.overDigit)
+        : twinUnderWinSet(input.contract.underDigit);
+    const tail = input.digits.slice(-3);
+    let agree = 0;
+    for (const d of tail) if (winSet.has(d)) agree++;
+    const required = need >= 2 ? 2 : 1;
+    const window = need >= 2 ? tail : tail.slice(-1);
+    let windowAgree = 0;
+    for (const d of window) if (winSet.has(d)) windowAgree++;
+    if (windowAgree < required) {
+      return {
+        ready: false,
+        reason:
+          need >= 2
+            ? `waiting for the favoured prints — ${windowAgree}/3 agree with ${input.primary.toUpperCase()}`
+            : `last print disagrees with ${input.primary.toUpperCase()} — holding one tick`,
+      };
+    }
+  }
+  return { ready: true, reason: "" };
 }
 
 // ── Walk-forward (train → threshold → out-of-sample) ─────────────────────────
@@ -1253,8 +903,7 @@ function summariseTwin(
 function simulateTwinShield(
   shots: TwinShot[],
   spec: TwinCertaintySpec,
-  tau: number,
-  maxBarBoost = 2.5,
+  maxBarBoost = 1.5,
 ): TwinPairShield {
   let pairsBefore = 0;
   for (let i = 1; i < shots.length; i++)
@@ -1266,8 +915,9 @@ function simulateTwinShield(
   for (const s of shots) {
     const boost = Math.min(maxBarBoost, spec.postLossTightening * lossRun);
     const cooled = s.index - lastLossIndex >= spec.postLossCoolTicks;
-    const clears = s.zGate >= tau + boost;
-    if (cooled && clears && s.edgePerBase > 0) {
+    const clears = s.zGate >= spec.zBar + boost;
+    const richEnough = s.edgePerBase >= spec.edgeFloor + boost * 0.002;
+    if (cooled && clears && richEnough) {
       kept.push({ ...s, suppressedByShield: false });
       if (!s.won) {
         lastLossIndex = s.index;
@@ -1326,21 +976,24 @@ export function twinWalkForward(
   contract: TwinContract,
   params: TwinWalkParams,
 ): TwinWalkForward {
-  const clean = digits.filter((d) => Number.isInteger(d) && d >= 0 && d <= 9);
+  const all = digits.filter((d) => Number.isInteger(d) && d >= 0 && d <= 9);
+  // The walk only needs the trailing window — older ticks add CPU, not signal.
+  const clean = all.length > 2400 ? all.slice(all.length - 2400) : all;
   const n = clean.length;
-  const burnIn = Math.max(150, params.burnIn ?? 300);
+  const burnIn = Math.max(60, params.burnIn ?? 120);
   const trainFraction = clamp(params.trainFraction ?? 0.5, 0.3, 0.7);
   const spec = params.spec;
   const targetEv = params.targetEvPerDollar ?? TWIN_DEFAULT_TARGET_EV;
 
   const empty = (): TwinShotLedger => summariseTwin([], 0, 0.5);
-  if (n < burnIn + 200) {
+  const fallbackHmm = { pHot: 0.62, pCold: 0.5, stay: 0.96, prior: 0.5 };
+  if (n < burnIn + 60) {
     return {
       trainTicks: 0,
       testTicks: 0,
-      tau: 0,
+      tau: spec.zBar,
       trainShotRate: 0,
-      hmm: { pHot: 0.62, pCold: 0.5, stay: 0.96, prior: 0.5 },
+      hmm: fallbackHmm,
       train: empty(),
       test: empty(),
       shield: {
@@ -1355,94 +1008,75 @@ export function twinWalkForward(
   }
 
   const out = twinOutcome(contract);
-  const payouts = twinPayouts(contract);
-  // Primary side has to be materialised per shot; for the break-even we use the
-  // model-implied marginal preference.
   const marginalOver = out.overCount / 10;
-  const primaryFallback: TwinSide = marginalOver >= 0.5 ? "over" : "under";
-  const bePrimary = primaryFallback;
-  const beBias = 0.1;
-  const beWinRate = twinBreakEvenWinRate(contract, bePrimary, beBias);
-
+  const beWinRate = twinBreakEvenWinRate(
+    contract,
+    marginalOver >= 0.5 ? "over" : "under",
+    0.1,
+  );
   const splitIndex = burnIn + Math.floor((n - burnIn) * trainFraction);
 
-  // Pass 1: fit the HMM and report on the training tail.
+  // Regime snapshot on the training half (diagnostic context on the card).
   const overWins = clean.map((d) => (out.overWinSet.has(d) ? 1 : 0));
   const hmm = fitRegimeHmm(overWins.slice(0, splitIndex));
 
-  const fitEns = new TwinEnsemble(contract, spec.targetShotRate, hmm, targetEv);
-  const trainGates: number[] = [];
-  for (let i = 0; i < splitIndex; i++) {
-    if (i >= burnIn) {
-      const r = fitEns.predict(1);
-      if (fitEns.statReady) trainGates.push(r.zGate);
-      fitEns.observe(clean[i], r);
-    } else {
-      fitEns.observe(clean[i]);
-    }
-  }
-
-  // Build a self-referential tau from the training readings (in zGate units).
-  const trainGatesSorted = [...trainGates].sort((a, b) => a - b);
-  const targetCount = Math.ceil(trainGates.length * spec.targetShotRate);
-  const neededCount = Math.ceil(spec.minShots * 1.6);
-  const wanted = Math.min(
-    trainGates.length,
-    Math.max(targetCount, neededCount),
-  );
-  const qIndex = Math.max(
-    0,
-    Math.min(Math.max(0, trainGates.length - 1), trainGates.length - wanted),
-  );
-  const tau = trainGates.length > 0 ? trainGatesSorted[qIndex] : 0;
-
-  // Pass 2: walk forward, applying tau from `split` onward.
-  const live = new TwinEnsemble(contract, spec.targetShotRate, hmm, targetEv);
+  // Walk forward paper-trading the EXACT live rule: trailing-only readings,
+  // mode cadence, the mode bar + cool-down shield.
   const trainShots: TwinShot[] = [];
   const testShots: TwinShot[] = [];
   let trainExamined = 0;
   let testExamined = 0;
   let lastFire = -Infinity;
-  for (let i = 0; i < n; i++) {
-    if (i >= burnIn) {
-      const r = live.predict(1);
-      const isTest = i >= splitIndex;
-      if (live.statReady) {
-        if (isTest) testExamined++;
-        else trainExamined++;
+  let lastLossIndex = -Infinity;
+  let lossRun = 0;
+  for (let i = burnIn; i < n; i++) {
+    const isTest = i >= splitIndex;
+    if (isTest) testExamined++;
+    else trainExamined++;
+    // Spacing and cool-down are known without a reading — only pay for the
+    // estimator on ticks that could actually fire.
+    if (i - lastFire < spec.minSpacing) continue;
+    if (i - lastLossIndex < spec.postLossCoolTicks) continue;
+    const prefix = clean.slice(Math.max(0, i - 600), i);
+    const reading = estimateTwinEdge(prefix, contract, {
+      maxBias: spec.maxBias,
+      targetEv,
+    });
+    const boost = Math.min(1.5, spec.postLossTightening * lossRun);
+    const clears =
+      Math.abs(reading.z) >= spec.zBar + boost &&
+      reading.edgePerBase >= spec.edgeFloor + boost * 0.002;
+    if (clears) {
+      const state = classifyDigit(
+        contract.overDigit,
+        contract.underDigit,
+        clean[i],
+      );
+      const plan = buildTwinPlan(contract, reading.primary, reading.bias, 1);
+      const net = twinRegionNet(contract, plan, state);
+      const won = net > 0;
+      const shot: TwinShot = {
+        index: i,
+        won,
+        edgePerBase: reading.edgePerBase,
+        zGate: Math.abs(reading.z),
+        netPerBase: net,
+        primary: reading.primary,
+        bias: reading.bias,
+        pOver: reading.pOver,
+        pUnder: reading.pUnder,
+        state,
+        suppressedByShield: false,
+      };
+      (isTest ? testShots : trainShots).push(shot);
+      lastFire = i;
+      if (!won) {
+        lastLossIndex = i;
+        lossRun++;
+      } else {
+        lastLossIndex = -Infinity;
+        lossRun = 0;
       }
-      if (
-        live.statReady &&
-        i - lastFire >= spec.minSpacing &&
-        r.zGate >= tau &&
-        r.edgePerBase > 0
-      ) {
-        const state = classifyDigit(
-          contract.overDigit,
-          contract.underDigit,
-          clean[i],
-        );
-        const plan = buildTwinPlan(contract, r.primary, r.bias, 1);
-        const net = twinRegionNet(contract, plan, state);
-        const shot: TwinShot = {
-          index: i,
-          won: net > 0,
-          edgePerBase: r.edgePerBase,
-          zGate: r.zGate,
-          netPerBase: net,
-          primary: r.primary,
-          bias: r.bias,
-          pOver: r.pOver,
-          pUnder: r.pUnder,
-          state,
-          suppressedByShield: false,
-        };
-        (isTest ? testShots : trainShots).push(shot);
-        lastFire = i;
-      }
-      live.observe(clean[i], r);
-    } else {
-      live.observe(clean[i]);
     }
   }
 
@@ -1451,13 +1085,13 @@ export function twinWalkForward(
   return {
     trainTicks: trainExamined,
     testTicks: testExamined,
-    tau: round(tau, 6),
+    tau: round(spec.zBar, 6),
     trainShotRate:
       trainExamined > 0 ? round(trainShots.length / trainExamined, 5) : 0,
     hmm: { pHot: hmm.pHot, pCold: hmm.pCold, stay: hmm.stay, prior: hmm.prior },
     train,
     test,
-    shield: simulateTwinShield(testShots, spec, tau),
+    shield: simulateTwinShield(testShots, spec),
   };
 }
 
@@ -1501,9 +1135,13 @@ export interface TwinCandidate {
   signals: string[];
   card: TwinModelCard;
   walk: TwinWalkForward;
+  /** Live conviction at the trailing reading (0.05 … 1). */
+  conviction: number;
+  /** Ranking score: paper edge + conviction + coverage. */
+  score: number;
 }
 
-export const TWIN_MIN_HISTORY = 900;
+export const TWIN_MIN_HISTORY = 120;
 export const TWIN_SCAN_WINDOW = 4999;
 
 export interface TwinEvalOptions {
@@ -1533,33 +1171,17 @@ export function evaluateTwinCandidate(
     targetEvPerDollar: targetEv,
   });
   const test = walk.test;
-  const primary: TwinSide =
-    test.shots.length > 0
-      ? test.shots.reduce<Record<TwinSide | "tie", number>>(
-          (acc, s) => {
-            acc[s.primary] += 1;
-            return acc;
-          },
-          { over: 0, under: 0, tie: 0 } as Record<TwinSide | "tie", number>,
-        ).over >=
-        test.shots.reduce<Record<TwinSide | "tie", number>>(
-          (acc, s) => {
-            acc[s.primary] += 1;
-            return acc;
-          },
-          { over: 0, under: 0, tie: 0 } as Record<TwinSide | "tie", number>,
-        ).under
-        ? "over"
-        : "under"
-      : out.overCount >= out.underCount
-        ? "over"
-        : "under";
-  const avgBias =
-    test.shots.length > 0 ? mean(test.shots.map((s) => s.bias)) : 0.1;
-  const netOnWinPerBase = test.avgWinPerBase;
-  const netOnLossPerBase = test.avgLossPerBase;
-  const beWinRate = twinBreakEvenWinRate(contract, primary, avgBias);
-  const limitPlan = buildTwinPlan(contract, primary, avgBias, baseStake);
+  // Deploy with the LIVE reading (current tilt), not a stale test average.
+  const live = estimateTwinEdge(clean.slice(-600), contract, {
+    maxBias: spec.maxBias,
+    targetEv,
+  });
+  const primary = live.primary;
+  const bias = live.bias;
+  const netOnWinPerBase = live.netOnWinPerBase;
+  const netOnLossPerBase = live.netOnLossPerBase;
+  const beWinRate = twinBreakEvenWinRate(contract, primary, bias);
+  const limitPlan = buildTwinPlan(contract, primary, bias, baseStake);
   const primaryRegion = primary === "over" ? "overOnly" : "underOnly";
   const hedgeRegion = primary === "over" ? "underOnly" : "overOnly";
   const winNet = Math.max(
@@ -1609,124 +1231,91 @@ export function evaluateTwinCandidate(
         )
       : 1;
 
+  // ── Mode-aware verdict. Balanced deploys on any warm market; Strict/Elite
+  // ask the paper trail to clear progressively higher bars. A dead-zone pair
+  // lowers confidence but never single-handedly refuses in Balanced — the
+  // four-region EV already prices the dead zone into every reading.
   const blockers: string[] = [];
+  const paperEv = test.nShots > 0 ? test.evPerDollar : -1;
   if (test.nShots < spec.minShots) {
     blockers.push(
-      `only ${test.nShots} out-of-sample pair shots (${spec.minShots} needed)`,
+      `only ${test.nShots} out-of-sample paper shots (${spec.minShots} needed for full proof)`,
     );
   }
-  if (test.nShots > 0 && test.evPerDollar < spec.minEvPerDollar) {
+  if (paperEv < spec.minEvCertified) {
     blockers.push(
-      `measured net ${(test.evPerDollar * 100).toFixed(2)}% per $1 base < ${(spec.minEvPerDollar * 100).toFixed(2)}%`,
+      `paper net ${(paperEv * 100).toFixed(2)}% per $1 base < ${(spec.minEvCertified * 100).toFixed(2)}% certified bar`,
     );
   }
-  if (test.nShots > 0 && test.evLowerPerDollar < spec.minEvLower) {
+  if (live.conviction < spec.minConvictionCertified) {
     blockers.push(
-      `conservative (Wilson) net ${(test.evLowerPerDollar * 100).toFixed(2)}% per $1 base < ${(spec.minEvLower * 100).toFixed(2)}%`,
+      `live conviction ${(live.conviction * 100).toFixed(0)}% < ${(spec.minConvictionCertified * 100).toFixed(0)}% certified bar`,
     );
-  }
-  if (test.evidence.peak < spec.minEvidenceE) {
-    blockers.push(
-      `evidence e-value ${test.evidence.peak.toFixed(1)} < ${spec.minEvidenceE}`,
-    );
-  }
-  if (
-    test.nShots > 4 &&
-    chain.clusterZ > spec.maxClusterZ &&
-    chain.clusterGapPP >= spec.minClusterGapPP
-  ) {
-    blockers.push(
-      `losses pair up — P(L|L) ${(chain.q * 100).toFixed(1)}% vs marginal ${(chain.pLoss * 100).toFixed(1)}%`,
-    );
-  }
-  if (
-    out.noneCount > 0 &&
-    (test.avgLossPerBase <= -0.9 || test.winRate < 0.25)
-  ) {
-    blockers.push(
-      `this pair leaves ${out.noneCount} digit(s) outside both legs — the measured shots do not support it`,
-    );
-  }
-  if (walk.test.shots.length > 0 && walk.test.evPerDollar <= 0) {
-    blockers.push("out-of-sample expected net is not positive");
   }
 
-  // Confidence composite (out-of-sample terms only).
-  const accTerm = clamp(
-    test.evPerDollar / Math.max(0.02, spec.minEvPerDollar * 2.5),
-    0,
-    1,
-  );
-  const lcbTerm = clamp(
-    test.evLowerPerDollar / Math.max(0.01, Math.abs(spec.minEvLower) + 0.01),
-    0,
-    1,
-  );
-  const eTerm = clamp(
-    Math.log10(Math.max(1, test.evidence.peak)) /
-      Math.log10(Math.max(2, spec.minEvidenceE * 4)),
-    0,
-    1,
-  );
-  const pairTerm = clamp(
-    1 - Math.max(0, chain.clusterZ) / Math.max(1, spec.maxClusterZ * 2),
-    0,
-    1,
-  );
-  const cadenceTerm = clamp(
-    test.nShots / Math.max(4, spec.minShots * 1.6),
-    0,
-    1,
-  );
   const balanceTerm = out.complementary
     ? 1
     : clamp(out.noneCount === 0 ? 0.9 : 1 - out.noneCount / 10, 0, 1);
   const confidence = Math.round(
     clamp(
       100 *
-        (0.34 * accTerm +
-          0.22 * lcbTerm +
-          0.18 * eTerm +
-          0.12 * pairTerm +
-          0.08 * cadenceTerm +
-          0.06 * balanceTerm),
-      0,
+        (0.34 * clamp((paperEv + 0.02) / 0.04, 0, 1) +
+          0.26 * live.conviction +
+          0.16 * clamp(test.nShots / Math.max(6, spec.minShots * 1.6), 0, 1) +
+          0.12 *
+            clamp(
+              1 - Math.max(0, chain.clusterZ) / 4,
+              0,
+              1,
+            ) +
+          0.12 * balanceTerm),
+      1,
       100,
     ),
   );
-  if (confidence < spec.minConfidence)
-    blockers.push(`composite confidence ${confidence} < ${spec.minConfidence}`);
 
-  const measurable = test.nShots >= Math.max(5, Math.floor(spec.minShots / 2));
-  const positive = test.nShots > 0 && test.evPerDollar > 0;
   let verdict: TwinVerdict;
-  if (blockers.length === 0) verdict = "certified";
-  else if (
-    measurable &&
-    positive &&
-    test.evLowerPerDollar >= Math.min(0, spec.minEvLower)
-  )
+  if (test.nShots === 0) {
+    verdict = spec.id === "balanced" ? "watch" : "refused";
+    if (verdict === "refused") blockers.push("no paper shots fired out of sample");
+  } else if (
+    blockers.length === 0 &&
+    confidence >= spec.minConfidence
+  ) {
+    verdict = "certified";
+  } else if (paperEv >= spec.minEvQualified) {
     verdict = "qualified";
-  else if (positive || !measurable) verdict = "watch";
-  else verdict = "refused";
-  const deployable = verdict === "certified" || verdict === "qualified";
+  } else if (paperEv >= spec.minEvRefuse) {
+    verdict = "watch";
+  } else {
+    verdict = "refused";
+    blockers.push(
+      `paper net ${(paperEv * 100).toFixed(2)}% below the ${(spec.minEvRefuse * 100).toFixed(2)}% refuse floor`,
+    );
+  }
+  const deployable =
+    spec.id === "balanced"
+      ? verdict !== "refused"
+      : spec.id === "strict"
+        ? verdict === "certified" || verdict === "qualified" || verdict === "watch"
+        : verdict === "certified" || verdict === "qualified";
 
   const safe = clamp(1 - absorption, 0, 1);
   const signals = [
-    `VERDICT ${verdict.toUpperCase()} · confidence ${confidence}/100 · out-of-sample net ${(test.evPerDollar * 100).toFixed(2)}% per $1 base (Wilson ${(test.evLowerPerDollar * 100).toFixed(2)}%)`,
+    `VERDICT ${verdict.toUpperCase()} · confidence ${confidence}/100 · paper net ${(test.evPerDollar * 100).toFixed(2)}% per $1 base (Wilson ${(test.evLowerPerDollar * 100).toFixed(2)}%)`,
     `PAIR · ${twinLabel(contract)} on ${displayName} · ${out.complementary ? "complementary 50/50 (exactly one leg always wins)" : out.noneCount === 0 ? `covers every digit (${out.bothCount} overlap)` : `${out.noneCount} dead digit(s) outside both legs`} · payout over ${payouts.over.toFixed(2)}× / under ${payouts.under.toFixed(2)}×`,
-    `WALK-FORWARD · ${test.nShots} unseen pair shots at ${(test.winRate * 100).toFixed(1)}% joint win rate (break-even ${(beWinRate * 100).toFixed(1)}%) · mean net/when right ${(netOnWinPerBase * 100).toFixed(2)}%, when wrong ${(netOnLossPerBase * 100).toFixed(2)}%`,
-    `SKEW · auto-bias ${(avgBias * 100).toFixed(1)}% on the ${primary} side — the smallest skew that keeps the pair +EV at the model's reading`,
+    `WALK-FORWARD · ${test.nShots} unseen paper shots at ${(test.winRate * 100).toFixed(1)}% joint win rate (break-even ${(beWinRate * 100).toFixed(1)}%) · live tilt ${(live.tilt * 100).toFixed(2)}pp · conviction ${(live.conviction * 100).toFixed(0)}%`,
+    `SKEW · live bias ${(bias * 100).toFixed(1)}% on the ${primary} side at a ${(spec.maxBias * 100).toFixed(0)}% ${spec.label} cap — grows with conviction, shrinks when flat`,
     `EVIDENCE · e-value ${test.evidence.peak.toFixed(1)} (anytime-valid, p≈${test.evidence.pValue < 0.001 ? test.evidence.pValue.toExponential(1) : test.evidence.pValue.toFixed(3)})`,
     `LADDER · effective payout ${effPayout.toFixed(2)}× → absorbs ${ladderLimit} consecutive losses · FMCI safety ${(safe * 100).toFixed(1)}% over ${horizon} shots · E[break] ${test.chain.q ? expectedShotsToLadderBreak(chain.pLoss, chain.q, ladderLimit) : "—"}`,
-    `SHIELD · out-of-sample loss pairs ${walk.shield.pairsBefore} → ${walk.shield.pairsAfter} under the post-loss protocol · longest run after ${walk.shield.longestRunAfter}`,
-    `MODEL · P(over|ctx) mean ${(test.meanPredictedOver * 100).toFixed(1)}% · P(under|ctx) mean ${(test.meanPredictedUnder * 100).toFixed(1)}% · HMM hot ${(walk.hmm.pHot * 100).toFixed(1)}% / cold ${(walk.hmm.pCold * 100).toFixed(1)}%`,
+    `SHIELD · paper loss pairs ${walk.shield.pairsBefore} → ${walk.shield.pairsAfter} under the post-loss protocol · longest run after ${walk.shield.longestRunAfter}`,
+    `MODEL · P(over|ctx) ${(live.pOver * 100).toFixed(1)}% · P(under|ctx) ${(live.pUnder * 100).toFixed(1)}% · HMM hot ${(walk.hmm.pHot * 100).toFixed(1)}% / cold ${(walk.hmm.pCold * 100).toFixed(1)}%`,
   ];
   for (const b of blockers) signals.push(`⛔ ${b}`);
 
   const card: TwinModelCard = {
     tau: walk.tau,
-    targetShotRate: spec.targetShotRate,
+    targetShotRate: round(1 / Math.max(1, spec.minSpacing), 4),
     hmm: walk.hmm,
     overDigit: contract.overDigit,
     underDigit: contract.underDigit,
@@ -1737,6 +1326,11 @@ export function evaluateTwinCandidate(
     postLossCoolTicks: spec.postLossCoolTicks,
     targetEvPerDollar: targetEv,
     fittedOn: walk.trainTicks,
+    certainty: spec.id,
+    edgeFloor: spec.edgeFloor,
+    maxBias: spec.maxBias,
+    agreeTicks: spec.agreeTicks,
+    minHistory: spec.minHistory,
   };
 
   const ladder: TwinLadderReport = {
@@ -1752,6 +1346,11 @@ export function evaluateTwinCandidate(
     netOnLossPerBase: round(-effLoss, 5),
   };
 
+  const score = round(
+    test.evPerDollar + 0.05 * live.conviction + 0.01 * balanceTerm,
+    6,
+  );
+
   return {
     symbol,
     displayName,
@@ -1765,7 +1364,7 @@ export function evaluateTwinCandidate(
     oosWinRate: test.winRate,
     oosShots: test.nShots,
     primary,
-    bias: round(avgBias, 3),
+    bias: round(bias, 3),
     breakEvenWinRate: round(beWinRate, 5),
     overPayout: payouts.over,
     underPayout: payouts.under,
@@ -1779,10 +1378,12 @@ export function evaluateTwinCandidate(
     signals,
     card,
     walk,
+    conviction: live.conviction,
+    score,
   };
 }
 
-/** Benjamini–Hochberg across the family, then rank by verdict → EV → safety. */
+/** Benjamini–Hochberg across the family, then rank by verdict → score → safety. */
 export function screenTwinCandidates(
   candidates: TwinCandidate[],
   q = 0.1,
@@ -1805,8 +1406,7 @@ export function screenTwinCandidates(
   return screened.sort((a, b) => {
     if (rank[a.verdict] !== rank[b.verdict])
       return rank[a.verdict] - rank[b.verdict];
-    if (Math.abs(a.edgePerDollar - b.edgePerDollar) > 0.001)
-      return b.edgePerDollar - a.edgePerDollar;
+    if (Math.abs(a.score - b.score) > 1e-9) return b.score - a.score;
     return b.ladder.safety - a.ladder.safety;
   });
 }

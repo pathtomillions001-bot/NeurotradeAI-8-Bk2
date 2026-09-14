@@ -205,6 +205,17 @@ export function setPersistenceSession(sessionId: string): void {
 }
 
 /**
+ * Session ids currently holding in-memory recovery state. Used by the
+ * midnight scheduler so every account's ledger rolls over and broadcasts
+ * `day_reset` even when that account runs no autonomous engine instance
+ * (e.g. FAB- or bot-only sessions, whose ledgers would otherwise roll over
+ * lazily on the next trade instead of exactly at midnight).
+ */
+export function knownSessionIds(): string[] {
+  return [...statesBySession.keys()];
+}
+
+/**
  * Persist a snapshot taken at call time. A generation counter drops superseded
  * writes so an in-flight persist of a completed cycle cannot be overwritten by
  * an earlier (stale) in-recovery snapshot.

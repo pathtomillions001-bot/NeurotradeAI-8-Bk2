@@ -17,6 +17,7 @@ import { Link } from "wouter";
 import { Activity, AlertTriangle, Target, Clock, RefreshCw, TimerOff, Zap, ArrowRight, CheckCircle2, ShieldAlert, Trophy } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
+import { withTabSession } from "@/lib/tab-session";
 
 interface JournalStats {
   totalTrades: number;
@@ -502,7 +503,7 @@ export default function Dashboard() {
   // SSE: journal_refreshed syncs journal; trade_completed applies immediate stat delta
   const sseRef = useRef<EventSource | null>(null);
   useEffect(() => {
-    const es = new EventSource("/api/ai/events");
+    const es = new EventSource(withTabSession("/api/ai/events"));
     sseRef.current = es;
 
     // Parallel tournament scan events

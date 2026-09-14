@@ -24,17 +24,37 @@
  * mix-up described above.
  */
 
+import { getBrowserSessionId } from "./session";
+
 export type TradingOwner = "autonomous" | "neuroai" | "bots";
 
-let activeOwner: TradingOwner | null = null;
+/**
+ * One execution lock PER CONNECTED ACCOUNT (browser session), not one per
+ * process. The original single global meant an engine running on Deriv
+ * account A blocked every engine on Deriv account B with "another engine is
+ * trading this account" — even though they trade different accounts with
+ * different recovery ledgers.
+ *
+ * Within one account the rule is unchanged: exactly one of the three
+ * executors may trade at a time. The ambient session (request context or an
+ * explicitly wrapped engine loop — see runWithSessionId) selects the lock,
+ * so no call site needed to change.
+ */
+const activeOwnerBySession = new Map<string, TradingOwner>();
+
+function sessionKey(): string {
+  return getBrowserSessionId();
+}
 
 /**
  * Take trading ownership for `owner`. Idempotent for the current owner.
  * Returns false when the other engine already owns execution.
  */
 export function acquireTradingOwnership(owner: TradingOwner): boolean {
+  const key = sessionKey();
+  const activeOwner = activeOwnerBySession.get(key) ?? null;
   if (activeOwner === null || activeOwner === owner) {
-    activeOwner = owner;
+    activeOwnerBySession.set(key, owner);
     return true;
   }
   return false;
@@ -42,17 +62,18 @@ export function acquireTradingOwnership(owner: TradingOwner): boolean {
 
 /** Give up trading ownership. Only the current owner can release it. */
 export function releaseTradingOwnership(owner: TradingOwner): void {
-  if (activeOwner === owner) activeOwner = null;
+  const key = sessionKey();
+  if (activeOwnerBySession.get(key) === owner) activeOwnerBySession.delete(key);
 }
 
 /** Which engine currently owns trade execution, if any. */
 export function currentTradingOwner(): TradingOwner | null {
-  return activeOwner;
+  return activeOwnerBySession.get(sessionKey()) ?? null;
 }
 
 /** True when `owner` holds the execution lock right now. */
 export function hasTradingOwnership(owner: TradingOwner): boolean {
-  return activeOwner === owner;
+  return activeOwnerBySession.get(sessionKey()) === owner;
 }
 
 /** Human-readable owner label for error messages and UI toasts. */

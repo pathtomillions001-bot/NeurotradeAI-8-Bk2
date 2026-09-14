@@ -19,6 +19,7 @@
  */
 
 import type { QuantumFeatures } from "./quantum-analysis";
+import { getBrowserSessionId } from "./session";
 
 export type SignalMode = "normal" | "recovery";
 
@@ -44,7 +45,25 @@ interface TradeSignalRecord {
   at: number;
 }
 
-const pools: Record<SignalMode, TradeSignalRecord[]> = { normal: [], recovery: [] };
+/**
+ * One self-measurement pool set per connected account (browser session).
+ * Previously a single process-global pool: starting a session on account B
+ * wiped account A's learned pool mid-run, and both accounts' outcomes were
+ * blended into one bonus. The ambient session (request context or wrapped
+ * engine loop) selects the pool; scoring math below is untouched.
+ */
+const poolsBySession = new Map<string, Record<SignalMode, TradeSignalRecord[]>>();
+
+function pools(): Record<SignalMode, TradeSignalRecord[]> {
+  const key = getBrowserSessionId();
+  let current = poolsBySession.get(key);
+  if (!current) {
+    current = { normal: [], recovery: [] };
+    poolsBySession.set(key, current);
+  }
+  return current;
+}
+
 const MAX_PER_POOL = 60;
 const MIN_POOL_SIZE = 12;
 const MIN_TERCILE_SIZE = 4;
@@ -54,16 +73,17 @@ type FeatureKey = keyof DecisionFeatures;
 const FEATURE_KEYS: FeatureKey[] = ["z", "lambda", "timing", "hazardRelative", "entropyDelta", "ciOverlap"];
 
 export function resetSignalValue(): void {
-  pools.normal = [];
-  pools.recovery = [];
+  pools().normal = [];
+  pools().recovery = [];
 }
 
 export function recordTradeSignal(mode: SignalMode, features: DecisionFeatures, won: boolean): void {
-  pools[mode] = [...pools[mode], { features, won, at: Date.now() }].slice(-MAX_PER_POOL);
+  const p = pools();
+  p[mode] = [...p[mode], { features, won, at: Date.now() }].slice(-MAX_PER_POOL);
 }
 
 export function signalPoolSize(mode: SignalMode): number {
-  return pools[mode].length;
+  return pools()[mode].length;
 }
 
 interface ValuedSignal {
@@ -82,7 +102,7 @@ interface ValuedSignal {
  * this mode so far? Recomputed on demand (≤60 records × 6 features — cheap).
  */
 export function valuedSignals(mode: SignalMode): ValuedSignal[] {
-  const pool = pools[mode];
+  const pool = pools()[mode];
   if (pool.length < MIN_POOL_SIZE) return [];
   const out: ValuedSignal[] = [];
   for (const key of FEATURE_KEYS) {

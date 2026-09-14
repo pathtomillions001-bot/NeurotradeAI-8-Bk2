@@ -9,6 +9,7 @@ import {
   CheckCircle2, XCircle, Clock, Flame,
 } from "lucide-react";
 import { useMemo, useEffect } from "react";
+import { withTabSession } from "@/lib/tab-session";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -302,7 +303,7 @@ export default function Analytics() {
   // query key — so a trade completing anywhere in the app updates Analytics with
   // the same zero-latency feel, not just its 10s poll.
   useEffect(() => {
-    const es = new EventSource("/api/ai/events");
+    const es = new EventSource(withTabSession("/api/ai/events"));
     es.addEventListener("trade_completed", () => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }));
     es.addEventListener("journal_refreshed", () => queryClient.invalidateQueries({ queryKey: ["derivJournal"] }));
     return () => es.close();

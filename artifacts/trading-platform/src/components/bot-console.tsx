@@ -25,6 +25,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { OVER_PAYOUTS, UNDER_PAYOUTS } from "@/lib/payouts";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON, SCAN_MARKETS, SCAN_MARKET_COUNT } from "@/lib/bots";
+import { withTabSession } from "@/lib/tab-session";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
 type MarketMode = "locked" | "switching";
@@ -232,7 +233,7 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
 
     function connect() {
       if (destroyed) return;
-      es = new EventSource("/api/ai/events");
+      es = new EventSource(withTabSession("/api/ai/events"));
 
       es.addEventListener("bot_update", (e: MessageEvent) => {
         try { applyStatus(JSON.parse(e.data) as BotSessionStatus); } catch { /* ignore */ }

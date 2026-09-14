@@ -10,6 +10,7 @@
 
 import type { AgentOutput, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
+import { getBrowserSessionId } from "../session";
 
 export type RecoveryMode = "normal";
 
@@ -37,8 +38,15 @@ interface LossContext {
   timestamp: number;
 }
 
-// Session-scoped: keyed by symbol, stores last 4 loss contexts
+// Session-scoped: keyed by browser session + symbol, stores last 4 loss
+// contexts. One account's losing setups must never suppress another
+// account's scans — the ambient session (request context or wrapped engine
+// loop) namespaces every key. Detection math is untouched.
 const lossPatternStore = new Map<string, LossContext[]>();
+
+function namespacedKey(symbol: string): string {
+  return `${getBrowserSessionId()}|${symbol}`;
+}
 
 /**
  * Called from ai.ts immediately after a confirmed loss outcome.
@@ -49,10 +57,11 @@ export function recordLossForPattern(
   contractType: string,
   regime: string,
 ): void {
-  const existing = lossPatternStore.get(symbol) ?? [];
+  const key = namespacedKey(symbol);
+  const existing = lossPatternStore.get(key) ?? [];
   // Keep last 4 only (sufficient for 2-match detection, bounded memory)
   const updated = [...existing, { contractType, regime, timestamp: Date.now() }].slice(-4);
-  lossPatternStore.set(symbol, updated);
+  lossPatternStore.set(key, updated);
 }
 
 /**
@@ -60,7 +69,7 @@ export function recordLossForPattern(
  * Clears the pattern — a win breaks the structural repeat cycle.
  */
 export function clearLossPattern(symbol: string): void {
-  lossPatternStore.delete(symbol);
+  lossPatternStore.delete(namespacedKey(symbol));
 }
 
 /**
@@ -73,7 +82,7 @@ export function clearLossPattern(symbol: string): void {
 export function getStructuralLossPattern(
   symbol: string,
 ): { contractType: string; regime: string } | null {
-  const contexts = lossPatternStore.get(symbol);
+  const contexts = lossPatternStore.get(namespacedKey(symbol));
   if (!contexts || contexts.length < 2) return null;
 
   const cutoff = Date.now() - 30 * 60 * 1000; // 30-minute window
@@ -100,7 +109,7 @@ export function getStructuralLossPattern(
 const recoveryStates = new Map<string, RecoveryState>();
 
 function getKey(ctx: ScanContext): string {
-  return `${ctx.symbol}|${ctx.settings.riskProfile}`;
+  return `${getBrowserSessionId()}|${ctx.symbol}|${ctx.settings.riskProfile}`;
 }
 
 export function getRecoveryState(ctx: ScanContext): RecoveryState {

@@ -24,6 +24,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "../lib/engine-arbiter";
+import { runWithSessionId } from "../lib/session";
 
 const router = Router();
 
@@ -42,29 +43,32 @@ const router = Router();
  *  2. POST /api/ai/day-reset from the frontend — fires at the user's exact local midnight.
  */
 export function forceDayReset(broadcast = true, sessionId?: string): void {
-  const resetSessionId = sessionId ?? engineOwnerSessionId ?? undefined;
-  const ownsExecutor = !!resetSessionId && engineOwnerSessionId === resetSessionId;
-
-  // Executor globals belong only to the current owner. A midnight request from
-  // another browser must never clear that owner's cooldown or counters.
-  if (ownsExecutor) {
-    tradesExecutedToday  = 0;
-    sessionLossCount     = 0;
-    lastTradeCompletedAt = null;
-    recentTradesBySymbol.clear();
-    if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
-    cooldownUntil = null;
+  // No session (server-side midnight scheduler) → reset EVERY account that
+  // holds engine or recovery state, so concurrent accounts each roll over.
+  // Each account resets only its own counters — one account's midnight can
+  // never clear another account's cooldown, exactly as before.
+  if (!sessionId) {
+    const ids = new Set<string>([
+      ...autonomousSessionIds(),
+      ...recoveryEngine.knownSessionIds(),
+    ]);
+    ids.delete("legacy");
+    for (const sid of ids) forceDayReset(broadcast, sid);
+    logger.info({ sessions: ids.size }, "Server midnight day-reset fired for all sessions");
+    return;
   }
 
-  if (resetSessionId) {
-    recoveryEngine.setPersistenceSession(resetSessionId);
+  getEngine(sessionId).resetDailyCounters();
+
+  runWithSessionId(sessionId, () => {
+    recoveryEngine.setPersistenceSession(sessionId);
     recoveryEngine.forceNewDay();
-  }
+  });
 
-  if (broadcast && resetSessionId) {
-    broadcastSSE("day_reset", { ts: new Date().toISOString() }, resetSessionId);
+  if (broadcast) {
+    broadcastSSE("day_reset", { ts: new Date().toISOString() }, sessionId);
   }
-  logger.info({ sessionId: resetSessionId, executorCountersReset: ownsExecutor }, "Session midnight day-reset fired");
+  logger.info({ sessionId }, "Session midnight day-reset fired");
 }
 
 /**
@@ -80,59 +84,48 @@ export async function resumeEngineIfEnabled(): Promise<void> {
   // Account-scoped sessions make auto-resume safe: an enabled settings row
   // belongs to a specific Deriv account, and that account's credentials are
   // stored with it — so restarting the loop can never run on an arbitrary
-  // visitor's data. Previously this wiped autonomous_enabled for EVERY session
-  // on every deploy, which silently killed every account's bots and forced
-  // each user to restart manually from their browser.
+  // visitor's data. Every account owns an independent engine instance, so
+  // ALL enabled accounts resume — nobody is cleared or left stranded.
   try {
     const enabled = await db.select().from(settingsTable)
       .where(eq(settingsTable.autonomousEnabled, true))
       .orderBy(desc(settingsTable.updatedAt));
     if (enabled.length === 0) return;
 
-    // The autonomous executor is a singleton per process: resume the most
-    // recent owner and clear the flag for the others (their owners see
-    // "stopped" in the UI and restart from their browser when they want).
-    for (const row of enabled.slice(1)) {
-      await db.update(settingsTable).set({ autonomousEnabled: false })
-        .where(eq(settingsTable.sessionId, row.sessionId));
-      logger.info(
-        { sessionId: row.sessionId },
-        "Autonomous flag cleared on restart — another account owns the executor; restart it from your browser",
-      );
-    }
+    for (const row of enabled) {
+      const sessionId = row.sessionId;
+      try {
+        const accounts = await db.select().from(accountsTable)
+          .where(eq(accountsTable.sessionId, sessionId)).limit(1);
+        const token = accounts[0]?.bearerToken ?? accounts[0]?.token ?? null;
+        if (!token) {
+          await db.update(settingsTable).set({ autonomousEnabled: false })
+            .where(eq(settingsTable.sessionId, sessionId));
+          logger.info(
+            { sessionId },
+            "Auto-resume skipped — that account session has no connected Deriv account",
+          );
+          continue;
+        }
 
-    const winner = enabled[0]!;
-    const accounts = await db.select().from(accountsTable)
-      .where(eq(accountsTable.sessionId, winner.sessionId)).limit(1);
-    const token = accounts[0]?.bearerToken ?? accounts[0]?.token ?? null;
-    if (!token) {
-      await db.update(settingsTable).set({ autonomousEnabled: false })
-        .where(eq(settingsTable.sessionId, winner.sessionId));
-      logger.info(
-        { sessionId: winner.sessionId },
-        "Auto-resume skipped — that account session has no connected Deriv account",
-      );
-      return;
+        runWithSessionId(sessionId, () => {
+          recoveryEngine.setPersistenceSession(sessionId);
+          const persistedRecovery = (row as any)?.recoveryStateJson;
+          if (persistedRecovery) {
+            try { recoveryEngine.loadState(persistedRecovery); }
+            catch { /* corrupt persisted state — start clean rather than crash */ }
+          }
+        });
+        getEngine(sessionId).resume({ loopIntervalSec: row.loopIntervalSec ?? 5 });
+        logger.info(
+          { sessionId, loopIntervalSec: row.loopIntervalSec ?? 5 },
+          "Autonomous engine auto-resumed for its account session after restart",
+        );
+      } catch (err) {
+        // One account's corrupt row must never block the other accounts.
+        logger.warn({ err, sessionId }, "Auto-resume failed for one account session — continuing with the rest");
+      }
     }
-
-    engineOwnerSessionId = winner.sessionId;
-    recoveryEngine.setPersistenceSession(winner.sessionId);
-    const persistedRecovery = (winner as any)?.recoveryStateJson;
-    if (persistedRecovery) {
-      try { recoveryEngine.loadState(persistedRecovery); }
-      catch { /* corrupt persisted state — start clean rather than crash */ }
-    }
-    if (winner.loopIntervalSec) loopIntervalSec = winner.loopIntervalSec;
-    engineRunning = true;
-    autonomousMode = "autonomous";
-    stopReasons = [];
-    nextScanIn = loopIntervalSec;
-    if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
-    autonomousTimer = setTimeout(runAutonomousLoop, 2000);
-    logger.info(
-      { sessionId: winner.sessionId, loopIntervalSec },
-      "Autonomous engine auto-resumed for its account session after restart",
-    );
   } catch (err) {
     logger.warn({ err }, "Auto-resume failed — the engine must be restarted from the browser");
   }
@@ -171,11 +164,56 @@ export async function loadRecoveryStateFromDb(): Promise<void> {
  * P&L/journal display only, never to overwrite recovery state.
  */
 
+// ── Per-account autonomous engines ────────────────────────────────────────────
+// One fully independent engine instance per connected Deriv account (browser
+// session). Previously every variable below was a process-global singleton,
+// so starting autonomous trading on account A disabled it (HTTP 409 plus a
+// "stopped" status) on account B. Now each account owns its loop, timers,
+// cooldowns, loss counters, per-symbol cooldowns and scan state; instances
+// share nothing except public market data (tickManager) and the per-session
+// recovery ledger (recovery-engine, already session-scoped).
+//
+// MECHANICAL MOVE — the state declarations and engine functions inside
+// createAutonomousEngine() are byte-identical to the old module singletons;
+// only the lifecycle wiring around them changed. The engine's scan,
+// tournament, recovery and execution logic is UNTOUCHED — verify with:
+//   git diff -w -- artifacts/api-server/src/routes/ai.ts
+// must show no change inside runAutonomousLoop's trading logic.
+
+/** Public lifecycle surface of one account's autonomous engine instance. */
+interface AutonomousEngine {
+  readonly ownerSessionId: string;
+  isRunning(): boolean;
+  /** Start (or restart) the loop. Safe to call when already running. */
+  start(opts: { loopIntervalSec: number }): void;
+  /** Resume after a server restart. */
+  resume(opts: { loopIntervalSec: number }): void;
+  /** Manual stop (same semantics as the old toggle-off branch). */
+  stop(): void;
+  /** Midnight reset of the in-memory daily counters. */
+  resetDailyCounters(): void;
+  /** Restart market scanning from the first market of each group. */
+  resetScanCursors(): void;
+  getComputedAgentScores(): Promise<Record<string, number>>;
+  snapshot(): {
+    running: boolean;
+    mode: string;
+    tradesExecutedToday: number;
+    currentMarket: string | null;
+    nextScanIn: number | null;
+    stopReasons: string[];
+    loopIntervalSec: number;
+    lastTradeTime: string | null;
+    cooldownUntil: string | null;
+    sessionLossCount: number;
+  };
+}
+
+function createAutonomousEngine(ownerSessionId: string): AutonomousEngine {
 // ── Engine state ─────────────────────────────────────────────────────────────
 let engineRunning = false;
-// The singleton autonomous executor is pinned to the browser session that
-// started it. Other visitors cannot inspect, stop, or redirect its credentials.
-let engineOwnerSessionId: string | null = null;
+// (No owner field: this factory instance IS the owner's engine — one
+// instance per connected Deriv account, held in `autonomousEngines`.)
 let autonomousMode = "manual";
 let tradesExecutedToday = 0;
 let currentMarket: string | null = null;
@@ -237,181 +275,12 @@ const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"]
 // Index: 0=Volatility 1s, 1=Volatility, 2=Jump Indices, 3=Bull/Bear
 const groupCursors = [0, 0, 0, 0];
 
-// 13-agent system names and score keys
-const AGENT_NAMES = [
-  "Market Scanner", "Tick Intelligence", "Digit Probability",
-  "Rise/Fall Model", "Market Regime", "Execution Timing",
-  "Confidence Fusion", "Recovery Intelligence", "Risk Intelligence",
-  "Portfolio Manager", "Learning Agent", "Pattern Discovery",
-  "Trade Explainability",
-];
-
-const AGENT_SCORE_KEYS = [
-  "marketScanner", "tickIntelligence", "digitProbability",
-  "riseFallAgent", "marketRegime", "executionTiming",
-  "confidenceFusion", "recoveryIntelligence", "riskIntelligence",
-  "portfolioManager", "learningAgent", "patternDiscovery",
-  "tradeExplainability",
-];
-
-// ── Settings builders ─────────────────────────────────────────────────────────
-
-async function getAccountAndSettings(sessionId: string) {
-  // Always prefer this browser session's active account (real vs demo switch).
-  let accounts = await db.select().from(accountsTable).where(and(
-    eq(accountsTable.sessionId, sessionId),
-    eq(accountsTable.isActive, true),
-  )).limit(1);
-  if (accounts.length === 0) {
-    accounts = await db.select().from(accountsTable)
-      .where(eq(accountsTable.sessionId, sessionId)).limit(1);
-  }
-  const settings = await db.select().from(settingsTable)
-    .where(eq(settingsTable.sessionId, sessionId)).limit(1);
-  return {
-    balance: accounts.length > 0 ? Number(accounts[0].balance) : 10000,
-    settings: settings.length > 0 ? settings[0] : null,
-    accountId: accounts.length > 0 ? accounts[0].id : null,
-    account: accounts.length > 0 ? accounts[0] : null,
-  };
-}
-
-function buildTradingSettings(s: any, preferredContractTypes: string[]): TradingSettings {
-  return {
-    riskAmountType:         (s?.riskAmountType === "percentage" ? "percentage" : "fixed") as "fixed" | "percentage",
-    riskAmountValue:        s ? Number(s.riskAmountValue ?? 1) : 1,
-    maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
-    minConfidenceThreshold: s ? Math.min(Number(s.minConfidenceThreshold), 55) : 38,
-    riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
-    preferredContractTypes,
-    tradeDurationSec:       s?.tradeDurationSec ?? 5,
-    maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
-    dailyLossLimit:         s ? Number(s.dailyLossLimit) : 30,
-    dailyTarget:            s ? Number(s.dailyTarget) : 50,
-    consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
-    maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
-    requirePositiveEv:      s?.requirePositiveEv ?? true,
-    paperTradeMode:         s?.paperTradeMode ?? false,
-    // Clamp digit barriers to valid Deriv ranges.
-    // OVER 0–8 are valid (OVER 9 is impossible — no digit > 9 exists).
-    // UNDER 1–9 are valid (UNDER 0 is impossible — no digit < 0 exists).
-    normalOverDigit:        Math.min(8, Math.max(0, s?.normalOverDigit ?? 2)),
-    normalUnderDigit:       Math.min(9, Math.max(1, s?.normalUnderDigit ?? 7)),
-    recoveryOverDigit:      Math.min(8, Math.max(0, s?.recoveryOverDigit ?? 4)),
-    recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
-    recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
-    // Manual mode owns this value; Auto mode ignores it completely.
-    recoveryMultiplier:     s ? Number(s.recoveryMultiplier ?? 1.5) : 1.5,
-    recoveryAutoMode:       s?.recoveryAutoMode ?? true,
-    maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
-  };
-}
-
-function buildDailyStats(
-  closedToday: any[],
-  consecutiveLosses: number,
-): DailyStats {
-  const wins = closedToday.filter((t) => t.status === "won").length;
-  const losses = closedToday.filter((t) => t.status === "lost").length;
-  const profit = closedToday.reduce((s: number, t: any) => s + Number(t.profit ?? 0), 0);
-  // Consecutive wins (for completeness)
-  let consecutiveWins = 0;
-  const sorted = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-  for (const t of sorted) { if (t.status === "won") consecutiveWins++; else break; }
-
-  return {
-    tradesCount: closedToday.length,
-    wins,
-    losses,
-    profit,
-    consecutiveLosses,
-    consecutiveWins,
-  };
-}
-
-function buildScanContext(
-  market: { symbol: string; displayName: string; category: string; digitEnabled?: boolean },
-  balance: number,
-  settings: TradingSettings,
-  daily: DailyStats,
-  token: string | null,
-  currency: string,
-): ScanContext {
-  const prices = tickManager.getTicks(market.symbol, 100);
-  const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : [];
-  return {
-    symbol:      market.symbol,
-    displayName: market.displayName,
-    category:    market.category,
-    prices,
-    digits,
-    balance,
-    settings,
-    daily,
-    token,
-    currency,
-  };
-}
-
-// ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
-
-// Track the last time each market received a real Deriv tick
-const lastTickTime = new Map<string, number>();
-
-tickManager.on("tick", (tick) => {
-  broadcastSSE("tick", tick);
-  lastTickTime.set(tick.symbol, Date.now());
-  const market = getMarketInfo(tick.symbol);
-  if (market && isAutomatedMarket(tick.symbol)) {
-    const prices = tickManager.getTicks(tick.symbol, 100);
-    const trendStats = analyzeTrend(prices);
-    // Get 100 digits for richer even/odd and digit analysis
-    const digits100 = market.digitEnabled ? tickManager.getDigits(tick.symbol, 100) : null;
-    const digitStats = (digits100 && digits100.length > 10) ? analyzeDigits(digits100) : null;
-    broadcastSSE("market_analysis", {
-      symbol: tick.symbol, trendStats, digitStats,
-      lastDigit: tick.lastDigit,
-      price: tick.price, epoch: tick.epoch,
-    });
-  }
-});
-
-// ── Heartbeat: broadcast market_analysis for markets that haven't received
-//    a real Deriv tick in the last 3s (e.g. 1HZ25V when Deriv throttles).
-//    Rotates through all markets, one per 200ms, full cycle every ~7s.
-let heartbeatIdx = 0;
-setInterval(() => {
-  const now = Date.now();
-  const markets = AUTOMATED_DERIV_MARKETS;
-  if (markets.length === 0) return;
-  heartbeatIdx = (heartbeatIdx + 1) % markets.length;
-  const market = markets[heartbeatIdx];
-  const lastTick = lastTickTime.get(market.symbol) ?? 0;
-  // Only broadcast if this market hasn't had a real tick in the last 3 seconds
-  if (now - lastTick < 3000) return;
-  const prices = tickManager.getTicks(market.symbol, 100);
-  const trendStats = analyzeTrend(prices);
-  const digits100h = market.digitEnabled ? tickManager.getDigits(market.symbol, 100) : null;
-  const digitStats = (digits100h && digits100h.length > 10) ? analyzeDigits(digits100h) : null;
-  const latestPrice = tickManager.getLatestPrice(market.symbol) ?? prices[prices.length - 1] ?? 0;
-  broadcastSSE("market_analysis", {
-    symbol: market.symbol,
-    trendStats,
-    digitStats,
-    lastDigit: digits100h ? digits100h[digits100h.length - 1] ?? null : null,
-    price: latestPrice,
-    epoch: Math.floor(now / 1000),
-  });
-}, 200);
-
 function broadcastEngineSSE(event: string, data: unknown): void {
-  if (!engineOwnerSessionId) return;
-  broadcastSSE(event, data, engineOwnerSessionId);
+  broadcastSSE(event, data, ownerSessionId);
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function stopEngine(reason: string, cooldownMinutes?: number) {
-  const stoppedOwnerSessionId = engineOwnerSessionId;
+  const stoppedOwnerSessionId = ownerSessionId;
   engineRunning = false;
   autonomousMode = "manual";
   stopReasons = [reason];
@@ -431,7 +300,9 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
 
   if (cooldownMinutes && cooldownMinutes > 0) {
     cooldownUntil = new Date(Date.now() + cooldownMinutes * 60 * 1000);
-    cooldownResumeTimer = setTimeout(() => {
+    // The resume callback touches session-scoped stores (recovery ledger) and
+    // restarts this instance's loop, so it runs pinned to the owner's session.
+    cooldownResumeTimer = setTimeout(() => runWithSessionId(ownerSessionId, () => {
       cooldownUntil = null;
       cooldownResumeTimer = null;
       // Reset the global loss-streak counter on cooldown expiry — the ONLY reset
@@ -450,12 +321,11 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
       logger.info("Cooldown expired — autonomous engine auto-resuming, session loss count reset");
       broadcastEngineSSE("engine_started", { reason: "cooldown_expired" });
       broadcastEngineSSE("loss_streak_reset", { sessionLossCount: 0 });
-      autonomousTimer = setTimeout(runAutonomousLoop, 1000);
-    }, cooldownMinutes * 60 * 1000);
+      autonomousTimer = setTimeout(() => runWithSessionId(ownerSessionId, runAutonomousLoop), 1000);
+    }), cooldownMinutes * 60 * 1000);
     logger.info({ reason, cooldownMinutes, cooldownUntil }, "Engine stopped with cooldown");
   } else {
     cooldownUntil = null;
-    engineOwnerSessionId = null;
     logger.info({ reason }, "Autonomous engine stopped");
   }
   if (stoppedOwnerSessionId) {
@@ -463,26 +333,6 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
   }
 }
 
-async function syncLiveBalance(
-  sessionId: string,
-  token: string,
-  derivAccountId: string,
-) {
-  try {
-    const balance = await getLiveBalance(token, derivAccountId);
-    if (balance === null) return;
-    const activeAccounts = await db.select().from(accountsTable).where(and(
-      eq(accountsTable.sessionId, sessionId),
-      eq(accountsTable.isActive, true),
-    )).limit(1);
-    if (activeAccounts.length > 0) {
-      await db.update(accountsTable).set({ balance: String(balance), updatedAt: new Date() })
-        .where(eq(accountsTable.id, activeAccounts[0].id));
-    }
-  } catch { /* ignore */ }
-}
-
-// ── Autonomous loop ───────────────────────────────────────────────────────────
 async function runAutonomousLoop() {
   if (!engineRunning) return;
   // Prevent concurrent iterations — if a previous loop is still running, skip
@@ -509,11 +359,8 @@ async function runAutonomousLoop() {
   isLoopRunning = true;
 
   try {
-    const sessionId = engineOwnerSessionId;
-    if (!sessionId) {
-      stopEngine("Autonomous engine lost its browser-session owner");
-      return;
-    }
+    // The instance IS the owner's engine — no owner lookup can fail.
+    const sessionId = ownerSessionId;
     recoveryEngine.setPersistenceSession(sessionId);
     const { balance, settings, account } = await getAccountAndSettings(sessionId);
     const token = account?.bearerToken ?? account?.token ?? null;
@@ -1698,8 +1545,315 @@ function scheduleNext(tradeExecuted = false, overrideDelayMs?: number) {
   const delayMs = overrideDelayMs ?? (tradeExecuted ? 15_000 : 3000);
   nextScanIn = Math.ceil(delayMs / 1000);
   loopIntervalSec = nextScanIn;
-  autonomousTimer = setTimeout(runAutonomousLoop, delayMs);
+  autonomousTimer = setTimeout(() => runWithSessionId(ownerSessionId, runAutonomousLoop), delayMs);
 }
+
+async function getComputedAgentScores(): Promise<Record<string, number>> {
+  if (Object.keys(lastAgentScores).length > 0) return lastAgentScores;
+  // Quick scan on the best-buffered market
+  const candidateSymbols = ["1HZ100V", "R_100", "R_50", "R_25", "R_10"];
+  const best = candidateSymbols
+    .map((s) => ({ symbol: s, count: tickManager.getTicks(s, 100).length }))
+    .filter((x) => x.count >= 5)
+    .sort((a, b) => b.count - a.count)[0];
+  if (!best) return {};
+  const mInfo = getMarketInfo(best.symbol);
+  if (!mInfo) return {};
+
+  try {
+    const ctx: ScanContext = {
+      symbol: mInfo.symbol,
+      displayName: mInfo.displayName,
+      category: mInfo.category,
+      prices: tickManager.getTicks(mInfo.symbol, 100),
+      digits: mInfo.digitEnabled ? tickManager.getDigits(mInfo.symbol, 100) : [],
+      balance: 10000,
+      settings: buildTradingSettings(null, ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"]),
+      daily: { tradesCount: 0, wins: 0, losses: 0, profit: 0, consecutiveLosses: 0, consecutiveWins: 0 },
+      token: null,
+      currency: "USD",
+    };
+    const output = await runCoordinator(ctx);
+    return Object.fromEntries(
+      AGENT_SCORE_KEYS.map((k) => [k, output.agents[k]?.score ?? 65])
+    );
+  } catch { return {}; }
+}
+
+  const startLoop = (initialDelayMs: number): void => {
+    if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
+    autonomousTimer = setTimeout(() => runWithSessionId(ownerSessionId, runAutonomousLoop), initialDelayMs);
+  };
+
+  return {
+    ownerSessionId,
+    isRunning: () => engineRunning,
+    start: ({ loopIntervalSec: interval }) => runWithSessionId(ownerSessionId, () => {
+      loopIntervalSec = interval;
+      // Clear any active cooldown timer when manually starting. Note: the
+      // loss-streak counter (recoveryEngine.getState().streakLossCount) is NOT
+      // reset here — it is the single source of truth for the cooldown gate
+      // and must keep reflecting reality (e.g. restarting mid-streak should
+      // not silently clear it).
+      if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+      cooldownUntil = null;
+      sessionLossCount = recoveryEngine.getState().streakLossCount;
+      engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
+      exploitSymbol = null; exploitCount = 0;
+      groupCursors.fill(0);
+      startLoop(2000);
+      logger.info({ loopIntervalSec }, "Autonomous engine started");
+    }),
+    resume: ({ loopIntervalSec: interval }) => runWithSessionId(ownerSessionId, () => {
+      loopIntervalSec = interval;
+      engineRunning = true;
+      autonomousMode = "autonomous";
+      stopReasons = [];
+      nextScanIn = loopIntervalSec;
+      startLoop(2000);
+    }),
+    stop: () => runWithSessionId(ownerSessionId, () => {
+      engineRunning = false; autonomousMode = "manual"; currentMarket = null; nextScanIn = null;
+      exploitSymbol = null; lastAgentScores = {};
+      if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
+      if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+      cooldownUntil = null;
+      releaseTradingOwnership("autonomous");
+    }),
+    resetDailyCounters: () => runWithSessionId(ownerSessionId, () => {
+      tradesExecutedToday  = 0;
+      sessionLossCount     = 0;
+      lastTradeCompletedAt = null;
+      recentTradesBySymbol.clear();
+      if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
+      cooldownUntil = null;
+    }),
+    resetScanCursors: () => { groupCursors.fill(0); },
+    getComputedAgentScores: () => runWithSessionId(ownerSessionId, () => getComputedAgentScores()),
+    snapshot: () => ({
+      running: engineRunning,
+      mode: autonomousMode,
+      tradesExecutedToday,
+      currentMarket,
+      nextScanIn,
+      stopReasons: [...stopReasons],
+      loopIntervalSec,
+      lastTradeTime: lastTradeTime?.toISOString() ?? null,
+      cooldownUntil: cooldownUntil?.toISOString() ?? null,
+      sessionLossCount,
+    }),
+  };
+}
+
+const autonomousEngines = new Map<string, AutonomousEngine>();
+
+/** This account's engine instance, created on first use. Never null. */
+function getEngine(ownerSessionId: string): AutonomousEngine {
+  let engine = autonomousEngines.get(ownerSessionId);
+  if (!engine) {
+    engine = createAutonomousEngine(ownerSessionId);
+    autonomousEngines.set(ownerSessionId, engine);
+  }
+  return engine;
+}
+
+/** Session ids holding an autonomous engine instance (midnight rollover). */
+export function autonomousSessionIds(): string[] {
+  return [...autonomousEngines.keys()];
+}
+
+
+// 13-agent system names and score keys
+const AGENT_NAMES = [
+  "Market Scanner", "Tick Intelligence", "Digit Probability",
+  "Rise/Fall Model", "Market Regime", "Execution Timing",
+  "Confidence Fusion", "Recovery Intelligence", "Risk Intelligence",
+  "Portfolio Manager", "Learning Agent", "Pattern Discovery",
+  "Trade Explainability",
+];
+
+const AGENT_SCORE_KEYS = [
+  "marketScanner", "tickIntelligence", "digitProbability",
+  "riseFallAgent", "marketRegime", "executionTiming",
+  "confidenceFusion", "recoveryIntelligence", "riskIntelligence",
+  "portfolioManager", "learningAgent", "patternDiscovery",
+  "tradeExplainability",
+];
+
+// ── Settings builders ─────────────────────────────────────────────────────────
+
+async function getAccountAndSettings(sessionId: string) {
+  // Always prefer this browser session's active account (real vs demo switch).
+  let accounts = await db.select().from(accountsTable).where(and(
+    eq(accountsTable.sessionId, sessionId),
+    eq(accountsTable.isActive, true),
+  )).limit(1);
+  if (accounts.length === 0) {
+    accounts = await db.select().from(accountsTable)
+      .where(eq(accountsTable.sessionId, sessionId)).limit(1);
+  }
+  const settings = await db.select().from(settingsTable)
+    .where(eq(settingsTable.sessionId, sessionId)).limit(1);
+  return {
+    balance: accounts.length > 0 ? Number(accounts[0].balance) : 10000,
+    settings: settings.length > 0 ? settings[0] : null,
+    accountId: accounts.length > 0 ? accounts[0].id : null,
+    account: accounts.length > 0 ? accounts[0] : null,
+  };
+}
+
+function buildTradingSettings(s: any, preferredContractTypes: string[]): TradingSettings {
+  return {
+    riskAmountType:         (s?.riskAmountType === "percentage" ? "percentage" : "fixed") as "fixed" | "percentage",
+    riskAmountValue:        s ? Number(s.riskAmountValue ?? 1) : 1,
+    maxRiskPerTrade:        s ? Number(s.maxRiskPerTrade) : 2,
+    minConfidenceThreshold: s ? Math.min(Number(s.minConfidenceThreshold), 55) : 38,
+    riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
+    preferredContractTypes,
+    tradeDurationSec:       s?.tradeDurationSec ?? 5,
+    maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
+    dailyLossLimit:         s ? Number(s.dailyLossLimit) : 30,
+    dailyTarget:            s ? Number(s.dailyTarget) : 50,
+    consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
+    maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
+    requirePositiveEv:      s?.requirePositiveEv ?? true,
+    paperTradeMode:         s?.paperTradeMode ?? false,
+    // Clamp digit barriers to valid Deriv ranges.
+    // OVER 0–8 are valid (OVER 9 is impossible — no digit > 9 exists).
+    // UNDER 1–9 are valid (UNDER 0 is impossible — no digit < 0 exists).
+    normalOverDigit:        Math.min(8, Math.max(0, s?.normalOverDigit ?? 2)),
+    normalUnderDigit:       Math.min(9, Math.max(1, s?.normalUnderDigit ?? 7)),
+    recoveryOverDigit:      Math.min(8, Math.max(0, s?.recoveryOverDigit ?? 4)),
+    recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
+    recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
+    // Manual mode owns this value; Auto mode ignores it completely.
+    recoveryMultiplier:     s ? Number(s.recoveryMultiplier ?? 1.5) : 1.5,
+    recoveryAutoMode:       s?.recoveryAutoMode ?? true,
+    maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
+  };
+}
+
+function buildDailyStats(
+  closedToday: any[],
+  consecutiveLosses: number,
+): DailyStats {
+  const wins = closedToday.filter((t) => t.status === "won").length;
+  const losses = closedToday.filter((t) => t.status === "lost").length;
+  const profit = closedToday.reduce((s: number, t: any) => s + Number(t.profit ?? 0), 0);
+  // Consecutive wins (for completeness)
+  let consecutiveWins = 0;
+  const sorted = [...closedToday].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  for (const t of sorted) { if (t.status === "won") consecutiveWins++; else break; }
+
+  return {
+    tradesCount: closedToday.length,
+    wins,
+    losses,
+    profit,
+    consecutiveLosses,
+    consecutiveWins,
+  };
+}
+
+function buildScanContext(
+  market: { symbol: string; displayName: string; category: string; digitEnabled?: boolean },
+  balance: number,
+  settings: TradingSettings,
+  daily: DailyStats,
+  token: string | null,
+  currency: string,
+): ScanContext {
+  const prices = tickManager.getTicks(market.symbol, 100);
+  const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : [];
+  return {
+    symbol:      market.symbol,
+    displayName: market.displayName,
+    category:    market.category,
+    prices,
+    digits,
+    balance,
+    settings,
+    daily,
+    token,
+    currency,
+  };
+}
+
+// ── Wire up TickManager → SSE for live prices + live analysis ─────────────────
+
+// Track the last time each market received a real Deriv tick
+const lastTickTime = new Map<string, number>();
+
+tickManager.on("tick", (tick) => {
+  broadcastSSE("tick", tick);
+  lastTickTime.set(tick.symbol, Date.now());
+  const market = getMarketInfo(tick.symbol);
+  if (market && isAutomatedMarket(tick.symbol)) {
+    const prices = tickManager.getTicks(tick.symbol, 100);
+    const trendStats = analyzeTrend(prices);
+    // Get 100 digits for richer even/odd and digit analysis
+    const digits100 = market.digitEnabled ? tickManager.getDigits(tick.symbol, 100) : null;
+    const digitStats = (digits100 && digits100.length > 10) ? analyzeDigits(digits100) : null;
+    broadcastSSE("market_analysis", {
+      symbol: tick.symbol, trendStats, digitStats,
+      lastDigit: tick.lastDigit,
+      price: tick.price, epoch: tick.epoch,
+    });
+  }
+});
+
+// ── Heartbeat: broadcast market_analysis for markets that haven't received
+//    a real Deriv tick in the last 3s (e.g. 1HZ25V when Deriv throttles).
+//    Rotates through all markets, one per 200ms, full cycle every ~7s.
+let heartbeatIdx = 0;
+setInterval(() => {
+  const now = Date.now();
+  const markets = AUTOMATED_DERIV_MARKETS;
+  if (markets.length === 0) return;
+  heartbeatIdx = (heartbeatIdx + 1) % markets.length;
+  const market = markets[heartbeatIdx];
+  const lastTick = lastTickTime.get(market.symbol) ?? 0;
+  // Only broadcast if this market hasn't had a real tick in the last 3 seconds
+  if (now - lastTick < 3000) return;
+  const prices = tickManager.getTicks(market.symbol, 100);
+  const trendStats = analyzeTrend(prices);
+  const digits100h = market.digitEnabled ? tickManager.getDigits(market.symbol, 100) : null;
+  const digitStats = (digits100h && digits100h.length > 10) ? analyzeDigits(digits100h) : null;
+  const latestPrice = tickManager.getLatestPrice(market.symbol) ?? prices[prices.length - 1] ?? 0;
+  broadcastSSE("market_analysis", {
+    symbol: market.symbol,
+    trendStats,
+    digitStats,
+    lastDigit: digits100h ? digits100h[digits100h.length - 1] ?? null : null,
+    price: latestPrice,
+    epoch: Math.floor(now / 1000),
+  });
+}, 200);
+
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+async function syncLiveBalance(
+  sessionId: string,
+  token: string,
+  derivAccountId: string,
+) {
+  try {
+    const balance = await getLiveBalance(token, derivAccountId);
+    if (balance === null) return;
+    const activeAccounts = await db.select().from(accountsTable).where(and(
+      eq(accountsTable.sessionId, sessionId),
+      eq(accountsTable.isActive, true),
+    )).limit(1);
+    if (activeAccounts.length > 0) {
+      await db.update(accountsTable).set({ balance: String(balance), updatedAt: new Date() })
+        .where(eq(accountsTable.id, activeAccounts[0].id));
+    }
+  } catch { /* ignore */ }
+}
+
+// ── Autonomous loop ───────────────────────────────────────────────────────────
+
 
 // ── Helper: build recommendation payload for /recommendation route ─────────────
 async function buildRecommendationPayload(sessionId: string, symbol: string, market: ReturnType<typeof getMarketInfo>, balance: number, settings: any, preferredContractTypes: string[], token: string | null, currency: string) {
@@ -1756,37 +1910,6 @@ async function buildRecommendationPayload(sessionId: string, symbol: string, mar
 }
 
 // ── Fast agent score computation for engine status ────────────────────────────
-async function getComputedAgentScores(): Promise<Record<string, number>> {
-  if (Object.keys(lastAgentScores).length > 0) return lastAgentScores;
-  // Quick scan on the best-buffered market
-  const candidateSymbols = ["1HZ100V", "R_100", "R_50", "R_25", "R_10"];
-  const best = candidateSymbols
-    .map((s) => ({ symbol: s, count: tickManager.getTicks(s, 100).length }))
-    .filter((x) => x.count >= 5)
-    .sort((a, b) => b.count - a.count)[0];
-  if (!best) return {};
-  const mInfo = getMarketInfo(best.symbol);
-  if (!mInfo) return {};
-
-  try {
-    const ctx: ScanContext = {
-      symbol: mInfo.symbol,
-      displayName: mInfo.displayName,
-      category: mInfo.category,
-      prices: tickManager.getTicks(mInfo.symbol, 100),
-      digits: mInfo.digitEnabled ? tickManager.getDigits(mInfo.symbol, 100) : [],
-      balance: 10000,
-      settings: buildTradingSettings(null, ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"]),
-      daily: { tradesCount: 0, wins: 0, losses: 0, profit: 0, consecutiveLosses: 0, consecutiveWins: 0 },
-      token: null,
-      currency: "USD",
-    };
-    const output = await runCoordinator(ctx);
-    return Object.fromEntries(
-      AGENT_SCORE_KEYS.map((k) => [k, output.agents[k]?.score ?? 65])
-    );
-  } catch { return {}; }
-}
 
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
@@ -1935,7 +2058,7 @@ router.get("/insights", async (req, res): Promise<void> => {
 // The card only returns to "Normal" once a win FULLY covers unrecoveredAmount
 // — a partial win clears the streak count but leaves the debt (and `active`)
 // in place, per spec.
-function buildRecoveryPayload(visible = true) {
+function buildRecoveryPayload(sessionId: string, visible = true) {
   if (!visible) {
     return {
       active: false, inRecovery: false, recoveryStep: 0, baseStake: 0,
@@ -1944,7 +2067,10 @@ function buildRecoveryPayload(visible = true) {
       totalStreakAmount: 0, highestStep: 0,
     };
   }
-  const state = recoveryEngine.getState();
+  const state = runWithSessionId(sessionId, () => {
+    recoveryEngine.setPersistenceSession(sessionId);
+    return recoveryEngine.getState();
+  });
   return {
     active: state.inRecovery,
     inRecovery: state.inRecovery,
@@ -1969,12 +2095,13 @@ router.get("/engine/status", async (req, res): Promise<void> => {
     eq(tradesTable.sessionId, req.sessionId),
     sql`${tradesTable.createdAt} >= ${today}`,
   ));
-  const liveScores = await getComputedAgentScores();
-  const ownsEngine = engineOwnerSessionId === req.sessionId;
-  const visibleRunning = engineRunning && ownsEngine;
+  // Every account reads its OWN engine instance — no cross-session blanking.
+  const engine = getEngine(req.sessionId);
+  const snap = engine.snapshot();
+  const liveScores = await engine.getComputedAgentScores();
 
   res.json({
-    isRunning: visibleRunning, mode: visibleRunning ? "autonomous" : "manual",
+    isRunning: snap.running, mode: snap.running ? "autonomous" : "manual",
     agentStatuses: AGENT_NAMES.map((name, i) => {
       const key = AGENT_SCORE_KEYS[i] ?? "featureEngineering";
       const score = liveScores[key] ?? 65;
@@ -1986,21 +2113,21 @@ router.get("/engine/status", async (req, res): Promise<void> => {
       };
     }),
     tradesExecutedToday: todayTrades.length,
-    currentMarket: ownsEngine ? currentMarket : null,
-    nextScanIn: visibleRunning ? nextScanIn : null,
-    stopReasons: ownsEngine ? stopReasons : [],
-    loopIntervalSec: ownsEngine ? loopIntervalSec : (settings[0]?.loopIntervalSec ?? 5),
-    lastTradeTime: ownsEngine ? (lastTradeTime?.toISOString() ?? null) : null,
+    currentMarket: snap.currentMarket,
+    nextScanIn: snap.running ? snap.nextScanIn : null,
+    stopReasons: snap.stopReasons,
+    loopIntervalSec: snap.loopIntervalSec,
+    lastTradeTime: snap.lastTradeTime,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
     paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
-    cooldownUntil: ownsEngine ? (cooldownUntil?.toISOString() ?? null) : null,
-    sessionLossCount: ownsEngine ? sessionLossCount : 0,
+    cooldownUntil: snap.cooldownUntil,
+    sessionLossCount: snap.sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: AUTOMATED_DERIV_MARKETS.length,
-    recovery: buildRecoveryPayload(ownsEngine),
+    recovery: buildRecoveryPayload(req.sessionId, true),
   });
 });
 
@@ -2011,18 +2138,18 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
 
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
-  if (settings.length > 0 && settings[0].loopIntervalSec) loopIntervalSec = settings[0].loopIntervalSec;
+  // Every account toggles its OWN engine instance — starting or stopping here
+  // can never affect another connected Deriv account.
+  const engine = getEngine(req.sessionId);
 
   if (running) {
-    if (engineRunning && engineOwnerSessionId !== req.sessionId) {
-      res.status(409).json({ error: "Another isolated browser session is currently using the autonomous executor. Your account was not touched; try again after that session stops." });
-      return;
-    }
     // ── Single-executor guard — one recovery ledger, one trading engine ──────
-    // If a NeuroAI FAB session is currently executing trades, refuse to start:
-    // both engines share the same account-level recovery ledger, so concurrent
-    // execution would double-stake the same debt and recreate the normal/
-    // recovery mix-up. The FAB loop will likewise halt if it loses ownership.
+    // If a NeuroAI FAB session is currently executing trades ON THIS ACCOUNT,
+    // refuse to start: both engines share the same account-level recovery
+    // ledger, so concurrent execution would double-stake the same debt and
+    // recreate the normal/recovery mix-up. The FAB loop will likewise halt if
+    // it loses ownership. (The lock is per-account: other Deriv accounts are
+    // unaffected.)
     if (!acquireTradingOwnership("autonomous")) {
       const owner = currentTradingOwner();
       res.status(409).json({
@@ -2030,70 +2157,52 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       });
       return;
     }
-    engineOwnerSessionId = req.sessionId;
-    recoveryEngine.setPersistenceSession(req.sessionId);
-    recoveryEngine.resetAll();
-    const persistedRecovery = (settings[0] as any)?.recoveryStateJson;
-    if (persistedRecovery) recoveryEngine.loadState(persistedRecovery);
-    // Clear any active cooldown timer when manually starting. Note: the global
-    // loss-streak counter (recoveryEngine.getState().streakLossCount) is NOT reset
-    // here — it is the single source of truth for the cooldown gate and must keep
-    // reflecting reality (e.g. restarting mid-streak should not silently clear it).
-    if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
-    cooldownUntil = null;
-    sessionLossCount = recoveryEngine.getState().streakLossCount;
-    engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
-    exploitSymbol = null; exploitCount = 0;
+    runWithSessionId(req.sessionId, () => {
+      recoveryEngine.setPersistenceSession(req.sessionId);
+      recoveryEngine.resetAll();
+      const persistedRecovery = (settings[0] as any)?.recoveryStateJson;
+      if (persistedRecovery) recoveryEngine.loadState(persistedRecovery);
+    });
     // NOTE: Do NOT call recoveryEngine.resetAll() here — any unrecovered loss amount
     // from before this session must be preserved so the engine can continue recovery.
     // Recovery state is persisted to DB and loaded on startup — it should survive
     // both manual engine restarts AND server restarts.
-
-    // Reset group cursors → scanning restarts from V10 1s / V10 / JD10 / RDBULL
-    groupCursors.fill(0);
+    engine.start({ loopIntervalSec: settings[0]?.loopIntervalSec ?? 5 });
     if (settings.length > 0) await db.update(settingsTable)
       .set({ autonomousEnabled: true })
       .where(eq(settingsTable.id, settings[0].id));
-    if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
-    autonomousTimer = setTimeout(runAutonomousLoop, 2000);
-    logger.info({ loopIntervalSec }, "Autonomous engine started");
   } else {
-    if (engineRunning && engineOwnerSessionId !== req.sessionId) {
-      res.status(409).json({ error: "You cannot stop another browser session's autonomous engine." });
-      return;
-    }
-    engineRunning = false; autonomousMode = "manual"; currentMarket = null; nextScanIn = null;
-    exploitSymbol = null; lastAgentScores = {};
-    if (autonomousTimer) { clearTimeout(autonomousTimer); autonomousTimer = null; }
-    if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
-    cooldownUntil = null;
-    releaseTradingOwnership("autonomous");
-    engineOwnerSessionId = null;
+    engine.stop();
     if (settings.length > 0) await db.update(settingsTable)
       .set({ autonomousEnabled: false })
       .where(eq(settingsTable.id, settings[0].id));
   }
 
-  const toggleScores = await getComputedAgentScores();
+  const snap = engine.snapshot();
+  const toggleScores = await engine.getComputedAgentScores();
   res.json({
-    isRunning: engineRunning, mode: autonomousMode,
+    isRunning: snap.running, mode: snap.mode,
     agentStatuses: AGENT_NAMES.map((name, i) => {
       const key = AGENT_SCORE_KEYS[i] ?? "featureEngineering";
       const score = toggleScores[key] ?? 65;
       return { name, isActive: true, lastRun: new Date().toISOString(), confidence: score };
     }),
-    tradesExecutedToday, currentMarket, nextScanIn, stopReasons, loopIntervalSec,
-    lastTradeTime: lastTradeTime?.toISOString() ?? null,
+    tradesExecutedToday: snap.tradesExecutedToday,
+    currentMarket: snap.currentMarket,
+    nextScanIn: snap.nextScanIn,
+    stopReasons: snap.stopReasons,
+    loopIntervalSec: snap.loopIntervalSec,
+    lastTradeTime: snap.lastTradeTime,
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
     paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: null,
-    sessionLossCount,
+    sessionLossCount: snap.sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: AUTOMATED_DERIV_MARKETS.length,
-    recovery: buildRecoveryPayload(),
+    recovery: buildRecoveryPayload(req.sessionId),
   });
 });
 
@@ -2160,18 +2269,19 @@ router.get("/intelligence/thresholds", async (_req, res): Promise<void> => {
  */
 router.post("/recovery/clear-debt", async (req, res): Promise<void> => {
   try {
-    if (engineOwnerSessionId && engineOwnerSessionId !== req.sessionId) {
-      res.status(409).json({ error: "You cannot change another browser session's recovery state." });
-      return;
-    }
-    recoveryEngine.setPersistenceSession(req.sessionId);
-    recoveryEngine.resetAll();
+    // Each account owns an independent recovery ledger, so there is no
+    // cross-session guard here anymore — this clears only the caller's debt.
+    const clearedJson = runWithSessionId(req.sessionId, () => {
+      recoveryEngine.setPersistenceSession(req.sessionId);
+      recoveryEngine.resetAll();
+      return recoveryEngine.serializeState();
+    });
     // Persist the cleared state only to this browser session.
     const [settings] = await db.select().from(settingsTable)
       .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
     if (settings) {
       await db.update(settingsTable)
-        .set({ recoveryStateJson: recoveryEngine.serializeState(), updatedAt: new Date() } as any)
+        .set({ recoveryStateJson: clearedJson, updatedAt: new Date() } as any)
         .where(eq(settingsTable.id, settings.id));
     }
     logger.info("Recovery debt cleared manually by user");
@@ -2184,11 +2294,11 @@ router.post("/recovery/clear-debt", async (req, res): Promise<void> => {
 
 router.get("/recovery/evaluation", async (req, res): Promise<void> => {
   try {
-    if (engineOwnerSessionId && engineOwnerSessionId !== req.sessionId) {
-      res.json({ inRecovery: false, unrecoveredAmount: 0, streakLosses: 0, message: "No recovery state for this browser session" });
-      return;
-    }
-    const state = recoveryEngine.getState();
+    // Each account reads its own recovery ledger — no cross-session blanking.
+    const state = runWithSessionId(req.sessionId, () => {
+      recoveryEngine.setPersistenceSession(req.sessionId);
+      return recoveryEngine.getState();
+    });
 
     if (!state.inRecovery) {
       res.json({

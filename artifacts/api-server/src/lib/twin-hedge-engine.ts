@@ -41,6 +41,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
+import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
 import { evaluateTiming } from "./killshot-timing";
 import {
   twinLabel,
@@ -63,7 +64,7 @@ import {
 
 export const TWIN_BOT_ID = "twin-hedge";
 
-const MAX_BAR_BOOST = 2.5;
+const MAX_BAR_BOOST = 1.5;
 const REANALYZE_LOCKED_MS = 15_000;
 const REANALYZE_SWITCHING_MS = 45_000;
 const SWITCH_MARGIN = 0.01;
@@ -296,7 +297,12 @@ function freshSession(): SessionState {
   };
 }
 
-let session: SessionState = freshSession();
+// One independent session per connected Deriv account (browser session).
+// Every `session.foo` line below is untouched — the proxy routes each access
+// to the calling session's own state. Whole-state resets go through
+// replaceSession(); the runLoop chain is wrapped in the owner's context.
+const { state: session, replace: replaceSession } =
+  createSessionScoped<SessionState>(freshSession);
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -532,7 +538,7 @@ export async function startSession(
   if (!market || !market.digitEnabled)
     return fail("This bot needs a digit-enabled market");
 
-  session = {
+  replaceSession({
     ...freshSession(),
     running: true,
     sessionId: `bot_twin_${Date.now()}`,
@@ -548,7 +554,7 @@ export async function startSession(
       config.marketMode === "locked"
         ? `🔒 Locked on ${config.displayName} · ${twinLabel(config.spec.contract)} — both legs trade this market only.`
         : `🔁 Deployed on ${config.displayName} · ${twinLabel(config.spec.contract)} — will re-measure for a better market if this one cools.`,
-  };
+  });
 
   logger.info(
     {
@@ -561,14 +567,17 @@ export async function startSession(
   );
   broadcast();
 
-  runLoop(config)
+  // Pin the whole loop chain to the owner's session context so every
+  // session-scoped store it touches resolves to this account.
+  const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
+  runWithSessionId(loopSessionId, () => runLoop(config)
     .catch((err) => {
       logger.error({ err }, "Twin-Hedge runLoop error");
       session.running = false;
       session.message = `⚠️ ${friendlyErrorMessage(err)}`;
       broadcast();
     })
-    .finally(() => releaseTradingOwnership("bots"));
+    .finally(() => releaseTradingOwnership("bots")));
 
   return { ok: true };
 }
@@ -675,15 +684,18 @@ async function runLoop(config: TwinConfig) {
       if (cand) all.push(cand);
     }
     const ranked = screenTwinCandidates(all);
-    const positive = ranked.filter((c) => c.edgePerDollar > 0);
-    if (positive.length === 0) return null;
-    const best = positive[0]!;
+    // Mode-aware selection: the verdict (not a raw positive-EV veto) decides
+    // what may trade. Balanced deploys on any warm market; Strict/Elite ask
+    // for progressively more proof. Refused markets sink to the bottom of the
+    // ranking and are never picked while anything deployable exists.
+    const usable = ranked.filter((c) => c.deployable);
+    if (usable.length === 0) return null;
+    const best = usable[0]!;
     if (!LOCKED && best.symbol !== activeSymbol) {
-      const currentBest = positive.find((c) => c.symbol === activeSymbol);
+      const currentBest = usable.find((c) => c.symbol === activeSymbol);
       if (
         currentBest &&
-        currentBest.edgePerDollar > 0 &&
-        best.edgePerDollar - currentBest.edgePerDollar < SWITCH_MARGIN
+        best.score - currentBest.score < SWITCH_MARGIN
       ) {
         return currentBest;
       }
@@ -754,10 +766,10 @@ async function runLoop(config: TwinConfig) {
         } else {
           activeRead = null;
           session.watch.phase = "watching";
-          session.watch.reason = "no positive pair edge measured right now";
+          session.watch.reason = "no market clears the mode bar yet — re-measuring";
           session.message = LOCKED
-            ? `Holding on ${activeName} — no positive pair edge right now`
-            : `Scanning markets — no positive pair edge measured right now`;
+            ? `Holding on ${activeName} — no market clears the mode bar yet`
+            : `Scanning markets — nothing clears the mode bar yet, re-measuring`;
           broadcast();
           await sleep(1500);
           continue;
@@ -856,6 +868,12 @@ async function runLoop(config: TwinConfig) {
         }
       }
 
+      // Conviction-scaled staking: the base grows with the measured tilt
+      // (1× … 1.75× of the configured stake). Recovery still owns sizing
+      // while a debt is outstanding.
+      const conviction = Number.isFinite(entry.conviction)
+        ? Math.max(0, Math.min(1, entry.conviction))
+        : 0.5;
       let baseStake = inRecovery
         ? recoveryEngine.getBotRecoveryStake(
             config.stake,
@@ -864,31 +882,57 @@ async function runLoop(config: TwinConfig) {
             effPayout,
             botRecoveryMarkup,
           )
-        : config.stake;
+        : config.stake * (1 + 0.75 * conviction);
       let plan = buildTwinPlan(
         activeContract,
         entry.primary,
         entry.bias,
         baseStake,
       );
-      // Pair safety: total exposure is both legs combined.
-      let totalExposure = plan.overStake + plan.underStake;
-      if (
-        Number.isFinite(availableBalance) &&
-        totalExposure > availableBalance
-      ) {
-        const scale = Math.max(0.01, availableBalance / totalExposure);
+      // Deriv rejects any leg under $0.35 — floor EACH leg, not the base.
+      let minLeg = Math.min(plan.overStake, plan.underStake);
+      if (minLeg < 0.35 && minLeg > 0) {
+        baseStake *= 0.35 / minLeg;
         plan = buildTwinPlan(
           activeContract,
           entry.primary,
           entry.bias,
-          baseStake * scale,
+          baseStake,
+        );
+      }
+      // Pair safety: total exposure is both legs combined — cap it at the
+      // account balance AND the configured max trade stake.
+      let totalExposure = plan.overStake + plan.underStake;
+      const exposureCap = Math.min(
+        Number.isFinite(availableBalance)
+          ? availableBalance
+          : Number.POSITIVE_INFINITY,
+        Number.isFinite(maxStake) && maxStake > 0
+          ? maxStake
+          : Number.POSITIVE_INFINITY,
+      );
+      if (
+        Number.isFinite(exposureCap) &&
+        totalExposure > exposureCap &&
+        totalExposure > 0
+      ) {
+        baseStake *= Math.max(0.01, exposureCap / totalExposure);
+        plan = buildTwinPlan(
+          activeContract,
+          entry.primary,
+          entry.bias,
+          baseStake,
         );
         totalExposure = plan.overStake + plan.underStake;
       }
-      if (baseStake < 0.35) {
-        plan = buildTwinPlan(activeContract, entry.primary, entry.bias, 0.35);
-        totalExposure = plan.overStake + plan.underStake;
+      minLeg = Math.min(plan.overStake, plan.underStake);
+      if (minLeg < 0.35) {
+        session.watch.phase = "watching";
+        session.message =
+          "Holding — balance caps push a leg under the $0.35 Deriv minimum";
+        broadcast();
+        await sleep(2000);
+        continue;
       }
       session.lastPlan = plan;
 
@@ -908,7 +952,7 @@ async function runLoop(config: TwinConfig) {
         `[Twin-Hedge${inRecovery ? " RECOVERY" : ""}] ${twinLabel(activeContract)} on ${activeName} · ` +
         `primary ${entry.primary.toUpperCase()} (bias ${(entry.bias * 100).toFixed(1)}%) · ` +
         `P(over|ctx) ${(entry.pOver * 100).toFixed(1)}% · P(under|ctx) ${(entry.pUnder * 100).toFixed(1)}% · ` +
-        `edge ${(entry.edgePerBase * 100).toFixed(2)}% per $1 base · z ${entry.zGate.toFixed(2)}σ / bar ${entry.bar.toFixed(2)}σ`;
+        `edge ${(entry.edgePerBase * 100).toFixed(2)}% per $1 base · conviction ${(conviction * 100).toFixed(0)}% · z ${entry.zGate.toFixed(2)}σ / bar ${entry.bar.toFixed(2)}σ`;
 
       const bar = activeContract.overDigit;
       const [journ] = await db

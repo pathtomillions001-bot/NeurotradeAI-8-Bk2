@@ -17,6 +17,7 @@ import {
   accountSessionId,
   hasRiskAcknowledgment,
   RISK_ACKNOWLEDGMENT_REQUIRED,
+  riskAckValue,
   setBrowserSessionCookie,
   setRiskAcknowledgment,
 } from "../lib/session";
@@ -90,8 +91,12 @@ function requireRiskAcknowledgment(req: Request, res: Response): boolean {
 }
 
 router.post("/risk-acknowledgment", (req, res): void => {
-  setRiskAcknowledgment(res, req.sessionId);
-  res.json({ success: true });
+  // Tab sessions keep the signed acknowledgment in per-tab sessionStorage —
+  // the cookie jar is shared across tabs, so one cookie could never stay
+  // valid for two tabs at once. The value is returned for the tab to store;
+  // cookie clients simply ignore it.
+  if (!req.isTabSession) setRiskAcknowledgment(res, req.sessionId);
+  res.json({ success: true, sessionId: req.sessionId, riskAck: riskAckValue(req.sessionId) });
 });
 
 router.get("/risk-acknowledgment", (req, res): void => {
@@ -194,9 +199,15 @@ async function resolveAccountSession(
     logger.info({ from: current, to: target }, "Session history migrated onto account-scoped session");
   }
 
-  setBrowserSessionCookie(res, target);
+  // Tab sessions never touch cookies: rotating the shared jar would be both
+  // useless (the tab identifies by header) and hostile (it would re-target
+  // every other tab still on legacy cookie behaviour). The rotated id travels
+  // back in the response body and the tab adopts it into sessionStorage.
+  if (!req.isTabSession) {
+    setBrowserSessionCookie(res, target);
+    if (wasRiskAcknowledged) setRiskAcknowledgment(res, target);
+  }
   req.sessionId = target;
-  if (wasRiskAcknowledged) setRiskAcknowledgment(res, target);
   logger.info({ to: target }, "Browser session rotated onto account-scoped session");
   return target;
 }
@@ -326,7 +337,10 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
 
     logger.info({ sessionId: req.sessionId, accountCount: derivAccounts.length },
       "OAuth login stored in isolated browser session");
-    res.json(formatAccount(row, preferred.balance));
+    // sessionId: the tab adopts the rotated account session (it never sees
+    // cookies). riskAck: re-signed for the rotated id — the signature is
+    // bound to the session id, so the pre-rotation value is void after this.
+    res.json({ ...formatAccount(row, preferred.balance), sessionId: accountSession, riskAck: riskAckValue(accountSession) });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "OAuth callback failed";
     logger.error({ err, sessionId: req.sessionId }, "OAuth callback error");
@@ -386,7 +400,10 @@ router.post("/connect", async (req, res): Promise<void> => {
       });
       logger.info({ sessionId: req.sessionId, accountCount: derivAccounts.length },
         "Token accounts stored in isolated browser session");
-      res.json(formatAccount(row, preferred.balance));
+      // sessionId: the tab adopts the rotated account session (it never sees
+    // cookies). riskAck: re-signed for the rotated id — the signature is
+    // bound to the session id, so the pre-rotation value is void after this.
+    res.json({ ...formatAccount(row, preferred.balance), sessionId: accountSession, riskAck: riskAckValue(accountSession) });
       return;
     }
 
@@ -412,7 +429,7 @@ router.post("/connect", async (req, res): Promise<void> => {
         country: info.country ?? null,
       },
     });
-    res.json(formatAccount(row, info.balance));
+    res.json({ ...formatAccount(row, info.balance), sessionId: accountSession, riskAck: riskAckValue(accountSession) });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Authorization failed";
     logger.error({ err, sessionId: req.sessionId }, "Deriv connect failed");
@@ -532,10 +549,18 @@ router.post("/disconnect", async (req, res): Promise<void> => {
   // scoped journal/settings/trades. The disconnected account's data stays in
   // the database untouched and reappears the moment that login reconnects.
   const fresh = randomUUID();
-  setBrowserSessionCookie(res, fresh);
+  // Tab sessions adopt the fresh id from the body (never cookies — see above).
+  if (!req.isTabSession) {
+    setBrowserSessionCookie(res, fresh);
+    if (wasRiskAcknowledged) setRiskAcknowledgment(res, fresh);
+  }
   req.sessionId = fresh;
-  if (wasRiskAcknowledged) setRiskAcknowledgment(res, fresh);
-  res.json({ success: true, message: "Your Deriv accounts were disconnected from this browser only" });
+  res.json({
+    success: true,
+    message: "Your Deriv accounts were disconnected from this browser only",
+    sessionId: fresh,
+    ...(wasRiskAcknowledged ? { riskAck: riskAckValue(fresh) } : {}),
+  });
 });
 
 export default router;

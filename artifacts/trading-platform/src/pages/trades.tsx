@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { motion } from "framer-motion";
 import { format, isToday } from "date-fns";
 import { Activity, RefreshCw, Database, Wifi } from "lucide-react";
+import { withTabSession } from "@/lib/tab-session";
 
 interface JournalTrade {
   id: string | number;
@@ -113,7 +114,7 @@ export default function Trades() {
 
   // SSE: zero-latency trade insertion + authoritative journal sync
   useEffect(() => {
-    const es = new EventSource("/api/ai/events");
+    const es = new EventSource(withTabSession("/api/ai/events"));
 
     es.addEventListener("trade_completed", (e: MessageEvent) => {
       try {

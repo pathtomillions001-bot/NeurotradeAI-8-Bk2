@@ -17,6 +17,13 @@ export interface SuccessResponse {
   success: boolean;
   /** @nullable */
   message?: string | null;
+  /**
+   * Fresh anonymous session id after a rotation (e.g. disconnect).
+   * Per-tab clients adopt it into sessionStorage; cookie clients ignore it.
+   */
+  sessionId?: string;
+  /** Signed risk-acknowledgment value for sessionId, for per-tab clients to store and resend as X-Risk-Ack. */
+  riskAck?: string;
 }
 
 export interface DerivTokenInput {
@@ -43,6 +50,13 @@ export interface DerivAccount {
   /** @nullable */
   country?: string | null;
   connectedAt?: string;
+  /**
+   * Account-scoped session id after a connect rotation. Per-tab clients
+   * adopt it into sessionStorage; cookie clients ignore it.
+   */
+  sessionId?: string;
+  /** Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack. */
+  riskAck?: string;
 }
 
 export type RankedMarketCategory = typeof RankedMarketCategory[keyof typeof RankedMarketCategory];

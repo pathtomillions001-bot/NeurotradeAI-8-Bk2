@@ -17,6 +17,7 @@ import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
 import Bots from "./pages/bots";
+import { withTabSession } from "@/lib/tab-session";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30000 } },
@@ -56,7 +57,7 @@ function useMidnightReset() {
     }).catch(() => { /* non-critical */ });
 
     // ── SSE listener for day_reset (server fires this at midnight) ──────────
-    const es = new EventSource(getApiUrl("/ai/events"));
+    const es = new EventSource(withTabSession(getApiUrl("/ai/events")));
     es.addEventListener("day_reset", () => {
       qc.invalidateQueries(); // invalidate everything — new day, fresh slate
     });

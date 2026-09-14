@@ -20,6 +20,7 @@ import {
   exactRecoveryStake,
   roundRecoveryStakeUp,
 } from "@/lib/payouts";
+import { withTabSession } from "@/lib/tab-session";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -406,7 +407,7 @@ export function SpeedAIFab() {
 
     function connect() {
       if (destroyed) return;
-      es = new EventSource("/api/ai/events");
+      es = new EventSource(withTabSession("/api/ai/events"));
 
       es.addEventListener("speed_ai_update", (e: MessageEvent) => {
         try { applyStatus(JSON.parse(e.data) as SessionStatus); } catch { /* ignore */ }

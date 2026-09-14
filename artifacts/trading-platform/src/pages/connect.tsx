@@ -12,6 +12,7 @@ import { toast } from "sonner";
 import { Link, useLocation } from "wouter";
 import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, CheckCircle2, Zap, FlaskConical, RefreshCw, AlertTriangle, Activity, LockKeyhole, TrendingDown } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { adoptTabSessionId, clearTabRiskAck, setTabRiskAck } from "@/lib/tab-session";
 
 // ── PKCE utilities ────────────────────────────────────────────────────────────
 
@@ -123,7 +124,13 @@ export default function Connect() {
           }
           return r.json();
         })
-        .then(() => {
+        .then((data: { sessionId?: unknown; riskAck?: unknown }) => {
+          // The server rotated this tab onto the account-scoped session — adopt
+          // it (plus the re-signed risk acknowledgment) so every later request
+          // and SSE stream in THIS tab targets the new account. Other tabs keep
+          // their own identities untouched.
+          adoptTabSessionId(data?.sessionId);
+          setTabRiskAck(data?.riskAck);
           toast.success("Signed in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
@@ -148,7 +155,9 @@ export default function Connect() {
       setOauthPending(true);
       window.history.replaceState({}, "", window.location.pathname);
       connect.mutate({ data: { token: oauthToken } }, {
-        onSuccess: () => {
+        onSuccess: (data) => {
+          adoptTabSessionId((data as { sessionId?: unknown })?.sessionId);
+          setTabRiskAck((data as { riskAck?: unknown })?.riskAck);
           toast.success("Logged in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
@@ -232,7 +241,9 @@ export default function Connect() {
   const performTokenConnect = () => {
     if (!token) return;
     connect.mutate({ data: { token } }, {
-      onSuccess: () => {
+      onSuccess: (data) => {
+        adoptTabSessionId((data as { sessionId?: unknown })?.sessionId);
+        setTabRiskAck((data as { riskAck?: unknown })?.riskAck);
         toast.success("Account connected — live trading on Deriv");
         setToken("");
         queryClient.invalidateQueries();
@@ -271,6 +282,8 @@ export default function Connect() {
         headers: { "Content-Type": "application/json" },
       });
       if (!response.ok) throw new Error("Could not save risk acknowledgment");
+      const ackData = await response.json().catch(() => ({})) as { riskAck?: unknown };
+      setTabRiskAck(ackData?.riskAck);
       setRiskOpen(false);
       if (connectIntent === "oauth") await performDerivLogin();
       else performTokenConnect();
@@ -283,7 +296,15 @@ export default function Connect() {
 
   const handleDisconnect = () => {
     disconnect.mutate(undefined, {
-      onSuccess: () => {
+      onSuccess: (data) => {
+        // Adopt the fresh anonymous session (and its re-signed risk ack, if
+        // any) so a subsequently connected DIFFERENT login starts clean.
+        adoptTabSessionId((data as { sessionId?: unknown })?.sessionId);
+        if ((data as { riskAck?: unknown })?.riskAck) {
+          setTabRiskAck((data as { riskAck?: unknown })?.riskAck);
+        } else {
+          clearTabRiskAck();
+        }
         toast.success("Account unlinked successfully");
         queryClient.invalidateQueries();
       },

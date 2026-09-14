@@ -20,6 +20,7 @@ import { Input } from "./ui/input";
 import { useGetSettings } from "@workspace/api-client-react";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON } from "@/lib/bots";
+import { withTabSession } from "@/lib/tab-session";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
 type Family = "overunder" | "parity" | "matchdiffer";
@@ -162,7 +163,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
     let dead = false;
     function connect() {
       if (dead) return;
-      es = new EventSource("/api/ai/events");
+      es = new EventSource(withTabSession("/api/ai/events"));
       es.addEventListener("bot_update", (e: MessageEvent) => {
         try {
           const d = JSON.parse(e.data);

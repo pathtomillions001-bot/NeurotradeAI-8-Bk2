@@ -15,6 +15,7 @@ import { Label } from "@/components/ui/label";
 import { useQueryClient } from "@tanstack/react-query";
 import { MATCH_PAYOUT, DIFF_PAYOUT } from "@/lib/payouts";
 import { pipSizeForSymbol } from "@/lib/pip-size";
+import { withTabSession } from "@/lib/tab-session";
 
 // ── AI Trade Panel ────────────────────────────────────────────────────────────
 // Unified recommendation panel synced to all 3 contract types + agent intelligence
@@ -496,7 +497,7 @@ export default function MarketDetail() {
   useEffect(() => {
     if (!symbol) return;
 
-    const es = new EventSource("/api/ai/events");
+    const es = new EventSource(withTabSession("/api/ai/events"));
     eventSourceRef.current = es;
 
     es.addEventListener("connected", () => setSseConnected(true));

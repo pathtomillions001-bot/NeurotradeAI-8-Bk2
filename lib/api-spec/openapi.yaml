@@ -557,6 +557,16 @@ components:
           type: boolean
         message:
           type: ["string", "null"]
+        sessionId:
+          type: string
+          description: >
+            Fresh anonymous session id after a rotation (e.g. disconnect).
+            Per-tab clients adopt it into sessionStorage; cookie clients ignore it.
+        riskAck:
+          type: string
+          description: >
+            Signed risk-acknowledgment value for sessionId, for per-tab clients
+            to store and resend as X-Risk-Ack.
 
     DerivTokenInput:
       type: object
@@ -595,6 +605,16 @@ components:
           type: ["string", "null"]
         connectedAt:
           type: string
+        sessionId:
+          type: string
+          description: >
+            Account-scoped session id after a connect rotation. Per-tab clients
+            adopt it into sessionStorage; cookie clients ignore it.
+        riskAck:
+          type: string
+          description: >
+            Risk acknowledgment re-signed for sessionId, for per-tab clients to
+            store and resend as X-Risk-Ack.
 
     RankedMarket:
       type: object

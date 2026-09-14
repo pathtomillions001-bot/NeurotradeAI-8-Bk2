@@ -20,6 +20,7 @@ import { KillShotConsole } from "@/components/killshot-console";
 import { KillShotFamilyConsole } from "@/components/killshot-family-console";
 import { TwinHedgeConsole } from "@/components/twin-hedge-console";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
+import { withTabSession } from "@/lib/tab-session";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
 
@@ -59,7 +60,7 @@ function useBotStatus(onUpdate: (status: BotSessionStatus | null) => void) {
 
     function connect() {
       if (destroyed) return;
-      es = new EventSource("/api/ai/events");
+      es = new EventSource(withTabSession("/api/ai/events"));
       es.addEventListener("bot_update", (e: MessageEvent) => {
         try { setSession(JSON.parse(e.data) as BotSessionStatus); } catch { /* ignore */ }
       });

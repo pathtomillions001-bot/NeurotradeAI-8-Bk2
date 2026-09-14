@@ -133,8 +133,33 @@ export async function getDerivAccounts(bearerToken: string): Promise<Array<{
  * Returns a one-time-password WebSocket URL for authenticated trading.
  * The OTP URL is single-use for establishing the WS connection; the connection
  * itself stays alive for multiple messages.
+ *
+ * Handshakes are serialized process-wide (see otpHandshakeChain): concurrent
+ * OTP requests — rapid manual trades, bulk + engine overlap, two accounts
+ * trading at once — arrive at Deriv's OTP endpoint as a burst and get
+ * 503 CircuitBreakerBusy, and each rejection costs a 1–3 s retry backoff (the
+ * "delayed" trades) or a failed execution after 3 attempts (the "missing"
+ * ones). One handshake takes ~200–400 ms, so chaining costs milliseconds
+ * where a throttle costs seconds. The chain never breaks on rejection.
  */
+let otpHandshakeChain: Promise<void> = Promise.resolve();
+
 export async function getOtpWebSocketUrl(
+  bearerToken: string,
+  accountId: string,
+): Promise<string> {
+  const previous = otpHandshakeChain;
+  let release!: () => void;
+  otpHandshakeChain = new Promise<void>((resolve) => { release = resolve; });
+  await previous;
+  try {
+    return await fetchOtpWebSocketUrl(bearerToken, accountId);
+  } finally {
+    release();
+  }
+}
+
+async function fetchOtpWebSocketUrl(
   bearerToken: string,
   accountId: string,
 ): Promise<string> {
@@ -703,8 +728,12 @@ class DerivTickManager extends EventEmitter {
 
   constructor() {
     super();
-    // Process outgoing requests at a controlled rate (20 req/sec max)
+    // Process outgoing requests at a controlled rate (20 req/sec max).
+    // Unref'd: the queue must never be what keeps the process alive on its own
+    // (in production the HTTP server and live sockets always hold the loop, so
+    // this changes nothing there; in tests it lets an importing file exit).
     this.queueInterval = setInterval(() => this.processQueue(), 50);
+    this.queueInterval.unref();
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -1925,16 +1954,21 @@ export async function executeLiveTrade(
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
     const timeout = setTimeout(() => {
-      ws.close();
-      reject(new Error("Trade execution timeout"));
+      // settleFail is declared below; the callback runs long after.
+      settleFail(new Error("Trade execution timeout"));
     }, 20_000);
 
     let proposalId: string | null = null;
     let askPrice: number | null = null;
+    let proposalAttempts = 0;
+    let settled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    ws.on("open", () => {
-      // Step 2: Connected — no authorize message needed
-      // Step 3: Send proposal with `underlying_symbol`
+    // Step 2: Connected — no authorize message needed
+    // Step 3: Send proposal with `underlying_symbol`
+    const sendProposal = () => {
+      if (settled || ws.readyState !== WebSocket.OPEN) return;
+      proposalAttempts += 1;
       const proposalParams: Record<string, unknown> = {
         amount: params.stake,
         basis: "stake",
@@ -1945,9 +1979,20 @@ export async function executeLiveTrade(
         underlying_symbol: params.symbol,   // new field name
       };
       if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
-      logger.info({ proposalParams }, "executeLiveTrade: sending proposal");
+      logger.info({ proposalParams, proposalAttempts }, "executeLiveTrade: sending proposal");
       ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
-    });
+    };
+
+    const settleFail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (retryTimer) clearTimeout(retryTimer);
+      ws.close();
+      reject(err);
+    };
+
+    ws.on("open", sendProposal);
 
     ws.on("message", (data) => {
       try {
@@ -1955,10 +2000,17 @@ export async function executeLiveTrade(
         logger.info({ msgType: msg.msg_type }, "executeLiveTrade: received message");
 
         if (msg.error) {
-          clearTimeout(timeout);
-          ws.close();
+          // A throttled quote (rapid manual trades trip Deriv's per-call
+          // throttle) is re-quoted with backoff instead of failing the trade;
+          // only a confirmed proposal or a hard rejection settles it.
+          if (proposalId === null && proposalAttempts < 3 && isRetryableDerivError(msg)) {
+            const backoffMs = 600 * 2 ** (proposalAttempts - 1);
+            logger.warn({ backoffMs, proposalAttempts, derivError: msg.error }, "executeLiveTrade: transient quote error — re-quoting");
+            retryTimer = setTimeout(sendProposal, backoffMs);
+            return;
+          }
           logger.error({ derivError: msg.error }, "executeLiveTrade: Deriv error");
-          reject(new Error(msg.error.message ?? "Trade rejected by Deriv"));
+          settleFail(new Error(msg.error.message ?? "Trade rejected by Deriv"));
           return;
         }
 
@@ -1973,7 +2025,10 @@ export async function executeLiveTrade(
 
         // Step 5: buy confirmed
         if (msg.msg_type === "buy" && msg.buy) {
+          if (settled) return;
+          settled = true;
           clearTimeout(timeout);
+          if (retryTimer) clearTimeout(retryTimer);
           ws.close();
           resolve({
             contractId: msg.buy.contract_id,
@@ -1987,7 +2042,7 @@ export async function executeLiveTrade(
       }
     });
 
-    ws.on("error", (err) => { clearTimeout(timeout); reject(err); });
+    ws.on("error", (err) => { settleFail(err); });
   });
 }
 
@@ -2003,9 +2058,89 @@ export async function executeLiveTrade(
  * as soon as each proposal is confirmed. Deriv processes them in order within
  * the same tick window, so every leg opens on the same tick.
  *
+ * Two refinements keep larger batches reliable:
+ *
+ * 1. Proposals are staggered ~150 ms apart. A 2N-message burst trips Deriv's
+ *    per-call throttle (`RateLimit` errors) and legs get rejected — the
+ *    \"missing\" executions above ~3 legs. The stagger keeps even a 10-leg
+ *    batch inside ~1.5 s (one entry zone) while staying under the throttle.
+ * 2. A throttled (or otherwise transiently failed) leg is re-proposed with
+ *    exponential backoff instead of being marked failed, so a momentary
+ *    throttle delays one leg by ~1 s instead of losing it.
+ *
  * The whole batch shares one 25s deadline; if the socket dies or the deadline
  * passes, the promise rejects and the caller settles whatever it has.
  */
+
+/** Spacing between a batch's proposal sends — smooths the burst under Deriv's per-call throttle. */
+export const BULK_PROPOSAL_STAGGER_MS = 150;
+/** Total quote attempts per leg (initial + retries) before the leg is failed. */
+export const BULK_MAX_ATTEMPTS = 4;
+/** First retry delay per leg; doubles on each subsequent retry (600 → 1200 → 2400 ms). */
+export const BULK_RETRY_BASE_MS = 600;
+const BULK_EXECUTION_DEADLINE_MS = 25_000;
+
+/** req_id one leg's proposal/buy carries — attempt-suffixed so a stale retry response can never double-buy. */
+export function bulkReqId(
+  phase: "proposal" | "buy",
+  legIndex: number,
+  attempt: number,
+): string {
+  return `bulk-${phase}-${legIndex}-${attempt}`;
+}
+
+/**
+ * Parse a Deriv response back to its (phase, leg, attempt).
+ *
+ * Deriv echoes our req_id at the top level of normal responses, but ERROR
+ * envelopes only reliably carry the original request under `echo_req` —
+ * matching errors on `msg.req_id` alone mis-attributes per-leg failures as
+ * batch-fatal and kills the healthy legs with them.
+ */
+export function parseBulkLegRef(
+  msg: any,
+): { phase: "proposal" | "buy"; leg: number; attempt: number } | null {
+  const raw = msg?.req_id ?? msg?.echo_req?.req_id;
+  if (typeof raw !== "string") return null;
+  const m = /^bulk-(proposal|buy)-(\d+)-(\d+)$/.exec(raw.trim());
+  if (!m) return null;
+  return {
+    phase: m[1] as "proposal" | "buy",
+    leg: Number(m[2]),
+    attempt: Number(m[3]),
+  };
+}
+
+/**
+ * True when a Deriv error is worth retrying the leg for: rate-limit throttles
+ * (bursting N proposals + N buys trips Deriv's per-call throttle), transient
+ * exchange hiccups, and stale-price buy rejections (the leg is simply
+ * re-quoted). Anything else (bad barrier, insufficient balance, invalid
+ * contract, …) fails the leg immediately — retrying would fail identically.
+ */
+export function isRetryableDerivError(msg: any): boolean {
+  const code = String(msg?.error?.code ?? "");
+  if (
+    code === "RateLimit" ||
+    code === "TemporaryUnavailable" ||
+    code === "CircuitBreakerBusy"
+  )
+    return true;
+  const text = `${code} ${String(msg?.error?.message ?? "")}`.toLowerCase();
+  return (
+    text.includes("rate limit") ||
+    text.includes("too many") ||
+    text.includes("temporar") ||
+    text.includes("try again") ||
+    text.includes("timed out") ||
+    text.includes("timeout") ||
+    text.includes("price mov") || // quote repriced between proposal and buy — re-quote
+    text.includes("stale") ||
+    text.includes("service unavailable") ||
+    text.includes("internal server error")
+  );
+}
+
 export async function executeBulkLiveTrades(
   bearerToken: string,
   accountId: string,
@@ -2018,6 +2153,10 @@ export async function executeBulkLiveTrades(
     currency: string;
     barrier?: number | string;
   }>,
+  opts?: {
+    /** Test-only: skip the Deriv OTP handshake and connect here instead. */
+    otpUrl?: string;
+  },
 ): Promise<BulkLeg[]> {
   if (!bearerToken || !accountId) {
     throw new Error(
@@ -2027,36 +2166,113 @@ export async function executeBulkLiveTrades(
   if (params.length === 0) return [];
 
   // One handshake for the entire batch — no per-leg OTP rate-limit exposure.
-  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+  const otpUrl =
+    opts?.otpUrl ?? (await getOtpWebSocketUrl(bearerToken, accountId));
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
     const timeout = setTimeout(() => {
       ws.close();
       reject(new Error("Bulk trade execution timeout"));
-    }, 25_000);
+    }, BULK_EXECUTION_DEADLINE_MS);
 
     const results: (BulkLeg | null)[] = new Array(params.length).fill(null);
+    // Per-leg attempt correlation: only a response matching the leg's CURRENT
+    // attempt may advance it. Without this a retried leg could buy twice — once
+    // for the late original response and once for the retry.
+    const attempts = new Array<number>(params.length).fill(0);
+    const proposalAttempt = new Array<number>(params.length).fill(0);
+    const buyAttempt = new Array<number>(params.length).fill(0);
+    const phase: Array<"idle" | "awaiting-proposal" | "awaiting-buy" | "done"> =
+      new Array(params.length).fill("idle");
+    const timers = new Set<ReturnType<typeof setTimeout>>();
     let finished = false;
+
+    const later = (ms: number, fn: () => void): void => {
+      const t = setTimeout(() => {
+        timers.delete(t);
+        fn();
+      }, ms);
+      timers.add(t);
+    };
 
     const finish = (err?: Error) => {
       if (finished) return;
       finished = true;
       clearTimeout(timeout);
-      try { ws.close(); } catch { /* ignore */ }
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+      try {
+        ws.close();
+      } catch {
+        /* ignore */
+      }
       if (err) reject(err);
       // Any leg that never got a confirmation is reported as an error leg so
       // the caller can settle it as "error" without losing the batch.
-      else resolve(results.map((r) => r ?? { error: new Error("Bulk trade leg unconfirmed") }));
+      else
+        resolve(
+          results.map(
+            (r) => r ?? { error: new Error("Bulk trade leg unconfirmed") },
+          ),
+        );
     };
 
     const markSettled = () => {
       if (results.every((r) => r !== null)) finish();
     };
 
+    const failLeg = (i: number, err: Error): void => {
+      if (results[i] !== null) return;
+      results[i] = { error: err };
+      phase[i] = "done";
+      markSettled();
+    };
+
+    // Retry a leg from a fresh proposal (a failed buy's proposal is spent, so
+    // every retry re-proposes). Bounded attempts + exponential backoff.
+    const retryLeg = (i: number, err: Error): void => {
+      if (results[i] !== null) return;
+      if (attempts[i] >= BULK_MAX_ATTEMPTS) {
+        logger.warn(
+          { i, attempts: attempts[i] },
+          "executeBulkLiveTrades: leg exhausted retries",
+        );
+        failLeg(i, err);
+        return;
+      }
+      phase[i] = "idle";
+      const backoffMs = BULK_RETRY_BASE_MS * 2 ** (attempts[i] - 1);
+      logger.info(
+        { i, backoffMs, attempt: attempts[i] + 1 },
+        "executeBulkLiveTrades: retrying leg",
+      );
+      later(backoffMs, () => {
+        if (!finished && results[i] === null && phase[i] === "idle") propose(i);
+      });
+    };
+
+    const send = (payload: Record<string, unknown>): void => {
+      // A dead socket mid-batch is batch-fatal: pending legs could never confirm.
+      try {
+        ws.send(JSON.stringify(payload));
+      } catch (e) {
+        finish(
+          e instanceof Error
+            ? e
+            : new Error("Bulk trade WebSocket send failed"),
+        );
+      }
+    };
+
     // Send a proposal for leg i, matched back by req_id.
-    const propose = (i: number) => {
+    const propose = (i: number): void => {
+      if (finished || results[i] !== null || ws.readyState !== WebSocket.OPEN)
+        return;
       const p = params[i]!;
+      attempts[i] += 1;
+      proposalAttempt[i] = attempts[i];
+      phase[i] = "awaiting-proposal";
       const proposalParams: Record<string, unknown> = {
         amount: p.stake,
         basis: "stake",
@@ -2065,86 +2281,155 @@ export async function executeBulkLiveTrades(
         duration: p.duration,
         duration_unit: p.durationUnit,
         underlying_symbol: p.symbol,
-        req_id: `bulk-proposal-${i}`,
+        req_id: bulkReqId("proposal", i, attempts[i]),
       };
       if (p.barrier !== undefined) proposalParams.barrier = String(p.barrier);
-      try {
-        ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
-      } catch (e) {
-        finish(e instanceof Error ? e : new Error("Failed to send bulk proposal"));
-      }
+      send({ proposal: 1, ...proposalParams });
+    };
+
+    const buy = (i: number, proposalId: string, askPrice: number): void => {
+      if (finished || results[i] !== null || ws.readyState !== WebSocket.OPEN)
+        return;
+      buyAttempt[i] = proposalAttempt[i];
+      phase[i] = "awaiting-buy";
+      // New buy format: { buy: proposalId, price: askPrice }
+      send({
+        buy: proposalId,
+        price: askPrice,
+        req_id: bulkReqId("buy", i, buyAttempt[i]),
+      });
     };
 
     ws.on("open", () => {
-      logger.info({ count: params.length }, "executeBulkLiveTrades: sending batch proposals");
-      // Fire every proposal immediately — Deriv processes them in order on the
-      // same socket, so the legs share one entry tick.
-      for (let i = 0; i < params.length; i++) propose(i);
+      logger.info(
+        { count: params.length },
+        "executeBulkLiveTrades: sending batch proposals",
+      );
+      // Proposals go out slightly staggered — an unstaggered 2N-message burst
+      // trips Deriv's per-call throttle and legs get rejected outright (the
+      // "missing" executions above ~3 legs). The stagger keeps even a 10-leg
+      // batch inside ~1.5 s — one entry zone — while staying under the
+      // throttle, and throttled legs are retried below regardless.
+      for (let i = 0; i < params.length; i++) {
+        later(i * BULK_PROPOSAL_STAGGER_MS, () => {
+          if (!finished && results[i] === null && phase[i] === "idle")
+            propose(i);
+        });
+      }
     });
 
     ws.on("message", (data) => {
+      if (finished) return;
       try {
         const msg = JSON.parse(data.toString());
 
         if (msg.error) {
-          // An error answer references the failing req_id. Only that leg is
-          // lost; the rest of the batch continues and settles as usual.
-          const failIndex = /bulk-proposal-(\d+)|bulk-buy-(\d+)/.exec(String(msg.req_id ?? ""));
-          const err = new Error(msg.error?.message ?? "Bulk trade rejected by Deriv");
-          if (failIndex && (failIndex[1] !== undefined || failIndex[2] !== undefined)) {
-            const i = Number(failIndex[1] ?? failIndex[2]);
-            if (results[i] === null) {
-              results[i] = { error: err };
-              markSettled();
-            }
+          const ref = parseBulkLegRef(msg);
+          const err = new Error(
+            msg.error?.message ?? "Bulk trade rejected by Deriv",
+          );
+          if (
+            ref &&
+            ref.leg >= 0 &&
+            ref.leg < params.length &&
+            results[ref.leg] === null
+          ) {
+            // Stale responses from a superseded attempt must not touch the leg.
+            const current =
+              ref.phase === "proposal"
+                ? proposalAttempt[ref.leg]
+                : buyAttempt[ref.leg];
+            const expecting =
+              ref.phase === "proposal" ? "awaiting-proposal" : "awaiting-buy";
+            if (ref.attempt !== current || phase[ref.leg] !== expecting) return;
+            if (isRetryableDerivError(msg)) retryLeg(ref.leg, err);
+            else failLeg(ref.leg, err);
             return;
           }
-          logger.error({ derivError: msg.error }, "executeBulkLiveTrades: Deriv error (batch)");
+          if (ref) return; // leg already settled — late duplicate, ignore.
+          // No leg attribution. Retryable/transient socket-level noise must NOT
+          // kill confirmed-or-confirming legs; only hard errors abort the batch.
+          if (isRetryableDerivError(msg)) {
+            logger.warn(
+              { derivError: msg.error },
+              "executeBulkLiveTrades: unattributed transient error — continuing batch",
+            );
+            return;
+          }
+          logger.error(
+            { derivError: msg.error },
+            "executeBulkLiveTrades: Deriv error (batch)",
+          );
           finish(err);
           return;
         }
 
         if (msg.msg_type === "proposal" && msg.proposal) {
-          const m = /bulk-proposal-(\d+)/.exec(String(msg.req_id ?? ""));
-          const i = m ? Number(m[1]) : -1;
-          const askPrice = Number(msg.proposal.ask_price ?? params[i]?.stake ?? 0);
+          const ref = parseBulkLegRef(msg);
+          if (
+            !ref ||
+            ref.phase !== "proposal" ||
+            ref.leg < 0 ||
+            ref.leg >= params.length
+          )
+            return;
+          if (results[ref.leg] !== null) return;
+          if (
+            ref.attempt !== proposalAttempt[ref.leg] ||
+            phase[ref.leg] !== "awaiting-proposal"
+          )
+            return;
+          const askPrice = Number(
+            msg.proposal.ask_price ?? params[ref.leg]?.stake ?? 0,
+          );
           const proposalId = String(msg.proposal.id ?? "");
-          if (i >= 0 && results[i] === null && proposalId) {
-            logger.info({ i, proposalId, askPrice }, "executeBulkLiveTrades: proposal confirmed — buying leg");
-            try {
-              ws.send(JSON.stringify({ buy: proposalId, price: askPrice, req_id: `bulk-buy-${i}` }));
-            } catch (e) {
-              finish(e instanceof Error ? e : new Error("Failed to send bulk buy"));
-            }
+          if (!proposalId) {
+            // Proposal arrived without an id — re-quote the leg (transient).
+            retryLeg(ref.leg, new Error("Deriv proposal missing id"));
             return;
           }
-          if (i >= 0 && results[i] === null) {
-            // Proposal arrived without an id — that leg cannot be bought.
-            results[i] = { error: new Error("Deriv proposal missing id") };
-            markSettled();
-          }
+          logger.info(
+            { i: ref.leg, proposalId, askPrice },
+            "executeBulkLiveTrades: proposal confirmed — buying leg",
+          );
+          buy(ref.leg, proposalId, askPrice);
           return;
         }
 
         if (msg.msg_type === "buy" && msg.buy) {
-          const m = /bulk-buy-(\d+)/.exec(String(msg.req_id ?? ""));
-          const i = m ? Number(m[1]) : -1;
-          if (i >= 0 && results[i] === null) {
-            results[i] = {
-              contractId: msg.buy.contract_id,
-              buyPrice: Number(msg.buy.buy_price),
-              entrySpot: Number(msg.buy.start_time ?? 0),
-              longcode: msg.buy.longcode ?? "",
-            };
-            markSettled();
-          }
+          const ref = parseBulkLegRef(msg);
+          if (
+            !ref ||
+            ref.phase !== "buy" ||
+            ref.leg < 0 ||
+            ref.leg >= params.length
+          )
+            return;
+          if (results[ref.leg] !== null) return;
+          if (
+            ref.attempt !== buyAttempt[ref.leg] ||
+            phase[ref.leg] !== "awaiting-buy"
+          )
+            return;
+          results[ref.leg] = {
+            contractId: msg.buy.contract_id,
+            buyPrice: Number(msg.buy.buy_price),
+            entrySpot: Number(msg.buy.start_time ?? 0),
+            longcode: msg.buy.longcode ?? "",
+          };
+          phase[ref.leg] = "done";
+          markSettled();
         }
       } catch (e) {
         logger.error({ e }, "executeBulkLiveTrades: error parsing message");
       }
     });
 
-    ws.on("error", (err) => finish(err instanceof Error ? err : new Error("Bulk trade WebSocket error")));
+    ws.on("error", (err) =>
+      finish(
+        err instanceof Error ? err : new Error("Bulk trade WebSocket error"),
+      ),
+    );
     ws.on("close", () => {
       // Socket dropped before every leg confirmed. finish() resolves with
       // error legs for the unconfirmed ones (or rejects on the deadline).

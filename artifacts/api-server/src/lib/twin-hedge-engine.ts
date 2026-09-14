@@ -41,6 +41,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
+import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
 import { evaluateTiming } from "./killshot-timing";
 import {
   twinLabel,
@@ -296,7 +297,12 @@ function freshSession(): SessionState {
   };
 }
 
-let session: SessionState = freshSession();
+// One independent session per connected Deriv account (browser session).
+// Every `session.foo` line below is untouched — the proxy routes each access
+// to the calling session's own state. Whole-state resets go through
+// replaceSession(); the runLoop chain is wrapped in the owner's context.
+const { state: session, replace: replaceSession } =
+  createSessionScoped<SessionState>(freshSession);
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -532,7 +538,7 @@ export async function startSession(
   if (!market || !market.digitEnabled)
     return fail("This bot needs a digit-enabled market");
 
-  session = {
+  replaceSession({
     ...freshSession(),
     running: true,
     sessionId: `bot_twin_${Date.now()}`,
@@ -548,7 +554,7 @@ export async function startSession(
       config.marketMode === "locked"
         ? `🔒 Locked on ${config.displayName} · ${twinLabel(config.spec.contract)} — both legs trade this market only.`
         : `🔁 Deployed on ${config.displayName} · ${twinLabel(config.spec.contract)} — will re-measure for a better market if this one cools.`,
-  };
+  });
 
   logger.info(
     {
@@ -561,14 +567,17 @@ export async function startSession(
   );
   broadcast();
 
-  runLoop(config)
+  // Pin the whole loop chain to the owner's session context so every
+  // session-scoped store it touches resolves to this account.
+  const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
+  runWithSessionId(loopSessionId, () => runLoop(config)
     .catch((err) => {
       logger.error({ err }, "Twin-Hedge runLoop error");
       session.running = false;
       session.message = `⚠️ ${friendlyErrorMessage(err)}`;
       broadcast();
     })
-    .finally(() => releaseTradingOwnership("bots"));
+    .finally(() => releaseTradingOwnership("bots")));
 
   return { ok: true };
 }

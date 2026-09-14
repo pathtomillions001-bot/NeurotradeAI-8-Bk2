@@ -21,6 +21,7 @@
 import { db } from "@workspace/db";
 import { adaptiveThresholdsTable } from "@workspace/db";
 import { logger } from "../logger";
+import { getBrowserSessionId } from "../session";
 
 // ── Base weights (same as confidence-fusion.ts) ────────────────────────────────
 // recoveryIntelligence raised from 0.6 → 1.2 so its streak-based score penalty
@@ -55,21 +56,64 @@ interface AgentAccuracyRecord {
 }
 
 // ── In-memory state ───────────────────────────────────────────────────────────
-const agentAccuracy: Record<string, AgentAccuracyRecord> = {};
-for (const id of AGENT_IDS) {
-  agentAccuracy[id] = { accuracy: 0.5, samples: 0 };
+// One adaptive memory per connected account (browser session). Previously a
+// single process-global: account A's outcomes moved account B's confidence
+// thresholds and agent weights. The ambient session (request context or
+// wrapped engine loop) selects the record; the adaptation math is untouched.
+interface DynamicConfidenceState {
+  agentAccuracy: Record<string, AgentAccuracyRecord>;
+  /** Recent outcomes window (circular buffer of length 20) */
+  recentOutcomes: boolean[];
+  currentConfidenceThreshold: number;
+  currentEvThreshold: number;
+  currentTimingThreshold: number;
+  tradesAnalyzed: number;
 }
 
-// Recent outcomes window (circular buffer of length 20)
-const recentOutcomes: boolean[] = [];
 const MAX_RECENT = 20;
 
-let currentConfidenceThreshold = 38;
-let currentEvThreshold = -0.05;
-let currentTimingThreshold = 38;
-let tradesAnalyzed = 0;
+function freshState(): DynamicConfidenceState {
+  const agentAccuracy: Record<string, AgentAccuracyRecord> = {};
+  for (const id of AGENT_IDS) {
+    agentAccuracy[id] = { accuracy: 0.5, samples: 0 };
+  }
+  return {
+    agentAccuracy,
+    recentOutcomes: [],
+    currentConfidenceThreshold: 38,
+    currentEvThreshold: -0.05,
+    currentTimingThreshold: 38,
+    tradesAnalyzed: 0,
+  };
+}
 
-// Whether we've loaded state from DB this session
+// Cold-start seed loaded once from the single DB row (see loadFromDb). Every
+// account session starts from this snapshot and then adapts independently.
+let persistedSeed: DynamicConfidenceState | null = null;
+
+const statesBySession = new Map<string, DynamicConfidenceState>();
+
+function active(): DynamicConfidenceState {
+  const key = getBrowserSessionId();
+  let current = statesBySession.get(key);
+  if (!current) {
+    current = freshState();
+    if (persistedSeed) {
+      current.agentAccuracy = Object.fromEntries(
+        Object.entries(persistedSeed.agentAccuracy).map(([id, rec]) => [id, { ...rec }]),
+      );
+      current.recentOutcomes = [...persistedSeed.recentOutcomes];
+      current.currentConfidenceThreshold = persistedSeed.currentConfidenceThreshold;
+      current.currentEvThreshold = persistedSeed.currentEvThreshold;
+      current.currentTimingThreshold = persistedSeed.currentTimingThreshold;
+      current.tradesAnalyzed = persistedSeed.tradesAnalyzed;
+    }
+    statesBySession.set(key, current);
+  }
+  return current;
+}
+
+// Whether we've loaded state from DB this process
 let initialized = false;
 
 // ── DB persistence ─────────────────────────────────────────────────────────────
@@ -80,16 +124,17 @@ export async function loadFromDb(): Promise<void> {
     const rows = await db.select().from(adaptiveThresholdsTable).limit(1);
     if (rows.length > 0) {
       const row = rows[0];
-      currentConfidenceThreshold = Number(row.confidenceThreshold ?? 38);
-      currentEvThreshold = Number(row.evThreshold ?? -0.05);
-      currentTimingThreshold = Number(row.timingThreshold ?? 38);
-      tradesAnalyzed = row.tradesAnalyzed ?? 0;
+      const seed = freshState();
+      seed.currentConfidenceThreshold = Number(row.confidenceThreshold ?? 38);
+      seed.currentEvThreshold = Number(row.evThreshold ?? -0.05);
+      seed.currentTimingThreshold = Number(row.timingThreshold ?? 38);
+      seed.tradesAnalyzed = row.tradesAnalyzed ?? 0;
 
       if (row.agentAccuracyJson) {
         try {
           const stored = JSON.parse(row.agentAccuracyJson) as Record<string, AgentAccuracyRecord>;
           for (const [id, rec] of Object.entries(stored)) {
-            if (agentAccuracy[id]) agentAccuracy[id] = rec;
+            if (seed.agentAccuracy[id]) seed.agentAccuracy[id] = rec;
           }
         } catch { /* ignore parse error */ }
       }
@@ -99,14 +144,20 @@ export async function loadFromDb(): Promise<void> {
         try {
           const parsed = JSON.parse(row.agentWeightsJson) as any;
           if (Array.isArray(parsed._recentOutcomes)) {
-            const restored = (parsed._recentOutcomes as boolean[]).slice(-MAX_RECENT);
-            recentOutcomes.splice(0, recentOutcomes.length, ...restored);
+            seed.recentOutcomes = (parsed._recentOutcomes as boolean[]).slice(-MAX_RECENT);
           }
         } catch { /* ignore */ }
       }
+      persistedSeed = seed;
     }
     initialized = true;
-    logger.info({ tradesAnalyzed, confidenceThreshold: currentConfidenceThreshold }, "DynamicConfidenceEngine loaded from DB");
+    logger.info(
+      {
+        tradesAnalyzed: persistedSeed?.tradesAnalyzed ?? 0,
+        confidenceThreshold: persistedSeed?.currentConfidenceThreshold ?? 38,
+      },
+      "DynamicConfidenceEngine loaded from DB",
+    );
   } catch (err) {
     logger.warn({ err }, "DynamicConfidenceEngine: could not load from DB — using defaults");
     initialized = true;
@@ -115,19 +166,23 @@ export async function loadFromDb(): Promise<void> {
 
 async function persistToDb(): Promise<void> {
   try {
-    const recentWinRate = recentOutcomes.length > 0
-      ? recentOutcomes.filter(Boolean).length / recentOutcomes.length
+    // Persists the CALLING session's snapshot to the single shared row
+    // (last-writer-wins cold-start seed — identical semantics to before for a
+    // single account; each account still adapts independently in memory).
+    const st = active();
+    const recentWinRate = st.recentOutcomes.length > 0
+      ? st.recentOutcomes.filter(Boolean).length / st.recentOutcomes.length
       : 0.5;
 
     const payload = {
-      confidenceThreshold: String(currentConfidenceThreshold),
-      evThreshold:         String(currentEvThreshold),
-      timingThreshold:     String(currentTimingThreshold),
-      agentAccuracyJson:   JSON.stringify(agentAccuracy),
+      confidenceThreshold: String(st.currentConfidenceThreshold),
+      evThreshold:         String(st.currentEvThreshold),
+      timingThreshold:     String(st.currentTimingThreshold),
+      agentAccuracyJson:   JSON.stringify(st.agentAccuracy),
       // Also persist the recent outcomes window so cold-start restores continuity
-      agentWeightsJson:    JSON.stringify({ ...getDynamicWeights(), _recentOutcomes: recentOutcomes }),
+      agentWeightsJson:    JSON.stringify({ ...getDynamicWeights(), _recentOutcomes: st.recentOutcomes }),
       recentWinRate:       String(recentWinRate),
-      tradesAnalyzed,
+      tradesAnalyzed:      st.tradesAnalyzed,
       updatedAt:           new Date(),
     };
 
@@ -153,10 +208,11 @@ export function recordTradeOutcome(
   agentScores: Record<string, number>,
   won: boolean,
 ): void {
+  const st = active();
   // Update recent outcome window
-  if (recentOutcomes.length >= MAX_RECENT) recentOutcomes.shift();
-  recentOutcomes.push(won);
-  tradesAnalyzed++;
+  if (st.recentOutcomes.length >= MAX_RECENT) st.recentOutcomes.shift();
+  st.recentOutcomes.push(won);
+  st.tradesAnalyzed++;
 
   // Update per-agent accuracy via EMA
   for (const id of AGENT_IDS) {
@@ -170,9 +226,9 @@ export function recordTradeOutcome(
     else if (score < 40) correct = !won;
 
     if (correct !== null) {
-      const prev = agentAccuracy[id];
+      const prev = st.agentAccuracy[id];
       const alpha = prev.samples < 5 ? 0.3 : ACCURACY_ALPHA; // faster learning when cold
-      agentAccuracy[id] = {
+      st.agentAccuracy[id] = {
         accuracy: prev.accuracy * (1 - alpha) + (correct ? alpha : 0),
         samples:  prev.samples + 1,
       };
@@ -180,26 +236,26 @@ export function recordTradeOutcome(
   }
 
   // Adaptive confidence threshold
-  if (recentOutcomes.length >= 10) {
-    const recentWinRate = recentOutcomes.filter(Boolean).length / recentOutcomes.length;
+  if (st.recentOutcomes.length >= 10) {
+    const recentWinRate = st.recentOutcomes.filter(Boolean).length / st.recentOutcomes.length;
 
     if (recentWinRate > 0.62) {
       // Doing well — slightly relax threshold to catch more opportunities
-      currentConfidenceThreshold = Math.max(MIN_THRESHOLD, currentConfidenceThreshold - 0.5);
+      st.currentConfidenceThreshold = Math.max(MIN_THRESHOLD, st.currentConfidenceThreshold - 0.5);
     } else if (recentWinRate < 0.44) {
       // Losing too much — tighten threshold
-      currentConfidenceThreshold = Math.min(MAX_THRESHOLD, currentConfidenceThreshold + 0.5);
+      st.currentConfidenceThreshold = Math.min(MAX_THRESHOLD, st.currentConfidenceThreshold + 0.5);
     }
     // Also adapt EV threshold
     if (recentWinRate > 0.65) {
-      currentEvThreshold = Math.max(-0.08, currentEvThreshold - 0.002);
+      st.currentEvThreshold = Math.max(-0.08, st.currentEvThreshold - 0.002);
     } else if (recentWinRate < 0.40) {
-      currentEvThreshold = Math.min(0.0, currentEvThreshold + 0.002);
+      st.currentEvThreshold = Math.min(0.0, st.currentEvThreshold + 0.002);
     }
   }
 
   // Persist every 5 trades (don't await — fire-and-forget)
-  if (tradesAnalyzed % 5 === 0) {
+  if (st.tradesAnalyzed % 5 === 0) {
     persistToDb().catch(() => {});
   }
 }
@@ -212,9 +268,10 @@ export function recordTradeOutcome(
  * The multiplier ranges from 0.5× (consistently wrong) to 1.5× (consistently right).
  */
 export function getDynamicWeights(): Record<string, number> {
+  const st = active();
   const weights: Record<string, number> = {};
   for (const id of AGENT_IDS) {
-    const rec = agentAccuracy[id];
+    const rec = st.agentAccuracy[id];
     // Multiplier: accuracy=0 → 0.5×, accuracy=0.5 → 1.0×, accuracy=1 → 1.5×
     const multiplier = rec.samples >= 5
       ? 0.5 + rec.accuracy        // data-driven
@@ -230,41 +287,42 @@ export function getDynamicWeights(): Record<string, number> {
  */
 export function getAdaptiveConfidenceThreshold(userMax: number): number {
   // Cap at the lower of: user setting, adaptive learned threshold, and 55
-  const base = Math.min(userMax, currentConfidenceThreshold, 55);
+  const base = Math.min(userMax, active().currentConfidenceThreshold, 55);
   return Math.max(MIN_THRESHOLD, base);
 }
 
 /** Returns the adaptive EV threshold (-0.08 to 0.0). */
 export function getAdaptiveEvThreshold(): number {
-  return currentEvThreshold;
+  return active().currentEvThreshold;
 }
 
 /** Returns the adaptive timing threshold. */
 export function getAdaptiveTimingThreshold(): number {
-  return currentTimingThreshold;
+  return active().currentTimingThreshold;
 }
 
 /** Returns a summary suitable for the API response. */
 export function getStatus() {
-  const recentWinRate = recentOutcomes.length > 0
-    ? recentOutcomes.filter(Boolean).length / recentOutcomes.length
+  const st = active();
+  const recentWinRate = st.recentOutcomes.length > 0
+    ? st.recentOutcomes.filter(Boolean).length / st.recentOutcomes.length
     : null;
 
   const agentStats = AGENT_IDS.map(id => ({
     agentId: id,
-    accuracy: Math.round(agentAccuracy[id].accuracy * 100),
-    samples: agentAccuracy[id].samples,
+    accuracy: Math.round(st.agentAccuracy[id].accuracy * 100),
+    samples: st.agentAccuracy[id].samples,
     dynamicWeight: Math.round(getDynamicWeights()[id] * 100) / 100,
     baseWeight: BASE_WEIGHTS[id],
   }));
 
   return {
-    confidenceThreshold: currentConfidenceThreshold,
-    evThreshold: currentEvThreshold,
-    timingThreshold: currentTimingThreshold,
+    confidenceThreshold: st.currentConfidenceThreshold,
+    evThreshold: st.currentEvThreshold,
+    timingThreshold: st.currentTimingThreshold,
     recentWinRate: recentWinRate !== null ? Math.round(recentWinRate * 1000) / 10 : null,
-    recentSampleSize: recentOutcomes.length,
-    tradesAnalyzed,
+    recentSampleSize: st.recentOutcomes.length,
+    tradesAnalyzed: st.tradesAnalyzed,
     agentStats,
   };
 }

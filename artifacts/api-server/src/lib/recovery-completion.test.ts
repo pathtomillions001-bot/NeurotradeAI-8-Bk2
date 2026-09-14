@@ -40,7 +40,7 @@ const ORIGIN_PAYOUT = 1.4; // 0.70 * 0.4 = 0.28 target profit
 function inBrowserSession<T>(sessionId: string, action: () => T): T {
   let value!: T;
   browserSession(
-    { cookies: { neurotrade_session: sessionId } } as any,
+    { cookies: { neurotrade_session: sessionId }, get: () => undefined, query: {} } as any,
     { cookie: () => undefined } as any,
     () => { value = action(); },
   );

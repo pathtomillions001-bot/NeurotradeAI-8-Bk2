@@ -24,7 +24,7 @@ import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
-  Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Target,
+  Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Target, Shuffle,
   ChevronLeft, X, ShieldCheck, Eye, Crosshair, Lock, Activity, FlaskConical,
 } from "lucide-react";
 import { Button } from "./ui/button";
@@ -100,6 +100,16 @@ interface Candidate {
   significant: boolean;
 }
 
+/** A market's deployment of the plan: its best read + every measured card. */
+interface MarketView {
+  symbol: string;
+  displayName: string;
+  best: Candidate;
+  cards: Record<string, any>;
+  deployable: boolean;
+  edgePerDollar: number;
+}
+
 interface ScanResult {
   suitable: boolean;
   best: Candidate | null;
@@ -109,10 +119,12 @@ interface ScanResult {
   certainty: Certainty;
   marketsScanned: number;
   historyDepth: number;
+  contracts: Contract[];
+  markets: MarketView[];
   detect: { fairRate: number; breakEven: number; hurdlePP: number; snrPerShot: number; shotsToCertify: number; note: string };
 }
 
-/** The five mutually-exclusive contract choices. Never both sides of a pair. */
+/** The five contract families the user may combine in any mix (both sides allowed). */
 const KINDS: Array<{ id: Kind; label: string; help: string }> = [
   { id: "over",  label: "Over",    help: "Wins when the last digit is ABOVE your number" },
   { id: "under", label: "Under",   help: "Wins when the last digit is BELOW your number" },
@@ -180,10 +192,17 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
   const { data: settings } = useGetSettings();
 
   const [certainty, setCertainty] = useState<Certainty>("strict");
-  const [kind, setKind] = useState<Kind>("over");
-  const [digit, setDigit] = useState<number>(7);
-  /** For Matches only: let the AI pick the digit. */
-  const [aiDigit, setAiDigit] = useState(true);
+  /**
+   * The user's PLAN — any combination of contracts. Both sides of a pair are
+   * legal now (Even+Odd, Over A+Under B, a mix, or a single contract). For
+   * Matches, the AI may pick (and keep changing) the digit live.
+   */
+  const [plan, setPlan] = useState({
+    over: true, overDigit: 7,
+    under: false, underDigit: 2,
+    match: false, matchDigit: 3, matchAI: true,
+    even: false, odd: false,
+  });
 
   const [config, setConfig] = useState({
     stake: 1,
@@ -246,25 +265,29 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
   const a = ACCENTS[bot.accent];
   const Icon = BOT_ICON[bot.icon] ?? Crosshair;
 
-  const activeKind = KINDS.find(k => k.id === kind)!;
-  const contractPayload = (): Contract => {
-    if (kind === "even" || kind === "odd") return { kind };
-    if (kind === "match") return aiDigit ? { kind: "match" } : { kind: "match", digit };
-    return { kind, digit };
+  /** The plan as an array of contracts to send to the server. */
+  const contractsPayload = (): Contract[] => {
+    const cs: Contract[] = [];
+    if (plan.over) cs.push({ kind: "over", digit: plan.overDigit });
+    if (plan.under) cs.push({ kind: "under", digit: plan.underDigit });
+    if (plan.match) cs.push(plan.matchAI ? { kind: "match" } : { kind: "match", digit: plan.matchDigit });
+    if (plan.even) cs.push({ kind: "even" });
+    if (plan.odd) cs.push({ kind: "odd" });
+    return cs;
   };
-  const contractLabel = () => {
-    if (kind === "even") return "Even";
-    if (kind === "odd") return "Odd";
-    if (kind === "match") return aiDigit ? "Matches (AI picks the digit)" : `Matches ${digit}`;
-    return `${kind === "over" ? "Over" : "Under"} ${digit}`;
+  const planLabel = () => {
+    const labels: string[] = [];
+    if (plan.over) labels.push(`Over ${plan.overDigit}`);
+    if (plan.under) labels.push(`Under ${plan.underDigit}`);
+    if (plan.match) labels.push(plan.matchAI ? "Matches (AI)" : `Matches ${plan.matchDigit}`);
+    if (plan.even) labels.push("Even");
+    if (plan.odd) labels.push("Odd");
+    return labels.length > 0 ? labels.join("  +  ") : "No contract selected";
   };
-
-  // Over 9 and Under 0 can never win — the picker must not offer them.
-  const digitRange = kind === "over" ? [0, 1, 2, 3, 4, 5, 6, 7, 8]
-    : kind === "under" ? [1, 2, 3, 4, 5, 6, 7, 8, 9]
-    : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const hasContract = plan.over || plan.under || plan.match || plan.even || plan.odd;
 
   const handleScan = async () => {
+    if (!hasContract) return;
     setLoading(true);
     setStep("scanning");
     setScanResult(null);
@@ -274,7 +297,7 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
       const res = await fetch("/api/bots/killshot/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contract: contractPayload(), certainty, ...config }),
+        body: JSON.stringify({ contracts: contractsPayload(), certainty, ...config }),
       });
       const data = await res.json();
       if (!res.ok) { toast.error(data.error ?? "Scan failed"); setStep("config"); return; }
@@ -286,21 +309,24 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
     } finally { setLoading(false); }
   };
 
-  const handleStart = async (c: Candidate, forced = false) => {
+  const handleStart = async (market: MarketView, mode: "locked" | "switching", forced = false) => {
     setLoading(true);
     try {
       const res = await fetch("/api/bots/killshot/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          symbol: c.symbol, contract: c.contract, analysis: c, card: c.card, certainty, forced, ...config,
+          symbol: market.symbol, contracts: contractsPayload(), cards: market.cards,
+          analysis: market.best, certainty, marketMode: mode, forced, ...config,
         }),
       });
       const data = await res.json();
       if (!res.ok) { toast.error(data.error ?? "Failed to start"); return; }
       onSession(data.status);
       setStep("running");
-      toast.success(`🔒 Locked on ${c.displayName} · ${c.label} — the market will not change`);
+      toast.success(mode === "locked"
+        ? `🔒 Locked on ${market.displayName} · ${planLabel()} — the market will not change`
+        : `🔁 Deployed on ${market.displayName} · ${planLabel()} — the AI may switch markets`);
     } catch {
       toast.error("Could not start the bot");
     } finally { setLoading(false); }
@@ -321,6 +347,13 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
     ? Math.round((session.winCount / session.tradeCount) * 100) : 0;
   const watch = session?.watch;
   const lock = session?.killshotLock;
+  /** The plan deployment (cards) for the best / best-available market, for /start. */
+  const bestMarket = scanResult?.best
+    ? scanResult.markets.find(m => m.symbol === scanResult.best!.symbol) ?? null
+    : null;
+  const availMarket = scanResult?.bestAvailable
+    ? scanResult.markets.find(m => m.symbol === scanResult.bestAvailable!.symbol) ?? null
+    : null;
 
   /** The measurement card — one verdict, one measured line, a few key stats. */
   const MeasurementCard = ({ c }: { c: Candidate }) => {
@@ -350,7 +383,8 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
         </div>
 
         <div className="grid grid-cols-2 gap-1.5">
-          <Stat label="Contract (frozen)" value={c.label} tone={a.text} />
+          <Stat label="Strongest read" value={c.label} tone={a.text} />
+          <Stat label="Your plan" value={planLabel()} tone="text-white/80" />
           <Stat label="Expectancy / $1"
                 value={`${c.edgePerDollar >= 0 ? "+" : ""}${(c.edgePerDollar * 100).toFixed(2)}%`}
                 tone={c.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"} />
@@ -411,31 +445,30 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                     <FlaskConical className="w-3 h-3" /> How this bot works
                   </p>
                   <p className="text-[10px] text-muted-foreground leading-relaxed">
-                    Pick <span className="text-white/80">one contract</span> — it never changes. The AI pulls
+                    Pick <span className="text-white/80">any combination of contracts</span> — one, or both sides of
+                    a pair, or a mix. The AI pulls
                     <span className="text-white/80"> 4,999 real digits</span> from every market, fits a five-model
                     ensemble on the first half, then <span className="text-white/80">measures its own entry rule on
-                    the second half it has never seen</span>. The best measured market is
-                    <span className="text-white/80"> locked</span> — no switching, no rotation — and the bot waits
-                    for health, edge, the post-loss shield and the tick to all agree before taking one shot.
+                    the second half it has never seen</span>. It then trades <span className="text-white/80">between
+                    your contracts</span> in the best measured market, firing the strongest ready setup each tick —
+                    an AI Matches digit is <span className="text-white/80">free to change live</span> (only the
+                    market is locked). You may also allow it to
+                    <span className="text-white/80"> switch markets</span> to chase the best trade.
                   </p>
                 </div>
 
-                {/* Contract choice — exactly one, never both sides */}
+                {/* Contract plan — pick any combination, both sides allowed */}
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                    Your Contract — pick exactly one
+                    Your Contracts — pick any combination
                   </p>
-                  <div className="grid grid-cols-3 gap-1.5">
+                  <div className="grid grid-cols-5 gap-1.5">
                     {KINDS.map(k => (
                       <button
                         key={k.id}
-                        onClick={() => {
-                          setKind(k.id);
-                          if (k.id === "over" && digit > 8) setDigit(7);
-                          if (k.id === "under" && digit < 1) setDigit(2);
-                        }}
-                        className={`px-2 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
-                          kind === k.id
+                        onClick={() => setPlan(p => ({ ...p, [k.id]: !p[k.id as "over" | "under" | "match" | "even" | "odd"] }))}
+                        className={`px-1.5 py-2 rounded-lg text-[10px] font-semibold transition-colors ${
+                          plan[k.id as "over" | "under" | "match" | "even" | "odd"]
                             ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
                             : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
                         }`}
@@ -444,48 +477,74 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                       </button>
                     ))}
                   </div>
-                  <p className="text-[9px] text-muted-foreground/70 leading-relaxed">{activeKind.help}</p>
-                </div>
 
-                {/* Digit picker */}
-                {(kind === "over" || kind === "under" || (kind === "match" && !aiDigit)) && (
-                  <div className="space-y-1.5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Digit</p>
-                    <div className="grid grid-cols-5 gap-1">
-                      {digitRange.map(d => (
-                        <button
-                          key={d}
-                          onClick={() => setDigit(d)}
-                          className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
-                            digit === d
-                              ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                              : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
-                          }`}
-                        >
-                          {d}
-                        </button>
-                      ))}
+                  {plan.over && (
+                    <div className="space-y-1.5">
+                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Over digit — wins above</p>
+                      <div className="grid grid-cols-9 gap-1">
+                        {[0, 1, 2, 3, 4, 5, 6, 7, 8].map(d => (
+                          <button key={d} onClick={() => setPlan(p => ({ ...p, overDigit: d }))}
+                                className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
+                                  plan.overDigit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}` : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
+                            {d}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                {kind === "match" && (
-                  <button
-                    onClick={() => setAiDigit(v => !v)}
-                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11px] text-left transition-colors ${
-                      aiDigit ? `${a.activeBg} border ${a.activeBorder}` : "bg-white/[0.03] border border-white/5"
-                    }`}
-                  >
-                    <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${
-                      aiDigit ? `${a.dot} border-transparent` : "border-white/20"
-                    }`}>
-                      {aiDigit && <span className="text-[8px] text-black font-bold">✓</span>}
-                    </span>
-                    <span className={aiDigit ? a.text : "text-muted-foreground"}>
-                      Let the AI choose the digit — all ten scored in every market, FDR-corrected
-                    </span>
-                  </button>
-                )}
+                  {plan.under && (
+                    <div className="space-y-1.5">
+                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Under digit — wins below</p>
+                      <div className="grid grid-cols-9 gap-1">
+                        {[1, 2, 3, 4, 5, 6, 7, 8, 9].map(d => (
+                          <button key={d} onClick={() => setPlan(p => ({ ...p, underDigit: d }))}
+                                className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
+                                  plan.underDigit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}` : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
+                            {d}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {plan.match && (
+                    <div className="space-y-1.5">
+                      <button onClick={() => setPlan(p => ({ ...p, matchAI: !p.matchAI }))}
+                              className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11px] text-left transition-colors ${plan.matchAI ? `${a.activeBg} border ${a.activeBorder}` : "bg-white/[0.03] border border-white/5"}`}>
+                        <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${plan.matchAI ? `${a.dot} border-transparent` : "border-white/20"}`}>
+                          {plan.matchAI && <span className="text-[8px] text-black font-bold">✓</span>}
+                        </span>
+                        <span className={plan.matchAI ? a.text : "text-muted-foreground"}>
+                          {plan.matchAI ? "AI picks the digit — free to change it live" : `Fixed digit ${plan.matchDigit}`}
+                        </span>
+                      </button>
+                      {!plan.matchAI && (
+                        <div className="grid grid-cols-10 gap-1">
+                          {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map(d => (
+                            <button key={d} onClick={() => setPlan(p => ({ ...p, matchDigit: d }))}
+                                  className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
+                                    plan.matchDigit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}` : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
+                              {d}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div className={`rounded-lg px-2.5 py-2 border ${hasContract ? a.panelBorder : "border-red-500/30"} ${a.panelBg}`}>
+                    <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60">
+                      Selected{hasContract && contractsPayload().length > 1 ? " plan" : ""}
+                    </p>
+                    <p className={`text-sm font-bold ${hasContract ? a.text : "text-red-400"}`}>{planLabel()}</p>
+                    {hasContract && contractsPayload().length > 1 && (
+                      <p className="text-[9px] text-muted-foreground/70 leading-relaxed mt-1">
+                        The AI trades between all of these in the same market, firing the strongest ready setup each tick.
+                      </p>
+                    )}
+                  </div>
+                </div>
 
                 {/* Certainty bar */}
                 <div className="space-y-1.5">
@@ -518,11 +577,6 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                   </p>
                 </div>
 
-                <div className={`rounded-lg px-2.5 py-2 border ${a.panelBorder} ${a.panelBg}`}>
-                  <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60">Selected</p>
-                  <p className={`text-sm font-bold ${a.text}`}>{contractLabel()}</p>
-                </div>
-
                 <div className="space-y-2">
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Session Boundaries</p>
                   <NumInput label="Stake per shot" value={config.stake} onChange={v => set("stake", v)} min={0.35} step={0.5} suffix="USD" accent={bot.accent} />
@@ -537,9 +591,9 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                   can absorb — the scan computes that number exactly, before you deploy.
                 </p>
 
-                <Button onClick={handleScan} disabled={loading}
+                <Button onClick={handleScan} disabled={loading || !hasContract}
                         className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                  <ScanSearch className="w-4 h-4 mr-2" /> Measure Every Market for {contractLabel()}
+                  <ScanSearch className="w-4 h-4 mr-2" /> Measure Every Market for {planLabel()}
                 </Button>
               </div>
             )}
@@ -567,15 +621,22 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
             {/* SCAN RESULT */}
             {step === "scan-result" && scanResult && (
               <div className="p-4 space-y-3">
-                {scanResult.best && scanResult.suitable ? (
+                {scanResult.best && scanResult.suitable && bestMarket ? (
                   <>
                     <MeasurementCard c={scanResult.best} />
 
-                    <Button onClick={() => handleStart(scanResult.best!)} disabled={loading}
-                            className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                      <Target className="w-4 h-4 mr-2" />
-                      Lock {scanResult.best.displayName} — {scanResult.best.label}
-                    </Button>
+                    <div className="space-y-2">
+                      <Button onClick={() => handleStart(bestMarket, "locked")} disabled={loading}
+                              className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
+                        <Target className="w-4 h-4 mr-2" />
+                        Lock {scanResult.best.displayName} — {planLabel()}
+                      </Button>
+                      <Button onClick={() => handleStart(bestMarket, "switching")} disabled={loading}
+                              variant="outline"
+                              className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
+                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Allow market switching on {scanResult.best.displayName}
+                      </Button>
+                    </div>
                   </>
                 ) : (
                   <div className="space-y-3">
@@ -592,7 +653,7 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                     </div>
 
                     {/* The best market available is always shown — never a dead end. */}
-                    {scanResult.bestAvailable && (
+                    {scanResult.bestAvailable && availMarket && (
                       <>
                         <MeasurementCard c={scanResult.bestAvailable} />
                         {scanResult.bestAvailable.verdict !== "refused" && (
@@ -609,7 +670,7 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                               <div className="flex gap-2">
                                 <Button onClick={() => setConfirmForce(false)} variant="outline"
                                         className="flex-1 h-8 text-[11px] border-white/10">Cancel</Button>
-                                <Button onClick={() => handleStart(scanResult.bestAvailable!, true)} disabled={loading}
+                                <Button onClick={() => handleStart(availMarket, "locked", true)} disabled={loading}
                                         className="flex-1 h-8 text-[11px] bg-amber-600 hover:bg-amber-500 text-white font-bold">
                                   Lock it anyway
                                 </Button>
@@ -634,28 +695,28 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                   </div>
                 )}
 
-                {scanResult.allScored.length > 1 && (
+                {scanResult.markets.length > 1 && (
                   <div className="space-y-1 pt-1 border-t border-white/5">
                     <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">All markets measured</p>
-                    {scanResult.allScored.slice(0, 8).map((c, i) => (
-                      <button key={i} onClick={() => c.deployable && handleStart(c)} disabled={loading || !c.deployable}
+                    {scanResult.markets.slice(0, 12).map((m, i) => (
+                      <button key={i} onClick={() => m.deployable && handleStart(m, "locked")} disabled={loading || !m.deployable}
                               className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-white/[0.03] hover:bg-white/[0.07] disabled:opacity-50 text-left">
                         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                          c.verdict === "certified" ? "bg-green-400"
-                            : c.verdict === "qualified" ? "bg-sky-400"
-                            : c.verdict === "watch" ? "bg-amber-400" : "bg-red-400"
+                          m.best.verdict === "certified" ? "bg-green-400"
+                            : m.best.verdict === "qualified" ? "bg-sky-400"
+                            : m.best.verdict === "watch" ? "bg-amber-400" : "bg-red-400"
                         }`} />
-                        <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
+                        <span className="font-medium flex-1 truncate text-white/80">{m.displayName}</span>
                         <span className="font-mono text-[10px] text-muted-foreground/70">
-                          {(c.walk.test.winRate * 100).toFixed(0)}%/{c.walk.test.nShots}
+                          {(m.best.walk.test.winRate * 100).toFixed(0)}%/{m.best.walk.test.nShots}
                         </span>
-                        <span className={`font-mono font-bold ${c.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
-                          {c.edgePerDollar >= 0 ? "+" : ""}{(c.edgePerDollar * 100).toFixed(1)}%
+                        <span className={`font-mono font-bold ${m.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
+                          {m.edgePerDollar >= 0 ? "+" : ""}{(m.edgePerDollar * 100).toFixed(1)}%
                         </span>
                       </button>
                     ))}
                     <p className="text-[9px] text-muted-foreground/60 px-1 leading-relaxed">
-                      Columns: out-of-sample accuracy / shots, then measured expectancy per $1. Dot = verdict.
+                      Out-of-sample accuracy / shots, then measured expectancy per $1 (best contract on each market). Dot = verdict. Click to lock that market.
                     </p>
                   </div>
                 )}
@@ -761,12 +822,23 @@ export function KillShotConsole({ bot, open, onOpenChange, session, onSession }:
                 {lock && (
                   <div className="rounded-xl border border-white/10 bg-black/25 p-3 space-y-2">
                     <p className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground flex items-center gap-1.5">
-                      <Lock className="w-3 h-3" /> Frozen lock · no switching, no rotation
+                      {lock.marketMode === "switching"
+                        ? <><Shuffle className="w-3 h-3" /> Market switching allowed · chasing the best trade</>
+                        : <><Lock className="w-3 h-3" /> Frozen lock · the market will not change</>}
                       {lock.forced && <span className="text-amber-300 font-mono">· forced</span>}
                     </p>
-                    <p className="text-xs font-bold text-white">{lock.displayName}</p>
+                    <p className="text-xs font-bold text-white">
+                      {lock.marketMode === "switching" && session?.currentMarket && session.currentMarket !== lock.displayName
+                        ? (
+                          <>
+                            {session.currentMarket}{" "}
+                            <span className="text-muted-foreground/60 font-normal">(from {lock.displayName})</span>
+                          </>
+                        )
+                        : lock.displayName}
+                    </p>
                     <div className="grid grid-cols-2 gap-1.5">
-                      <Stat label="Contract (frozen)" value={lock.contract} tone={a.text} />
+                      <Stat label="Plan (traded between)" value={lock.contract} tone={a.text} />
                       <Stat label="Verdict at lock" value={lock.verdict.toUpperCase()}
                             tone={lock.verdict === "certified" ? "text-green-400" : "text-sky-300"} />
                       <Stat label="Out-of-sample" value={`${(lock.oosWinRate * 100).toFixed(1)}% / ${lock.oosShots}`} tone="text-green-400" />

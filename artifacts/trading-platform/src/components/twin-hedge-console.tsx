@@ -584,39 +584,6 @@ export function TwinHedgeConsole({
                   </div>
                 </div>
 
-                {/* Market mode */}
-                <div className="space-y-1.5">
-                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                    Market
-                  </p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <button
-                      onClick={() => setMarketMode("locked")}
-                      className={`px-2 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
-                        marketMode === "locked"
-                          ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                          : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
-                      }`}
-                    >
-                      🔒 Locked
-                    </button>
-                    <button
-                      onClick={() => setMarketMode("switching")}
-                      className={`px-2 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
-                        marketMode === "switching"
-                          ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                          : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
-                      }`}
-                    >
-                      🔁 Switching
-                    </button>
-                  </div>
-                  <p className="text-[9px] text-muted-foreground/70 leading-relaxed">
-                    Both legs are ALWAYS taken on the same market. Switching
-                    only re-measures for a better one between pair-shots.
-                  </p>
-                </div>
-
                 <div className="space-y-2">
                   <NumInput
                     label="Target edge / $1 base"

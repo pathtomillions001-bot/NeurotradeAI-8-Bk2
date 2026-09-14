@@ -258,9 +258,6 @@ export default function Bots() {
             <Bot className="w-6 h-6 text-primary" />
             AI Bot Arena
           </h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Specialist bots — each one spends its whole analysis budget on one trade type, including the twin-leg pair bot
-          </p>
         </div>
 
         <div className="flex items-center gap-2">

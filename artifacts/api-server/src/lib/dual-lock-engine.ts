@@ -722,16 +722,12 @@ async function runLoop(config: DualLockConfig) {
       consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++;
-      logger.error({ err, consecutiveErrors }, "Dual-Lock stability catch");
-      session.message = `Stabilizing engine — retry ${consecutiveErrors}/5`;
+      logger.error({ err, consecutiveErrors }, "Dual-Lock stability catch — keeping the session alive");
+      // Never self-stop on transient errors — the session only stops on TP,
+      // SL, or a manual stop. Back off (capped) and keep retrying.
+      session.message = `Engine stabilizing… retry ${consecutiveErrors} — the session will keep running`;
       broadcast();
-      await sleep(Math.min(2000, 500 * consecutiveErrors));
-      if (consecutiveErrors >= 5) {
-        session.running = false;
-        session.message = "Engine paused for stability check — please restart";
-        broadcast();
-        return;
-      }
+      await sleep(Math.min(15000, 500 * consecutiveErrors));
     }
   }
 

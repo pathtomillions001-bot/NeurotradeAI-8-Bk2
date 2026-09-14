@@ -25,6 +25,8 @@ import type {
   AiInsight,
   AiRecommendation,
   ApiError,
+  BulkTradeInput,
+  BulkTradeResult,
   DailySummary,
   DerivAccount,
   DerivTokenInput,
@@ -964,6 +966,78 @@ export const useExecuteTrade = <TError = ErrorType<ApiError>,
         TContext
       > => {
       return useMutation(getExecuteTradeMutationOptions(options));
+    }
+
+export const getExecuteBulkTradesUrl = () => {
+
+
+
+
+  return `/api/trades/bulk`
+}
+
+/**
+ * Places `count` identical contracts as ONE logical entry: a single shared trading session opens every leg on the same tick and the batch is settled in one sweep, so no individual order is delayed relative to the others.
+ * @summary Execute a bulk of identical trades — all legs open and settle simultaneously
+ */
+export const executeBulkTrades = async (bulkTradeInput: BulkTradeInput, options?: RequestInit): Promise<BulkTradeResult> => {
+
+  return customFetch<BulkTradeResult>(getExecuteBulkTradesUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(
+      bulkTradeInput,)
+  }
+);}
+
+
+
+
+export const getExecuteBulkTradesMutationOptions = <TError = ErrorType<ApiError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeBulkTrades>>, TError,{data: BodyType<BulkTradeInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof executeBulkTrades>>, TError,{data: BodyType<BulkTradeInput>}, TContext> => {
+
+const mutationKey = ['executeBulkTrades'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeBulkTrades>>, {data: BodyType<BulkTradeInput>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  executeBulkTrades(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ExecuteBulkTradesMutationResult = NonNullable<Awaited<ReturnType<typeof executeBulkTrades>>>
+    export type ExecuteBulkTradesMutationBody = BodyType<BulkTradeInput>
+    export type ExecuteBulkTradesMutationError = ErrorType<ApiError>
+
+    /**
+ * @summary Execute a bulk of identical trades — all legs open and settle simultaneously
+ */
+export const useExecuteBulkTrades = <TError = ErrorType<ApiError>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeBulkTrades>>, TError,{data: BodyType<BulkTradeInput>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof executeBulkTrades>>,
+        TError,
+        {data: BodyType<BulkTradeInput>},
+        TContext
+      > => {
+      return useMutation(getExecuteBulkTradesMutationOptions(options));
     }
 
 export const getGetTradeUrl = (id: number,) => {

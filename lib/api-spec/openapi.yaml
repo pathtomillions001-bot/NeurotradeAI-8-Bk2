@@ -283,6 +283,36 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /trades/bulk:
+    post:
+      operationId: executeBulkTrades
+      tags: [trades]
+      summary: Execute a bulk of identical trades — all legs open and settle simultaneously
+      description: >-
+        Places `count` identical contracts as ONE logical entry: a single shared
+        trading session opens every leg on the same tick and the batch is
+        settled in one sweep, so no individual order is delayed relative to the
+        others.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BulkTradeInput"
+      responses:
+        "201":
+          description: Bulk trades executed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkTradeResult"
+        "400":
+          description: Trade rejected by risk controls
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
   /trades/{id}:
     get:
       operationId: getTrade
@@ -746,6 +776,45 @@ components:
         durationUnit:
           type: string
           enum: [t, s, m, h, d]
+
+    BulkTradeInput:
+      type: object
+      required: [symbol, contractType, stake, direction, count]
+      properties:
+        symbol:
+          type: string
+        contractType:
+          type: string
+        stake:
+          type: number
+        direction:
+          type: string
+          enum: [up, down]
+        barrier:
+          type: number
+          nullable: true
+        isAutonomous:
+          type: boolean
+        duration:
+          type: integer
+        durationUnit:
+          type: string
+          enum: [t, s, m, h, d]
+        count:
+          type: integer
+          minimum: 2
+          maximum: 10
+
+    BulkTradeResult:
+      type: object
+      required: [trades, count]
+      properties:
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/Trade"
+        count:
+          type: integer
 
     TradeStats:
       type: object

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useGetMarketDetail, useExecuteTrade, useGetAiRecommendationForMarket, useGetAiEngineStatus } from "@workspace/api-client-react";
+import { useGetMarketDetail, useExecuteTrade, useExecuteBulkTrades, useGetAiRecommendationForMarket, useGetAiEngineStatus } from "@workspace/api-client-react";
 import { useParams, Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -490,6 +490,7 @@ export default function MarketDetail() {
   const { data: engineStatus } = useGetAiEngineStatus({ query: { refetchInterval: 5000 } } as { query: any });
   const isPaperMode = (engineStatus as any)?.paperTradeMode ?? false;
   const executeTrade = useExecuteTrade();
+  const executeBulkTrades = useExecuteBulkTrades();
 
   // ── SSE: live ticks + live market analysis ───────────────────────────────────
   useEffect(() => {
@@ -680,43 +681,37 @@ export default function MarketDetail() {
         return;
       }
       setBulkExecuting(true);
-      toast.info(`Executing ` + count + `× ` + (tradeContract || "trade") + ` @ $` + singleStake.toFixed(2) + ` — total $` + totalStake.toFixed(2));
+      toast.info(`Executing ` + count + `× ` + (tradeContract || "trade") + ` @ $` + singleStake.toFixed(2) + ` — total $` + totalStake.toFixed(2) + ` (all at once)`);
       try {
-        const promises = Array.from({ length: count }, () => {
-          return new Promise<any>((resolve, reject) => {
-            const payload = {
-              symbol,
-              contractType: tradeContract || (tradeDir === "up" ? "CALL" : "PUT"),
-              direction: tradeDir,
-              stake: singleStake,
-              duration: tradeDuration,
-              durationUnit: "t" as const,
-              barrier: tradeBarrier,
-            };
-            const mut: any = executeTrade as any;
-            if (mut.mutateAsync) {
-              mut.mutateAsync({ data: payload }).then(resolve).catch(reject);
-            } else {
-              fetch("/api/trades", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload),
-              }).then(r => r.json().then(j => r.ok ? resolve(j) : reject(j))).catch(reject);
-            }
-          });
+        // ONE request → the server opens every leg on the same tick through a
+        // single shared trading session and settles the whole batch in one
+        // sweep. No per-order delay like the old N-parallel approach.
+        const bulkResult: any = await (executeBulkTrades as any).mutateAsync({
+          data: {
+            symbol,
+            contractType: tradeContract || (tradeDir === "up" ? "CALL" : "PUT"),
+            direction: tradeDir,
+            stake: singleStake,
+            duration: tradeDuration,
+            durationUnit: "t" as const,
+            barrier: tradeBarrier ?? null,
+            count,
+          },
         });
 
-        const results: any[] = await Promise.allSettled(promises).then(settled =>
-          settled.map(s => s.status === "fulfilled" ? s.value : null).filter(Boolean)
-        );
+        const results: any[] = Array.isArray(bulkResult?.trades) ? bulkResult.trades : [];
 
         const wonCount = results.filter(r => r.status === "won").length;
+        const errorCount = results.filter(r => r.status === "error").length;
+        const settledCount = results.length - errorCount;
         const totalProfit = results.reduce((sum, r) => sum + Number(r.profit ?? 0), 0);
         const first = results[0];
         if (results.length === 0) {
           toast.error("Bulk trades failed to execute");
         } else if (results.length === 1) {
           toast.success(`Trade ` + (first.status === "won" ? "WON 🎉" : "LOST") + ` — ` + (first.status === "won" ? "+" : "") + `$` + Number(first.profit ?? 0).toFixed(2));
+        } else if (errorCount > 0) {
+          toast.error(`Bulk complete: ${wonCount}/${settledCount} won — $${totalProfit.toFixed(2)} · ${errorCount} leg(s) failed to execute`);
         } else {
           if (wonCount === results.length) {
             toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` WON 🎉 — +$` + totalProfit.toFixed(2));

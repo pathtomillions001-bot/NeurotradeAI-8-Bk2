@@ -1,11 +1,15 @@
 /**
- * Twin-Hedge Edge console (11th bot).
+ * Twin-Hedge Edge console (auto-configured twin pair).
  *
- * The user picks a digit pair (Over A / Under B), a certainty bar and whether
- * the market is LOCKED or may SWITCH between pair-shots. The bot then measures
- * every digit market out of sample, and when a shot fires it places BOTH legs
- * on the SAME market at the SAME tick with a small adaptive stake-skew on the
- * favoured side.
+ * The user sets ONE thing: risk. The contract plan is fixed —
+ *
+ *   normal   : Over 4 + Under 5   (equal stakes, same tick — one leg always wins)
+ *   recovery : Over 5 + Under 4   (equal stakes, same tick — dead zone {4,5})
+ *
+ * and the market + its mode (locked/switching) are DECIDED BY THE ANALYSIS.
+ * The console is the control room: measure all markets, read what the
+ * out-of-sample simulation found, deploy, and watch the 4/5 gate work —
+ * including the same-tick proof strip for every shot.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -22,6 +26,8 @@ import {
   Shuffle,
   Layers,
   ShieldCheck,
+  GitCompareArrows,
+  Zap,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -31,78 +37,49 @@ import { ACCENTS, BOT_ICON } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
-type Certainty = "elite" | "strict" | "balanced";
-type Primary = "over" | "under";
 
-interface Pair {
-  overDigit: number;
-  underDigit: number;
-}
-interface Candidate {
+interface TwinCard {
   symbol: string;
   displayName: string;
-  contract: Pair;
-  label: string;
+  baseline: number;
+  barNormal: number;
+  barRecovery: number;
+  nEff: number;
+  opportunityNormal: number;
+  opportunityRecovery: number;
+  avoidanceLiftPp: number;
+  survival: number;
+  evPerNormalShot: number;
+  deepestLadder: number;
+  simNormalShots: number;
+  simRecoveryShots: number;
+  stationarityZ: number;
+  minSpacing: number;
   verdict: "certified" | "qualified" | "watch" | "refused";
-  confidence: number;
-  edgePerDollar: number;
-  evLowerPerDollar: number;
-  oosWinRate: number;
-  oosShots: number;
-  primary: Primary;
-  bias: number;
-  breakEvenWinRate: number;
-  overPayout: number;
-  underPayout: number;
-  netOnWinPerBase: number;
-  netOnLossPerBase: number;
-  ladderSafety: number;
-  ladderLimit: number;
   deployable: boolean;
-  card: any;
-}
-interface ScanResult {
-  suitable: boolean;
-  best: Candidate | null;
-  bestAvailable: Candidate | null;
-  allScored: Candidate[];
-  reason: string;
-  certainty: Certainty;
-  marketsScanned: number;
-  historyDepth: number;
-  outcome?: {
-    overCount: number;
-    underCount: number;
-    bothCount: number;
-    noneCount: number;
-    complementary: boolean;
-  };
+  score: number;
+  summary: string;
 }
 
-const VERDICT_TONE: Record<Candidate["verdict"], string> = {
+interface ScanResult {
+  suitable: boolean;
+  best: TwinCard | null;
+  bestAvailable: TwinCard | null;
+  allScored: TwinCard[];
+  mode: "locked" | "switching";
+  cluster: TwinCard[];
+  modeReason: string;
+  reason: string;
+  marketsScanned: number;
+  historyDepth: number;
+}
+
+const VERDICT_TONE: Record<TwinCard["verdict"], string> = {
   certified: "text-green-400 bg-green-500/10 border-green-500/30",
   qualified: "text-sky-300 bg-sky-500/10 border-sky-500/30",
   watch: "text-amber-300 bg-amber-500/10 border-amber-500/30",
   refused: "text-red-400 bg-red-500/10 border-red-500/30",
 };
-
-const CERTAINTIES: Array<{ id: Certainty; label: string; hint: string }> = [
-  { id: "balanced", label: "Balanced", hint: "most shots" },
-  { id: "strict", label: "Strict", hint: "balanced proof" },
-  { id: "elite", label: "Elite", hint: "rarest, most proof" },
-];
-
-const PRESET_PAIRS: Array<Pair & { label: string }> = [
-  { overDigit: 4, underDigit: 5, label: "Over 4 / Under 5" },
-  { overDigit: 7, underDigit: 2, label: "Over 7 / Under 2" },
-  { overDigit: 6, underDigit: 3, label: "Over 6 / Under 3" },
-  { overDigit: 8, underDigit: 1, label: "Over 8 / Under 1" },
-  { overDigit: 2, underDigit: 8, label: "Over 2 / Under 8" },
-  { overDigit: 1, underDigit: 9, label: "Over 1 / Under 9" },
-];
-
-const OVER_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8];
-const UNDER_DIGITS = [1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 function NumInput({
   label: lbl,
@@ -135,9 +112,7 @@ function NumInput({
           className={`w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10 focus-visible:ring-0 ${a.focusBorder}`}
         />
         {suffix && (
-          <span className="text-[10px] text-muted-foreground w-6">
-            {suffix}
-          </span>
+          <span className="text-[10px] text-muted-foreground w-6">{suffix}</span>
         )}
       </div>
     </div>
@@ -155,20 +130,79 @@ function Stat({
 }) {
   return (
     <div className="bg-black/25 rounded-lg px-2 py-1.5">
-      <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">
-        {lbl}
+      <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">{lbl}</p>
+      <p className={`text-[11px] font-mono font-bold ${tone ?? "text-white/90"}`}>{value}</p>
+    </div>
+  );
+}
+
+/** The fixed plan — rendered read-only so the user always sees what will trade. */
+function FixedPlanCard({ accent }: { accent: AccentKey }) {
+  const a = ACCENTS[accent];
+  return (
+    <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
+      <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
+        Auto-configured pairs · equal stakes · same tick
       </p>
-      <p
-        className={`text-[11px] font-mono font-bold ${tone ?? "text-white/90"}`}
-      >
-        {value}
+      <div className="grid grid-cols-2 gap-1.5">
+        <div className="rounded-lg bg-black/25 border border-white/10 p-2 space-y-1">
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Normal shot</p>
+          <p className="text-[11px] font-mono font-bold text-white/90">Over 4 + Under 5</p>
+          <p className="text-[9px] leading-snug text-muted-foreground">
+            Complementary — exactly one leg always wins (1.95×). Net −5%: the price of the hedge.
+          </p>
+        </div>
+        <div className="rounded-lg bg-black/25 border border-white/10 p-2 space-y-1">
+          <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Recovery shot</p>
+          <p className="text-[11px] font-mono font-bold text-white/90">Over 5 + Under 4</p>
+          <p className="text-[9px] leading-snug text-muted-foreground">
+            Wins +143% net on any digit but 4/5. The 4/5 dead zone is what the analysis hunts.
+          </p>
+        </div>
+      </div>
+      <p className="text-[9px] leading-snug text-muted-foreground">
+        No pair picker, no digit picker, no market picker — the AI measures every market,
+        keeps the closed digit out of {`{4,5}`} at every gated entry, and decides
+        locked vs switching itself.
       </p>
     </div>
   );
 }
 
-function labelOf(p: Pair): string {
-  return `Over ${p.overDigit} · Under ${p.underDigit}`;
+function CandidateCard({ c }: { c: TwinCard }) {
+  return (
+    <div className={`rounded-xl border ${VERDICT_TONE[c.verdict]} p-3 space-y-2`}>
+      <div className="flex items-center justify-between">
+        <p className="text-[11px] font-bold text-white">{c.displayName}</p>
+        <span className="text-[10px] font-mono font-bold uppercase">{c.verdict}</span>
+      </div>
+      <p className="text-[10px] text-muted-foreground leading-relaxed">{c.summary}</p>
+      <div className="grid grid-cols-3 gap-1.5">
+        <Stat
+          label="Survival (OOS)"
+          value={`${(c.survival * 100).toFixed(0)}%`}
+          tone={c.survival >= 0.7 ? "text-green-400" : c.survival >= 0.55 ? "text-sky-300" : "text-red-400"}
+        />
+        <Stat label="4/5 at gated entries" value={`${((c.baseline - c.avoidanceLiftPp / 100) * 100).toFixed(1)}%`} />
+        <Stat
+          label="Deep. ladder"
+          value={`${c.deepestLadder}`}
+          tone={c.deepestLadder <= 2 ? "text-green-400" : "text-amber-300"}
+        />
+        <Stat label="Gate opens (rec)" value={`${(c.opportunityRecovery * 100).toFixed(0)}% of ticks`} />
+        <Stat
+          label="4/5 avoidance lift"
+          value={`${c.avoidanceLiftPp >= 0 ? "+" : ""}${c.avoidanceLiftPp.toFixed(1)}pp`}
+          tone={c.avoidanceLiftPp >= 0 ? "text-green-400" : "text-red-400"}
+        />
+        <Stat
+          label="Net / normal shot"
+          value={`${c.evPerNormalShot >= 0 ? "+" : ""}$${c.evPerNormalShot.toFixed(3)}`}
+          tone={c.evPerNormalShot >= 0 ? "text-green-400" : "text-red-400"}
+        />
+      </div>
+    </div>
+  );
 }
 
 export function TwinHedgeConsole({
@@ -187,23 +221,13 @@ export function TwinHedgeConsole({
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
-  const [progress, setProgress] = useState<{
-    scanning: string | null;
-    scanned: number;
-    total: number;
-  }>({
+  const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
     scanning: null,
     scanned: 0,
     total: 19,
   });
   const { data: settings } = useGetSettings();
 
-  const [pair, setPair] = useState<Pair>({ overDigit: 4, underDigit: 5 });
-  const [certainty, setCertainty] = useState<Certainty>("balanced");
-  const [marketMode, setMarketMode] = useState<"locked" | "switching">(
-    "locked",
-  );
-  const [targetEv, setTargetEv] = useState(0.01);
   const [config, setConfig] = useState({
     stake: 1,
     takeProfit: 10,
@@ -225,11 +249,7 @@ export function TwinHedgeConsole({
 
   const isRunning = session?.running === true && session?.botId === bot?.id;
   useEffect(() => {
-    if (isRunning) {
-      setStep("running");
-      const m = (session?.config as any)?.marketMode;
-      if (m === "locked" || m === "switching") setMarketMode(m);
-    }
+    if (isRunning) setStep("running");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRunning]);
   useEffect(() => {
@@ -239,10 +259,7 @@ export function TwinHedgeConsole({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  const applyStatus = useCallback(
-    (d: BotSessionStatus) => onSession(d),
-    [onSession],
-  );
+  const applyStatus = useCallback((d: BotSessionStatus) => onSession(d), [onSession]);
 
   useEffect(() => {
     if (!open || !bot) return;
@@ -265,11 +282,7 @@ export function TwinHedgeConsole({
         try {
           const p = JSON.parse(e.data);
           if (p.botId !== botId) return;
-          setProgress({
-            scanning: p.scanning,
-            scanned: p.scanned,
-            total: p.total,
-          });
+          setProgress({ scanning: p.scanning, scanned: p.scanned, total: p.total });
         } catch {
           /* ignore */
         }
@@ -291,14 +304,7 @@ export function TwinHedgeConsole({
   const a = ACCENTS[bot.accent];
   const Icon = BOT_ICON[bot.icon] ?? Layers;
 
-  const buildBody = () => ({
-    botId: bot.id,
-    overDigit: pair.overDigit,
-    underDigit: pair.underDigit,
-    certainty,
-    targetEvPerDollar: targetEv,
-    ...config,
-  });
+  const buildBody = () => ({ ...config });
 
   const handleScan = async () => {
     setLoading(true);
@@ -327,7 +333,8 @@ export function TwinHedgeConsole({
     }
   };
 
-  const handleStart = async (c: Candidate, mode: "locked" | "switching") => {
+  const handleStart = async (c: TwinCard) => {
+    if (!scanResult) return;
     setLoading(true);
     try {
       const res = await fetch("/api/bots/twin/start", {
@@ -335,11 +342,10 @@ export function TwinHedgeConsole({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...buildBody(),
-          marketMode: mode,
           symbol: c.symbol,
-          card: c.card,
-          analysis: c,
-          ...(mode === "locked" ? { lockedSymbol: c.symbol } : {}),
+          card: c,
+          cluster: scanResult.cluster,
+          marketMode: scanResult.mode,
         }),
       });
       const data = await res.json();
@@ -348,12 +354,11 @@ export function TwinHedgeConsole({
         return;
       }
       onSession(data.status);
-      setMarketMode(mode);
       setStep("running");
       toast.success(
-        mode === "locked"
-          ? `🔒 Locked on ${c.displayName} — both legs trade this market only`
-          : `🔁 Deployed on ${c.displayName} — switching re-measures, both legs stay on one market`,
+        scanResult.mode === "locked"
+          ? `🔒 Locked on ${c.displayName} — the analysis found a clear winner`
+          : `🔁 Deployed on ${c.displayName} — switching among the top ${scanResult.cluster.length}`,
       );
     } catch {
       toast.error("Could not start the bot");
@@ -383,50 +388,9 @@ export function TwinHedgeConsole({
       : 0;
   const watch = session?.twinWatch;
   const deployed = session?.twinDeployed;
-
-  const CandidateCard = ({ c }: { c: Candidate }) => (
-    <div
-      className={`rounded-xl border ${VERDICT_TONE[c.verdict]} p-3 space-y-2`}
-    >
-      <div className="flex items-center justify-between">
-        <p className="text-[11px] font-bold text-white">
-          {c.displayName} · <span className="text-white/80">{c.label}</span>
-        </p>
-        <span className="text-[10px] font-mono font-bold uppercase">
-          {c.verdict}
-        </span>
-      </div>
-      <p className="text-[10px] text-muted-foreground leading-relaxed">
-        <span className="font-mono text-white/80">{c.oosShots}</span> unseen
-        pair shots at{" "}
-        <span className="font-mono text-white/80">
-          {(c.oosWinRate * 100).toFixed(0)}%
-        </span>{" "}
-        joint win rate — net{" "}
-        <span
-          className={`font-mono font-bold ${c.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}
-        >
-          {c.edgePerDollar >= 0 ? "+" : ""}
-          {(c.edgePerDollar * 100).toFixed(2)}%
-        </span>{" "}
-        per $1 base · skew {c.primary.toUpperCase()} +
-        {(c.bias * 100).toFixed(1)}%
-      </p>
-      <div className="grid grid-cols-3 gap-1.5">
-        <Stat
-          label="Win net"
-          value={`${(c.netOnWinPerBase * 100).toFixed(2)}%`}
-          tone="text-green-400"
-        />
-        <Stat
-          label="Loss net"
-          value={`${(c.netOnLossPerBase * 100).toFixed(2)}%`}
-          tone="text-red-400"
-        />
-        <Stat label="Ladder" value={`${(c.ladderSafety * 100).toFixed(0)}%`} />
-      </div>
-    </div>
-  );
+  const lastShot = watch?.lastShot;
+  const marketMode: "locked" | "switching" =
+    deployed?.marketMode ?? (session?.config as any)?.marketMode ?? "locked";
 
   return (
     <AnimatePresence>
@@ -453,23 +417,17 @@ export function TwinHedgeConsole({
               className={`flex items-center justify-between gap-2 p-4 border-b border-white/5 bg-gradient-to-r ${a.headerGrad}`}
             >
               <div className="flex items-center gap-2.5 min-w-0">
-                <div
-                  className={`w-9 h-9 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}
-                >
-                  <Icon className={`w-4.5 h-4.5 ${a.text}`} />
+                <div className={`w-9 h-9 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}>
+                  <Icon className="w-4.5 h-4.5" style={{ color: "currentColor" }} />
                 </div>
                 <div className="min-w-0">
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
                     {bot.name}
-                    <span
-                      className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text} font-normal`}
-                    >
+                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text} font-normal`}>
                       {bot.code}
                     </span>
                   </h3>
-                  <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                    {bot.tagline}
-                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{bot.tagline}</p>
                 </div>
               </div>
               <button
@@ -484,161 +442,27 @@ export function TwinHedgeConsole({
             {/* CONFIG */}
             {step === "config" && (
               <div className="p-4 space-y-4">
-                <div className="space-y-1.5">
-                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                    Digit pair (both legs)
-                  </p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {PRESET_PAIRS.map((p) => (
-                      <button
-                        key={`${p.overDigit}-${p.underDigit}`}
-                        onClick={() =>
-                          setPair({
-                            overDigit: p.overDigit,
-                            underDigit: p.underDigit,
-                          })
-                        }
-                        className={`px-2 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
-                          pair.overDigit === p.overDigit &&
-                          pair.underDigit === p.underDigit
-                            ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                            : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
-                        }`}
-                      >
-                        {p.label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="space-y-1">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                      Over digit
-                    </p>
-                    <div className="grid grid-cols-5 gap-1">
-                      {OVER_DIGITS.map((d) => (
-                        <button
-                          key={`o${d}`}
-                          onClick={() =>
-                            setPair((prev) => ({ ...prev, overDigit: d }))
-                          }
-                          className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
-                            pair.overDigit === d
-                              ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                              : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
-                          }`}
-                        >
-                          {d}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                      Under digit
-                    </p>
-                    <div className="grid grid-cols-5 gap-1">
-                      {UNDER_DIGITS.map((d) => (
-                        <button
-                          key={`u${d}`}
-                          onClick={() =>
-                            setPair((prev) => ({ ...prev, underDigit: d }))
-                          }
-                          className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
-                            pair.underDigit === d
-                              ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                              : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
-                          }`}
-                        >
-                          {d}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Proof */}
-                <div className="space-y-1.5">
-                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                    Proof required
-                  </p>
-                  <div className="grid grid-cols-3 gap-1.5">
-                    {CERTAINTIES.map((c) => (
-                      <button
-                        key={c.id}
-                        onClick={() => setCertainty(c.id)}
-                        className={`px-2 py-2 rounded-lg text-center transition-colors ${
-                          certainty === c.id
-                            ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                            : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
-                        }`}
-                      >
-                        <span className="block text-[11px] font-semibold">
-                          {c.label}
-                        </span>
-                        <span className="block text-[8px] text-muted-foreground/70">
-                          {c.hint}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <FixedPlanCard accent={bot.accent} />
 
                 <div className="space-y-2">
-                  <NumInput
-                    label="Target edge / $1 base"
-                    value={targetEv}
-                    onChange={setTargetEv}
-                    min={0.001}
-                    step={0.005}
-                    suffix="USD"
-                    accent={bot.accent}
-                  />
-                  <NumInput
-                    label="Stake per shot"
-                    value={config.stake}
-                    onChange={(v) => set("stake", v)}
-                    min={0.35}
-                    step={0.5}
-                    suffix="USD"
-                    accent={bot.accent}
-                  />
-                  <NumInput
-                    label="Take profit"
-                    value={config.takeProfit}
-                    onChange={(v) => set("takeProfit", v)}
-                    min={1}
-                    step={1}
-                    suffix="USD"
-                    accent={bot.accent}
-                  />
-                  <NumInput
-                    label="Stop loss"
-                    value={config.stopLoss}
-                    onChange={(v) => set("stopLoss", v)}
-                    min={1}
-                    step={1}
-                    suffix="USD"
-                    accent={bot.accent}
-                  />
-                  <NumInput
-                    label="Max recovery steps"
-                    value={config.maxRecoverySteps}
-                    onChange={(v) => set("maxRecoverySteps", v)}
-                    min={1}
-                    step={1}
-                    accent={bot.accent}
-                  />
+                  <NumInput label="Stake per leg (normal shot)" value={config.stake} onChange={(v) => set("stake", v)} min={0.35} step={0.5} suffix="USD" accent={bot.accent} />
+                  <NumInput label="Take profit" value={config.takeProfit} onChange={(v) => set("takeProfit", v)} min={1} step={1} suffix="USD" accent={bot.accent} />
+                  <NumInput label="Stop loss" value={config.stopLoss} onChange={(v) => set("stopLoss", v)} min={1} step={1} suffix="USD" accent={bot.accent} />
+                  <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} step={1} accent={bot.accent} />
                 </div>
+
+                <p className="text-[9px] leading-snug text-muted-foreground">
+                  Recovery stakes are not yours to set — the shared ledger sizes them from the
+                  debt (markup from Settings), exactly like every other bot. Both legs of a shot
+                  always carry the SAME stake and open on the SAME tick.
+                </p>
 
                 <Button
                   onClick={handleScan}
                   disabled={loading}
                   className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
                 >
-                  <ScanSearch className="w-4 h-4 mr-2" /> Measure both legs
-                  everywhere
+                  <ScanSearch className="w-4 h-4 mr-2" /> Measure every market
                 </Button>
               </div>
             )}
@@ -649,7 +473,7 @@ export function TwinHedgeConsole({
                 <Loader2 className={`w-8 h-8 ${a.text} animate-spin mx-auto`} />
                 <div>
                   <p className="text-sm font-semibold text-white">
-                    Measuring the joint pair out of sample
+                    Fitting the 4/5 model & replaying the engine out of sample
                   </p>
                   <p className="text-[11px] text-muted-foreground mt-1">
                     {progress.scanning ? `${progress.scanning}…` : "Preparing…"}
@@ -658,9 +482,7 @@ export function TwinHedgeConsole({
                 <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
                   <div
                     className={`h-full ${a.solidBtn} transition-all`}
-                    style={{
-                      width: `${(progress.scanned / Math.max(1, progress.total)) * 100}%`,
-                    }}
+                    style={{ width: `${(progress.scanned / Math.max(1, progress.total)) * 100}%` }}
                   />
                 </div>
                 <p className="text-[10px] font-mono text-muted-foreground/70">
@@ -672,88 +494,70 @@ export function TwinHedgeConsole({
             {/* SCAN RESULT */}
             {step === "scan-result" && scanResult && (
               <div className="p-4 space-y-3">
+                {(scanResult.best ?? scanResult.bestAvailable) && (
+                  <CandidateCard c={scanResult.best ?? scanResult.bestAvailable!} />
+                )}
+
                 {scanResult.best && scanResult.suitable ? (
                   <>
-                    <CandidateCard c={scanResult.best} />
-                    <div className="space-y-2">
-                      <Button
-                        onClick={() => handleStart(scanResult.best!, "locked")}
-                        disabled={loading}
-                        className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
-                      >
-                        <Lock className="w-4 h-4 mr-2" /> Trade locked on{" "}
-                        {scanResult.best.displayName}
-                      </Button>
-                      <Button
-                        onClick={() =>
-                          handleStart(scanResult.best!, "switching")
-                        }
-                        disabled={loading}
-                        variant="outline"
-                        className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}
-                      >
-                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Smart market
-                        switching
-                      </Button>
+                    <div
+                      className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${
+                        scanResult.mode === "locked"
+                          ? "bg-indigo-500/10 border-indigo-500/30 text-indigo-300"
+                          : "bg-sky-500/10 border-sky-500/30 text-sky-300"
+                      }`}
+                    >
+                      {scanResult.mode === "locked" ? (
+                        <Lock className="w-4 h-4 flex-shrink-0" />
+                      ) : (
+                        <Shuffle className="w-4 h-4 flex-shrink-0" />
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-[11px] font-bold uppercase tracking-wider">
+                          {scanResult.mode === "locked"
+                            ? `Locked — ${scanResult.best.displayName}`
+                            : `Switching — top ${scanResult.cluster.length} cluster`}
+                        </p>
+                        <p className="text-[10px] leading-snug opacity-80">{scanResult.modeReason}</p>
+                      </div>
                     </div>
+                    <Button
+                      onClick={() => handleStart(scanResult.best!)}
+                      disabled={loading}
+                      className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
+                    >
+                      <Zap className="w-4 h-4 mr-2" /> Deploy on {scanResult.best.displayName}
+                    </Button>
                   </>
-                ) : scanResult.bestAvailable &&
-                  scanResult.bestAvailable.edgePerDollar > 0 ? (
+                ) : scanResult.bestAvailable ? (
                   <>
-                    <CandidateCard c={scanResult.bestAvailable} />
                     <p className="text-[10px] text-muted-foreground leading-relaxed">
-                      Measured expectancy is positive but this pair did not
-                      clear the full bar. Starting it is a deliberate choice —
-                      the bot re-measures and stops if the pair cools.
+                      No market cleared the full bar. Starting anyway is a deliberate choice —
+                      the gate still vetoes every hot 4/5 entry, and the session stops on TP/SL.
                     </p>
-                    <div className="space-y-2">
-                      <Button
-                        onClick={() =>
-                          handleStart(scanResult.bestAvailable!, "locked")
-                        }
-                        disabled={loading}
-                        className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
-                      >
-                        <Lock className="w-4 h-4 mr-2" /> Lock{" "}
-                        {scanResult.bestAvailable.displayName} anyway
-                      </Button>
-                      <Button
-                        onClick={() =>
-                          handleStart(scanResult.bestAvailable!, "switching")
-                        }
-                        disabled={loading}
-                        variant="outline"
-                        className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}
-                      >
-                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Start switching
-                      </Button>
-                    </div>
+                    <Button
+                      onClick={() => handleStart(scanResult.bestAvailable!)}
+                      disabled={loading}
+                      className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
+                    >
+                      <Zap className="w-4 h-4 mr-2" /> Deploy on {scanResult.bestAvailable.displayName} anyway
+                    </Button>
                   </>
                 ) : (
                   <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-2 text-center">
-                    <p className="text-xs font-semibold text-amber-300">
-                      No positive pair edge right now
-                    </p>
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">
-                      {scanResult.reason}
-                    </p>
+                    <p className="text-xs font-semibold text-amber-300">No measurable market right now</p>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
                   </div>
                 )}
 
-                {scanResult.outcome && (
-                  <div className="rounded-lg bg-white/[0.03] border border-white/10 px-2.5 py-2 text-[10px] font-mono text-muted-foreground">
-                    {scanResult.outcome.complementary
-                      ? "Complementary pair — exactly one leg always wins (no both-lose zone)."
-                      : `${scanResult.outcome.overCount} over digits · ${scanResult.outcome.underCount} under digits · ${scanResult.outcome.bothCount} overlap · ${scanResult.outcome.noneCount} dead digit(s).`}
-                  </div>
-                )}
+                <p className="text-[10px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
 
                 {scanResult.allScored.length > 1 && (
                   <div className="space-y-1 pt-1 border-t border-white/5">
                     <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
                       Runner-ups
                     </p>
-                    {scanResult.allScored.slice(1, 6).map((c, i) => (
+                    {scanResult.allScored.slice(0, 5).map((c, i) => (
                       <div
                         key={i}
                         className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-white/[0.03] text-left"
@@ -769,14 +573,14 @@ export function TwinHedgeConsole({
                                   : "bg-red-400"
                           }`}
                         />
-                        <span className="font-medium flex-1 truncate text-white/80">
-                          {c.displayName} · {c.label}
+                        <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
+                        <span className="font-mono text-muted-foreground">
+                          surv {(c.survival * 100).toFixed(0)}%
                         </span>
                         <span
-                          className={`font-mono font-bold ${c.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}
+                          className={`font-mono font-bold ${c.evPerNormalShot >= 0 ? "text-green-400" : "text-red-400"}`}
                         >
-                          {c.edgePerDollar >= 0 ? "+" : ""}
-                          {(c.edgePerDollar * 100).toFixed(1)}%
+                          {c.evPerNormalShot >= 0 ? "+" : ""}${c.evPerNormalShot.toFixed(3)}/shot
                         </span>
                       </div>
                     ))}
@@ -795,7 +599,7 @@ export function TwinHedgeConsole({
                   onClick={() => setStep("config")}
                   className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1 flex items-center justify-center gap-1"
                 >
-                  <ChevronLeft className="w-3 h-3" /> Change pair or risk
+                  <ChevronLeft className="w-3 h-3" /> Change risk settings
                 </button>
               </div>
             )}
@@ -811,140 +615,126 @@ export function TwinHedgeConsole({
                       Session P&amp;L
                     </span>
                     {isRunning ? (
-                      <span
-                        className={`flex items-center gap-1 text-[10px] ${a.text}`}
-                      >
-                        <span
-                          className={`w-1.5 h-1.5 rounded-full ${a.dot} animate-pulse`}
-                        />
+                      <span className={`flex items-center gap-1 text-[10px] ${a.text}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${a.dot} animate-pulse`} />
                         {marketMode === "locked" ? "LOCKED" : "SWITCHING"}
                       </span>
                     ) : (
-                      <span className="text-[10px] text-muted-foreground">
-                        STOPPED
-                      </span>
+                      <span className="text-[10px] text-muted-foreground">STOPPED</span>
                     )}
                   </div>
-                  <div
-                    className={`text-2xl font-bold font-mono ${profit >= 0 ? "text-green-400" : "text-red-400"}`}
-                  >
+                  <div className={`text-2xl font-bold font-mono ${profit >= 0 ? "text-green-400" : "text-red-400"}`}>
                     {profit >= 0 ? "+" : "−"}${Math.abs(profit).toFixed(2)}
                   </div>
                   <div className="flex gap-3 mt-2 text-[11px] flex-wrap">
-                    <span className="text-green-400">
-                      {session?.winCount ?? 0}W
-                    </span>
-                    <span className="text-red-400">
-                      {session?.lossCount ?? 0}L
-                    </span>
+                    <span className="text-green-400">{session?.winCount ?? 0}W</span>
+                    <span className="text-red-400">{session?.lossCount ?? 0}L</span>
                     <span className="text-muted-foreground">{winRate}% WR</span>
-                    <span className="text-muted-foreground">
-                      {session?.tradeCount ?? 0} pair shots
-                    </span>
+                    <span className="text-muted-foreground">{session?.tradeCount ?? 0} shots</span>
                   </div>
                 </div>
 
                 {deployed && (
-                  <div
-                    className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}
-                  >
+                  <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
                     <div className="flex items-center justify-between">
-                      <p
-                        className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}
-                      >
-                        {marketMode === "locked"
-                          ? "Locked market"
-                          : "Active market"}
+                      <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
+                        {marketMode === "locked" ? "Locked market" : "Active market"}
                       </p>
                       {watch?.switched && (
-                        <span className="text-[9px] font-mono text-amber-300">
-                          ↻ rotated
+                        <span className="text-[9px] font-mono text-amber-300 flex items-center gap-1">
+                          <GitCompareArrows className="w-3 h-3" /> rotated
                         </span>
                       )}
                     </div>
-                    <p className="text-xs font-bold text-white">
-                      {deployed.displayName}
-                    </p>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <Stat
-                        label="Pair"
-                        value={deployed.contract}
-                        tone={a.text}
-                      />
+                    <p className="text-xs font-bold text-white">{deployed.displayName}</p>
+                    <div className="grid grid-cols-3 gap-1.5">
                       <Stat
                         label="Verdict"
                         value={deployed.verdict.toUpperCase()}
-                        tone={
-                          deployed.verdict === "refused"
-                            ? "text-red-400"
-                            : "text-green-400"
-                        }
+                        tone={deployed.verdict === "refused" ? "text-red-400" : "text-green-400"}
                       />
+                      <Stat label="4/5 baseline" value={`${(deployed.baseline * 100).toFixed(1)}%`} />
+                      <Stat label="Survival (OOS)" value={`${(deployed.survival * 100).toFixed(0)}%`} />
+                      <Stat label="Rec. bar" value={`${(deployed.barRecovery * 100).toFixed(1)}%`} />
+                      <Stat label="Norm. bar" value={`${(deployed.barNormal * 100).toFixed(1)}%`} />
                       <Stat
-                        label="Primary"
-                        value={`${deployed.primary.toUpperCase()} +${(deployed.bias * 100).toFixed(1)}%`}
-                      />
-                      <Stat
-                        label="Measured net"
-                        value={`${deployed.edgePerDollar >= 0 ? "+" : ""}${(deployed.edgePerDollar * 100).toFixed(2)}%`}
-                        tone={
-                          deployed.edgePerDollar >= 0
-                            ? "text-green-400"
-                            : "text-red-400"
-                        }
+                        label="Net / normal"
+                        value={`${deployed.evPerNormalShot >= 0 ? "+" : ""}$${deployed.evPerNormalShot.toFixed(3)}`}
+                        tone={deployed.evPerNormalShot >= 0 ? "text-green-400" : "text-red-400"}
                       />
                     </div>
                   </div>
                 )}
 
                 {isRunning && watch && (
-                  <div
-                    className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}
-                  >
+                  <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
                     <div className="flex items-center justify-between">
-                      <p
-                        className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}
-                      >
+                      <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
                         {watch.phase === "firing"
                           ? "Firing"
                           : watch.phase === "armed"
                             ? "Armed"
                             : "Watching"}
+                        <span className={`ml-1.5 ${watch.mode === "recovery" ? "text-amber-400" : "text-white/60"}`}>
+                          {watch.mode === "recovery" ? "· RECOVERY" : "· NORMAL"}
+                        </span>
                       </p>
                       <span className="text-[9px] font-mono text-muted-foreground/70">
-                        edge {watch.z.toFixed(2)}σ / {watch.bar.toFixed(2)}σ bar
+                        P(4/5) {(watch.p45 * 100).toFixed(1)}% / bar {(watch.bar * 100).toFixed(1)}%
                       </span>
                     </div>
                     <p className="text-[11px] text-muted-foreground leading-relaxed">
-                      {watch.reason || "Waiting…"}
+                      {watch.veto ? (
+                        <span className="text-red-300">⛔ {watch.veto} — {watch.reason}</span>
+                      ) : (
+                        watch.reason || "Waiting…"
+                      )}
                     </p>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <Stat
-                        label="P(over|ctx)"
-                        value={`${(watch.pOver * 100).toFixed(1)}%`}
-                      />
-                      <Stat
-                        label="P(under|ctx)"
-                        value={`${(watch.pUnder * 100).toFixed(1)}%`}
-                      />
-                      <Stat
-                        label="Skew"
-                        value={`${watch.primary.toUpperCase()} +${(watch.bias * 100).toFixed(1)}%`}
-                        tone={a.text}
-                      />
-                    </div>
                     {watch.overStake > 0 && (
                       <div className="grid grid-cols-2 gap-1.5">
-                        <Stat
-                          label="Over stake"
-                          value={`$${watch.overStake.toFixed(2)}`}
-                          tone="text-green-400"
-                        />
-                        <Stat
-                          label="Under stake"
-                          value={`$${watch.underStake.toFixed(2)}`}
-                          tone="text-red-300"
-                        />
+                        <Stat label="Over leg" value={`$${watch.overStake.toFixed(2)}`} tone="text-green-400" />
+                        <Stat label="Under leg" value={`$${watch.underStake.toFixed(2)}`} tone="text-red-300" />
+                      </div>
+                    )}
+                    {lastShot && (
+                      <div
+                        className={`rounded-lg border px-2.5 py-2 space-y-1 ${
+                          lastShot.sameTick
+                            ? "bg-green-500/5 border-green-500/25"
+                            : "bg-amber-500/10 border-amber-500/30"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between">
+                          <span
+                            className={`text-[10px] font-bold ${lastShot.sameTick ? "text-green-400" : "text-amber-300"}`}
+                          >
+                            {lastShot.paper ? "PAPER " : ""}
+                            {lastShot.sameTick ? "✓ SAME TICK" : "⚠ SPLIT LEGS"}
+                            {lastShot.spreadMs >= 0 && (
+                              <span className="ml-1 font-mono text-[9px] opacity-70">Δ{lastShot.spreadMs}ms</span>
+                            )}
+                          </span>
+                          <span className="text-[10px] font-mono text-white/80">
+                            digit {lastShot.digit}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          <Stat
+                            label="Over leg"
+                            value={lastShot.overWon ? "WIN" : "loss"}
+                            tone={lastShot.overWon ? "text-green-400" : "text-red-400"}
+                          />
+                          <Stat
+                            label="Under leg"
+                            value={lastShot.underWon ? "WIN" : "loss"}
+                            tone={lastShot.underWon ? "text-green-400" : "text-red-400"}
+                          />
+                          <Stat
+                            label="Net"
+                            value={`${lastShot.net >= 0 ? "+" : ""}$${lastShot.net.toFixed(2)}`}
+                            tone={lastShot.net >= 0 ? "text-green-400" : "text-red-400"}
+                          />
+                        </div>
                       </div>
                     )}
                   </div>
@@ -959,11 +749,13 @@ export function TwinHedgeConsole({
                           ? "bg-red-500/10 border-red-500/20 text-red-400"
                           : session.message.startsWith("❌")
                             ? "bg-red-500/10 border-red-500/20 text-red-300"
-                            : session.message.startsWith("🔁")
-                              ? "bg-sky-500/10 border-sky-500/25 text-sky-300"
-                              : session.message.startsWith("🎯")
-                                ? "bg-amber-500/10 border-amber-500/25 text-amber-300"
-                                : "bg-secondary/30 border-border text-muted-foreground"
+                            : session.message.startsWith("⚠️")
+                              ? "bg-amber-500/10 border-amber-500/25 text-amber-300"
+                              : session.message.startsWith("🔁")
+                                ? "bg-sky-500/10 border-sky-500/25 text-sky-300"
+                                : session.message.startsWith("🎯")
+                                  ? "bg-amber-500/10 border-amber-500/25 text-amber-300"
+                                  : "bg-secondary/30 border-border text-muted-foreground"
                     }`}
                   >
                     {session.message}
@@ -974,16 +766,15 @@ export function TwinHedgeConsole({
                   <div className="rounded-lg px-3 py-2 border text-xs bg-amber-500/[0.08] border-amber-500/30 space-y-1">
                     <div className="flex items-center justify-between">
                       <span className="font-semibold text-amber-300 flex items-center gap-1.5">
-                        <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />{" "}
-                        Recovery (Step {session.recoveryStep})
+                        <ShieldCheck className="w-3.5 h-3.5 text-amber-400" /> Recovery (Step {session.recoveryStep})
                       </span>
                       <span className="font-mono text-[10px] text-amber-400">
                         ${(session.unrecoveredAmount ?? 0).toFixed(2)} debt
                       </span>
                     </div>
                     <p className="text-[10px] text-muted-foreground leading-relaxed">
-                      The recovery pair-shot keeps the same skew but raises the
-                      base so a winning favored leg repays the debt.
+                      Recovery fires Over 5 + Under 4 — the gate holds every hot 4/5 entry,
+                      and the ledger's debt-driven stake sizes both legs equally.
                     </p>
                   </div>
                 )}

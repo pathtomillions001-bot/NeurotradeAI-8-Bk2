@@ -238,40 +238,48 @@ export interface BotSessionStatus {
     verdict: string;
     ticksWatched: number;
   };
-  /** Twin-Hedge bot: the pair currently deployed. */
+  /** Twin-Hedge Edge: the measured market card the session is running on. */
   twinDeployed?: {
     symbol: string;
     displayName: string;
-    contract: string;
     verdict: string;
-    confidence: number;
-    edgePerDollar: number;
-    oosWinRate: number;
-    oosShots: number;
-    primary: "over" | "under";
-    bias: number;
-    overPayout: number;
-    underPayout: number;
-    netOnWinPerBase: number;
-    netOnLossPerBase: number;
+    baseline: number;
+    barNormal: number;
+    barRecovery: number;
+    survival: number;
+    evPerNormalShot: number;
+    deepestLadder: number;
+    simShots: number;
+    marketMode: "locked" | "switching";
   };
-  /** Twin-Hedge bot: live pair watch / both-leg stakes. */
+  /** Twin-Hedge Edge: live 4/5-avoidance watch + same-tick shot proof. */
   twinWatch?: {
     phase: "watching" | "armed" | "firing" | "settling";
-    pOver: number;
-    pUnder: number;
-    primary: "over" | "under";
-    bias: number;
-    edgePerBase: number;
-    z: number;
+    mode: "normal" | "recovery";
+    p45: number;
+    p45Se: number;
     bar: number;
+    baseline: number;
+    veto: string | null;
     reason: string;
+    patienceTicks: number;
+    ticksWatched: number;
     switched: boolean;
     confidence: number;
     verdict: string;
-    ticksWatched: number;
     overStake: number;
     underStake: number;
+    lastShot?: {
+      sameTick: boolean;
+      spreadMs: number;
+      entryTick: number;
+      digit: number;
+      overWon: boolean;
+      underWon: boolean;
+      net: number;
+      recovery: boolean;
+      paper: boolean;
+    };
   };
 }
 

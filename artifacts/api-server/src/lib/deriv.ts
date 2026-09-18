@@ -2058,26 +2058,37 @@ export async function executeLiveTrade(
  * as soon as each proposal is confirmed. Deriv processes them in order within
  * the same tick window, so every leg opens on the same tick.
  *
- * Two refinements keep larger batches reliable:
+ * SAME-TICK DISCIPLINE (why there is no stagger):
+ * A 1-tick digit contract opens on the tick that is CURRENT at the moment its
+ * buy is processed. Legs opened in different ticks close in different ticks,
+ * which is exactly the "some orders delayed" failure this batch exists to
+ * prevent — so the batch sends ALL proposals in ONE unscheduled burst (same
+ * event-loop tick, same millisecond). Deriv quotes them all off the same
+ * underlying tick, and each buy goes out the instant its proposal returns, so
+ * the whole batch (the UI caps it at 2–10 legs; the Twin-Hedge bot uses 2)
+ * lands inside a few milliseconds — far shorter than any tick period.
  *
- * 1. Proposals are staggered ~150 ms apart. A 2N-message burst trips Deriv's
- *    per-call throttle (`RateLimit` errors) and legs get rejected — the
- *    \"missing\" executions above ~3 legs. The stagger keeps even a 10-leg
- *    batch inside ~1.5 s (one entry zone) while staying under the throttle.
- * 2. A throttled (or otherwise transiently failed) leg is re-proposed with
- *    exponential backoff instead of being marked failed, so a momentary
- *    throttle delays one leg by ~1 s instead of losing it.
+ * The only delay path left is a THROTTLED leg, which is re-proposed with
+ * exponential backoff instead of being marked failed — a momentary throttle
+ * delays one leg by a few hundred ms instead of losing it, and the leg's
+ * split entry is reported so callers can see it happened.
  *
  * The whole batch shares one 25s deadline; if the socket dies or the deadline
  * passes, the promise rejects and the caller settles whatever it has.
  */
 
-/** Spacing between a batch's proposal sends — smooths the burst under Deriv's per-call throttle. */
-export const BULK_PROPOSAL_STAGGER_MS = 150;
+/**
+ * Spacing between a batch's proposal sends. 0 = one unscheduled burst —
+ * every proposal leaves in the same millisecond so every leg opens on the
+ * same tick. (A non-zero value is only a throttle safety valve for batches
+ * far larger than the UI allows; the retry path covers the throttle either
+ * way.)
+ */
+export const BULK_PROPOSAL_STAGGER_MS = 0;
 /** Total quote attempts per leg (initial + retries) before the leg is failed. */
 export const BULK_MAX_ATTEMPTS = 4;
-/** First retry delay per leg; doubles on each subsequent retry (600 → 1200 → 2400 ms). */
-export const BULK_RETRY_BASE_MS = 600;
+/** First retry delay per leg; doubles on each subsequent retry (300 → 600 → 1200 ms). */
+export const BULK_RETRY_BASE_MS = 300;
 const BULK_EXECUTION_DEADLINE_MS = 25_000;
 
 /** req_id one leg's proposal/buy carries — attempt-suffixed so a stale retry response can never double-buy. */
@@ -2303,18 +2314,23 @@ export async function executeBulkLiveTrades(
     ws.on("open", () => {
       logger.info(
         { count: params.length },
-        "executeBulkLiveTrades: sending batch proposals",
+        "executeBulkLiveTrades: bursting ALL proposals in the same tick — same-tick entry for every leg",
       );
-      // Proposals go out slightly staggered — an unstaggered 2N-message burst
-      // trips Deriv's per-call throttle and legs get rejected outright (the
-      // "missing" executions above ~3 legs). The stagger keeps even a 10-leg
-      // batch inside ~1.5 s — one entry zone — while staying under the
-      // throttle, and throttled legs are retried below regardless.
-      for (let i = 0; i < params.length; i++) {
-        later(i * BULK_PROPOSAL_STAGGER_MS, () => {
-          if (!finished && results[i] === null && phase[i] === "idle")
-            propose(i);
-        });
+      // ONE unscheduled burst: every proposal is sent back-to-back in the
+      // same event-loop tick (same millisecond), so Deriv quotes them all off
+      // the same underlying tick and every leg opens on the same tick. A
+      // per-leg 150 ms stagger used to spread a 4+ leg batch across tick
+      // boundaries — the "delayed orders" failure. Stagger is a no-op at 0;
+      // keep the timer path only as a future safety valve for very large N.
+      if (BULK_PROPOSAL_STAGGER_MS > 0) {
+        for (let i = 0; i < params.length; i++) {
+          later(i * BULK_PROPOSAL_STAGGER_MS, () => {
+            if (!finished && results[i] === null && phase[i] === "idle")
+              propose(i);
+          });
+        }
+      } else {
+        for (let i = 0; i < params.length; i++) propose(i);
       }
     });
 

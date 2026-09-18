@@ -104,7 +104,7 @@ export function Layout({ children }: { children: ReactNode }) {
   }, [mobileOpen]);
 
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-screen supports-[height:100dvh]:h-[100dvh] overflow-hidden bg-background">
       {/* Desktop sidebar */}
       <aside className="hidden md:flex w-56 lg:w-64 border-r border-border bg-card flex-col flex-shrink-0">
         <NavContent location={location} />
@@ -135,33 +135,35 @@ export function Layout({ children }: { children: ReactNode }) {
         )}
       </AnimatePresence>
 
+      {/* Mobile top bar — FIXED so the hamburger is always reachable.
+          Positioned above the scroll area (z-30, below the z-40/50 overlays)
+          with a deterministic h-14 height; <main> pads itself to match. */}
+      <header className="fixed top-0 inset-x-0 z-30 md:hidden flex h-14 items-center gap-3 px-4 border-b border-border bg-card">
+        <button
+          onClick={() => setMobileOpen(!mobileOpen)}
+          className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
+          aria-label="Toggle menu"
+        >
+          {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
+        <div className="flex items-center gap-2">
+          <div className="w-6 h-6 flex items-center justify-center">
+            <img src="/neuroai-logo.png" alt="" aria-hidden="true" className="w-5 h-5 object-contain" />
+          </div>
+          <span className="font-bold text-base tracking-tight">NeuroTrade</span>
+        </div>
+        <div className="ml-auto">
+          {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href))) && (
+            <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
+              {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href)))?.label}
+            </span>
+          )}
+        </div>
+      </header>
+
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-        {/* Mobile top bar */}
-        <header className="md:hidden flex items-center gap-3 px-4 py-3 border-b border-border bg-card flex-shrink-0">
-          <button
-            onClick={() => setMobileOpen(!mobileOpen)}
-            className="p-1.5 rounded-md text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors"
-            aria-label="Toggle menu"
-          >
-            {mobileOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-          </button>
-          <div className="flex items-center gap-2">
-            <div className="w-6 h-6 flex items-center justify-center">
-              <img src="/neuroai-logo.png" alt="" aria-hidden="true" className="w-5 h-5 object-contain" />
-            </div>
-            <span className="font-bold text-base tracking-tight">NeuroTrade</span>
-          </div>
-          <div className="ml-auto">
-            {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href))) && (
-              <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
-                {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href)))?.label}
-              </span>
-            )}
-          </div>
-        </header>
-
-        <main className="flex-1 overflow-y-auto">
+        <main className="flex-1 overflow-y-auto pt-14 md:pt-0">
           {children}
         </main>
       </div>

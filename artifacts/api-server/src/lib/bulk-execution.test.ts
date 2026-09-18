@@ -318,4 +318,86 @@ describe("executeBulkLiveTrades against a hostile fake Deriv", () => {
       await closeServer();
     }
   });
+
+  it("bursts ALL proposals in the same tick — no staggered order delays", async () => {
+    // Regression for "bulk trades above 3 are not executed at the same time":
+    // a per-leg 150 ms stagger spread a 10-leg batch over ≥1.35 s of wall
+    // clock, across tick boundaries, so legs opened (and closed) at different
+    // times. All proposals must now arrive in one burst.
+    const proposalTimes: number[] = [];
+    const proposedLegs = new Set<number>();
+    const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+    await new Promise<void>((resolve) => wss.on("listening", resolve));
+    const address = wss.address();
+    assert.ok(address && typeof address === "object", "server is listening");
+
+    const sockets = new Set<any>();
+    const closeServer = () =>
+      new Promise<void>((resolve) => {
+        for (const socket of sockets) {
+          try {
+            socket.terminate();
+          } catch {
+            /* ignore */
+          }
+        }
+        wss.close(() => resolve());
+      });
+    wss.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
+      socket.on("message", (raw) => {
+        const req = JSON.parse(String(raw)) as Record<string, any>;
+        const reqId = String(req.req_id ?? "");
+        const m = /^bulk-(proposal|buy)-(\d+)-(\d+)$/.exec(reqId);
+        if (!m) return;
+        const [, phase, legStr] = m as unknown as [string, string, string];
+        const leg = Number(legStr);
+        if (phase === "proposal") {
+          proposalTimes.push(Date.now());
+          proposedLegs.add(leg);
+          socket.send(
+            JSON.stringify({
+              msg_type: "proposal",
+              req_id: reqId,
+              proposal: { id: `P-${leg}`, ask_price: 1 },
+            }),
+          );
+          return;
+        }
+        socket.send(
+          JSON.stringify({
+            msg_type: "buy",
+            req_id: reqId,
+            buy: { contract_id: 3000 + leg, buy_price: 1, start_time: 1, longcode: "" },
+          }),
+        );
+      });
+    });
+
+    try {
+      const legs = await executeBulkLiveTrades(
+        "test-token",
+        "test-account",
+        legParams(10),
+        {
+          otpUrl: `ws://127.0.0.1:${(address as any).port}`,
+        },
+      );
+      assert.equal(legs.length, 10);
+      assert.equal(proposedLegs.size, 10, "every leg was proposed exactly once");
+      const spreadMs =
+        Math.max(...proposalTimes) - Math.min(...proposalTimes);
+      // One burst: the whole 10-leg batch arrives within a few ms
+      // (Date.now() is millisecond-resolved, so a true same-tick burst
+      // measures a spread of 0–2 ms). The old 150 ms stagger measured
+      // ≥ 1350 ms here.
+      assert.ok(
+        spreadMs < 150,
+        `all proposals in one burst (spread ${spreadMs} ms < 150 ms)`,
+      );
+    } finally {
+      await closeServer();
+    }
+  });
 });

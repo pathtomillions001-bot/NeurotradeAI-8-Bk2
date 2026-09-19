@@ -10,6 +10,13 @@
  *   PORT              — listen port (Railway injects this)
  *   API_UPSTREAM      — upstream API base, e.g. http://api.railway.internal:8080
  *                       Falls back to http://127.0.0.1:8080 for local smoke tests.
+ *
+ * Fix for release-skew incident (2026-09-19):
+ * - Old web bundle at 39300a9 had no __release handler, so /__release fell through
+ *   to index.html (200) and Railway healthcheck passed while bot consoles were wrong.
+ * - Now /__release and /release.json are handled explicitly BEFORE static handler,
+ *   always returning JSON with no-store cache, so healthcheck and deployment
+ *   verification can never be fooled by SPA fallback.
  */
 import http from "node:http";
 import fs from "node:fs";
@@ -45,9 +52,7 @@ const proxy = httpProxy.createProxyServer({
   target: upstream,
   changeOrigin: true,
   xfwd: true,
-  // EventSource / long-lived responses
   ws: true,
-  // Don't time out SSE streams aggressively
   proxyTimeout: 0,
   timeout: 0,
 });
@@ -60,10 +65,6 @@ proxy.on("error", (err, _req, res) => {
   }
 });
 
-/**
- * Release manifest written by the Vite build (see vite.config.ts). Kept in
- * memory: the file never changes while the container runs.
- */
 function readOwnRelease() {
   try {
     return JSON.parse(fs.readFileSync(path.join(publicDir, "release.json"), "utf8"));
@@ -73,26 +74,12 @@ function readOwnRelease() {
 }
 const ownRelease = readOwnRelease();
 
-/**
- * `/__release` — the release handshake between the two Railway services.
- *
- * The web bundle and the API deploy independently: when the web service lags,
- * its consoles no longer match the catalogue the API serves, and the Bot Arena
- * used to silently draw the wrong controls. This endpoint reports both sides
- * and whether they agree, so a deploy/runbook check (or `pnpm check:release`)
- * sees the skew immediately instead of after a user notices odd bot screens.
- *
- * Always answers 200 with a JSON body: it is also the web service's Railway
- * healthcheck, and a slow/absent API must not take the site down — the `parity`
- * field reports that instead.
- */
 async function releaseReport() {
   const web = ownRelease;
   let api = null;
   let apiError = null;
   try {
     const response = await fetch(`${upstream}/api/healthz`, {
-      // /api/healthz probes Deriv's OAuth endpoint (5 s cap) before answering.
       signal: AbortSignal.timeout(8000),
     });
     if (response.ok) {
@@ -113,7 +100,6 @@ async function releaseReport() {
   return {
     status: "ok",
     web,
-    /** What the API service reports about itself (null when unreachable). */
     api: api ? { ...api.release, consoles: api.consoles } : null,
     apiError,
     parity: apiError || missingHere.length > 0 ? "skew" : "ok",
@@ -129,25 +115,51 @@ async function releaseReport() {
 
 const server = http.createServer((req, res) => {
   const url = req.url ?? "/";
+  const pathname = url.split("?")[0];
 
-  if (url === "/__release" || url.startsWith("/__release?")) {
+  // ── Release endpoints — MUST be before static handler ────────────────────
+  if (pathname === "/__release") {
     res.setHeader("content-type", "application/json; charset=utf-8");
     res.setHeader("cache-control", "no-store");
+    res.setHeader("access-control-allow-origin", "*");
     releaseReport()
-      .then(report => res.end(JSON.stringify(report, null, 2)))
-      .catch(error => res.end(JSON.stringify({ status: "error", detail: String(error) })));
+      .then(report => {
+        if (!res.writableEnded) {
+          res.writeHead(200);
+          res.end(JSON.stringify(report, null, 2));
+        }
+      })
+      .catch(error => {
+        if (!res.writableEnded) {
+          res.writeHead(200);
+          res.end(JSON.stringify({ status: "error", detail: String(error), web: ownRelease }, null, 2));
+        }
+      });
     return undefined;
   }
 
-  if (url === "/api" || url.startsWith("/api/")) {
+  if (pathname === "/release.json") {
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    res.setHeader("access-control-allow-origin", "*");
+    try {
+      const data = fs.readFileSync(path.join(publicDir, "release.json"), "utf8");
+      res.writeHead(200);
+      res.end(data);
+    } catch {
+      res.writeHead(200);
+      res.end(JSON.stringify(ownRelease, null, 2));
+    }
+    return undefined;
+  }
+
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
     return proxy.web(req, res, { target: upstream });
   }
 
   return handler(req, res, {
     public: publicDir,
-    // SPA fallback — wouter client routes
     rewrites: [{ source: "**", destination: "/index.html" }],
-    // Don't directory-list
     directoryListing: false,
     headers: [
       {
@@ -167,7 +179,8 @@ const server = http.createServer((req, res) => {
 
 server.on("upgrade", (req, socket, head) => {
   const url = req.url ?? "/";
-  if (url === "/api" || url.startsWith("/api/")) {
+  const pathname = url.split("?")[0];
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
     proxy.ws(req, socket, head, { target: upstream });
     return;
   }
@@ -177,9 +190,12 @@ server.on("upgrade", (req, socket, head) => {
 server.listen(port, "0.0.0.0", () => {
   console.log(`[web] Serving ${publicDir} on 0.0.0.0:${port}`);
   console.log(`[web] Proxying /api → ${upstream}`);
+  console.log(`[web] Release: ${ownRelease.shortSha} consoles=${(ownRelease.consoles ?? []).join(",")}`);
 });
 
-// Keep process alive on proxy hiccups
 process.on("uncaughtException", (err) => {
   console.error("[web] uncaughtException", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("[web] unhandledRejection", err);
 });

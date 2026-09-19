@@ -14,10 +14,13 @@ watchPatterns = [
   "/artifacts/trading-platform/**",
   "/lib/api-client-react/**",
   "/lib/api-spec/**",
+  "/lib/api-zod/**",
+  "/lib/db/**",
   "/package.json",
   "/pnpm-lock.yaml",
   "/pnpm-workspace.yaml",
   "/.npmrc",
+  "/scripts/**",
 ]
 
 [deploy]

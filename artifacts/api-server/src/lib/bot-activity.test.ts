@@ -30,7 +30,7 @@ describe("pickActiveBotId", () => {
 describe("bot console contract", () => {
   it("gives every catalogue bot a console id", () => {
     for (const bot of BOT_CATALOG) {
-      assert.match(botConsoleId(bot), /^[a-z-]+@\d+$/, `${bot.id} has no console id`);
+      assert.match(botConsoleId(bot), /^[a-z0-9-]+@\d+$/, `${bot.id} has no console id`);
     }
   });
 
@@ -38,6 +38,8 @@ describe("bot console contract", () => {
     assert.equal(botConsoleId(getBotDefinition("duallock")!), "dual-lock@1");
     assert.equal(botConsoleId(getBotDefinition("killshot")!), "killshot@1");
     assert.equal(botConsoleId(getBotDefinition("ks-overunder")!), "killshot-family@1");
+    assert.equal(botConsoleId(getBotDefinition("match-apex")!), "match-apex@1");
+    assert.equal(botConsoleId(getBotDefinition("twin-o4u5")!), "twin-o4u5@1");
   });
 
   it("falls back to the specialist console for family bots with no dedicated UI", () => {
@@ -50,7 +52,9 @@ describe("bot console contract", () => {
       "dual-lock@1",
       "killshot-family@1",
       "killshot@1",
+      "match-apex@1",
       "specialist@1",
+      "twin-o4u5@1",
     ]);
   });
 });

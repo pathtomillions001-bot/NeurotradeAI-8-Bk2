@@ -7,7 +7,7 @@
  * giving each specialist its own hue.
  */
 
-import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
+import { Hash, Layers, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
 
@@ -243,6 +243,13 @@ export interface BotSessionStatus {
     verdict: string;
     ticksWatched: number;
   };
+  /** Match-Apex / Twin O4U5 deployed market */
+  apexDeployed?: any;
+  apexWatch?: any;
+  twinDeployed?: any;
+  twinWatch?: any;
+  matchApexDeployed?: any;
+  matchApexWatch?: any;
 }
 
 /**
@@ -464,6 +471,7 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   lock: Lock,
   target: Target,
   zap: Zap,
+  layers: Layers,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

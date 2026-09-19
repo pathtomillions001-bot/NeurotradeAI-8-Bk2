@@ -19,6 +19,8 @@ const API_CONSOLE_IDS = [
   "dual-lock@1",
   "killshot@1",
   "killshot-family@1",
+  "match-apex@1",
+  "twin-o4u5@1",
 ];
 
 describe("web console contract", () => {
@@ -84,7 +86,7 @@ describe("consoleSkew", () => {
     );
 
     assert.equal(skew.skewed, true);
-    assert.deepEqual(skew.missing, ["killshot-family@1", "killshot@1"]);
+    assert.deepEqual(skew.missing, ["killshot-family@1", "killshot@1", "match-apex@1", "twin-o4u5@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {

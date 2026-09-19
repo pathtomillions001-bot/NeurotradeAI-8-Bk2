@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot";
+  family: SpecialistFamily | "duallock" | "killshot" | "match-apex" | "twin-o4u5";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -55,6 +55,8 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
+  /** Custom console id for bots that don't fit the 4 legacy consoles. */
+  customConsole?: string;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -359,6 +361,64 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalWinRate: "≈11% / ≈90%",
     nominalPayout: "8.93× / 1.09×",
   },
+  {
+    id: "match-apex",
+    name: "Match Apex Sentinel",
+    code: "BOT-MATCH-APEX",
+    family: "match-apex",
+    contractLabel: "Matches (elite)",
+    tagline: "6-model ensemble · entropy-gated · lock/switch after scan",
+    description:
+      "Replacement for Match Sniper and Matches/Differs Oracle. Pulls 4999 digits per market, fuses six estimators per digit — forgetting Dirichlet, order-1/2/3 Markov with KT, 2-state outcome chain, Kaplan-Meier hazard — then filters by market entropy (<3.15b) and transition concentration (<2.9b) so it only trades predictable regimes. Out-of-sample walk-forward measures win rate, EV, survival, deepest ladder; Page-Hinkley drift, post-loss shield, patience valve gate every entry. After scan you choose locked (market frozen, digit may rotate) or switching (moves to best market). Same recovery ledger.",
+    edge: [
+      "WEAKNESSES FIXED: single-window → 4999 deep; generic green-light → gap/hazard/entropy/transition gates; no tick-age → <3s freshness; lenient FDR q=0.25 → strict q=0.15 per market + q=0.10 across markets",
+      "6 ESTIMATORS PER DIGIT: order-0 forgetting Dirichlet (half-life 69), order-1 P(d|last), order-2 P(d|last2), order-3 P(d|last3) KT, 2-state outcome chain, Kaplan-Meier hazard — fused by inverse variance",
+      "REGIME FILTERS: market entropy H<3.15b and transition entropy H(row|last)<2.9b — match edge in random walk refused",
+      "EXACT MATH: Beta-Binomial posterior, betaQuantile worst-case, Benjamini-Hochberg FDR, geometric overdue (1-p)^gap ≤0.35, hazard≥0.8, gap 4-22, hot-run veto <3/6",
+      "MEASURED OOS: 60/40 train/test, self-referential quantile bar (70th pct zBe), 4-block χ² stationarity, Wilson lower bound, survival = no SL + positive EV + ladder ≤ max",
+      "TIMING & EXECUTION: tick-age <3s, Page-Hinkley drift, post-loss shield (bar boost 0.5σ + 3-tick cool-down), patience valve 20 ticks, execution-tick revalidation, pre-warmed payout, shared ledger + arbiter",
+      "MARKET MODE AFTER SCAN: clear winner (edge gap ≥4pp) → locked, tight cluster → switching (hysteresis 3pp). User selects lock/switch after scan",
+    ],
+    accent: "amber",
+    icon: "crosshair",
+    customConsole: "match-apex@1",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "AI picks best digit per market with 6-model ensemble" },
+    ],
+    nominalWinRate: "≈14–18% oos",
+    nominalPayout: "8.93×",
+  },
+  {
+    id: "twin-o4u5",
+    name: "Twin Barrier Sentinel",
+    code: "BOT-TWIN-O4U5",
+    family: "twin-o4u5",
+    contractLabel: "Over4+Under5 / Over5+Under4 (twin)",
+    tagline: "Dual execution · avoids 4/5 at all cost · same-tick proof",
+    description:
+      "Normal Over4+Under5 simultaneous same stake (never double-loses, net -5% cost). Recovery Over5+Under4 simultaneous same stake (net +0.43 avoids 4/5, -2.00 on 4/5). Five estimators — forgetting Dirichlet, order-1/2/3 Markov, HMM regime filter (clean 8% vs dirty 35% 4/5) — fused inverse variance, plus entropy and transition gates. Out-of-sample replay of exact engine rules measures survival and EV. Both legs placed as one bulk order over single socket so both proposals same millisecond and both contracts open same tick — same-tick proof with spreadMs telemetry. Auto-configured, lock/switch after analysis, speed/latency prioritized.",
+    edge: [
+      "AUTO-CONFIGURED TWIN: normal Over4+Under5 (complementary, one leg always wins, -0.05 per $1), recovery Over5+Under4 (dead zone {4,5}, +0.43 win, -2.00 loss) — user cannot change contracts, only risk",
+      "5 ESTIMATORS FOR P(4/5): order-0 forgetting Dirichlet (half-life 69), order-1 P(4/5|last), order-2 P(4/5|last2), order-3 P(4/5|last3), 2-state HMM forward tick by tick — inverse-variance fusion, entropy + transition gates",
+      "HARD VETOES AT NO COST: baseline >22% hot, 4/5 hot cluster 3+/6, post-4/5 state P(4/5|last)≥baseline, cool-down 2 ticks, tick-age >3s, entropy ≥3.25b — never overridden",
+      "SOFT GATES + PATIENCE VALVE: worst-case P̂+1.25σ must sit below baseline, P̂ must clear market's own 30th pct (recovery)/55th (normal) — debt waiting 25 ticks > imperfect reading, so best available non-vetoed fires",
+      "MEASURED OOS: fit first 60% of 4999 digits, gate + exact engine rules measured on last 40% unseen — survival = no SL + positive EV per normal shot + ladder ≤ max steps, stationarity 4-block χ², opportunity metrics, FDR across markets",
+      "SAME-TICK EXECUTION: both legs placed as ONE bulk order over single socket, proposals same millisecond, buys fired instantly on proposal confirmation — equal start_time proof, spreadMs telemetry, latency prioritized, pre-warmed payout",
+      "MARKET MODE AFTER ANALYSIS: clear winner → locked, tight cluster → switching (hysteresis 3pp), user selects after scan — same recovery ledger, same arbiter, same stake for both legs",
+    ],
+    accent: "teal",
+    icon: "layers",
+    customConsole: "twin-o4u5@1",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Twin O4U5", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Over4+Under5 normal, Over5+Under4 recovery — auto-configured twin" },
+    ],
+    nominalWinRate: "50% normal (hedged) · 80% recovery when avoiding 4/5",
+    nominalPayout: "1.95× normal · 2.43× recovery",
+  },
 ];
 
 export function getBotDefinition(botId: string): BotDefinition | undefined {
@@ -369,6 +429,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
+  if (bot.customConsole) return bot.customConsole;
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

@@ -22,6 +22,10 @@ export const WEB_CONSOLE_IDS = [
   "killshot@1",
   /** Kill-Shot family oracles (Over/Under, Even/Odd, Matches/Differs). */
   "killshot-family@1",
+  /** Match Apex Sentinel — elite Matches bot. */
+  "match-apex@1",
+  /** Twin Barrier Sentinel — Over4+Under5 / Over5+Under4 twin. */
+  "twin-o4u5@1",
 ] as const;
 
 export type WebConsoleId = (typeof WEB_CONSOLE_IDS)[number];

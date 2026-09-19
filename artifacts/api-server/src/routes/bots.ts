@@ -25,6 +25,8 @@ import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
+import * as matchApex from "../lib/match-apex-engine";
+import * as twinO4U5 from "../lib/twin-o4u5-engine";
 import { validateShotContract, validateShotPlan, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -57,11 +59,10 @@ interface ParsedBotBody {
 function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotBody } | { ok: false; error: string } {
   const bot = getBotDefinition(botId);
   if (!bot) return { ok: false, error: "Unknown bot" };
-  // Pre-locked bots (Dual-Lock Range Sentinel) have their own endpoints
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
-  // One-shot bots (Kill-Shot Oracle) likewise have their own endpoints.
   if (bot.oneShot) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
   if (bot.killShotFamily) return { ok: false, error: `${bot.name} uses the /family endpoints` };
+  if (bot.customConsole) return { ok: false, error: `${bot.name} uses the /${bot.id} endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -72,7 +73,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   }
   const contractTypes = sideOption.contracts as BotContractType[];
 
-  // Barriers (barrier bot only).
   const overBarrier = Number(body.overBarrier);
   const underBarrier = Number(body.underBarrier);
   const barriers: number[] = [];
@@ -89,7 +89,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
     barriers.push(Math.trunc(underBarrier));
   }
 
-  // Digit lock (match / differ bots only).
   let lockedBarrier: number | undefined;
   if (bot.hasDigitLock) {
     if (body.lockedBarrier !== undefined && body.lockedBarrier !== null && body.lockedBarrier !== "") {
@@ -143,7 +142,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   };
 }
 
-/** Status as this browser session may see it (other sessions are blanked). */
 function visibleStatus(sessionId: string) {
   const status = getStatus();
   const owner = getOwnerSessionId();
@@ -176,6 +174,19 @@ function visibleStatus(sessionId: string) {
   };
 }
 
+function visibleMatchApexStatus(sessionId: string) {
+  const status = matchApex.getStatus();
+  const owner = matchApex.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, deployed: undefined, watch: undefined };
+}
+function visibleTwinStatus(sessionId: string) {
+  const status = twinO4U5.getStatus();
+  const owner = twinO4U5.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, twinDeployed: undefined, twinWatch: undefined };
+}
+
 // ── Catalogue ─────────────────────────────────────────────────────────────────
 
 router.get("/", (req, res) => {
@@ -183,9 +194,10 @@ router.get("/", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
+  const apex = visibleMatchApexStatus(req.sessionId);
+  const twin = visibleTwinStatus(req.sessionId);
   res.json({
     release: API_RELEASE,
-    /** Console ids this catalogue expects the web bundle to implement. */
     consoles: botConsoleIds(),
     bots: BOT_CATALOG.map(bot => {
       const console_ = botConsoleId(bot);
@@ -198,12 +210,20 @@ router.get("/", (req, res) => {
       if (bot.killShotFamily) {
         return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
       }
+      if (bot.id === matchApex.MATCH_APEX_BOT_ID) {
+        return { ...bot, console: console_, session: apex.running ? apex : null };
+      }
+      if (bot.id === twinO4U5.TWIN_O4U5_BOT_ID) {
+        return { ...bot, console: console_, session: twin.running ? twin : null };
+      }
       return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: pickActiveBotId([
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: fam.botId ?? null, running: fam.running },
+      { botId: apex.botId ?? null, running: apex.running },
+      { botId: twin.botId ?? null, running: twin.running },
       { botId: status.botId, running: status.running },
     ]),
   });
@@ -379,20 +399,23 @@ router.get("/killshot/status", (req, res) => {
 async function killshotRisk(sessionId: string, body: any) {
   let markupPercent = 10;
   let maxStake = 500;
+  let maxTradeStake = 500;
   try {
     const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
     if (rows.length > 0) {
       const v = Number((rows[0] as any).botRecoveryMarkup);
       if (Number.isFinite(v)) markupPercent = v;
       const m = Number((rows[0] as any).maxTradeStake);
-      if (Number.isFinite(m) && m > 0) maxStake = m;
+      if (Number.isFinite(m) && m > 0) { maxStake = m; maxTradeStake = m; }
     }
   } catch { /* defaults */ }
   return {
     stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
     stopLoss: Number(body?.stopLoss) > 0 ? Number(body.stopLoss) : 5,
+    takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
     markupPercent,
     maxStake,
+    maxTradeStake,
   };
 }
 
@@ -661,6 +684,176 @@ router.post("/family/stop", (req, res) => {
   res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
 });
 
+// ── Match Apex Sentinel ─────────────────────────────────────────────────────
+
+router.get("/match-apex/status", (req, res) => {
+  res.json(visibleMatchApexStatus(req.sessionId));
+});
+
+router.post("/match-apex/scan", async (req, res): Promise<void> => {
+  try {
+    const risk = await killshotRisk(req.sessionId, req.body);
+    const result = await matchApex.scanForMatchApex(req.sessionId, {
+      stake: risk.stake,
+      markupPercent: risk.markupPercent,
+      maxStake: risk.maxStake,
+      stopLoss: risk.stopLoss,
+      takeProfit: (req.body?.takeProfit as number) > 0 ? Number(req.body.takeProfit) : 10,
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(req.body?.maxRecoverySteps) || 3)),
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Match Apex scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/match-apex/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+  const card = body.card ?? body.analysis;
+  if (!card || typeof card.pHat !== "number") {
+    res.status(400).json({ error: "Run the analysis first — measured card required" });
+    return;
+  }
+  let lockedSymbol: string | undefined;
+  if (marketMode === "locked") {
+    if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
+      res.status(400).json({ error: "lockedSymbol required in locked mode" });
+      return;
+    }
+    if (!isAutomatedMarket(body.lockedSymbol)) {
+      res.status(400).json({ error: `${body.lockedSymbol} cannot be traded` });
+      return;
+    }
+    lockedSymbol = body.lockedSymbol;
+  }
+  const existingOwner = matchApex.getOwnerSessionId();
+  if (matchApex.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot." });
+    return;
+  }
+  const result = await matchApex.startSession({
+    ownerSessionId: req.sessionId,
+    botId: matchApex.MATCH_APEX_BOT_ID,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    marketMode,
+    lockedSymbol,
+    cluster: body.cluster ?? [],
+    symbol: market.symbol,
+    displayName: market.displayName,
+    card,
+  });
+  if (!result.ok) { res.status(409).json({ error: result.error }); return; }
+  res.json({ ok: true, status: visibleMatchApexStatus(req.sessionId) });
+});
+
+router.post("/match-apex/stop", (req, res) => {
+  const owner = matchApex.getOwnerSessionId();
+  if (matchApex.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  matchApex.stopSession();
+  res.json({ ok: true, status: visibleMatchApexStatus(req.sessionId) });
+});
+
+// ── Twin Barrier Sentinel ───────────────────────────────────────────────────
+
+router.get("/twin-o4u5/status", (req, res) => {
+  res.json(visibleTwinStatus(req.sessionId));
+});
+
+router.post("/twin-o4u5/scan", async (req, res): Promise<void> => {
+  try {
+    const risk = await killshotRisk(req.sessionId, req.body);
+    const result = await twinO4U5.scanForTwinO4U5(req.sessionId, {
+      stake: risk.stake,
+      markupPercent: risk.markupPercent,
+      maxTradeStake: risk.maxTradeStake,
+      maxStake: risk.maxStake,
+      takeProfit: (req.body?.takeProfit as number) > 0 ? Number(req.body.takeProfit) : 10,
+      stopLoss: risk.stopLoss,
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(req.body?.maxRecoverySteps) || 3)),
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Twin O4U5 scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/twin-o4u5/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+  const card = body.card ?? body.analysis;
+  if (!card || typeof card.baseline !== "number") {
+    res.status(400).json({ error: "Run the analysis first — measured card required" });
+    return;
+  }
+  const existingOwner = twinO4U5.getOwnerSessionId();
+  if (twinO4U5.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot." });
+    return;
+  }
+  const result = await twinO4U5.startSession({
+    ownerSessionId: req.sessionId,
+    botId: twinO4U5.TWIN_O4U5_BOT_ID,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    marketMode,
+    cluster: body.cluster ?? [],
+    symbol: market.symbol,
+    displayName: market.displayName,
+    card,
+  });
+  if (!result.ok) { res.status(409).json({ error: result.error }); return; }
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
+});
+
+router.post("/twin-o4u5/stop", (req, res) => {
+  const owner = twinO4U5.getOwnerSessionId();
+  if (twinO4U5.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  twinO4U5.stopSession();
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
+});
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
@@ -670,6 +863,10 @@ router.get("/status", (req, res) => {
   if (shot.running) { res.json(shot); return; }
   const fam = visibleFamilyStatus(req.sessionId);
   if (fam.running) { res.json(fam); return; }
+  const apex = visibleMatchApexStatus(req.sessionId);
+  if (apex.running) { res.json(apex); return; }
+  const twin = visibleTwinStatus(req.sessionId);
+  if (twin.running) { res.json(twin); return; }
   res.json(visibleStatus(req.sessionId));
 });
 

@@ -1,5 +1,9 @@
 # Deploy NeuroTrade to Railway (pnpm shared monorepo)
 
+> **Release parity:** if production does not match the sandbox after a merge,
+> follow [`deployment-parity.md`](./deployment-parity.md). A green API deploy
+> does not prove that the separate web service deployed.
+
 This repo is a **shared pnpm workspace** (`pnpm-workspace.yaml` + `catalog:` + `workspace:*`).  
 It is **not** an isolated monorepo. Getting that distinction wrong is what caused the earlier Railway failures.
 
@@ -100,6 +104,7 @@ Optional:
 |-------|--------|
 | Build Command | `pnpm --filter @workspace/trading-platform build` |
 | Start Command | `pnpm --filter @workspace/trading-platform start` |
+| Healthcheck | `/__healthz` (proves the built SPA release/contract) |
 
 **Variables**
 

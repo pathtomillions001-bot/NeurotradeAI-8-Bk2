@@ -41,6 +41,14 @@ if (!fs.existsSync(publicDir)) {
   process.exit(1);
 }
 
+const releasePath = path.join(publicDir, "release.json");
+let release = null;
+try {
+  release = JSON.parse(fs.readFileSync(releasePath, "utf8"));
+} catch (err) {
+  console.error(`[web] Release metadata missing or invalid at ${releasePath}:`, err.message);
+}
+
 const proxy = httpProxy.createProxyServer({
   target: upstream,
   changeOrigin: true,
@@ -62,11 +70,26 @@ proxy.on("error", (err, _req, res) => {
 
 const server = http.createServer((req, res) => {
   const url = req.url ?? "/";
+  const pathname = url.split("?", 1)[0];
 
-  if (url === "/api" || url.startsWith("/api/")) {
+  // This healthcheck proves which browser bundle is actually serving users.
+  // Checking only "/" allowed a months-old SPA to remain "healthy" forever.
+  if (pathname === "/__healthz") {
+    const healthy = Boolean(release?.commit && release?.botConsoleContract);
+    res.writeHead(healthy ? 200 : 503, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      ...(release?.commit ? { "x-neurotrade-web-release": String(release.commit) } : {}),
+    });
+    res.end(JSON.stringify({ status: healthy ? "ok" : "error", service: "web", release }));
+    return;
+  }
+
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
     return proxy.web(req, res, { target: upstream });
   }
 
+  if (release?.commit) res.setHeader("x-neurotrade-web-release", String(release.commit));
   return handler(req, res, {
     public: publicDir,
     // SPA fallback — wouter client routes
@@ -100,6 +123,7 @@ server.on("upgrade", (req, socket, head) => {
 
 server.listen(port, "0.0.0.0", () => {
   console.log(`[web] Serving ${publicDir} on 0.0.0.0:${port}`);
+  console.log(`[web] Release ${release?.commit ?? "UNKNOWN"} · ${release?.botConsoleContract ?? "NO CONTRACT"}`);
   console.log(`[web] Proxying /api → ${upstream}`);
 });
 

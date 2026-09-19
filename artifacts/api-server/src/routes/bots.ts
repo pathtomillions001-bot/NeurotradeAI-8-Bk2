@@ -44,6 +44,7 @@ import {
 import { db, settingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
+import { deploymentRelease } from "../lib/deployment-release";
 
 const router = Router();
 // Dedicated lifecycle; register before the generic /:botId routes.
@@ -197,6 +198,10 @@ router.get("/", (req, res) => {
   const twin = visibleTwinStatus(req.sessionId);
   const pulse = getMatchPulseStatus();
   res.json({
+    // The web client checks this before opening a console. A stale frontend
+    // must never silently render a specialist through the generic controls.
+    botConsoleContract: deploymentRelease.botConsoleContract,
+    release: deploymentRelease,
     bots: BOT_CATALOG.map(bot => {
       if (bot.matchPulse) return { ...bot, session: pulse.running ? pulse : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {

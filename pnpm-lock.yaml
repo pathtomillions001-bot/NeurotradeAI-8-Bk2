@@ -92,6 +92,9 @@ importers:
       '@workspace/db':
         specifier: workspace:*
         version: link:../../lib/db
+      '@workspace/deployment-contract':
+        specifier: workspace:*
+        version: link:../../lib/deployment-contract
       cookie-parser:
         specifier: ^1.4.7
         version: 1.4.7
@@ -447,6 +450,9 @@ importers:
       '@workspace/api-client-react':
         specifier: workspace:*
         version: link:../../lib/api-client-react
+      '@workspace/deployment-contract':
+        specifier: workspace:*
+        version: link:../../lib/deployment-contract
       class-variance-authority:
         specifier: 'catalog:'
         version: 0.7.1
@@ -581,6 +587,8 @@ importers:
       pg-mem:
         specifier: ^3.0.14
         version: 3.0.14
+
+  lib/deployment-contract: {}
 
   scripts:
     devDependencies:

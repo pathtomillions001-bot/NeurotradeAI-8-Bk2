@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Bot, Sparkles, Lock, Activity, ChevronRight,
+  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,12 @@ import { TwinHedgeConsole } from "@/components/twin-hedge-console";
 import { AccumulatorConsole } from "@/components/accumulator-console";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
+import { webRelease } from "@/lib/deployment-release";
+import {
+  botDeploymentIssue,
+  shortCommit,
+} from "@/lib/deployment-compatibility";
+import type { DeploymentRelease } from "@workspace/deployment-contract";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
 
@@ -33,7 +39,12 @@ function useBotCatalogue() {
       const res = await fetch("/api/bots");
       if (!res.ok) throw new Error("Could not load the bot catalogue");
       const data = await res.json();
-      return data as { bots: BotCardData[]; activeBotId: string | null };
+      return data as {
+        bots: BotCardData[];
+        activeBotId: string | null;
+        botConsoleContract?: string;
+        release?: DeploymentRelease;
+      };
     },
     refetchInterval: 15_000,
     staleTime: 10_000,
@@ -90,10 +101,11 @@ function useBotStatus(onUpdate: (status: BotSessionStatus | null) => void) {
 
 // ── Bot card ──────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, isThisRunning, anotherRunning, onOpen, index }: {
+function BotCard({ bot, isThisRunning, anotherRunning, deploymentBlocked, onOpen, index }: {
   bot: BotCardData;
   isThisRunning: boolean;
   anotherRunning: boolean;
+  deploymentBlocked: boolean;
   onOpen: () => void;
   index: number;
 }) {
@@ -193,22 +205,31 @@ function BotCard({ bot, isThisRunning, anotherRunning, onOpen, index }: {
             {isThisRunning ? (
               <Button
                 onClick={onOpen}
+                disabled={deploymentBlocked}
                 className={`w-full h-9 text-xs font-semibold ${a.solidBtn} text-white`}
               >
-                <Activity className="w-3.5 h-3.5 mr-1.5" /> {s?.pulse ? "Open Session" : "Open Live Session"}
+                {deploymentBlocked ? (
+                  <><AlertTriangle className="w-3.5 h-3.5 mr-1.5" /> Update Required</>
+                ) : (
+                  <><Activity className="w-3.5 h-3.5 mr-1.5" /> {s?.pulse ? "Open Session" : "Open Live Session"}</>
+                )}
               </Button>
             ) : (
               <Button
                 onClick={onOpen}
-                disabled={anotherRunning}
+                disabled={anotherRunning || deploymentBlocked}
                 variant="outline"
                 className={`w-full h-9 text-xs font-semibold ${
-                  anotherRunning
+                  anotherRunning || deploymentBlocked
                     ? "border-white/5 text-muted-foreground/40"
                     : `${a.outlineBtn}`
                 }`}
               >
-                {anotherRunning ? (
+                {deploymentBlocked ? (
+                  <>
+                    <AlertTriangle className="w-3.5 h-3.5 mr-1.5" /> Update Required
+                  </>
+                ) : anotherRunning ? (
                   <>
                     <Lock className="w-3.5 h-3.5 mr-1.5" /> Engine Busy
                   </>
@@ -238,6 +259,7 @@ export default function Bots() {
 
   const { session, setSession } = useBotStatus(onConsoleSession);
   const { data, isLoading, isError, error, refetch } = useBotCatalogue();
+  const deploymentIssue = botDeploymentIssue(data);
 
   // The console's own SSE copy wins when it is open (it is more immediate);
   // otherwise fall back to the page-level session.
@@ -249,7 +271,7 @@ export default function Bots() {
     session: liveSession?.running && liveSession.botId === bot.id ? liveSession : null,
   }));
 
-  const openBot = bots.find(b => b.id === openBotId) ?? null;
+  const openBot = deploymentIssue ? null : (bots.find(b => b.id === openBotId) ?? null);
 
   return (
     <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">
@@ -285,6 +307,21 @@ export default function Bots() {
           )}
         </div>
       </div>
+
+      {deploymentIssue && (
+        <Card className="border-red-500/40 bg-red-500/10">
+          <CardContent className="p-4 flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-red-300 mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <p className="text-sm font-semibold text-red-200">Bot controls paused: deployment versions do not match</p>
+              <p className="text-xs text-red-100/80">{deploymentIssue} Refresh after both Railway services finish deploying.</p>
+              <p className="text-[10px] font-mono text-red-100/55">
+                web {shortCommit(webRelease.commit)} · api {shortCommit(data?.release?.commit)}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* ── Bot grid ───────────────────────────────────────────────────── */}
       {isLoading && (
@@ -327,6 +364,7 @@ export default function Bots() {
               index={i}
               isThisRunning={activeBotId === bot.id}
               anotherRunning={!!activeBotId && activeBotId !== bot.id}
+              deploymentBlocked={Boolean(deploymentIssue)}
               onOpen={() => setOpenBotId(bot.id)}
             />
           ))}

@@ -359,6 +359,36 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalWinRate: "≈11% / ≈90%",
     nominalPayout: "8.93× / 1.09×",
   },
+  {
+    id: "match-nexus",
+    name: "Match Nexus — Quantum Singularity",
+    code: "BOT-MATCH-NEXUS",
+    family: "killshot",
+    killShotFamily: "matchdiffer",
+    contractLabel: "Matches (Quantum Singularity)",
+    tagline: "6-model singularity · gap-distribution aware · match-tuned shield",
+    description:
+      "The first Matches bot built ONLY for Matches — not a generic tail model. It pulls 4 999 deep digits per market, fits a 6-expert ensemble (forgetting Dirichlet, context-tree mixing to order 4, outcome chain, digit-specific renewal hazard, regime HMM, transition row) with Hedge regret bound, calibrates with Platt + Brier skill, and measures its own quantile gate out-of-sample. Entry needs hazard ×1.25, gap at its own p60-p95, percentile ≥60% and geometric overdue <0.32 — not a fixed 4-12 band. Post-loss shield is match-tuned: after a loss gap resets to 0, so it enforces gap≥4, hazard≥1.4 and cool-down 8-18 ticks, plus anti-pattern veto if a digit lost 2/5 recently. Locked mode freezes market but rotates edge to next best digit; switching mode moves to best market when Page-Hinkley fires. Same shared recovery ledger as Match Sniper (debt + markup profit).",
+    edge: [
+      "6 EXPERTS WITH REGRET BOUND — forgetting Dirichlet (drifting marginal), context-tree mixing 0-4 KT (best Markov in hindsight), 2-state outcome chain P(win|last outcome), digit-specific Kaplan-Meier hazard h(gap) from THIS digit's own gaps, 2-state HMM regime filter, exact Dirichlet transition row P(digit|last digit). Hedge on log-loss.",
+      "GAP DISTRIBUTION AWARENESS — not fixed 4-12. For each digit it builds its inter-arrival gap CDF, median, p70, p90, p95, current gap percentile and hazard × baseline. Entry needs gap ≥p60 and ≤p95, percentile ≥60%, hazardRelative ≥1.25 and geo-overdue (1-p̂)^gap <0.32.",
+      "PLATT + BRIER SKILL + E-VALUE — fused score calibrated on training half; slope collapses to 0 when no skill, Brier skill vs base printed. Evidence is anytime-valid betting e-value on SHOT sequence (Ville), valid at data-dependent stop.",
+      "MATCH-TUNED POST-LOSS SHIELD, SIMULATED BEFORE TRUSTED — for Matches a loss resets gap to 0, worst entry. Shield enforces gap≥4, hazard≥1.4, cool-down 8/12/18 ticks and is simulated over OOS shots: pairs before→after and cost in shots reported. Anti-pattern: digit losing 2/5 vetoed 25s.",
+      "EXACT LADDER-RUIN via FMCI — debt(k)=stake·(1+a)^(k-1), a=(1+markup)/(payout-1), k* solves closed-form, absorption P(deeper run) exact via Fu&Koutras, no Monte Carlo.",
+      "LOCKED = EDGE ROTATES, SWITCHING = MARKET ROTATES — locked freezes market but moves to next best digit when current cools (EV margin 0.015). Switching re-measures all 19 markets ×10 digits =190 candidates with BH FDR q=0.10 when PH fires. Never dead-end rescan.",
+      "ENTROPY + STATIONARITY + CONCORDANCE GATES — Shannon entropy >3.275b = white noise refuse, χ² block homogeneity z>3 or drift slope>0.06 refuse, concordance needs 2/4 horizons above BE, Page-Hinkley live health.",
+      "SAME SHARED RECOVERY AS MATCH SNIPER — one account-global ledger, debt-driven stake stake(k)=debt·(1+markup)/(payout-1), markup user-configurable, single-executor arbiter.",
+    ],
+    accent: "fuchsia",
+    icon: "zap",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Matches — AI picks best digit", contracts: ["DIGITMATCH"], desc: "AI scores all 10 digits in every market with 6-model singularity and BH FDR" },
+    ],
+    nominalWinRate: "measured OOS 12-18%",
+    nominalPayout: "8.93×",
+  },
 ];
 
 export function getBotDefinition(botId: string): BotDefinition | undefined {

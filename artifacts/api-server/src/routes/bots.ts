@@ -25,7 +25,9 @@ import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
+import * as matchNexus from "../lib/match-nexus-engine";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
+import { type NexusCertainty } from "../lib/match-nexus-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
@@ -57,11 +59,10 @@ interface ParsedBotBody {
 function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotBody } | { ok: false; error: string } {
   const bot = getBotDefinition(botId);
   if (!bot) return { ok: false, error: "Unknown bot" };
-  // Pre-locked bots (Dual-Lock Range Sentinel) have their own endpoints — they
-  // are never driven through the generic specialist route.
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
-  // One-shot bots (Kill-Shot Oracle) likewise have their own endpoints.
   if (bot.oneShot) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
+  // match-nexus uses its own engine, not the generic specialist route
+  if (botId === "match-nexus") return { ok: false, error: `${bot.name} uses the /nexus endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -72,7 +73,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   }
   const contractTypes = sideOption.contracts as BotContractType[];
 
-  // Barriers (barrier bot only).
   const overBarrier = Number(body.overBarrier);
   const underBarrier = Number(body.underBarrier);
   const barriers: number[] = [];
@@ -89,7 +89,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
     barriers.push(Math.trunc(underBarrier));
   }
 
-  // Digit lock (match / differ bots only).
   let lockedBarrier: number | undefined;
   if (bot.hasDigitLock) {
     if (body.lockedBarrier !== undefined && body.lockedBarrier !== null && body.lockedBarrier !== "") {
@@ -143,7 +142,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   };
 }
 
-/** Status as this browser session may see it (other sessions are blanked). */
 function visibleStatus(sessionId: string) {
   const status = getStatus();
   const owner = getOwnerSessionId();
@@ -183,13 +181,11 @@ router.get("/", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
+  const nexus = visibleNexusStatus(req.sessionId);
   res.json({
     release: API_RELEASE,
-    /** Console ids this catalogue expects the web bundle to implement. */
     consoles: botConsoleIds(),
     bots: BOT_CATALOG.map(bot => {
-      // `console` is the contract: the web bundle must implement this id or it
-      // is an out-of-date build (see lib/bot-catalog.ts + lib/release.ts).
       const console_ = botConsoleId(bot);
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
@@ -197,29 +193,29 @@ router.get("/", (req, res) => {
       if (bot.id === killshot.KILLSHOT_BOT_ID) {
         return { ...bot, console: console_, session: shot.running ? shot : null };
       }
+      if (bot.id === matchNexus.MATCH_NEXUS_BOT_ID) {
+        return { ...bot, console: console_, session: nexus.running ? nexus : null };
+      }
       if (bot.killShotFamily) {
+        // For family bots, show whichever family engine is running that matches this bot id
+        if (bot.id === "match-nexus") {
+          return { ...bot, console: console_, session: nexus.running ? nexus : null };
+        }
         return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
       }
       return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
-    // Priority order is owned by lib/bot-activity.ts, so the catalogue and
-    // /status can never disagree.
     activeBotId: pickActiveBotId([
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
+      { botId: matchNexus.MATCH_NEXUS_BOT_ID, running: nexus.running },
       { botId: fam.botId ?? null, running: fam.running },
       { botId: status.botId, running: status.running },
     ]),
   });
 });
 
-// ── Dual-Lock Range Sentinel (pre-locked bot) ─────────────────────────────────
-//
-// This bot has its own engine because its lifecycle is different: ALL analysis
-// runs once in /scan, the chosen (market, normal, recovery) triple is frozen,
-// and /start simply executes it until TP or SL. It shares the account-global
-// recovery ledger, the recovery stake formula and the single-executor arbiter
-// with the other five bots.
+// ── Dual-Lock ─────────────────────────────────────────────────────────────────
 
 function visibleDualStatus(sessionId: string) {
   const status = dualLock.getStatus();
@@ -240,9 +236,6 @@ async function dualSimParams(sessionId: string, body: any) {
       if (Number.isFinite(m) && m > 0) maxStake = m;
     }
   } catch { /* defaults */ }
-  // The Dual-Lock bot commits its risk parameters on the FIRST scan of an
-  // engagement and refuses to change them afterwards — a re-scan may move the
-  // market and contract pair, never the stake / TP / SL / steps.
   const requested = {
     stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
     takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
@@ -264,10 +257,6 @@ router.get("/duallock/status", (req, res) => {
   res.json(visibleDualStatus(req.sessionId));
 });
 
-/**
- * Start a brand-new Dual-Lock engagement — releases the committed risk
- * parameters so the next scan may set fresh ones. Refused while a session runs.
- */
 router.post("/duallock/reset", (req, res): void => {
   if (dualLock.isRunning() && dualLock.getOwnerSessionId() === req.sessionId) {
     res.status(409).json({ error: "Stop the running session before starting a new engagement." });
@@ -288,8 +277,6 @@ router.post("/duallock/scan", async (req, res): Promise<void> => {
     const result = await dualLock.scanForLock(req.sessionId, { ...params, markupPercent, maxStake });
     res.json({
       ...result,
-      // Echo the parameters the scan ACTUALLY used, plus whether the request
-      // tried to change locked ones, so the console can tell the user.
       sessionParams: params,
       paramsCommittedNow: committed,
       paramsOverridden: overridden,
@@ -320,10 +307,6 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 5, Under 4" });
     return;
   }
-  // In hunt mode the market is only the STARTING target — the loop re-selects it
-  // continuously — so it may be omitted and the first digit-enabled market is
-  // used. In lock mode it is frozen for the session and must be named.
-  const targetMode = body.targetMode === "lock" ? "lock" : "hunt";
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
   const fallback = AUTOMATED_DERIV_MARKETS.find(m => m.digitEnabled);
   const symbol = requested ?? fallback?.symbol;
@@ -341,9 +324,6 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     return;
   }
 
-  // Risk parameters are whatever was committed at the first scan of this
-  // engagement — the start request cannot widen or change them. This is what
-  // guarantees the quoted survival figure applies to the session being run.
   const committed = dualLock.getCommittedParams(req.sessionId);
   if (!committed) {
     res.status(409).json({ error: "Run the Dual-Lock analysis first — this bot may only deploy a scanned lock." });
@@ -389,16 +369,7 @@ router.post("/duallock/stop", (req, res) => {
   res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
 });
 
-// ── Kill-Shot Oracle (one-shot bot) ───────────────────────────────────────────
-//
-// Its own engine because its lifecycle is different again: the user names ONE
-// contract, the scan pulls deep history for every digit market, fits its model
-// on half of it and MEASURES the entry rule on the other half, then names ONE
-// market. Both the market and the model card are frozen, and the engine waits —
-// sometimes a long time — until health, edge, the post-loss shield and the tick
-// all agree. There is no hunt mode and no rotation. It shares the account-global
-// recovery ledger, the recovery stake formula and the single-executor arbiter
-// with every other bot in the section.
+// ── Kill-Shot Oracle ──────────────────────────────────────────────────────────
 
 function visibleKillShotStatus(sessionId: string) {
   const status = killshot.getStatus();
@@ -411,7 +382,6 @@ router.get("/killshot/status", (req, res) => {
   res.json(visibleKillShotStatus(req.sessionId));
 });
 
-/** Read the bot-recovery markup + stake cap the ladder projection must use. */
 async function killshotRisk(sessionId: string, body: any) {
   let markupPercent = 10;
   let maxStake = 500;
@@ -435,16 +405,10 @@ async function killshotRisk(sessionId: string, body: any) {
 function parseCertainty(raw: unknown): Certainty {
   return raw === "elite" || raw === "balanced" ? raw : "strict";
 }
+function parseNexusCertainty(raw: unknown): NexusCertainty {
+  return raw === "elite" || raw === "balanced" ? raw as NexusCertainty : "strict";
+}
 
-/**
- * Analyse every digit-enabled market for the user's PLAN — any combination of
- * contracts (both sides of a pair allowed) — and return the full ranking, the
- * per-market deployments, and the best market available even when nothing is
- * CERTIFIED, so the client can offer a deliberate lock instead of a dead end.
- *
- * An AI Matches/Differs fans out to all ten digits in every market and
- * Benjamini–Hochberg runs across the whole plan × market × digit family.
- */
 router.post("/killshot/scan", async (req, res): Promise<void> => {
   const parsed = validateShotPlan(req.body?.contracts ?? req.body?.contract);
   if (!parsed.ok) {
@@ -469,10 +433,6 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: parsed.error });
     return;
   }
-  // An AI Matches/Differs digit is NOT resolved before deployment: the bot is
-  // allowed to change it live with the market. Only the market is locked.
-
-  // The market must be named, and it must be one the scan is allowed to look at.
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
   if (!requested || !isAutomatedMarket(requested)) {
     res.status(400).json({ error: "Run the analysis first — this bot deploys only onto a market it has measured" });
@@ -487,9 +447,6 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "stake must be ≥ 0.35" });
     return;
   }
-  // The measured model cards are what make the live rule identical to the
-  // measured one. Without them there is nothing to deploy — the analysis IS the
-  // product. Accept the per-contract `cards` map (a plan) or a single `card`.
   const cards = (body.cards && typeof body.cards === "object") ? body.cards : {};
 
   const marketMode: "locked" | "switching" = body.marketMode === "switching" ? "switching" : "locked";
@@ -537,12 +494,7 @@ router.post("/killshot/stop", (req, res) => {
   res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
 });
 
-// ── Kill-Shot Family Oracles (Over/Under · Even/Odd · Matches/Differs) ────────
-//
-// Three bots that borrow the Kill-Shot Oracle's measurement unchanged and apply
-// it to a whole contract family. Unlike the one-shot Oracle they never dead-end:
-// in locked mode the EDGE rotates inside the frozen market, in switching mode the
-// MARKET rotates to the next best — either way the session runs to TP/SL/stop.
+// ── Kill-Shot Family Oracles ──────────────────────────────────────────────────
 
 function visibleFamilyStatus(sessionId: string) {
   const status = killshotFamily.getStatus();
@@ -595,7 +547,6 @@ function parseFamilySpec(botId: string, body: any):
     return { ok: true, spec: { botId: botId as killshotFamily.FamilyBotId, family, side, aiDigit: false, certainty: parseCertainty(body?.certainty) } };
   }
 
-  // matchdiffer
   if (!["match", "differ", "both"].includes(side)) return { ok: false, error: "side must be match, differ or both" };
   const hasDigit = body?.digit !== undefined && body?.digit !== null && body?.digit !== "";
   let digit: number | undefined;
@@ -614,15 +565,34 @@ router.get("/family/status", (req, res) => {
   res.json(visibleFamilyStatus(req.sessionId));
 });
 
-/** Measure every market for this bot's family and return a compact ranking. */
 router.post("/family/scan", async (req, res): Promise<void> => {
-  const parsed = parseFamilySpec(String(req.body?.botId ?? ""), req.body);
+  const body = req.body ?? {};
+  const botId = String(body?.botId ?? "");
+  // Match Nexus has its own superior engine — intercept here so the generic family engine is not used
+  if (botId === "match-nexus") {
+    const parsed = parseNexusSpec(botId, body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    try {
+      const risk = await killshotRisk(req.sessionId, body);
+      const result = await matchNexus.scanForNexus(req.sessionId, parsed.spec, risk);
+      res.json(result);
+    } catch (err) {
+      logger.error({ err }, "Match Nexus scan failed");
+      res.status(500).json({ error: "Scan failed" });
+    }
+    return;
+  }
+
+  const parsed = parseFamilySpec(botId, body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
   }
   try {
-    const risk = await killshotRisk(req.sessionId, req.body);
+    const risk = await killshotRisk(req.sessionId, body);
     const result = await killshotFamily.scanForFamily(req.sessionId, parsed.spec, risk);
     res.json(result);
   } catch (err) {
@@ -633,7 +603,76 @@ router.post("/family/scan", async (req, res): Promise<void> => {
 
 router.post("/family/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
-  const parsed = parseFamilySpec(String(body.botId ?? ""), body);
+  const botId = String(body.botId ?? "");
+
+  if (botId === "match-nexus") {
+    const parsed = parseNexusSpec(botId, body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+    const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+    if (!requested || !isAutomatedMarket(requested)) {
+      res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
+      return;
+    }
+    const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+    if (!market || !market.digitEnabled) {
+      res.status(400).json({ error: "This bot needs a digit-enabled market" });
+      return;
+    }
+    if (typeof body.stake !== "number" || body.stake < 0.35) {
+      res.status(400).json({ error: "stake must be ≥ 0.35" });
+      return;
+    }
+    let lockedSymbol: string | undefined;
+    if (marketMode === "locked") {
+      if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
+        res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+        return;
+      }
+      if (!isAutomatedMarket(body.lockedSymbol)) {
+        res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
+        return;
+      }
+      lockedSymbol = body.lockedSymbol;
+    }
+    const card = body.card ?? body.analysis?.card;
+    if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
+      res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
+      return;
+    }
+    const existingOwner = matchNexus.getOwnerSessionId();
+    if (matchNexus.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+      res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+      return;
+    }
+    const result = await matchNexus.startSession({
+      ownerSessionId: req.sessionId,
+      botId: parsed.spec.botId,
+      spec: parsed.spec,
+      stake: body.stake,
+      stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+      takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+      marketMode,
+      lockedSymbol,
+      symbol: market.symbol,
+      displayName: market.displayName,
+      digit: Number.isInteger(body.digit) ? Number(body.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5),
+      card,
+      lockedAnalysis: body.analysis,
+    });
+    if (!result.ok) {
+      res.status(409).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+    return;
+  }
+
+  const parsed = parseFamilySpec(botId, body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
@@ -715,8 +754,142 @@ router.post("/family/stop", (req, res) => {
     res.status(409).json({ error: "You cannot stop another browser session's bot." });
     return;
   }
+  const nexusOwner = matchNexus.getOwnerSessionId();
+  if (matchNexus.isRunning() && nexusOwner && nexusOwner === req.sessionId) {
+    matchNexus.stopSession();
+    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+    return;
+  }
   killshotFamily.stopSession();
   res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
+});
+
+// ── Match Nexus — Quantum Singularity ────────────────────────────────────────
+
+function visibleNexusStatus(sessionId: string) {
+  const status = matchNexus.getStatus();
+  const owner = matchNexus.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, deployed: undefined, familyWatch: undefined };
+}
+
+function parseNexusSpec(botId: string, body: any):
+  { ok: true; spec: matchNexus.NexusDeploySpec } | { ok: false; error: string } {
+  if (botId !== "match-nexus") return { ok: false, error: "Unknown bot" };
+  const certainty = parseNexusCertainty(body?.certainty);
+  const hasDigit = body?.digit !== undefined && body?.digit !== null && body?.digit !== "";
+  let digit: number | undefined;
+  if (hasDigit) {
+    const d = Number(body?.digit);
+    if (!Number.isInteger(d) || d < 0 || d > 9) return { ok: false, error: "digit must be 0–9" };
+    digit = d;
+  }
+  return {
+    ok: true,
+    spec: {
+      botId,
+      digit,
+      aiDigit: !hasDigit,
+      certainty,
+    },
+  };
+}
+
+router.get("/nexus/status", (req, res) => {
+  res.json(visibleNexusStatus(req.sessionId));
+});
+
+router.post("/nexus/scan", async (req, res): Promise<void> => {
+  const parsed = parseNexusSpec(String(req.body?.botId ?? "match-nexus"), req.body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  try {
+    const risk = await killshotRisk(req.sessionId, req.body);
+    const result = await matchNexus.scanForNexus(req.sessionId, parsed.spec, risk);
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Match Nexus scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/nexus/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const parsed = parseNexusSpec(String(body.botId ?? "match-nexus"), body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+  let lockedSymbol: string | undefined;
+  if (marketMode === "locked") {
+    if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
+      res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+      return;
+    }
+    if (!isAutomatedMarket(body.lockedSymbol)) {
+      res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
+      return;
+    }
+    lockedSymbol = body.lockedSymbol;
+  }
+  const card = body.card ?? body.analysis?.card;
+  if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
+    res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
+    return;
+  }
+  const existingOwner = matchNexus.getOwnerSessionId();
+  if (matchNexus.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+    return;
+  }
+  const result = await matchNexus.startSession({
+    ownerSessionId: req.sessionId,
+    botId: parsed.spec.botId,
+    spec: parsed.spec,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    marketMode,
+    lockedSymbol,
+    symbol: market.symbol,
+    displayName: market.displayName,
+    digit: Number.isInteger(body.digit) ? Number(body.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5),
+    card,
+    lockedAnalysis: body.analysis,
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+});
+
+router.post("/nexus/stop", (req, res) => {
+  const owner = matchNexus.getOwnerSessionId();
+  if (matchNexus.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  matchNexus.stopSession();
+  res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
 });
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -726,14 +899,33 @@ router.get("/status", (req, res) => {
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
   if (shot.running) { res.json(shot); return; }
+  const nexus = visibleNexusStatus(req.sessionId);
+  if (nexus.running) { res.json(nexus); return; }
   const fam = visibleFamilyStatus(req.sessionId);
   if (fam.running) { res.json(fam); return; }
   res.json(visibleStatus(req.sessionId));
 });
 
-// ── Scan ──────────────────────────────────────────────────────────────────────
+// ── Scan (specialist) ─────────────────────────────────────────────────────────
 
 router.post("/:botId/scan", async (req, res): Promise<void> => {
+  if (req.params["botId"] === "match-nexus") {
+    const parsed = parseNexusSpec("match-nexus", req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    try {
+      const risk = await killshotRisk(req.sessionId, req.body);
+      const result = await matchNexus.scanForNexus(req.sessionId, parsed.spec, risk);
+      res.json(result);
+    } catch (err) {
+      logger.error({ err }, "Match Nexus scan failed");
+      res.status(500).json({ error: "Scan failed" });
+    }
+    return;
+  }
+
   const parsed = validateBotBody(req.params["botId"]!, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
@@ -752,10 +944,78 @@ router.post("/:botId/scan", async (req, res): Promise<void> => {
   }
 });
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+// ── Start (specialist) ────────────────────────────────────────────────────────
 
 router.post("/:botId/start", async (req, res): Promise<void> => {
   const botId = req.params["botId"]!;
+  if (botId === "match-nexus") {
+    const body = req.body ?? {};
+    const parsed = parseNexusSpec(botId, body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+    const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+    if (!requested || !isAutomatedMarket(requested)) {
+      res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
+      return;
+    }
+    const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+    if (!market || !market.digitEnabled) {
+      res.status(400).json({ error: "This bot needs a digit-enabled market" });
+      return;
+    }
+    if (typeof body.stake !== "number" || body.stake < 0.35) {
+      res.status(400).json({ error: "stake must be ≥ 0.35" });
+      return;
+    }
+    let lockedSymbol: string | undefined;
+    if (marketMode === "locked") {
+      if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
+        res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+        return;
+      }
+      if (!isAutomatedMarket(body.lockedSymbol)) {
+        res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
+        return;
+      }
+      lockedSymbol = body.lockedSymbol;
+    }
+    const card = body.card ?? body.analysis?.card;
+    if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
+      res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
+      return;
+    }
+    const existingOwner = matchNexus.getOwnerSessionId();
+    if (matchNexus.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+      res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+      return;
+    }
+    const result = await matchNexus.startSession({
+      ownerSessionId: req.sessionId,
+      botId: parsed.spec.botId,
+      spec: parsed.spec,
+      stake: body.stake,
+      stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+      takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+      marketMode,
+      lockedSymbol,
+      symbol: market.symbol,
+      displayName: market.displayName,
+      digit: Number.isInteger(body.digit) ? Number(body.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5),
+      card,
+      lockedAnalysis: body.analysis,
+    });
+    if (!result.ok) {
+      res.status(409).json({ error: result.error });
+      return;
+    }
+    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+    return;
+  }
+
   const parsed = validateBotBody(botId, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
@@ -783,9 +1043,21 @@ router.post("/:botId/start", async (req, res): Promise<void> => {
   res.json({ ok: true, status: visibleStatus(req.sessionId) });
 });
 
-// ── Stop ──────────────────────────────────────────────────────────────────────
+// ── Stop (specialist) ─────────────────────────────────────────────────────────
 
 router.post("/:botId/stop", (req, res) => {
+  const botId = req.params["botId"]!;
+  if (botId === "match-nexus") {
+    const owner = matchNexus.getOwnerSessionId();
+    if (matchNexus.isRunning() && owner && owner !== req.sessionId) {
+      res.status(409).json({ error: "You cannot stop another browser session's specialist bot." });
+      return;
+    }
+    matchNexus.stopSession();
+    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+    return;
+  }
+
   const owner = getOwnerSessionId();
   const status = getStatus();
   if (status.running && owner && owner !== req.sessionId) {

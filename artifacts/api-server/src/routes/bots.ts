@@ -24,6 +24,13 @@ import * as dualLock from "../lib/dual-lock-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
 import * as twinAvoid from "../lib/twin-avoid-engine";
+import * as accumulator from "../lib/accumulator-engine";
+import {
+  ACCU_CERTAINTY,
+  ACCU_GROWTH_RATES,
+  tickCapFor,
+  type CertaintyProfile,
+} from "../lib/accumulator-analysis";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -848,6 +855,186 @@ router.post("/twin/stop", (req, res) => {
   res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
 });
 
+// ── Accumulator (Compounding Range Sentinel) ─────────────────────────────────
+//
+// The accumulator is the one bot whose controls are about VOLATILITY rather
+// than direction or digits: the growth rate sets the range and the compounding
+// rate together, the certainty profile sets how much measured proof is
+// demanded, and the market mode decides whether a market whose edge has died
+// is held with an alert or swapped for the best measured one.
+
+/**
+ * Bind an accumulator status payload to the calling browser session: another
+ * session's running bot is reported as "not running" rather than leaking its
+ * positions into this user's console.
+ */
+function visibleAccumulatorStatus(sessionId: string | undefined) {
+  const status = accumulator.getAccumulatorStatus();
+  const owner = accumulator.getOwnerSessionId();
+  if (!status.running || !owner || owner === sessionId) return status;
+  return { ...status, running: false, config: undefined, message: "Another browser session is running the accumulator bot." };
+}
+
+router.get("/accumulator/status", (req, res) => {
+  res.json(visibleAccumulatorStatus(req.sessionId));
+});
+
+router.get("/accumulator/params", (_req, res) => {
+  res.json({
+    growthRates: ACCU_GROWTH_RATES,
+    certainty: Object.values(ACCU_CERTAINTY),
+    tickCaps: ACCU_GROWTH_RATES.map((g) => ({ growthRate: g, maxTicks: tickCapFor(g) })),
+    markets: AUTOMATED_DERIV_MARKETS.map((m) => ({ symbol: m.symbol, displayName: m.displayName })),
+  });
+});
+
+/**
+ * Measure every market × growth rate without deploying anything.
+ * Returns the ranked candidates, the FDR control that was applied, and the
+ * reason the best candidate is or is not deployable.
+ */
+router.post("/accumulator/scan", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const growthRate = Number(body.growthRate ?? 0.02);
+  if (!ACCU_GROWTH_RATES.includes(growthRate as (typeof ACCU_GROWTH_RATES)[number])) {
+    res.status(400).json({ error: `growthRate must be one of ${ACCU_GROWTH_RATES.join(", ")}` });
+    return;
+  }
+  const certainty: CertaintyProfile["id"] = ["elite", "strict", "balanced"].includes(body.certainty)
+    ? body.certainty
+    : "strict";
+  const symbol = typeof body.symbol === "string" && body.symbol.length > 0 ? body.symbol : null;
+  if (symbol && !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: `${symbol} is not available to the accumulator bot.` });
+    return;
+  }
+
+  try {
+    const result = await accumulator.scanAccumulators({
+      growthRates: [growthRate],
+      symbols: symbol ? [symbol] : undefined,
+      stake: Number(body.stake) > 0 ? Number(body.stake) : 1,
+      certainty,
+    });
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Accumulator scan failed");
+    res.status(500).json({ error: "Accumulator scan failed" });
+  }
+});
+
+/**
+ * The deep read on ONE market × growth rate: the barrier, the break-even, the
+ * measured survival curve against the contractual payout curve, and the horizon
+ * where the conservative EV peaks. This is the "show me the maths" endpoint.
+ */
+router.post("/accumulator/explain", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const symbol = typeof body.symbol === "string" ? body.symbol : "";
+  const growthRate = Number(body.growthRate ?? 0.02);
+  if (!symbol || !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: "A valid symbol is required." });
+    return;
+  }
+  if (!ACCU_GROWTH_RATES.includes(growthRate as (typeof ACCU_GROWTH_RATES)[number])) {
+    res.status(400).json({ error: `growthRate must be one of ${ACCU_GROWTH_RATES.join(", ")}` });
+    return;
+  }
+  const certainty: CertaintyProfile["id"] = ["elite", "strict", "balanced"].includes(body.certainty)
+    ? body.certainty
+    : "strict";
+  try {
+    const result = await accumulator.explainAccumulator({
+      symbol,
+      growthRate,
+      stake: Number(body.stake) > 0 ? Number(body.stake) : 1,
+      certainty,
+    });
+    if (!result) {
+      res.status(503).json({ error: "Not enough tick history for this market yet — try again in a few seconds." });
+      return;
+    }
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Accumulator explain failed");
+    res.status(500).json({ error: "Accumulator analysis failed" });
+  }
+});
+
+router.post("/accumulator/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const growthRate = Number(body.growthRate ?? 0.02);
+  if (!ACCU_GROWTH_RATES.includes(growthRate as (typeof ACCU_GROWTH_RATES)[number])) {
+    res.status(400).json({ error: `growthRate must be one of ${ACCU_GROWTH_RATES.join(", ")}` });
+    return;
+  }
+  const certainty: CertaintyProfile["id"] = ["elite", "strict", "balanced"].includes(body.certainty)
+    ? body.certainty
+    : "strict";
+  const stake = Number(body.stake);
+  if (!(stake > 0)) { res.status(400).json({ error: "A stake greater than zero is required." }); return; }
+  const stopLoss = Number(body.stopLoss);
+  const takeProfit = Number(body.takeProfit);
+  if (!(stopLoss > 0) || !(takeProfit > 0)) {
+    res.status(400).json({ error: "Stop loss and take profit must both be greater than zero." });
+    return;
+  }
+  const marketMode = body.marketMode === "locked" ? "locked" : "switching";
+  const lockedSymbol = typeof body.lockedSymbol === "string" && body.lockedSymbol.length > 0 ? body.lockedSymbol : undefined;
+  if (marketMode === "locked" && !lockedSymbol) {
+    res.status(400).json({ error: "Choose a market to lock before deploying in locked mode." });
+    return;
+  }
+  if (lockedSymbol && !isAutomatedMarket(lockedSymbol)) {
+    res.status(400).json({ error: `${lockedSymbol} is not available to the accumulator bot.` });
+    return;
+  }
+
+  const existingOwner = accumulator.getOwnerSessionId();
+  const status = accumulator.getAccumulatorStatus();
+  if (status.running && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running the accumulator bot. Your account was not touched." });
+    return;
+  }
+
+  const contractTakeProfit = Number(body.contractTakeProfit);
+  const config: accumulator.AccumulatorConfig = {
+    ownerSessionId: req.sessionId,
+    botId: "accumulator",
+    growthRate,
+    stake,
+    stopLoss,
+    takeProfit,
+    contractTakeProfit: Number.isFinite(contractTakeProfit) && contractTakeProfit > 0
+      ? contractTakeProfit
+      : Math.max(0.01, Math.round(stake * (Math.pow(1 + growthRate, 20) - 1) * 100) / 100),
+    certainty,
+    marketMode,
+    lockedSymbol,
+    recoveryAutoMode: true,
+    maxRecoverySteps: Number(body.maxRecoverySteps) > 0 ? Math.min(10, Number(body.maxRecoverySteps)) : 3,
+    maxHoldTicks: Number(body.maxHoldTicks) > 0 ? Number(body.maxHoldTicks) : undefined,
+  };
+
+  const result = await accumulator.startAccumulatorSession(config);
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: accumulator.getAccumulatorStatus() });
+});
+
+router.post("/accumulator/stop", (req, res) => {
+  const owner = accumulator.getOwnerSessionId();
+  const status = accumulator.getAccumulatorStatus();
+  if (status.running && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  accumulator.stopAccumulatorSession();
+  res.json({ ok: true, status: accumulator.getAccumulatorStatus() });
+});
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
@@ -859,12 +1046,18 @@ router.get("/status", (req, res) => {
   if (fam.running) { res.json(fam); return; }
   const twin = visibleTwinStatus(req.sessionId);
   if (twin.running) { res.json(twin); return; }
+  const accu = accumulator.getAccumulatorStatus();
+  if (accu.running) { res.json(accu); return; }
   res.json(visibleStatus(req.sessionId));
 });
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
 
 router.post("/:botId/scan", async (req, res): Promise<void> => {
+  if (getBotDefinition(req.params["botId"]!)?.family === "accumulator") {
+    res.status(400).json({ error: "Use /accumulator/scan for the Compounding Range Sentinel." });
+    return;
+  }
   const parsed = validateBotBody(req.params["botId"]!, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
@@ -887,6 +1080,10 @@ router.post("/:botId/scan", async (req, res): Promise<void> => {
 
 router.post("/:botId/start", async (req, res): Promise<void> => {
   const botId = req.params["botId"]!;
+  if (getBotDefinition(botId)?.family === "accumulator") {
+    res.status(400).json({ error: "Use /accumulator/start for the Compounding Range Sentinel — its controls are not the specialist family's." });
+    return;
+  }
   const parsed = validateBotBody(botId, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });

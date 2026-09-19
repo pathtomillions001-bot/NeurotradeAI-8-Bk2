@@ -7,7 +7,7 @@
  * giving each specialist its own hue.
  */
 
-import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Layers } from "lucide-react";
+import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Layers } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
 
@@ -41,6 +41,8 @@ export interface BotCardData {
   preLocked?: boolean;
   /** One-shot bots lock one market + one contract and wait for the one shot. */
   oneShot?: boolean;
+  /** Compounding Range Sentinel — the accumulator bot family. */
+  accumulator?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
   /** Twin-Hedge Edge — two legs, one market, same tick. */
@@ -503,6 +505,7 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   target: Target,
   zap: Zap,
   layers: Layers,
+  activity: Activity,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

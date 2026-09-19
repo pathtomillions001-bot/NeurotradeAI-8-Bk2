@@ -24,6 +24,11 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { logger } from "./logger";
+// The published index specifications (annualised volatility and tick interval)
+// live in the accumulator analysis module because the ACCU barrier theory is
+// built on them. It has no imports of its own, so this is a clean one-way edge
+// and there is exactly ONE definition of "how volatile is R_10" in the codebase.
+import { annualVolFor, tickSecondsFor, YEAR_SECONDS } from "./accumulator-analysis";
 import { RISE_FALL_PAYOUT } from "./payouts";
 import {
   describeDerivHttpFailure,
@@ -667,6 +672,27 @@ const SIM_PARAMS: Record<string, { base: number; vol: number }> = {
   JD100:   { base: 1000.00,  vol: 0.00200 },
 };
 
+/**
+ * Per-tick σ of a simulated index, taken from the index's PUBLISHED annualised
+ * volatility and its real tick interval rather than a hand-tuned constant.
+ *
+ * The `vol` column above is kept only as a display-scale fallback for symbols
+ * outside the volatility family; for every Volatility / 1-second / Jump index
+ * the real
+ * specification is used, because the accumulator bot compares the measured
+ * per-tick vol against the volatility implied by a live barrier — a simulator
+ * that is 7× too volatile (which the hand-tuned constants were for R_10)
+ * makes every such comparison meaningless.
+ */
+function simulatedSigmaTick(symbol: string): number {
+  const specSec = tickSecondsFor(symbol);
+  const annual = annualVolFor(symbol);
+  const sigma = annual * Math.sqrt(specSec / YEAR_SECONDS);
+  if (Number.isFinite(sigma) && sigma > 0) return sigma;
+  const fallback = SIM_PARAMS[symbol];
+  return fallback ? fallback.vol : 0.0005;
+}
+
 export interface TickEvent {
   symbol: string;
   price: number;
@@ -710,6 +736,8 @@ class DerivTickManager extends EventEmitter {
 
   private simInterval: ReturnType<typeof setInterval> | null = null;
   private simPrices = new Map<string, number>();
+  /** Last simulated tick time per symbol — keeps each index on its real cadence. */
+  private simLastTickMs = new Map<string, number>();
   private usingSimulated = false;
 
   // Request multiplexing & queueing over persistent public WS
@@ -1133,9 +1161,10 @@ class DerivTickManager extends EventEmitter {
       const params = SIM_PARAMS[market.symbol];
       if (!params || !market.digitEnabled) continue;
       this.simPrices.set(market.symbol, params.base);
+      const sigmaTick = simulatedSigmaTick(market.symbol);
       let price = params.base;
       for (let i = 0; i < SIM_SEED_TICKS; i++) {
-        const delta = price * params.vol * this.gaussianRandom();
+        const delta = price * sigmaTick * this.gaussianRandom();
         price = Math.max(price * 0.5, price + delta);
         this.pushSimulatedTick(market, price);
       }
@@ -1151,8 +1180,20 @@ class DerivTickManager extends EventEmitter {
       const params = SIM_PARAMS[market.symbol];
       if (!params) return;
 
+      // Each index keeps its OWN tick cadence: the 1-second indices tick every
+      // second and everything else every 2 seconds. Without this the simulated
+      // feed delivered one tick per second for every symbol, which made a
+      // 2-second index look 41% more volatile per tick than it is and made every
+      // barrier calculation meaningless in offline mode.
+      const tickMs = tickSecondsFor(market.symbol) * 1000;
+      const now = Date.now();
+      const last = this.simLastTickMs.get(market.symbol) ?? 0;
+      if (now - last < tickMs) return;
+      this.simLastTickMs.set(market.symbol, now);
+
+      const sigmaTick = simulatedSigmaTick(market.symbol);
       let price = this.simPrices.get(market.symbol) ?? params.base;
-      const delta = price * params.vol * this.gaussianRandom();
+      const delta = price * sigmaTick * this.gaussianRandom();
       price = Math.max(price * 0.5, price + delta);
       this.simPrices.set(market.symbol, price);
       this.pushSimulatedTick(market, price);
@@ -1917,6 +1958,158 @@ export async function getContractProposal(
   return null;
 }
 
+// ── Accumulator (ACCU) proposal ──────────────────────────────────────────────
+/**
+ * Quote an accumulator on the public WS.
+ *
+ * ACCU is not a directional contract: it buys a compounding range. The request
+ * therefore carries `growth_rate` (0.01–0.05, in 1 % steps) and an optional
+ * `limit_order.take_profit`, and the response carries the ACTUAL two barriers
+ * (absolute prices) that the range is built from. Those barriers are ground
+ * truth for the whole analysis layer — `accumulator-analysis.ts` prefers a
+ * calibrated barrier over its model whenever one has been seen.
+ */
+export interface AccumulatorProposal {
+  proposalId: string;
+  askPrice: number;
+  payout: number;
+  /** Absolute upper/lower barriers as quoted by Deriv. */
+  highBarrier: number | null;
+  lowBarrier: number | null;
+  /** Band half-width as a fraction of spot, derived from the quoted barriers. */
+  barrierRatio: number | null;
+  spot: number;
+  longcode: string;
+  growthRate: number;
+  takeProfit: number | null;
+}
+
+export async function getAccumulatorProposal(
+  params: {
+    symbol: string;
+    stake: number;
+    currency: string;
+    durationTicks: number;
+    growthRate: number;
+    takeProfit?: number | null;
+  },
+): Promise<AccumulatorProposal | null> {
+  try {
+    const proposalParams: Record<string, unknown> = {
+      amount: params.stake,
+      basis: "stake",
+      contract_type: "ACCU",
+      currency: params.currency,
+      duration: params.durationTicks,
+      duration_unit: "t",
+      underlying_symbol: params.symbol,
+      growth_rate: params.growthRate,
+    };
+    if (params.takeProfit !== undefined && params.takeProfit !== null) {
+      proposalParams.limit_order = { take_profit: params.takeProfit };
+    }
+
+    const msg = await tickManager.request({ proposal: 1, ...proposalParams }, 10_000);
+    if (msg?.error) {
+      logger.debug({ symbol: params.symbol, err: msg.error }, "getAccumulatorProposal: Deriv error");
+      return null;
+    }
+    if (msg?.msg_type !== "proposal" || !msg.proposal) return null;
+
+    const proposal = msg.proposal;
+    const spot = Number(proposal.spot ?? 0);
+    const high = proposal.high_barrier !== undefined ? Number(proposal.high_barrier) : null;
+    const low = proposal.low_barrier !== undefined ? Number(proposal.low_barrier) : null;
+    let barrierRatio: number | null = null;
+    if (spot > 0 && high !== null && low !== null && Number.isFinite(high) && Number.isFinite(low)) {
+      // The band is symmetric about the previous spot; average the two sides so
+      // a one-sided rounding to the pip does not skew the reading.
+      barrierRatio = ((high - spot) + (spot - low)) / 2 / spot;
+      if (!(barrierRatio > 0)) barrierRatio = null;
+    }
+
+    const askPrice = Number(proposal.ask_price ?? params.stake);
+    const payout = Number(proposal.payout ?? askPrice);
+    return {
+      proposalId: String(proposal.id ?? ""),
+      askPrice,
+      payout,
+      highBarrier: Number.isFinite(high as number) ? high : null,
+      lowBarrier: Number.isFinite(low as number) ? low : null,
+      barrierRatio,
+      spot,
+      longcode: proposal.longcode ?? "",
+      growthRate: params.growthRate,
+      takeProfit: params.takeProfit ?? null,
+    };
+  } catch (e) {
+    logger.debug({ e }, "getAccumulatorProposal failed");
+    return null;
+  }
+}
+
+/**
+ * Sell an open contract back to Deriv — the accumulator's exit.
+ *
+ * This is what makes the accumulator bot's risk management real rather than
+ * theoretical: the bot can close a position at ANY tick after the first, so a
+ * deteriorating market can be cashed out near par instead of being ridden to a
+ * total loss. Runs on the authenticated OTP socket; `price: 0` means "accept
+ * the market price".
+ */
+export async function sellContract(
+  bearerToken: string,
+  accountId: string,
+  contractId: number | string,
+): Promise<{ soldFor: number; balanceAfter: number | null }> {
+  if (!bearerToken || !accountId) {
+    throw new Error("No authenticated session — a Bearer token and account ID are required to sell a contract.");
+  }
+  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
+    let settled = false;
+    const timeout = setTimeout(() => settleFail(new Error("Sell request timed out")), 15_000);
+
+    const settleFail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch { /* ignore */ }
+      reject(err);
+    };
+
+    ws.on("open", () => {
+      ws.send(JSON.stringify({ sell: contractId, price: 0 }));
+    });
+
+    ws.on("message", (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.error) {
+          settleFail(new Error(msg.error.message ?? "Sell rejected by Deriv"));
+          return;
+        }
+        if (msg.msg_type === "sell" && msg.sell) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          try { ws.close(); } catch { /* ignore */ }
+          resolve({
+            soldFor: Number(msg.sell.sold_for ?? 0),
+            balanceAfter: msg.sell.balance_after !== undefined ? Number(msg.sell.balance_after) : null,
+          });
+        }
+      } catch (e) {
+        logger.error({ e }, "sellContract: error parsing message");
+      }
+    });
+
+    ws.on("error", (err) => settleFail(err));
+  });
+}
+
 // ── Live trade execution via OTP WebSocket ────────────────────────────────────
 /**
  * Execute a live trade using the new OTP-authenticated WebSocket flow:
@@ -1937,6 +2130,10 @@ export async function executeLiveTrade(
     currency: string;
     accountId: string;
     barrier?: number | string;
+    /** ACCU only: growth rate 0.01–0.05. */
+    growthRate?: number;
+    /** ACCU only: exchange-side take-profit in account currency. */
+    takeProfit?: number;
   },
 ): Promise<LiveTradeResult> {
   const accountId = params.accountId;
@@ -1979,6 +2176,9 @@ export async function executeLiveTrade(
         underlying_symbol: params.symbol,   // new field name
       };
       if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
+      // Accumulators: the compounding schedule and the exchange-side exit.
+      if (params.growthRate !== undefined) proposalParams.growth_rate = params.growthRate;
+      if (params.takeProfit !== undefined) proposalParams.limit_order = { take_profit: params.takeProfit };
       logger.info({ proposalParams, proposalAttempts }, "executeLiveTrade: sending proposal");
       ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
     };

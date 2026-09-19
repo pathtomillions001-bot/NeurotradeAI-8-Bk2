@@ -4,33 +4,18 @@
  * The web bundle and the API are separate Railway services. When the web
  * service is a release behind, its console registry is missing the consoles the
  * API's catalogue asks for, and the old Bot Arena silently fell back to the
- * generic specialist console. That is the production incident this file exists
- * to prevent:
- *
- *   Match Pulse              → generic console instead of the pulse console
- *   Compounding Range Sentinel → generic console instead of the accumulation one
- *   Twin-Hedge Edge          → the superseded (pre-2026-09-18) twin console
- *
- * The ids below are data (no React) so the Vite config can embed them in the
- * build's `release.json` without pulling components into the config graph, and
- * so `console-registry.ts` can be tested against them.
+ * generic specialist console.
  *
  * RULES
  *  - Add the id here AND to the registry when a console ships.
  *  - Bump the `@N` revision when a console's UI/flow changes materially, so
  *    bundles built before the change are detected even though the bot id did
- *    not change (that is the Twin-Hedge case).
+ *    not change.
  */
 
 export const WEB_CONSOLE_IDS = [
   /** Legacy specialist suite: sides / digit lock / barrier controls. */
   "specialist@1",
-  /** Match Pulse — Matches-only causal predictor. */
-  "match-pulse@1",
-  /** Compounding Range Sentinel — accumulator compounding console. */
-  "accumulator@1",
-  /** Twin-Hedge Edge — 4/5 dead-zone hunter (rebuilt 2026-09-18 ⇒ revision 2). */
-  "twin-hedge@2",
   /** Dual-Lock Range Sentinel — scan once, freeze the pair. */
   "dual-lock@1",
   /** Kill-Shot Oracle — one contract, one market, one shot. */

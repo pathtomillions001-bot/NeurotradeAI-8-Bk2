@@ -7,8 +7,7 @@
  * giving each specialist its own hue.
  */
 
-import type { PulseTelemetry } from "./match-pulse";
-import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Layers } from "lucide-react";
+import { Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
 
@@ -40,19 +39,13 @@ export interface BotCardData {
   nominalPayout: string;
   /** Pre-locked bots analyse once, then freeze their pair for the session. */
   preLocked?: boolean;
-  /** Tick-guarded Matches-only lifecycle. */
-  matchPulse?: boolean;
   /** One-shot bots lock one market + one contract and wait for the one shot. */
   oneShot?: boolean;
-  /** Compounding Range Sentinel — the accumulator bot family. */
-  accumulator?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
-  /** Twin-Hedge Edge — two legs, one market, same tick. */
-  twinHedge?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
-   * (e.g. "match-pulse@1"). The web bundle only renders bots whose console it
+   * (e.g. "specialist@1"). The web bundle only renders bots whose console it
    * implements; anything else is reported as a stale bundle instead of being
    * silently drawn with the generic specialist console.
    */
@@ -61,7 +54,6 @@ export interface BotCardData {
 }
 
 export interface BotSessionStatus {
-  pulse?: PulseTelemetry;
   running: boolean;
   botId: string | null;
   botName: string | null;
@@ -250,49 +242,6 @@ export interface BotSessionStatus {
     confidence: number;
     verdict: string;
     ticksWatched: number;
-  };
-  /** Twin-Hedge Edge: the measured market card the session is running on. */
-  twinDeployed?: {
-    symbol: string;
-    displayName: string;
-    verdict: string;
-    baseline: number;
-    barNormal: number;
-    barRecovery: number;
-    survival: number;
-    evPerNormalShot: number;
-    deepestLadder: number;
-    simShots: number;
-    marketMode: "locked" | "switching";
-  };
-  /** Twin-Hedge Edge: live 4/5-avoidance watch + same-tick shot proof. */
-  twinWatch?: {
-    phase: "watching" | "armed" | "firing" | "settling";
-    mode: "normal" | "recovery";
-    p45: number;
-    p45Se: number;
-    bar: number;
-    baseline: number;
-    veto: string | null;
-    reason: string;
-    patienceTicks: number;
-    ticksWatched: number;
-    switched: boolean;
-    confidence: number;
-    verdict: string;
-    overStake: number;
-    underStake: number;
-    lastShot?: {
-      sameTick: boolean;
-      spreadMs: number;
-      entryTick: number;
-      digit: number;
-      overWon: boolean;
-      underWon: boolean;
-      net: number;
-      recovery: boolean;
-      paper: boolean;
-    };
   };
 }
 
@@ -515,8 +464,6 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   lock: Lock,
   target: Target,
   zap: Zap,
-  layers: Layers,
-  activity: Activity,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

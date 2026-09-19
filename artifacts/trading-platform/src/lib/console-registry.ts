@@ -15,9 +15,8 @@ import { BotConsole } from "@/components/bot-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
 import { KillShotFamilyConsole } from "@/components/killshot-family-console";
-import { TwinHedgeConsole } from "@/components/twin-hedge-console";
-import { AccumulatorConsole } from "@/components/accumulator-console";
-import { MatchPulseConsole } from "@/components/match-pulse-console";
+import { MatchApexConsole } from "@/components/match-apex-console";
+import { TwinO4U5Console } from "@/components/twin-o4u5-console";
 import { WEB_CONSOLE_IDS, type WebConsoleId } from "./console-contract";
 import type { BotCardData, BotSessionStatus } from "./bots";
 
@@ -32,12 +31,11 @@ export interface BotConsoleProps {
 /** Every console this build can render, keyed by its contract id. */
 export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProps>> = {
   "specialist@1": BotConsole,
-  "match-pulse@1": MatchPulseConsole,
-  "accumulator@1": AccumulatorConsole,
-  "twin-hedge@2": TwinHedgeConsole,
   "dual-lock@1": DualLockConsole,
   "killshot@1": KillShotConsole,
   "killshot-family@1": KillShotFamilyConsole,
+  "match-apex@1": MatchApexConsole as unknown as ComponentType<BotConsoleProps>,
+  "twin-o4u5@1": TwinO4U5Console as unknown as ComponentType<BotConsoleProps>,
 };
 
 /** Console ids this bundle implements (mirrors `WEB_CONSOLE_IDS` exactly). */

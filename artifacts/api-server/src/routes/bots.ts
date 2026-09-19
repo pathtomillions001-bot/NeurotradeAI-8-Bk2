@@ -9,8 +9,6 @@
  */
 
 import { Router } from "express";
-import matchPulseRouter from "./match-pulse";
-import { MATCH_PULSE_ID, getMatchPulseStatus } from "../lib/match-pulse-engine";
 import { BOT_CATALOG, botConsoleId, botConsoleIds, getBotDefinition, type BotSideMode } from "../lib/bot-catalog";
 import { pickActiveBotId } from "../lib/bot-activity";
 import { API_RELEASE } from "../lib/release";
@@ -27,15 +25,9 @@ import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
-import * as twinAvoid from "../lib/twin-avoid-engine";
-import * as accumulator from "../lib/accumulator-engine";
-import {
-  ACCU_CERTAINTY,
-  ACCU_GROWTH_RATES,
-  tickCapFor,
-  type CertaintyProfile,
-} from "../lib/accumulator-analysis";
-import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
+import * as matchApex from "../lib/match-apex-engine";
+import * as twinO4U5 from "../lib/twin-o4u5-engine";
+import { validateShotContract, validateShotPlan, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
@@ -48,8 +40,6 @@ import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
 
 const router = Router();
-// Dedicated lifecycle; register before the generic /:botId routes.
-router.use("/match-pulse", matchPulseRouter);
 
 interface ParsedBotBody {
   contractTypes: BotContractType[];
@@ -69,12 +59,10 @@ interface ParsedBotBody {
 function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotBody } | { ok: false; error: string } {
   const bot = getBotDefinition(botId);
   if (!bot) return { ok: false, error: "Unknown bot" };
-  if (bot.matchPulse) return { ok: false, error: "Match Pulse requires its own scan receipt and endpoints" };
-  // Pre-locked bots (Dual-Lock Range Sentinel) have their own endpoints — they
-  // are never driven through the generic specialist route.
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
-  // One-shot bots (Kill-Shot Oracle) likewise have their own endpoints.
   if (bot.oneShot) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
+  if (bot.killShotFamily) return { ok: false, error: `${bot.name} uses the /family endpoints` };
+  if (bot.customConsole) return { ok: false, error: `${bot.name} uses the /${bot.id} endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -85,7 +73,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   }
   const contractTypes = sideOption.contracts as BotContractType[];
 
-  // Barriers (barrier bot only).
   const overBarrier = Number(body.overBarrier);
   const underBarrier = Number(body.underBarrier);
   const barriers: number[] = [];
@@ -102,7 +89,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
     barriers.push(Math.trunc(underBarrier));
   }
 
-  // Digit lock (match / differ bots only).
   let lockedBarrier: number | undefined;
   if (bot.hasDigitLock) {
     if (body.lockedBarrier !== undefined && body.lockedBarrier !== null && body.lockedBarrier !== "") {
@@ -156,7 +142,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   };
 }
 
-/** Status as this browser session may see it (other sessions are blanked). */
 function visibleStatus(sessionId: string) {
   const status = getStatus();
   const owner = getOwnerSessionId();
@@ -189,6 +174,19 @@ function visibleStatus(sessionId: string) {
   };
 }
 
+function visibleMatchApexStatus(sessionId: string) {
+  const status = matchApex.getStatus();
+  const owner = matchApex.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, deployed: undefined, watch: undefined };
+}
+function visibleTwinStatus(sessionId: string) {
+  const status = twinO4U5.getStatus();
+  const owner = twinO4U5.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, twinDeployed: undefined, twinWatch: undefined };
+}
+
 // ── Catalogue ─────────────────────────────────────────────────────────────────
 
 router.get("/", (req, res) => {
@@ -196,18 +194,13 @@ router.get("/", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
+  const apex = visibleMatchApexStatus(req.sessionId);
   const twin = visibleTwinStatus(req.sessionId);
-  const accu = accumulator.getAccumulatorStatus();
-  const pulse = getMatchPulseStatus();
   res.json({
     release: API_RELEASE,
-    /** Console ids this catalogue expects the web bundle to implement. */
     consoles: botConsoleIds(),
     bots: BOT_CATALOG.map(bot => {
-      // `console` is the contract: the web bundle must implement this id or it
-      // is an out-of-date build (see lib/bot-catalog.ts + lib/release.ts).
       const console_ = botConsoleId(bot);
-      if (bot.matchPulse) return { ...bot, console: console_, session: pulse.running ? pulse : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
       }
@@ -217,35 +210,26 @@ router.get("/", (req, res) => {
       if (bot.killShotFamily) {
         return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
       }
-      if (bot.twinHedge) {
-        return { ...bot, console: console_, session: twin.running ? twin : null };
+      if (bot.id === matchApex.MATCH_APEX_BOT_ID) {
+        return { ...bot, console: console_, session: apex.running ? apex : null };
       }
-      if (bot.accumulator) {
-        return { ...bot, console: console_, session: accu.running ? accu : null };
+      if (bot.id === twinO4U5.TWIN_O4U5_BOT_ID) {
+        return { ...bot, console: console_, session: twin.running ? twin : null };
       }
       return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
-    // Priority order is owned by lib/bot-activity.ts — the accumulator is part
-    // of it, so the catalogue and /status can never disagree again.
     activeBotId: pickActiveBotId([
-      { botId: MATCH_PULSE_ID, running: pulse.running },
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: fam.botId ?? null, running: fam.running },
+      { botId: apex.botId ?? null, running: apex.running },
       { botId: twin.botId ?? null, running: twin.running },
-      { botId: accumulator.ACCUMULATOR_BOT_ID, running: accu.running },
       { botId: status.botId, running: status.running },
     ]),
   });
 });
 
-// ── Dual-Lock Range Sentinel (pre-locked bot) ─────────────────────────────────
-//
-// This bot has its own engine because its lifecycle is different: ALL analysis
-// runs once in /scan, the chosen (market, normal, recovery) triple is frozen,
-// and /start simply executes it until TP or SL. It shares the account-global
-// recovery ledger, the recovery stake formula and the single-executor arbiter
-// with the other five bots.
+// ── Dual-Lock Range Sentinel ─────────────────────────────────────────────────
 
 function visibleDualStatus(sessionId: string) {
   const status = dualLock.getStatus();
@@ -266,9 +250,6 @@ async function dualSimParams(sessionId: string, body: any) {
       if (Number.isFinite(m) && m > 0) maxStake = m;
     }
   } catch { /* defaults */ }
-  // The Dual-Lock bot commits its risk parameters on the FIRST scan of an
-  // engagement and refuses to change them afterwards — a re-scan may move the
-  // market and contract pair, never the stake / TP / SL / steps.
   const requested = {
     stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
     takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
@@ -290,10 +271,6 @@ router.get("/duallock/status", (req, res) => {
   res.json(visibleDualStatus(req.sessionId));
 });
 
-/**
- * Start a brand-new Dual-Lock engagement — releases the committed risk
- * parameters so the next scan may set fresh ones. Refused while a session runs.
- */
 router.post("/duallock/reset", (req, res): void => {
   if (dualLock.isRunning() && dualLock.getOwnerSessionId() === req.sessionId) {
     res.status(409).json({ error: "Stop the running session before starting a new engagement." });
@@ -314,8 +291,6 @@ router.post("/duallock/scan", async (req, res): Promise<void> => {
     const result = await dualLock.scanForLock(req.sessionId, { ...params, markupPercent, maxStake });
     res.json({
       ...result,
-      // Echo the parameters the scan ACTUALLY used, plus whether the request
-      // tried to change locked ones, so the console can tell the user.
       sessionParams: params,
       paramsCommittedNow: committed,
       paramsOverridden: overridden,
@@ -346,10 +321,6 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 5, Under 4" });
     return;
   }
-  // In hunt mode the market is only the STARTING target — the loop re-selects it
-  // continuously — so it may be omitted and the first digit-enabled market is
-  // used. In lock mode it is frozen for the session and must be named.
-  const targetMode = body.targetMode === "lock" ? "lock" : "hunt";
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
   const fallback = AUTOMATED_DERIV_MARKETS.find(m => m.digitEnabled);
   const symbol = requested ?? fallback?.symbol;
@@ -367,9 +338,6 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     return;
   }
 
-  // Risk parameters are whatever was committed at the first scan of this
-  // engagement — the start request cannot widen or change them. This is what
-  // guarantees the quoted survival figure applies to the session being run.
   const committed = dualLock.getCommittedParams(req.sessionId);
   if (!committed) {
     res.status(409).json({ error: "Run the Dual-Lock analysis first — this bot may only deploy a scanned lock." });
@@ -415,16 +383,7 @@ router.post("/duallock/stop", (req, res) => {
   res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
 });
 
-// ── Kill-Shot Oracle (one-shot bot) ───────────────────────────────────────────
-//
-// Its own engine because its lifecycle is different again: the user names ONE
-// contract, the scan pulls deep history for every digit market, fits its model
-// on half of it and MEASURES the entry rule on the other half, then names ONE
-// market. Both the market and the model card are frozen, and the engine waits —
-// sometimes a long time — until health, edge, the post-loss shield and the tick
-// all agree. There is no hunt mode and no rotation. It shares the account-global
-// recovery ledger, the recovery stake formula and the single-executor arbiter
-// with every other bot in the section.
+// ── Kill-Shot Oracle ──────────────────────────────────────────────────────────
 
 function visibleKillShotStatus(sessionId: string) {
   const status = killshot.getStatus();
@@ -437,24 +396,26 @@ router.get("/killshot/status", (req, res) => {
   res.json(visibleKillShotStatus(req.sessionId));
 });
 
-/** Read the bot-recovery markup + stake cap the ladder projection must use. */
 async function killshotRisk(sessionId: string, body: any) {
   let markupPercent = 10;
   let maxStake = 500;
+  let maxTradeStake = 500;
   try {
     const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
     if (rows.length > 0) {
       const v = Number((rows[0] as any).botRecoveryMarkup);
       if (Number.isFinite(v)) markupPercent = v;
       const m = Number((rows[0] as any).maxTradeStake);
-      if (Number.isFinite(m) && m > 0) maxStake = m;
+      if (Number.isFinite(m) && m > 0) { maxStake = m; maxTradeStake = m; }
     }
   } catch { /* defaults */ }
   return {
     stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
     stopLoss: Number(body?.stopLoss) > 0 ? Number(body.stopLoss) : 5,
+    takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
     markupPercent,
     maxStake,
+    maxTradeStake,
   };
 }
 
@@ -462,15 +423,6 @@ function parseCertainty(raw: unknown): Certainty {
   return raw === "elite" || raw === "balanced" ? raw : "strict";
 }
 
-/**
- * Analyse every digit-enabled market for the user's PLAN — any combination of
- * contracts (both sides of a pair allowed) — and return the full ranking, the
- * per-market deployments, and the best market available even when nothing is
- * CERTIFIED, so the client can offer a deliberate lock instead of a dead end.
- *
- * An AI Matches/Differs fans out to all ten digits in every market and
- * Benjamini–Hochberg runs across the whole plan × market × digit family.
- */
 router.post("/killshot/scan", async (req, res): Promise<void> => {
   const parsed = validateShotPlan(req.body?.contracts ?? req.body?.contract);
   if (!parsed.ok) {
@@ -495,10 +447,7 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: parsed.error });
     return;
   }
-  // An AI Matches/Differs digit is NOT resolved before deployment: the bot is
-  // allowed to change it live with the market. Only the market is locked.
 
-  // The market must be named, and it must be one the scan is allowed to look at.
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
   if (!requested || !isAutomatedMarket(requested)) {
     res.status(400).json({ error: "Run the analysis first — this bot deploys only onto a market it has measured" });
@@ -513,9 +462,6 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "stake must be ≥ 0.35" });
     return;
   }
-  // The measured model cards are what make the live rule identical to the
-  // measured one. Without them there is nothing to deploy — the analysis IS the
-  // product. Accept the per-contract `cards` map (a plan) or a single `card`.
   const cards = (body.cards && typeof body.cards === "object") ? body.cards : {};
 
   const marketMode: "locked" | "switching" = body.marketMode === "switching" ? "switching" : "locked";
@@ -563,12 +509,7 @@ router.post("/killshot/stop", (req, res) => {
   res.json({ ok: true, status: visibleKillShotStatus(req.sessionId) });
 });
 
-// ── Kill-Shot Family Oracles (Over/Under · Even/Odd · Matches/Differs) ────────
-//
-// Three bots that borrow the Kill-Shot Oracle's measurement unchanged and apply
-// it to a whole contract family. Unlike the one-shot Oracle they never dead-end:
-// in locked mode the EDGE rotates inside the frozen market, in switching mode the
-// MARKET rotates to the next best — either way the session runs to TP/SL/stop.
+// ── Kill-Shot Family Oracles ────────────────────────────────────────────────
 
 function visibleFamilyStatus(sessionId: string) {
   const status = killshotFamily.getStatus();
@@ -621,7 +562,6 @@ function parseFamilySpec(botId: string, body: any):
     return { ok: true, spec: { botId: botId as killshotFamily.FamilyBotId, family, side, aiDigit: false, certainty: parseCertainty(body?.certainty) } };
   }
 
-  // matchdiffer
   if (!["match", "differ", "both"].includes(side)) return { ok: false, error: "side must be match, differ or both" };
   const hasDigit = body?.digit !== undefined && body?.digit !== null && body?.digit !== "";
   let digit: number | undefined;
@@ -640,7 +580,6 @@ router.get("/family/status", (req, res) => {
   res.json(visibleFamilyStatus(req.sessionId));
 });
 
-/** Measure every market for this bot's family and return a compact ranking. */
 router.post("/family/scan", async (req, res): Promise<void> => {
   const parsed = parseFamilySpec(String(req.body?.botId ?? ""), req.body);
   if (!parsed.ok) {
@@ -745,72 +684,33 @@ router.post("/family/stop", (req, res) => {
   res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
 });
 
-// ── Twin-Hedge Edge (auto-configured twin pair) ──────────────────────────────
-//
-// The contract plan is fixed (normal Over 4 + Under 5, recovery Over 5 +
-// Under 4) — the request body carries risk settings and the scan's measured
-// card, never contract choices. Its own lifecycle because a pair, not a
-// single contract, is the unit being analysed and executed.
+// ── Match Apex Sentinel ─────────────────────────────────────────────────────
 
-function visibleTwinStatus(sessionId: string) {
-  const status = twinAvoid.getStatus();
-  const owner = twinAvoid.getOwnerSessionId();
-  if (!owner || owner === sessionId) return status;
-  return { ...status, running: false, sessionId: null, config: undefined, twinDeployed: undefined, twinWatch: undefined };
-}
-
-/** Risk settings shared by scan (to size the out-of-sample simulation) and start. */
-function parseTwinRisk(body: any): twinAvoid.TwinAvoidRisk {
-  const stake = Number(body?.stake);
-  const stopLoss = Number(body?.stopLoss);
-  const takeProfit = Number(body?.takeProfit);
-  const maxRecoverySteps = Math.max(1, Math.min(10, Number(body?.maxRecoverySteps) || 3));
-  const markup = Number(body?.botRecoveryMarkup);
-  const maxTradeStake = Number(body?.maxTradeStake);
-  return {
-    stake: Number.isFinite(stake) && stake >= 0.35 ? stake : 1,
-    stopLoss: Number.isFinite(stopLoss) && stopLoss > 0 ? stopLoss : 5,
-    takeProfit: Number.isFinite(takeProfit) && takeProfit > 0 ? takeProfit : 10,
-    maxRecoverySteps,
-    markupPercent: Number.isFinite(markup) && markup >= 0 ? markup : 10,
-    maxTradeStake: Number.isFinite(maxTradeStake) && maxTradeStake > 0 ? maxTradeStake : 500,
-  };
-}
-
-router.get("/twin/status", (req, res) => {
-  res.json(visibleTwinStatus(req.sessionId));
+router.get("/match-apex/status", (req, res) => {
+  res.json(visibleMatchApexStatus(req.sessionId));
 });
 
-router.post("/twin/scan", async (req, res): Promise<void> => {
-  // The settings row supplies the recovery markup / max stake when the
-  // console does not pass them, so the simulation prices recovery exactly
-  // like the live session will.
-  let risk = parseTwinRisk(req.body);
+router.post("/match-apex/scan", async (req, res): Promise<void> => {
   try {
-    const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
-    if (rows.length > 0) {
-      const s = rows[0] as any;
-      if (!Number.isFinite(Number(req.body?.botRecoveryMarkup)) && Number.isFinite(Number(s.botRecoveryMarkup))) {
-        risk.markupPercent = Number(s.botRecoveryMarkup);
-      }
-      if (!Number.isFinite(Number(req.body?.maxTradeStake)) && Number.isFinite(Number(s.maxTradeStake))) {
-        risk.maxTradeStake = Number(s.maxTradeStake);
-      }
-    }
-  } catch {
-    /* defaults are fine */
-  }
-  try {
-    const result = await twinAvoid.scanForTwinAvoid(req.sessionId, risk);
+    const risk = await killshotRisk(req.sessionId, req.body);
+    const result = await matchApex.scanForMatchApex(req.sessionId, {
+      stake: risk.stake,
+      markupPercent: risk.markupPercent,
+      maxStake: risk.maxStake,
+      stopLoss: risk.stopLoss,
+      takeProfit: (req.body?.takeProfit as number) > 0 ? Number(req.body.takeProfit) : 10,
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(req.body?.maxRecoverySteps) || 3)),
+    });
     res.json(result);
   } catch (err) {
-    logger.error({ err }, "Twin-Hedge scan failed");
+    logger.error({ err }, "Match Apex scan failed");
     res.status(500).json({ error: "Scan failed" });
   }
 });
 
-router.post("/twin/start", async (req, res): Promise<void> => {
+router.post("/match-apex/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
   if (!requested || !isAutomatedMarket(requested)) {
     res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
@@ -821,266 +721,158 @@ router.post("/twin/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "This bot needs a digit-enabled market" });
     return;
   }
-  const risk = parseTwinRisk(body);
-
-  // The measured card is the analysis's receipt — without it the bot refuses
-  // to deploy (it only trades markets it has measured out of sample).
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
   const card = body.card ?? body.analysis;
-  if (!card || typeof card.baseline !== "number" || !Number.isFinite(card.baseline) ||
-      typeof card.barNormal !== "number" || typeof card.barRecovery !== "number" ||
-      typeof card.score !== "number" || typeof card.survival !== "number") {
-    res.status(400).json({ error: "Run the analysis first — the measured market card is required before this bot can deploy" });
+  if (!card || typeof card.pHat !== "number") {
+    res.status(400).json({ error: "Run the analysis first — measured card required" });
     return;
   }
-
-  // Market mode comes from the analysis (the scan's decision), not the user.
-  const marketMode: "locked" | "switching" =
-    body.marketMode === "switching" || body.marketMode === "locked"
-      ? body.marketMode
-      : (typeof body.mode === "string" && body.mode === "switching" ? "switching" : "locked");
-  const cluster: twinAvoid.TwinAvoidCard[] = Array.isArray(body.cluster) ? body.cluster : [];
-
-  const existingOwner = twinAvoid.getOwnerSessionId();
-  if (twinAvoid.isRunning() && existingOwner && existingOwner !== req.sessionId) {
-    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+  let lockedSymbol: string | undefined;
+  if (marketMode === "locked") {
+    if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
+      res.status(400).json({ error: "lockedSymbol required in locked mode" });
+      return;
+    }
+    if (!isAutomatedMarket(body.lockedSymbol)) {
+      res.status(400).json({ error: `${body.lockedSymbol} cannot be traded` });
+      return;
+    }
+    lockedSymbol = body.lockedSymbol;
+  }
+  const existingOwner = matchApex.getOwnerSessionId();
+  if (matchApex.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot." });
     return;
   }
-
-  const result = await twinAvoid.startSession({
+  const result = await matchApex.startSession({
     ownerSessionId: req.sessionId,
-    botId: twinAvoid.TWIN_AVOID_BOT_ID,
-    stake: risk.stake,
-    stopLoss: risk.stopLoss,
-    takeProfit: risk.takeProfit,
-    maxRecoverySteps: risk.maxRecoverySteps,
+    botId: matchApex.MATCH_APEX_BOT_ID,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
     marketMode,
-    cluster,
+    lockedSymbol,
+    cluster: body.cluster ?? [],
     symbol: market.symbol,
     displayName: market.displayName,
     card,
   });
-  if (!result.ok) {
-    res.status(409).json({ error: result.error });
-    return;
-  }
-  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
+  if (!result.ok) { res.status(409).json({ error: result.error }); return; }
+  res.json({ ok: true, status: visibleMatchApexStatus(req.sessionId) });
 });
 
-router.post("/twin/stop", (req, res) => {
-  const owner = twinAvoid.getOwnerSessionId();
-  if (twinAvoid.isRunning() && owner && owner !== req.sessionId) {
+router.post("/match-apex/stop", (req, res) => {
+  const owner = matchApex.getOwnerSessionId();
+  if (matchApex.isRunning() && owner && owner !== req.sessionId) {
     res.status(409).json({ error: "You cannot stop another browser session's bot." });
     return;
   }
-  twinAvoid.stopSession();
-  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
+  matchApex.stopSession();
+  res.json({ ok: true, status: visibleMatchApexStatus(req.sessionId) });
 });
 
-// ── Accumulator (Compounding Range Sentinel) ─────────────────────────────────
-//
-// The accumulator is the one bot whose controls are about VOLATILITY rather
-// than direction or digits: the growth rate sets the range and the compounding
-// rate together, the certainty profile sets how much measured proof is
-// demanded, and the market mode decides whether a market whose edge has died
-// is held with an alert or swapped for the best measured one.
+// ── Twin Barrier Sentinel ───────────────────────────────────────────────────
 
-/**
- * Bind an accumulator status payload to the calling browser session: another
- * session's running bot is reported as "not running" rather than leaking its
- * positions into this user's console.
- */
-function visibleAccumulatorStatus(sessionId: string | undefined) {
-  const status = accumulator.getAccumulatorStatus();
-  const owner = accumulator.getOwnerSessionId();
-  if (!status.running || !owner || owner === sessionId) return status;
-  return { ...status, running: false, config: undefined, message: "Another browser session is running the accumulator bot." };
-}
-
-router.get("/accumulator/status", (req, res) => {
-  res.json(visibleAccumulatorStatus(req.sessionId));
+router.get("/twin-o4u5/status", (req, res) => {
+  res.json(visibleTwinStatus(req.sessionId));
 });
 
-router.get("/accumulator/params", (_req, res) => {
-  res.json({
-    growthRates: ACCU_GROWTH_RATES,
-    certainty: Object.values(ACCU_CERTAINTY),
-    tickCaps: ACCU_GROWTH_RATES.map((g) => ({ growthRate: g, maxTicks: tickCapFor(g) })),
-    markets: AUTOMATED_DERIV_MARKETS.map((m) => ({ symbol: m.symbol, displayName: m.displayName })),
-  });
-});
-
-/**
- * Measure every market × growth rate without deploying anything.
- * Returns the ranked candidates, the FDR control that was applied, and the
- * reason the best candidate is or is not deployable.
- */
-router.post("/accumulator/scan", async (req, res): Promise<void> => {
-  const body = req.body ?? {};
-  const growthRate = Number(body.growthRate ?? 0.02);
-  if (!ACCU_GROWTH_RATES.includes(growthRate as (typeof ACCU_GROWTH_RATES)[number])) {
-    res.status(400).json({ error: `growthRate must be one of ${ACCU_GROWTH_RATES.join(", ")}` });
-    return;
-  }
-  const certainty: CertaintyProfile["id"] = ["elite", "strict", "balanced"].includes(body.certainty)
-    ? body.certainty
-    : "strict";
-  const symbol = typeof body.symbol === "string" && body.symbol.length > 0 ? body.symbol : null;
-  if (symbol && !isAutomatedMarket(symbol)) {
-    res.status(400).json({ error: `${symbol} is not available to the accumulator bot.` });
-    return;
-  }
-
+router.post("/twin-o4u5/scan", async (req, res): Promise<void> => {
   try {
-    const result = await accumulator.scanAccumulators({
-      growthRates: [growthRate],
-      symbols: symbol ? [symbol] : undefined,
-      stake: Number(body.stake) > 0 ? Number(body.stake) : 1,
-      certainty,
+    const risk = await killshotRisk(req.sessionId, req.body);
+    const result = await twinO4U5.scanForTwinO4U5(req.sessionId, {
+      stake: risk.stake,
+      markupPercent: risk.markupPercent,
+      maxTradeStake: risk.maxTradeStake,
+      maxStake: risk.maxStake,
+      takeProfit: (req.body?.takeProfit as number) > 0 ? Number(req.body.takeProfit) : 10,
+      stopLoss: risk.stopLoss,
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(req.body?.maxRecoverySteps) || 3)),
     });
     res.json(result);
   } catch (err) {
-    logger.error({ err }, "Accumulator scan failed");
-    res.status(500).json({ error: "Accumulator scan failed" });
+    logger.error({ err }, "Twin O4U5 scan failed");
+    res.status(500).json({ error: "Scan failed" });
   }
 });
 
-/**
- * The deep read on ONE market × growth rate: the barrier, the break-even, the
- * measured survival curve against the contractual payout curve, and the horizon
- * where the conservative EV peaks. This is the "show me the maths" endpoint.
- */
-router.post("/accumulator/explain", async (req, res): Promise<void> => {
+router.post("/twin-o4u5/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
-  const symbol = typeof body.symbol === "string" ? body.symbol : "";
-  const growthRate = Number(body.growthRate ?? 0.02);
-  if (!symbol || !isAutomatedMarket(symbol)) {
-    res.status(400).json({ error: "A valid symbol is required." });
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
     return;
   }
-  if (!ACCU_GROWTH_RATES.includes(growthRate as (typeof ACCU_GROWTH_RATES)[number])) {
-    res.status(400).json({ error: `growthRate must be one of ${ACCU_GROWTH_RATES.join(", ")}` });
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
     return;
   }
-  const certainty: CertaintyProfile["id"] = ["elite", "strict", "balanced"].includes(body.certainty)
-    ? body.certainty
-    : "strict";
-  try {
-    const result = await accumulator.explainAccumulator({
-      symbol,
-      growthRate,
-      stake: Number(body.stake) > 0 ? Number(body.stake) : 1,
-      certainty,
-    });
-    if (!result) {
-      res.status(503).json({ error: "Not enough tick history for this market yet — try again in a few seconds." });
-      return;
-    }
-    res.json(result);
-  } catch (err) {
-    logger.error({ err }, "Accumulator explain failed");
-    res.status(500).json({ error: "Accumulator analysis failed" });
-  }
-});
-
-router.post("/accumulator/start", async (req, res): Promise<void> => {
-  const body = req.body ?? {};
-  const growthRate = Number(body.growthRate ?? 0.02);
-  if (!ACCU_GROWTH_RATES.includes(growthRate as (typeof ACCU_GROWTH_RATES)[number])) {
-    res.status(400).json({ error: `growthRate must be one of ${ACCU_GROWTH_RATES.join(", ")}` });
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
     return;
   }
-  const certainty: CertaintyProfile["id"] = ["elite", "strict", "balanced"].includes(body.certainty)
-    ? body.certainty
-    : "strict";
-  const stake = Number(body.stake);
-  if (!(stake > 0)) { res.status(400).json({ error: "A stake greater than zero is required." }); return; }
-  const stopLoss = Number(body.stopLoss);
-  const takeProfit = Number(body.takeProfit);
-  if (!(stopLoss > 0) || !(takeProfit > 0)) {
-    res.status(400).json({ error: "Stop loss and take profit must both be greater than zero." });
+  const card = body.card ?? body.analysis;
+  if (!card || typeof card.baseline !== "number") {
+    res.status(400).json({ error: "Run the analysis first — measured card required" });
     return;
   }
-  const marketMode = body.marketMode === "locked" ? "locked" : "switching";
-  const lockedSymbol = typeof body.lockedSymbol === "string" && body.lockedSymbol.length > 0 ? body.lockedSymbol : undefined;
-  if (marketMode === "locked" && !lockedSymbol) {
-    res.status(400).json({ error: "Choose a market to lock before deploying in locked mode." });
+  const existingOwner = twinO4U5.getOwnerSessionId();
+  if (twinO4U5.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot." });
     return;
   }
-  if (lockedSymbol && !isAutomatedMarket(lockedSymbol)) {
-    res.status(400).json({ error: `${lockedSymbol} is not available to the accumulator bot.` });
-    return;
-  }
-
-  const existingOwner = accumulator.getOwnerSessionId();
-  const status = accumulator.getAccumulatorStatus();
-  if (status.running && existingOwner && existingOwner !== req.sessionId) {
-    res.status(409).json({ error: "Another browser session is running the accumulator bot. Your account was not touched." });
-    return;
-  }
-
-  const contractTakeProfit = Number(body.contractTakeProfit);
-  const config: accumulator.AccumulatorConfig = {
+  const result = await twinO4U5.startSession({
     ownerSessionId: req.sessionId,
-    botId: "accumulator",
-    growthRate,
-    stake,
-    stopLoss,
-    takeProfit,
-    contractTakeProfit: Number.isFinite(contractTakeProfit) && contractTakeProfit > 0
-      ? contractTakeProfit
-      : Math.max(0.01, Math.round(stake * (Math.pow(1 + growthRate, 20) - 1) * 100) / 100),
-    certainty,
+    botId: twinO4U5.TWIN_O4U5_BOT_ID,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
     marketMode,
-    lockedSymbol,
-    recoveryAutoMode: true,
-    maxRecoverySteps: Number(body.maxRecoverySteps) > 0 ? Math.min(10, Number(body.maxRecoverySteps)) : 3,
-    maxHoldTicks: Number(body.maxHoldTicks) > 0 ? Number(body.maxHoldTicks) : undefined,
-  };
-
-  const result = await accumulator.startAccumulatorSession(config);
-  if (!result.ok) {
-    res.status(409).json({ error: result.error });
-    return;
-  }
-  res.json({ ok: true, status: accumulator.getAccumulatorStatus() });
+    cluster: body.cluster ?? [],
+    symbol: market.symbol,
+    displayName: market.displayName,
+    card,
+  });
+  if (!result.ok) { res.status(409).json({ error: result.error }); return; }
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
 });
 
-router.post("/accumulator/stop", (req, res) => {
-  const owner = accumulator.getOwnerSessionId();
-  const status = accumulator.getAccumulatorStatus();
-  if (status.running && owner && owner !== req.sessionId) {
+router.post("/twin-o4u5/stop", (req, res) => {
+  const owner = twinO4U5.getOwnerSessionId();
+  if (twinO4U5.isRunning() && owner && owner !== req.sessionId) {
     res.status(409).json({ error: "You cannot stop another browser session's bot." });
     return;
   }
-  accumulator.stopAccumulatorSession();
-  res.json({ ok: true, status: accumulator.getAccumulatorStatus() });
+  twinO4U5.stopSession();
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
 });
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
-  const pulse = getMatchPulseStatus();
-  if (pulse.running) { res.json(pulse); return; }
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
   if (shot.running) { res.json(shot); return; }
   const fam = visibleFamilyStatus(req.sessionId);
   if (fam.running) { res.json(fam); return; }
+  const apex = visibleMatchApexStatus(req.sessionId);
+  if (apex.running) { res.json(apex); return; }
   const twin = visibleTwinStatus(req.sessionId);
   if (twin.running) { res.json(twin); return; }
-  const accu = accumulator.getAccumulatorStatus();
-  if (accu.running) { res.json(accu); return; }
   res.json(visibleStatus(req.sessionId));
 });
 
 // ── Scan ──────────────────────────────────────────────────────────────────────
 
 router.post("/:botId/scan", async (req, res): Promise<void> => {
-  if (getBotDefinition(req.params["botId"]!)?.family === "accumulator") {
-    res.status(400).json({ error: "Use /accumulator/scan for the Compounding Range Sentinel." });
-    return;
-  }
   const parsed = validateBotBody(req.params["botId"]!, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
@@ -1103,10 +895,6 @@ router.post("/:botId/scan", async (req, res): Promise<void> => {
 
 router.post("/:botId/start", async (req, res): Promise<void> => {
   const botId = req.params["botId"]!;
-  if (getBotDefinition(botId)?.family === "accumulator") {
-    res.status(400).json({ error: "Use /accumulator/start for the Compounding Range Sentinel — its controls are not the specialist family's." });
-    return;
-  }
   const parsed = validateBotBody(botId, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });

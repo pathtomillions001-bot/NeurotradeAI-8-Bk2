@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "twin" | "accumulator";
+  family: SpecialistFamily | "duallock" | "killshot" | "match-apex" | "twin-o4u5";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -43,8 +43,6 @@ export interface BotDefinition {
    * Range Sentinel). The UI renders a different console for these.
    */
   preLocked?: boolean;
-  /** Matches-only causal predictor with a tick-guarded execution lifecycle. */
-  matchPulse?: boolean;
   /**
    * Bots that lock ONE market + ONE user-chosen contract, then wait for health,
    * edge, the post-loss shield and the tick to all agree (the Kill-Shot Oracle).
@@ -57,14 +55,8 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
-  /** Twin-Hedge Edge — places TWO complementary legs on the SAME tick. */
-  twinHedge?: boolean;
-  /**
-   * Compounding Range Sentinel — the accumulator bot. The UI renders a console
-   * with a growth-rate picker, a horizon read-out and the live survival/EV
-   * table instead of the digit/barrier controls the other families use.
-   */
-  accumulator?: boolean;
+  /** Custom console id for bots that don't fit the 4 legacy consoles. */
+  customConsole?: string;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -163,32 +155,6 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "≈11%",
     nominalPayout: "8.93×",
-  },
-  {
-    id: "match-pulse",
-    name: "Match Pulse",
-    code: "BOT-MATCH-PULSE",
-    family: "match",
-    matchPulse: true,
-    contractLabel: "Matches only",
-    tagline: "Measure the pattern. Respect the tick.",
-    description:
-      "A selective Matches-only bot built around the next tick, not overdue-digit guesses. It tests its entire digit-selection rule on two unseen blocks, then rechecks the tick, probability and actual payout at the broker send boundary. Lock a scanned market or switch only to another qualified one. No qualified setup means no trade.",
-    edge: [
-      "All ten digits · supported order-0/1/2 conditional models · no fixed gap or due-digit bonus",
-      "Chronological validation + untouched audit; market-search and repeated-scan evidence correction",
-      "Distinct-tick clock, post-loss cooling and no patience override — even during recovery",
-      "Quote-time AND socket-send checks; one order at a time; unknown settlements freeze execution",
-      "Same debt-plus-markup recovery as Match Sniper, with pre-trade stake and loss-budget limits",
-      "Trades on your selected Deriv demo or real account; broker-feed and account checks before every order",
-    ],
-    accent: "teal",
-    icon: "activity",
-    hasSides: false,
-    hasDigitLock: false,
-    sides: [{ id: "both", label: "Matches only", contracts: ["DIGITMATCH"], desc: "The same Matches-only rule for normal and recovery entries" }],
-    nominalWinRate: "10% fair baseline",
-    nominalPayout: "Live-quoted",
   },
   {
     id: "barrier",
@@ -396,76 +362,62 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalPayout: "8.93× / 1.09×",
   },
   {
-    id: "twin-hedge",
-    name: "Twin-Hedge Edge",
-    code: "BOT-TWINHEDGE",
-    family: "twin",
-    twinHedge: true,
-    contractLabel: "O4+U5 normal · O5+U4 recovery",
-    tagline: "Auto-configured twin pair · the 4/5 dead-zone hunter",
+    id: "match-apex",
+    name: "Match Apex Sentinel",
+    code: "BOT-MATCH-APEX",
+    family: "match-apex",
+    contractLabel: "Matches (elite)",
+    tagline: "6-model ensemble · entropy-gated · lock/switch after scan",
     description:
-      "Trades twin pairs — two contracts fired at the same time with equal stakes. Normal shots fire Over 4 + Under 5, so exactly one leg always wins. Recovery shots fire Over 5 + Under 4, which wins on every closed digit except 4 and 5 — so the bot's one job is keeping the closed digit out of {4,5}. You set stake, target and stop. The AI picks the market and decides when to lock it or switch.",
+      "Replacement for Match Sniper and Matches/Differs Oracle. Pulls 4999 digits per market, fuses six estimators per digit — forgetting Dirichlet, order-1/2/3 Markov with KT, 2-state outcome chain, Kaplan-Meier hazard — then filters by market entropy (<3.15b) and transition concentration (<2.9b) so it only trades predictable regimes. Out-of-sample walk-forward measures win rate, EV, survival, deepest ladder; Page-Hinkley drift, post-loss shield, patience valve gate every entry. After scan you choose locked (market frozen, digit may rotate) or switching (moves to best market). Same recovery ledger.",
     edge: [
-      "AUTO-CONFIGURED PAIRS — normal: Over 4 + Under 5 (one leg ALWAYS wins, net −5% — the cost of the hedge), recovery: Over 5 + Under 4 (wins +143% net on every digit but 4/5, −200% net on 4/5). No pair picker, no digit picker — the plan is the plan",
-      "BOTH LEGS, ONE MARKET, ONE TICK — the two contracts are a single bulk order over a single socket: both proposals leave in the same millisecond, both open on the same entry tick, and the buy confirmations are verified (equal start_time = true same-tick shot, printed with the ms spread)",
-      "THREE-FUSED 4/5 MODEL — forgetting Dirichlet (half-life ≈ 69 ticks) + order-1 Markov on the last digit + order-2 Markov on the last two digits, fused in inverse variance so a well-fed conditional model outweighs a sparse one automatically",
-      "HARD VETOS, NEVER OVERRIDDEN — 4/5 hot cluster (3+ of last 6 ticks), post-4/5 state with an elevated conditional, markets running hotter than 22% baseline, and a post-loss cool-down: the patience valve can force a soft-gate miss, never a veto",
-      "WORST-CASE GATE — P̂(4/5) + 1.25σ must sit BELOW the market's own baseline before the recovery pair is armed: the entry has to be measurably cleaner than this market's usual 4/5 pressure",
-      "SELF-REFERENTIAL BARS — the entry bar is the market's own 30th percentile (recovery) / 55th (normal) of its out-of-sample readings, so selectivity adapts to the stream instead of a fixed constant",
-      "OUT-OF-SAMPLE SURVIVAL — the model is fit on the first 60% of ~4999 digits and the EXACT engine rules (debt-driven recovery stakes, $0.35 leg floor, TP/SL, max steps) are replayed on the last 40% it never saw; the headline number is P(take-profit before stop-loss) on unseen data",
-      "MARKET MODE DECIDED BY ANALYSIS — a clear scan winner is LOCKED, a tight top cluster SWITCHES (rotation with hysteresis). You set stake/TP/SL/recovery steps — nothing else",
-      "LIVE 4/5 DRIFT MONITOR — Page–Hinkley on the realised 4/5 rate: a locked market that runs hot raises RESCAN REQUIRED and holds recovery fire (the debt stays frozen, which is the point); a switching session rotates to the next cluster market",
-      "SHARED RECOVERY — the account-global ledger records the realised net of every shot and sizes the recovery pair's stake so one clean win repays the debt plus the bot markup, exactly like every other bot",
+      "WEAKNESSES FIXED: single-window → 4999 deep; generic green-light → gap/hazard/entropy/transition gates; no tick-age → <3s freshness; lenient FDR q=0.25 → strict q=0.15 per market + q=0.10 across markets",
+      "6 ESTIMATORS PER DIGIT: order-0 forgetting Dirichlet (half-life 69), order-1 P(d|last), order-2 P(d|last2), order-3 P(d|last3) KT, 2-state outcome chain, Kaplan-Meier hazard — fused by inverse variance",
+      "REGIME FILTERS: market entropy H<3.15b and transition entropy H(row|last)<2.9b — match edge in random walk refused",
+      "EXACT MATH: Beta-Binomial posterior, betaQuantile worst-case, Benjamini-Hochberg FDR, geometric overdue (1-p)^gap ≤0.35, hazard≥0.8, gap 4-22, hot-run veto <3/6",
+      "MEASURED OOS: 60/40 train/test, self-referential quantile bar (70th pct zBe), 4-block χ² stationarity, Wilson lower bound, survival = no SL + positive EV + ladder ≤ max",
+      "TIMING & EXECUTION: tick-age <3s, Page-Hinkley drift, post-loss shield (bar boost 0.5σ + 3-tick cool-down), patience valve 20 ticks, execution-tick revalidation, pre-warmed payout, shared ledger + arbiter",
+      "MARKET MODE AFTER SCAN: clear winner (edge gap ≥4pp) → locked, tight cluster → switching (hysteresis 3pp). User selects lock/switch after scan",
     ],
-    accent: "lime",
-    icon: "layers",
+    accent: "amber",
+    icon: "crosshair",
+    customConsole: "match-apex@1",
     hasSides: false,
     hasDigitLock: false,
     sides: [
-      {
-        id: "both",
-        label: "Auto-configured twin pair",
-        contracts: ["DIGITOVER", "DIGITUNDER"],
-        desc: "Normal: Over 4 + Under 5 · Recovery: Over 5 + Under 4 — equal stakes, same tick",
-      },
+      { id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "AI picks best digit per market with 6-model ensemble" },
     ],
-    nominalWinRate: "80%+ at gated entries",
-    nominalPayout: "1.95× / 2.43× legs",
+    nominalWinRate: "≈14–18% oos",
+    nominalPayout: "8.93×",
   },
   {
-    id: "accumulator",
-    name: "Compounding Range Sentinel",
-    code: "BOT-ACCU",
-    family: "accumulator",
-    accumulator: true,
-    contractLabel: "Accumulator (range compounding)",
-    tagline: "Range survival · measured, never assumed",
+    id: "twin-o4u5",
+    name: "Twin Barrier Sentinel",
+    code: "BOT-TWIN-O4U5",
+    family: "twin-o4u5",
+    contractLabel: "Over4+Under5 / Over5+Under4 (twin)",
+    tagline: "Dual execution · avoids 4/5 at all cost · same-tick proof",
     description:
-      "Buys Accumulator contracts — the only deal in this app where the payout compounds and the position can be sold at any tick. It does not predict direction. It measures how often the index actually stays inside the range Deriv's own barrier defines, compares that with the break-even the compounding rate demands, and trades only when the measured survival beats it with statistical significance. When the market stops agreeing with the measurement it sells the position at par and moves to the market that does.",
+      "Normal Over4+Under5 simultaneous same stake (never double-loses, net -5% cost). Recovery Over5+Under4 simultaneous same stake (net +0.43 avoids 4/5, -2.00 on 4/5). Five estimators — forgetting Dirichlet, order-1/2/3 Markov, HMM regime filter (clean 8% vs dirty 35% 4/5) — fused inverse variance, plus entropy and transition gates. Out-of-sample replay of exact engine rules measures survival and EV. Both legs placed as one bulk order over single socket so both proposals same millisecond and both contracts open same tick — same-tick proof with spreadMs telemetry. Auto-configured, lock/switch after analysis, speed/latency prioritized.",
     edge: [
-      "THE WHOLE GAME IS ONE NUMBER — λ = p·(1+g). Expected value multiplies by λ every tick, so holding n ticks is worth λⁿ. Deriv sizes the range so a fresh band is exactly fair (published R_10 bands are σ_tick × the 99%/95% quantiles to four significant figures), which means the only honest edge is realized volatility coming in BELOW the volatility the barrier was built from — and that ratio is measurable from thousands of ticks",
-      "MEASURED, NOT MODELLED — the empirical survival curve is Kaplan–Meier over consecutive in-range runs (Deriv's own Stats list), so the payout schedule (contractual, exact) and the survival curve (measured, with a confidence band) are both known and their product is the EV curve. The bot holds to the horizon where the LOWER confidence bound of that product peaks",
-      "EVERY CANDIDATE IS FDR-CONTROLLED — the scan tests every market × growth rate and puts the p-values through Benjamini–Hochberg, because the best of 100 noise draws always looks like an edge",
-      "REFUSAL IS A FEATURE — when nothing clears break-even, the bot says so and holds fire. A compounding contract cannot be rescued by an exit rule or a bigger stake once λ ≤ 1, so 'no trade' is the correct output and the console shows exactly why",
-      "SELL-AT-PAR RISK MANAGEMENT — the position can be sold at any tick, so a deteriorating market is closed near par instead of ridden to a 100% loss. Page–Hinkley, a Wald SPRT with stated error probabilities and a Bernoulli CUSUM watch the live in-range rate; two flags cash the contract out, and the exchange-side take-profit still guarantees the target even if the process dies",
-      "RECOVERY BY HORIZON, NEVER BY MARTINGALE — a loss is always the WHOLE stake, so escalating the stake only enlarges what the next breach destroys. Debt is cleared by holding longer: n* = ⌈ln(1+D/stake)/ln(1+g)⌉, which is logarithmic in the debt. The bot proves the flat-stake ladder dominates the doubled one on identical ticks, and refuses the recovery outright when the measured survival cannot carry the horizon",
-      "MARKOV ENTRY STATE — a 4-state magnitude chain (tight / normal / wide / breach) reads P(next tick stays in range | the state the market is in right now), with Krichevsky–Trofimov smoothing, so entries are conditioned on the volatility state rather than the unconditional average",
-      "ROTATION, NOT RESIGNATION — locked mode holds one market and raises the alert; switching mode closes a market whose measured edge has died and immediately moves the session to whichever market now measures best",
+      "AUTO-CONFIGURED TWIN: normal Over4+Under5 (complementary, one leg always wins, -0.05 per $1), recovery Over5+Under4 (dead zone {4,5}, +0.43 win, -2.00 loss) — user cannot change contracts, only risk",
+      "5 ESTIMATORS FOR P(4/5): order-0 forgetting Dirichlet (half-life 69), order-1 P(4/5|last), order-2 P(4/5|last2), order-3 P(4/5|last3), 2-state HMM forward tick by tick — inverse-variance fusion, entropy + transition gates",
+      "HARD VETOES AT NO COST: baseline >22% hot, 4/5 hot cluster 3+/6, post-4/5 state P(4/5|last)≥baseline, cool-down 2 ticks, tick-age >3s, entropy ≥3.25b — never overridden",
+      "SOFT GATES + PATIENCE VALVE: worst-case P̂+1.25σ must sit below baseline, P̂ must clear market's own 30th pct (recovery)/55th (normal) — debt waiting 25 ticks > imperfect reading, so best available non-vetoed fires",
+      "MEASURED OOS: fit first 60% of 4999 digits, gate + exact engine rules measured on last 40% unseen — survival = no SL + positive EV per normal shot + ladder ≤ max steps, stationarity 4-block χ², opportunity metrics, FDR across markets",
+      "SAME-TICK EXECUTION: both legs placed as ONE bulk order over single socket, proposals same millisecond, buys fired instantly on proposal confirmation — equal start_time proof, spreadMs telemetry, latency prioritized, pre-warmed payout",
+      "MARKET MODE AFTER ANALYSIS: clear winner → locked, tight cluster → switching (hysteresis 3pp), user selects after scan — same recovery ledger, same arbiter, same stake for both legs",
     ],
     accent: "teal",
-    icon: "activity",
+    icon: "layers",
+    customConsole: "twin-o4u5@1",
     hasSides: false,
     hasDigitLock: false,
     sides: [
-      {
-        id: "both",
-        label: "Accumulator",
-        contracts: ["ACCU"],
-        desc: "One compounding range contract — growth rate chosen, horizon measured",
-      },
+      { id: "both", label: "Twin O4U5", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Over4+Under5 normal, Over5+Under4 recovery — auto-configured twin" },
     ],
-    nominalWinRate: "measured per market",
-    nominalPayout: "(1+g)^n",
+    nominalWinRate: "50% normal (hedged) · 80% recovery when avoiding 4/5",
+    nominalPayout: "1.95× normal · 2.43× recovery",
   },
 ];
 
@@ -474,23 +426,10 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 }
 
 // ── Bot console contract ──────────────────────────────────────────────────────
-//
-// Every bot is driven by a dedicated console component in the web bundle. The
-// web service and the API service deploy INDEPENDENTLY, so the API has to state
-// which console each bot needs; an out-of-date web bundle then detects that it
-// cannot render a bot and says so instead of quietly opening the generic
-// specialist console (the production incident: Match Pulse, Twin-Hedge Edge and
-// the Compounding Range Sentinel all rendered their previous UI).
-//
-// The `@N` suffix is a REVISION: bump it whenever a console's behaviour or
-// layout changes materially, so bundles built before the change are detected
-// even though the bot id itself never changed.
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.matchPulse) return "match-pulse@1";
-  if (bot.accumulator) return "accumulator@1";
-  if (bot.twinHedge) return "twin-hedge@2";
+  if (bot.customConsole) return bot.customConsole;
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

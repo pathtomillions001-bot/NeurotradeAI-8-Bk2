@@ -25,11 +25,7 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { DigitTape, type DigitSnapshot } from "./digit-tape";
 import { logger } from "./logger";
-// The published index specifications (annualised volatility and tick interval)
-// live in the accumulator analysis module because the ACCU barrier theory is
-// built on them. It has no imports of its own, so this is a clean one-way edge
-// and there is exactly ONE definition of "how volatile is R_10" in the codebase.
-import { annualVolFor, tickSecondsFor, YEAR_SECONDS } from "./accumulator-analysis";
+import { annualVolFor, tickSecondsFor, YEAR_SECONDS } from "./market-specs";
 import { RISE_FALL_PAYOUT } from "./payouts";
 import {
   describeDerivHttpFailure,

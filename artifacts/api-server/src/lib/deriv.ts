@@ -2126,6 +2126,125 @@ async function accountRequest(
   return getAccountConnection(bearerToken, accountId).request(msg, timeoutMs);
 }
 
+/**
+ * The small subset of a broker ACCU contract specification that the bot needs
+ * before it can form a proposal. The fields are deliberately optional because
+ * Deriv has returned different `contracts_for` shapes during the API
+ * transition; the live proposal remains authoritative when a value is present.
+ */
+export interface AccumulatorContractSpec {
+  symbol: string;
+  available: boolean;
+  minDurationTicks?: number;
+  maxDurationTicks?: number;
+  growthRates: number[];
+  barrierPct?: number;
+  source: "broker" | "fallback";
+}
+
+/**
+ * Discover ACCU limits without opening a second authenticated socket. Public
+ * market metadata is enough for the catalogue; authenticated callers may pass
+ * credentials when their account-specific stake/contract limits are relevant.
+ */
+export async function discoverAccumulatorContractSpec(
+  symbol: string,
+  currency = "USD",
+  bearerToken?: string,
+  accountId?: string,
+): Promise<AccumulatorContractSpec> {
+  const fallback: AccumulatorContractSpec = {
+    symbol,
+    available: true,
+    growthRates: [0.01, 0.02, 0.03, 0.04, 0.05],
+    source: "fallback",
+  };
+  try {
+    const msg = bearerToken && accountId
+      ? await accountRequest(bearerToken, accountId, {
+          contracts_for: symbol,
+          product_type: "basic",
+          currency,
+        }, 10_000)
+      : await tickManager.request({
+          contracts_for: symbol,
+          product_type: "basic",
+          currency,
+        }, 10_000);
+    if (!msg || msg.error) return fallback;
+
+    const rows = [
+      ...(Array.isArray(msg.contracts_for?.available) ? msg.contracts_for.available : []),
+      ...(Array.isArray(msg.contracts_for?.contracts) ? msg.contracts_for.contracts : []),
+      ...(Array.isArray(msg.available) ? msg.available : []),
+    ] as any[];
+    const accu = rows.find((row) => String(row.contract_type ?? row.contractType ?? "").toUpperCase() === "ACCU");
+    if (!accu) return { ...fallback, available: false };
+
+    const toNumber = (value: unknown): number | undefined => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const ratesRaw = accu.growth_rate ?? accu.growth_rates ?? accu.growthRate;
+    const rates = (Array.isArray(ratesRaw) ? ratesRaw : [0.01, 0.02, 0.03, 0.04, 0.05])
+      .map((x) => Number(x))
+      .filter((x) => Number.isFinite(x))
+      .map((x) => x > 1 ? x / 100 : x)
+      .filter((x) => x >= 0.01 && x <= 0.05);
+    const min = toNumber(accu.min_duration ?? accu.minimum_duration ?? accu.min_ticks);
+    const max = toNumber(accu.max_duration ?? accu.maximum_duration ?? accu.max_ticks);
+    const barrier = toNumber(accu.barrier ?? accu.dynamic_barrier ?? accu.barrier_pct);
+    return {
+      symbol,
+      available: true,
+      minDurationTicks: min,
+      maxDurationTicks: max,
+      growthRates: rates.length ? [...new Set(rates)] : fallback.growthRates,
+      barrierPct: barrier !== undefined ? (barrier > 1 ? barrier / 100 : barrier) : undefined,
+      source: "broker",
+    };
+  } catch (err) {
+    logger.debug({ err, symbol }, "Accumulator contract discovery unavailable — using conservative fallback");
+    return fallback;
+  }
+}
+
+/** Request the current state of an open ACCU contract through the pooled socket. */
+export async function getAccumulatorOpenContract(
+  bearerToken: string,
+  accountId: string,
+  contractId: number,
+): Promise<any | null> {
+  if (!bearerToken || !accountId || !Number.isFinite(contractId)) return null;
+  const msg = await accountRequest(bearerToken, accountId, {
+    proposal_open_contract: 1,
+    contract_id: contractId,
+    subscribe: 0,
+  }, 12_000);
+  if (!msg || msg.error) return null;
+  return msg.proposal_open_contract ?? null;
+}
+
+/**
+ * Ask Deriv to close an open contract at the current bid. This helper is
+ * intentionally idempotent: an exchange-side take-profit/knockout can win the
+ * race with the local adverse-condition close, so callers may safely retry or
+ * simply accept a null/already-settled response.
+ */
+export async function sellAccumulatorContract(
+  bearerToken: string,
+  accountId: string,
+  contractId: number,
+): Promise<any | null> {
+  if (!bearerToken || !accountId || !Number.isFinite(contractId)) return null;
+  const msg = await accountRequest(bearerToken, accountId, {
+    sell: contractId,
+    price: 0,
+  }, 12_000);
+  if (!msg || msg.error) return null;
+  return msg.sell ?? msg;
+}
+
 
 /**
  * `ws`-shaped façade over a pooled connection.

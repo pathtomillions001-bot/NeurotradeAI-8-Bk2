@@ -239,13 +239,16 @@ function deployedFrom(activeDigit: number | undefined, activeSymbol: string | un
     verdict: read?.verdict ?? "—",
     confidence: read?.confidence ?? 0,
     edgePerDollar: read?.edgePerDollar ?? 0,
-    oosWinRate: read?.walk.test.winRate ?? 0,
-    oosShots: read?.walk.test.nShots ?? 0,
+    // The scan route intentionally sends CandidateLite to the browser and the
+    // browser sends that measured card back on deploy. Do not assume the full
+    // in-memory NexusCandidate (with `walk`) survived the JSON round-trip.
+    oosWinRate: read?.walk?.test?.winRate ?? (read as any)?.winRate ?? 0,
+    oosShots: read?.walk?.test?.nShots ?? (read as any)?.nShots ?? 0,
     breakEven: read?.breakEven ?? 0.112,
     payout: read?.payout ?? 8.93,
-    gap: read?.walk.gapStats.currentGap ?? card.gapStats.currentGap,
-    hazardRelative: read?.walk.gapStats.hazardRelative ?? card.gapStats.hazardRelative,
-    percentile: read?.walk.gapStats.percentile ?? card.gapStats.percentile,
+    gap: read?.walk?.gapStats?.currentGap ?? (read as any)?.gap ?? card.gapStats?.currentGap ?? 0,
+    hazardRelative: read?.walk?.gapStats?.hazardRelative ?? (read as any)?.hazardRelative ?? card.gapStats?.hazardRelative ?? 0,
+    percentile: read?.walk?.gapStats?.percentile ?? (read as any)?.percentile ?? card.gapStats?.percentile ?? 0,
   };
 }
 
@@ -291,7 +294,9 @@ export function getStatus(): NexusStatus {
         percentile: session.watch.percentile, geoOverdue: session.watch.geoOverdue,
         regimeHot: session.watch.regimeHot, contextOrder: session.watch.contextOrder,
       },
-      signals: session.activeRead.signals.slice(0, 6),
+      signals: (Array.isArray((session.activeRead as any).signals)
+        ? (session.activeRead as any).signals
+        : []).slice(0, 6),
     } : undefined,
     digitCandidates: [],
     topMarkets: [],
@@ -422,6 +427,12 @@ export async function startSession(config: NexusConfig): Promise<{ ok: boolean; 
   if (config.takeProfit <= 0) return fail("Take profit must be positive");
   if (!isAutomatedMarket(config.symbol)) return fail(`${config.symbol} cannot be traded by this bot`);
   if (!config.card || !Number.isFinite(Number(config.card.tau))) return fail("Run analysis first — this bot only deploys a measured rule");
+  const cardInput = config.card as any;
+  if (!cardInput.platt || !Number.isFinite(Number(cardInput.platt.n))
+    || !cardInput.hmm || !Number.isFinite(Number(cardInput.hmm.pHot))
+    || !cardInput.gapStats || !Number.isFinite(Number(cardInput.gapStats.currentGap))) {
+    return fail("The measured Nexus card is incomplete or stale — run the analysis again");
+  }
   if (config.digit < 0 || config.digit > 9) return fail("Digit must be 0-9");
 
   const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === config.symbol);
@@ -641,7 +652,9 @@ async function runLoop(config: NexusConfig) {
       session.message = inRecovery ? `🎯 [R${sharedStep}] Matches ${activeDigit} on ${activeName} · $${stake.toFixed(2)} · gap ${entry.gap}t · hazard ×${entry.hazardRelative.toFixed(2)}` : `🎯 Matches ${activeDigit} on ${activeName} · $${stake.toFixed(2)} · P ${(entry.p * 100).toFixed(1)}% · gap ${entry.gap}t`;
       broadcast();
 
-      const reason = `[${botName}${inRecovery ? " RECOVERY" : ""}] Matches ${activeDigit} on ${activeName} · measured: ${activeRead?.walk.test.nShots ?? 0} shots at ${((activeRead?.walk.test.winRate ?? 0) * 100).toFixed(1)}% OOS · edge ${entry.z.toFixed(2)}σ vs bar ${entry.bar.toFixed(2)}σ · P ${(entry.p * 100).toFixed(1)}% vs BE ${(activeCard.breakEven * 100).toFixed(1)}% · gap ${entry.gap}t (p${(entry.percentile * 100).toFixed(0)}) · hazard ×${entry.hazardRelative.toFixed(2)} · geo ${(entry.geoOverdue * 100).toFixed(1)}% · leader ${entry.leader} order ${entry.contextOrder}`;
+      const measuredShots = activeRead?.walk?.test?.nShots ?? (activeRead as any)?.nShots ?? 0;
+      const measuredWinRate = activeRead?.walk?.test?.winRate ?? (activeRead as any)?.winRate ?? 0;
+      const reason = `[${botName}${inRecovery ? " RECOVERY" : ""}] Matches ${activeDigit} on ${activeName} · measured: ${measuredShots} shots at ${(measuredWinRate * 100).toFixed(1)}% OOS · edge ${entry.z.toFixed(2)}σ vs bar ${entry.bar.toFixed(2)}σ · P ${(entry.p * 100).toFixed(1)}% vs BE ${(activeCard.breakEven * 100).toFixed(1)}% · gap ${entry.gap}t (p${(entry.percentile * 100).toFixed(0)}) · hazard ×${entry.hazardRelative.toFixed(2)} · geo ${(entry.geoOverdue * 100).toFixed(1)}% · leader ${entry.leader} order ${entry.contextOrder}`;
 
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId, symbol: activeSymbol, displayName: activeName, contractType: "DIGITMATCH", barrier: activeDigit,

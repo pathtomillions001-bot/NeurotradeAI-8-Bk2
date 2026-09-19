@@ -95,10 +95,16 @@ const RECOVERY_PATIENCE_TICKS = 12;
 const DRY_STREAM_TICKS = 30;
 /** Ticks to wait after a gap-digit settlement before re-arming the gate. */
 const BOUNDARY_COOLDOWN_TICKS = 3;
-/** Live hazard above which SWITCHING mode starts hunting another market. */
-const SWITCH_HAZARD = 0.30;
+/**
+ * Live hazard above which SWITCHING mode starts hunting another market. The
+ * original .30/.23 split made a near-uniform ten-state stream wait forever
+ * because the posterior upper bound is naturally above .23 on a small rolling
+ * window. Keep the current-digit/crossing/cooldown checks; loosen only this
+ * uncertainty ceiling so quality non-boundary entries can occur.
+ */
+const SWITCH_HAZARD = 0.34;
 /** …and the score lead the alternative must show before we move. */
-const SWITCH_MARGIN = 6;
+const SWITCH_MARGIN = 3;
 
 export const TWIN_MIN_SCORE = 44;
 
@@ -639,7 +645,11 @@ async function runLoop(config: TwinHedgeConfig) {
       const gate = twinEntryGate({
         digits,
         mode: inRecovery ? "recovery" : "normal",
-        maxHazard: inRecovery ? 0.26 : 0.23,
+        // The prior 0.26/0.23 bars rejected most normal markets on the
+        // Wilson-style upper bound even when the current tick was clean. A
+        // 0.31/0.29 ceiling still refuses boundary digits, crossings, hot
+        // recovery hazards and post-gap cooldowns, but permits measured trades.
+        maxHazard: inRecovery ? 0.31 : 0.29,
         minSafeLcb: inRecovery
           ? recoveryBreakEvenGapRate(config.lockedAnalysis?.payoutRecovery ?? 2.43) + 0.01
           : 0,
@@ -668,6 +678,15 @@ async function runLoop(config: TwinHedgeConfig) {
           if (moved) {
             symbol = moved.symbol;
             displayName = moved.displayName;
+            // Keep the public lock card truthful after a real switch. The
+            // pair remains hard-wired; only the active market and its fresh
+            // analysis move.
+            const movedAnalysis = config.rankedCandidates?.find((c) => c.symbol === moved.symbol);
+            if (movedAnalysis) {
+              session.config = { ...session.config!, symbol, displayName, lockedAnalysis: movedAnalysis };
+            } else if (session.config) {
+              session.config = { ...session.config, symbol, displayName };
+            }
             waitedTicks = 0;
             continue;
           }

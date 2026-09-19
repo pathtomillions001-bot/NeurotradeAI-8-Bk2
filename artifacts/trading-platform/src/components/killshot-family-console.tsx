@@ -24,7 +24,9 @@ interface Contract { kind: string; digit?: number }
 interface Candidate {
   symbol: string;
   displayName: string;
-  contract: Contract;
+  /** Match Nexus returns the selected digit at the top level. */
+  digit?: number;
+  contract?: Contract;
   label: string;
   verdict: "certified" | "qualified" | "watch" | "refused";
   confidence: number;
@@ -256,6 +258,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
           marketMode: mode,
           symbol: c.symbol,
           contract: c.contract,
+          ...(isNexus && Number.isInteger(c.digit) ? { digit: c.digit } : {}),
           card: c.card,
           analysis: c,
           ...(mode === "locked" ? { lockedSymbol: c.symbol } : {}),

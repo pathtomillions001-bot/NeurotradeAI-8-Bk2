@@ -23,9 +23,15 @@ import {
 } from "../lib/bot-engine";
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
+import * as twinHedge from "../lib/twin-hedge-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
 import * as matchNexus from "../lib/match-nexus-engine";
+import {
+  TWIN_NORMAL_LEGS,
+  TWIN_RECOVERY_LEGS,
+  recoveryBreakEvenGapRate,
+} from "../lib/twin-hedge-analysis";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import { type NexusCertainty } from "../lib/match-nexus-analysis";
 import {
@@ -61,6 +67,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
   if (bot.oneShot) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
+  if (bot.twinHedge) return { ok: false, error: `${bot.name} uses the /twin endpoints` };
   // match-nexus uses its own engine, not the generic specialist route
   if (botId === "match-nexus") return { ok: false, error: `${bot.name} uses the /nexus endpoints` };
 
@@ -179,6 +186,7 @@ function visibleStatus(sessionId: string) {
 router.get("/", (req, res) => {
   const status = visibleStatus(req.sessionId);
   const dual = visibleDualStatus(req.sessionId);
+  const twin = visibleTwinStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
   const nexus = visibleNexusStatus(req.sessionId);
@@ -189,6 +197,9 @@ router.get("/", (req, res) => {
       const console_ = botConsoleId(bot);
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
+      }
+      if (bot.id === twinHedge.TWIN_HEDGE_BOT_ID) {
+        return { ...bot, console: console_, session: twin.running ? twin : null };
       }
       if (bot.id === killshot.KILLSHOT_BOT_ID) {
         return { ...bot, console: console_, session: shot.running ? shot : null };
@@ -207,6 +218,7 @@ router.get("/", (req, res) => {
     }),
     activeBotId: pickActiveBotId([
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
+      { botId: twinHedge.TWIN_HEDGE_BOT_ID, running: twin.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: matchNexus.MATCH_NEXUS_BOT_ID, running: nexus.running },
       { botId: fam.botId ?? null, running: fam.running },
@@ -367,6 +379,133 @@ router.post("/duallock/stop", (req, res) => {
   }
   dualLock.stopSession();
   res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
+});
+
+// ── Twin-Lock Hedge Sentinel ──────────────────────────────────────────────────
+
+function visibleTwinStatus(sessionId: string) {
+  const status = twinHedge.getStatus();
+  const owner = twinHedge.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, lock: undefined };
+}
+
+/**
+ * The pair is HARD-WIRED. This endpoint exists so the console can render and
+ * validate exactly what the bot will trade — a client can never widen, narrow
+ * or re-point the contracts; there is no contract choice to make.
+ */
+router.get("/twin/contracts", (_req, res) => {
+  res.json({
+    normal: TWIN_NORMAL_LEGS,
+    recovery: TWIN_RECOVERY_LEGS,
+    simultaneous: true,
+    perLegPayouts: {
+      over4: 1.95,
+      under5: 1.95,
+      over5: 2.43,
+      under4: 2.43,
+    },
+    recoveryBreakEvenGapRate: recoveryBreakEvenGapRate(2.43),
+    bothLoseArmsRecovery: true,
+    splitIgnored: true,
+  });
+});
+
+router.get("/twin/status", (req, res) => {
+  res.json(visibleTwinStatus(req.sessionId));
+});
+
+async function twinSimParams(sessionId: string, body: any) {
+  let markupPercent = 10;
+  let maxStake = 500;
+  try {
+    const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
+    if (rows.length > 0) {
+      const v = Number((rows[0] as any).botRecoveryMarkup);
+      if (Number.isFinite(v)) markupPercent = v;
+      const m = Number((rows[0] as any).maxTradeStake);
+      if (Number.isFinite(m) && m > 0) maxStake = m;
+    }
+  } catch { /* defaults */ }
+  return {
+    stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
+    takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
+    stopLoss: Number(body?.stopLoss) > 0 ? Number(body.stopLoss) : 5,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body?.maxRecoverySteps) || 3)),
+    markupPercent,
+    maxStake,
+  };
+}
+
+router.post("/twin/scan", async (req, res): Promise<void> => {
+  try {
+    const params = await twinSimParams(req.sessionId, req.body);
+    const result = await twinHedge.scanTwinMarkets(req.sessionId, params);
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Twin-Lock scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/twin/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const requestedSymbol = typeof body.symbol === "string" ? body.symbol : undefined;
+  const fallback = AUTOMATED_DERIV_MARKETS.find(m => m.digitEnabled);
+  const symbol = requestedSymbol ?? fallback?.symbol;
+  if (!symbol || !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: "A valid digit-enabled market symbol is required" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === symbol);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "This bot needs a digit-enabled market" });
+    return;
+  }
+  const stake = Number(body.stake);
+  if (!Number.isFinite(stake) || stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+  const marketMode = body.marketMode === "switching" ? "switching" : "locked";
+  const takeProfit = Number(body.takeProfit) > 0 ? Number(body.takeProfit) : 10;
+  const stopLoss = Number(body.stopLoss) > 0 ? Number(body.stopLoss) : 5;
+  const maxRecoverySteps = Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3));
+
+  const existingOwner = twinHedge.getOwnerSessionId();
+  if (twinHedge.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+    return;
+  }
+
+  const result = await twinHedge.startSession({
+    ownerSessionId: req.sessionId,
+    symbol: market.symbol,
+    displayName: market.displayName,
+    marketMode,
+    stake,
+    stopLoss,
+    takeProfit,
+    maxRecoverySteps,
+    lockedAnalysis: body.analysis,
+    rankedCandidates: Array.isArray(body.ranked) ? body.ranked : undefined,
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
+});
+
+router.post("/twin/stop", (req, res) => {
+  const owner = twinHedge.getOwnerSessionId();
+  if (twinHedge.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  twinHedge.stopSession();
+  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
 });
 
 // ── Kill-Shot Oracle ──────────────────────────────────────────────────────────

@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot";
+  family: SpecialistFamily | "duallock" | "killshot" | "twinhedge";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -55,6 +55,15 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
+  /**
+   * The Twin-Lock Hedge Sentinel: two complementary contracts per round
+   * (Over 4 + Under 5 normal, Over 5 + Under 4 recovery), always executed
+   * simultaneously on one tick, recovery armed ONLY on a both-legs-lost
+   * round. Contracts are hard-wired — the user chooses nothing about the
+   * pair, and only LOCK vs SWITCH for the market, after the scan.
+   * The UI renders a dedicated console for this bot.
+   */
+  twinHedge?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -389,6 +398,44 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalWinRate: "measured OOS 12-18%",
     nominalPayout: "8.93×",
   },
+  {
+    id: "twinhedge",
+    name: "Twin-Lock Hedge Sentinel",
+    code: "BOT-TWINHEDGE",
+    family: "twinhedge",
+    contractLabel: "Over 4 + Under 5 · recovery Over 5 + Under 4",
+    tagline: "Two legs, one tick, zero boundary exposure",
+    twinHedge: true,
+    description:
+      "The paired-hedge bot. Normal rounds fire TWO contracts on the SAME tick with the SAME stake — Over 4 and Under 5 — so one leg wins every round by construction and the round only reaches the ladder if a broker half-tick drops both legs on opposite sides of the 4|5 boundary (a 4-then-5 up-crossing). That both-lose round, and ONLY that round, arms recovery: the mirrored pair Over 5 + Under 4, again both legs on one tick, staked to digest the TOTAL lost amount of the round that fell through (lose $2 across two $1 legs → attack $2). A split round is deliberately ignored — its small payout-vs-stakes tax never triggers a ladder. Every design decision in this bot therefore reduces to one number: P(next exit digit is 4 or 5). The scan measures that hazard per market — three fused estimators on an autocorrelation-corrected sample, worst-case posterior bounds, crossing-rate and clustering tests — and the live gate refuses boundary entries tick by tick: never enter from a 4 or a 5, never fire while the last tick crossed the boundary, never fire while the stream hovers. The recovery pair's own break-even is printed and enforced: at 2.43× per leg the ladder digests debt only while gap-avoidance q̂ clears 82.3%, so a market whose worst-case q̂ sits under that line is refused for recovery work — the honest number behind the promise, not a hope.",
+    edge: [
+      "SAME-TICK EXECUTION IS THE WHOLE GAME — both legs ride the shared bulk executor: every proposal burst is sent on one socket in one tick, entries are taken only on a FRESH tick arrival (never on a timer), and the loop refuses to fire on stale or stalled feeds, so leg A and leg B settle on the same exit tick by construction, not by luck",
+      "BOUNDARY-DIGIT HAZARD AS THE SINGLE STATE VARIABLE — P(next digit ∈ {4,5}) estimated three ways (Dirichlet marginal, first-order Markov row on the current digit, boundary-side chain) and fused in inverse variance on n_eff = n(1−ρ₁)/(1+ρ₁); the gate reads the 95th-percentile posterior bound, so it trades the worst plausible hazard, not the flattering one",
+      "THE SPLIT ROUND IS SILENTLY IGNORED — exactly the product rule: one win + one loss is the hedge doing its job, it never enters the recovery ledger, and the tax it pays (≈ |payout−2|·stake per round) is booked honestly in P&L, where TP/SL can still see it",
+      "RECOVERY FIRES ON TOTALS, NOT LEGS — a both-lose round records ONE ledger event with the ROUND's total stake (2 × stake), and the recovery stake is the shared debt-driven formula fed the PAIR's net-profit rate (min-leg payout − 1), so the recovery ROUND — whichever of its two legs wins — digests debt + markup; the same one-account ledger and arbiter every other bot shares",
+      "THE 82.3% DIGEST LINE IS THE VETO — a recovery pair at 2.43× per leg breaks even at gap-avoidance q* = 2/2.43 = 82.3%; the scan computes each market's worst-case q̂ and marks recovery on it unworkable below the line — a market that can only win the recovery pair by averaging past 82.3% is telling you the ladder will eat the account",
+      "UP-CROSSINGS ARE THE DISASTER, DOWN-CROSSINGS THE WINDFALL — the side-flip rate and its asymmetry are measured per market; a stream that crosses up through 4|5 more than it crosses down is penalised (that is the microstructure where a half-tick of broker jitter turns a hedge into a double loss), and a tick that JUST crossed the boundary is never entered on",
+      "POST-GAP COOL-DOWN — after any settlement on 4 or 5 the gate stands down for 3 clean ticks, because the digit stream that touched the boundary tends to keep touching it, and the next round's legs would enter it mid-hover",
+      "RECOVERY IS PATIENT BUT NEVER STUCK — the same boundary gates apply, tightened, but debt must be digested: after 12 refused ticks a recovery round fires FORCED and the message says so, instead of letting a perfect entry become a stranded debt",
+      "A BROKER REJECTS ONE LEG? THE ROUND NEVER ARMS RECOVERY — a leg that never traded cannot 'lose', so the round settles on the confirmed leg alone and recovery only ever triggers when both legs actually traded and actually lost; the hedge is never allowed to grow debt out of a socket hiccup",
+      "LOCK OR SWITCH — AFTER THE SCAN, NOT IN THE SETTINGS — the scan ranks the whole digit universe on the boundary statistics; you then choose: LOCK freezes the chosen market for the engagement (hazards only warn), SWITCH lets the engine rotate to the next-best scanned market when the live hazard measurably decays. Contracts NEVER rotate — the pair is the product",
+      "CIRCUIT BREAKERS WITH A MODELLED NUMBER — consecutive recovery failures beyond the max-steps ladder halt the session, and the bootstrap's p95 recovery depth + 2 is armed against the realised loss run; the breaker quotes the scan's own prediction, not a magic constant",
+    ],
+    accent: "lime",
+    icon: "layers",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      {
+        id: "both",
+        label: "Twin pair (auto-configured)",
+        contracts: ["DIGITOVER", "DIGITUNDER"],
+        desc: "Normal Over 4 + Under 5 · recovery Over 5 + Under 4 — both legs, one tick, no contract choice",
+      },
+    ],
+    nominalWinRate: "100% one-leg-wins normal · ≈80%+ recovery pair",
+    nominalPayout: "1.95× · 2.43×",
+  },
 ];
 
 export function getBotDefinition(botId: string): BotDefinition | undefined {
@@ -409,6 +456,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
+  if (bot.twinHedge) return "twin-hedge@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

@@ -598,13 +598,19 @@ async function runLoop(config: NexusConfig) {
         broadcast(); await sleep(600); continue;
       }
 
+      // Aligned with the shared timing contract (killshot-timing): this call
+      // site was written against an older private API — `pass` never existed
+      // on TimingResult and the extra fields were silently ignored, so the
+      // engine looped "watching" forever. `ready` is the real gate.
       const timing = evaluateTiming({
-        digits: liveDigits, winSet: new Set([activeDigit]), breakEven: activeCard.breakEven,
-        ticksSinceLoss, lastLossWasThisContract: lastLossDigit === activeDigit, ticksSinceLastShot: 0,
-        minSpacing: activeCard.minSpacing, regimeHot: entry.regimeHot,
+        digits: liveDigits, winSet: new Set([activeDigit]),
+        secondsSinceLastTick: tickManager.getTickAgeSeconds(activeSymbol),
+        medianTickGapSeconds: activeSymbol.startsWith("1HZ") ? 1 : 2,
+        ticksSinceLastShot: 0,
+        minSpacing: activeCard.minSpacing,
       });
 
-      if (!timing.pass) {
+      if (!timing.ready) {
         session.watch.phase = "watching"; session.watch.reason = timing.reason;
         session.message = `⏳ Timing: ${timing.reason}`; broadcast(); await sleep(700); continue;
       }

@@ -27,6 +27,7 @@ const API_CONSOLE_IDS = [
   "dual-lock@1",
   "killshot@1",
   "killshot-family@1",
+  "twin-hedge@1",
 ];
 
 describe("web console contract", () => {
@@ -84,6 +85,7 @@ describe("consoleSkew", () => {
       "specialist@1",
       "killshot@1",
       "killshot-family@1",
+      "twin-hedge@1",
     ];
     const skew = consoleSkew(
       [

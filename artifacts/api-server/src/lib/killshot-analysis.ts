@@ -584,7 +584,7 @@ export interface EnsembleReading {
   contextOrder: number;
 }
 
-interface HmmParams {
+export interface HmmParams {
   pHot: number;
   pCold: number;
   /** P(stay in the same regime). */

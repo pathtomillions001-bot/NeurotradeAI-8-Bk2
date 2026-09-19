@@ -17,16 +17,15 @@
  * engine may execute against it at any moment. Ownership only blocks TRADE
  * EXECUTION — status endpoints, scanning, and analysis always work.
  *
- * Three executors share this lock: the main autonomous engine (`autonomous`),
- * the NeuroAI Quantum FAB (`neuroai`) and the specialist AI bots (`bots` — one
- * bot session at a time, see `lib/bot-engine.ts`). All three read and write the
- * same ledger, so a fourth concurrent executor would recreate exactly the
- * mix-up described above.
+ * Four executors share this lock: the main autonomous engine (`autonomous`),
+ * the NeuroAI Quantum FAB (`neuroai`), the specialist AI bots (`bots` — one
+ * bot session at a time), and Match Pulse (`match-pulse`, including unsettled
+ * purchases). They all share the live ledger and must not execute together.
  */
 
 import { getBrowserSessionId } from "./session";
 
-export type TradingOwner = "autonomous" | "neuroai" | "bots";
+export type TradingOwner = "autonomous" | "neuroai" | "bots" | "match-pulse";
 
 /**
  * One execution lock PER CONNECTED ACCOUNT (browser session), not one per
@@ -35,7 +34,7 @@ export type TradingOwner = "autonomous" | "neuroai" | "bots";
  * trading this account" — even though they trade different accounts with
  * different recovery ledgers.
  *
- * Within one account the rule is unchanged: exactly one of the three
+ * Within one account the rule is unchanged: exactly one of the four
  * executors may trade at a time. The ambient session (request context or an
  * explicitly wrapped engine loop — see runWithSessionId) selects the lock,
  * so no call site needed to change.
@@ -80,5 +79,6 @@ export function hasTradingOwnership(owner: TradingOwner): boolean {
 export function tradingOwnerLabel(owner: TradingOwner): string {
   if (owner === "autonomous") return "main autonomous engine";
   if (owner === "neuroai") return "NeuroAI FAB session";
+  if (owner === "match-pulse") return "Match Pulse session (including pending settlement)";
   return "specialist AI bot";
 }

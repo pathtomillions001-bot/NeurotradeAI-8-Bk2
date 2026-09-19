@@ -7,6 +7,7 @@
  * giving each specialist its own hue.
  */
 
+import type { PulseTelemetry } from "./match-pulse";
 import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Layers } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
@@ -39,6 +40,8 @@ export interface BotCardData {
   nominalPayout: string;
   /** Pre-locked bots analyse once, then freeze their pair for the session. */
   preLocked?: boolean;
+  /** Tick-guarded Matches-only lifecycle. */
+  matchPulse?: boolean;
   /** One-shot bots lock one market + one contract and wait for the one shot. */
   oneShot?: boolean;
   /** Compounding Range Sentinel — the accumulator bot family. */
@@ -51,6 +54,7 @@ export interface BotCardData {
 }
 
 export interface BotSessionStatus {
+  pulse?: PulseTelemetry;
   running: boolean;
   botId: string | null;
   botName: string | null;

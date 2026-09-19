@@ -9,6 +9,8 @@
  */
 
 import { Router } from "express";
+import matchPulseRouter from "./match-pulse";
+import { getMatchPulseStatus } from "../lib/match-pulse-engine";
 import { BOT_CATALOG, getBotDefinition, type BotSideMode } from "../lib/bot-catalog";
 import {
   startSession,
@@ -44,6 +46,8 @@ import { eq } from "drizzle-orm";
 import { logger } from "../lib/logger";
 
 const router = Router();
+// Dedicated lifecycle; register before the generic /:botId routes.
+router.use("/match-pulse", matchPulseRouter);
 
 interface ParsedBotBody {
   contractTypes: BotContractType[];
@@ -63,6 +67,7 @@ interface ParsedBotBody {
 function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotBody } | { ok: false; error: string } {
   const bot = getBotDefinition(botId);
   if (!bot) return { ok: false, error: "Unknown bot" };
+  if (bot.matchPulse) return { ok: false, error: "Match Pulse requires its own scan receipt and endpoints" };
   // Pre-locked bots (Dual-Lock Range Sentinel) have their own endpoints — they
   // are never driven through the generic specialist route.
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
@@ -190,8 +195,10 @@ router.get("/", (req, res) => {
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
   const twin = visibleTwinStatus(req.sessionId);
+  const pulse = getMatchPulseStatus();
   res.json({
     bots: BOT_CATALOG.map(bot => {
+      if (bot.matchPulse) return { ...bot, session: pulse.running ? pulse : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, session: dual.running ? dual : null };
       }
@@ -206,7 +213,7 @@ router.get("/", (req, res) => {
       }
       return { ...bot, session: status.running && status.botId === bot.id ? status : null };
     }),
-    activeBotId: dual.running
+    activeBotId: pulse.running ? "match-pulse" : dual.running
       ? dualLock.DUAL_LOCK_BOT_ID
       : shot.running
         ? killshot.KILLSHOT_BOT_ID
@@ -1038,6 +1045,8 @@ router.post("/accumulator/stop", (req, res) => {
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
+  const pulse = getMatchPulseStatus();
+  if (pulse.running) { res.json(pulse); return; }
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);

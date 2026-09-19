@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import {
   authorizeWithDeriv,
   clearJournalManager,
+  closeAccountConnections,
   exchangeOAuthCode,
   getDerivAccounts,
   getJournalManager,
@@ -15,7 +16,9 @@ import { ConnectDerivAccountBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import {
   accountSessionId,
+  clearSessionLinksForSession,
   hasRiskAcknowledgment,
+  linkSessionIdentity,
   RISK_ACKNOWLEDGMENT_REQUIRED,
   riskAckValue,
   setBrowserSessionCookie,
@@ -208,6 +211,25 @@ async function resolveAccountSession(
     if (wasRiskAcknowledged) setRiskAcknowledgment(res, target);
   }
   req.sessionId = target;
+
+  // ── Persist the connection across tabs, restarts and devices ──────────────
+  // The connection must survive losing `sessionStorage` (new tab, closed tab,
+  // browser restart, mobile eviction) and third-party-cookie blocking. The
+  // durable client id and the cookie identity are bound to the account session
+  // so ANY later request — from this tab, another tab, or a fresh browser
+  // session — resolves straight back to the connected account. Only an explicit
+  // user disconnect clears these bindings.
+  const cookieSessionId =
+    typeof req.cookies?.["neurotrade_session"] === "string"
+      ? (req.cookies["neurotrade_session"] as string).trim()
+      : null;
+  await linkSessionIdentity({
+    sessionId: target,
+    clientId: req.clientId ?? null,
+    cookieId: cookieSessionId === current ? null : cookieSessionId,
+    tabId: req.isTabSession ? current : null,
+  });
+
   logger.info({ to: target }, "Browser session rotated onto account-scoped session");
   return target;
 }
@@ -216,11 +238,12 @@ async function upsertDerivAccounts(args: {
   sessionId: string;
   bearerToken: string;
   refreshToken?: string | null;
+  tokenExpiresAt?: Date | null;
   derivAccounts: Awaited<ReturnType<typeof getDerivAccounts>>;
   preferredId: string;
   profile?: { email: string | null; fullName: string | null; country: string | null };
 }) {
-  const { sessionId, bearerToken, refreshToken, derivAccounts, preferredId, profile } = args;
+  const { sessionId, bearerToken, refreshToken, tokenExpiresAt, derivAccounts, preferredId, profile } = args;
 
   await db.update(accountsTable).set({ isActive: false })
     .where(eq(accountsTable.sessionId, sessionId));
@@ -234,6 +257,10 @@ async function upsertDerivAccounts(args: {
     const common = {
       bearerToken,
       refreshToken: refreshToken ?? existing[0]?.refreshToken ?? null,
+      // OAuth access tokens expire (~1h); the stored expiry drives the
+      // automatic refresh that keeps the account connected until the user
+      // revokes access. PATs have no expiry and stay null.
+      tokenExpiresAt: tokenExpiresAt ?? existing[0]?.tokenExpiresAt ?? null,
       token: null,
       derivAccountId: derivAccount.account_id,
       currency: derivAccount.currency,
@@ -330,6 +357,7 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
       sessionId: accountSession,
       bearerToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
+      tokenExpiresAt: new Date(Date.now() + tokens.expiresIn * 1000),
       derivAccounts,
       preferredId: preferred.account_id,
       profile,
@@ -543,6 +571,15 @@ router.post("/switch-account", async (req, res): Promise<void> => {
 router.post("/disconnect", async (req, res): Promise<void> => {
   const wasRiskAcknowledged = hasRiskAcknowledgment(req);
   clearJournalManager(req.sessionId);
+  // Closing THIS session's pooled sockets gives the user's Deriv connection
+  // slots straight back — and never touches another visitor's connections.
+  const sessionAccounts = await getSessionAccounts(req.sessionId);
+  for (const account of sessionAccounts) {
+    closeAccountConnections(account.derivAccountId ?? account.loginId);
+  }
+  // This is the ONLY place a connection is ever unbound, and it only ever runs
+  // because the user asked for it.
+  await clearSessionLinksForSession(req.sessionId);
   await db.delete(accountsTable).where(eq(accountsTable.sessionId, req.sessionId));
   // Rotate this browser onto a brand-new anonymous session so a subsequently
   // connected DIFFERENT Deriv login can never inherit or migrate this account's

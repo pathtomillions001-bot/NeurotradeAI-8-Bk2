@@ -19,7 +19,8 @@
 
 import { db } from "@workspace/db";
 import { missedOpportunitiesTable } from "@workspace/db";
-import { desc } from "drizzle-orm";
+import { getBrowserSessionId } from "../session";
+import { desc, eq } from "drizzle-orm";
 import type { CoordinatorOutput } from "./types";
 import { tickManager } from "../deriv";
 import { logger } from "../logger";
@@ -143,6 +144,7 @@ export function trackRejectedTrade(input: MissedOpportunityInput): void {
       const filterTooStrict     = wouldHaveWon === true;
 
       await db.insert(missedOpportunitiesTable).values({
+        sessionId: getBrowserSessionId(),
         symbol,
         contractType,
         barrier:               barrier ?? null,
@@ -173,10 +175,13 @@ export function trackRejectedTrade(input: MissedOpportunityInput): void {
 
 // ── Query helpers ──────────────────────────────────────────────────────────────
 
-export async function getMissedOpportunitySummary() {
+export async function getMissedOpportunitySummary(sessionId?: string) {
+  // PER ACCOUNT — this used to be a global table, so every visitor saw the
+  // missed-opportunity statistics of whoever traded last.
   const records = await db
     .select()
     .from(missedOpportunitiesTable)
+    .where(sessionId ? eq(missedOpportunitiesTable.sessionId, sessionId) : undefined)
     .orderBy(desc(missedOpportunitiesTable.createdAt))
     .limit(200);
 
@@ -235,10 +240,11 @@ export async function getMissedOpportunitySummary() {
   };
 }
 
-export async function getRecentMissed(limit = 20) {
+export async function getRecentMissed(limit = 20, sessionId?: string) {
   return db
     .select()
     .from(missedOpportunitiesTable)
+    .where(sessionId ? eq(missedOpportunitiesTable.sessionId, sessionId) : undefined)
     .orderBy(desc(missedOpportunitiesTable.createdAt))
     .limit(limit);
 }

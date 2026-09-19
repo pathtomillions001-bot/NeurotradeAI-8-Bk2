@@ -110,27 +110,111 @@ export async function exchangeOAuthCode(
 }
 
 /**
- * GET /trading/v1/options/accounts — list all trading accounts for the Bearer token.
+ * Exchange an OAuth refresh token for a fresh access token.
+ *
+ * OAuth access tokens expire after ~1h. Before this existed the app simply kept
+ * using the expired token, every Deriv call 401'd, and the user was shown the
+ * "connect your account" screen — a silent logout they never asked for. The
+ * refresh token is long-lived, so a connected account now stays connected until
+ * the user actually revokes access.
  */
-export async function getDerivAccounts(bearerToken: string): Promise<Array<{
+export async function refreshOAuthAccessToken(
+  refreshToken: string,
+): Promise<{ accessToken: string; refreshToken: string; expiresIn: number }> {
+  const body = new URLSearchParams({
+    grant_type: "refresh_token",
+    client_id: APP_ID,
+    refresh_token: refreshToken,
+  });
+  const res = await fetch(`${DERIV_AUTH_BASE}/oauth2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: body.toString(),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(describeDerivHttpFailure("Refreshing the Deriv session", res.status, text));
+  }
+  const data = (await res.json()) as any;
+  return {
+    accessToken: data.access_token,
+    // Deriv may or may not rotate the refresh token; keep the old one when absent.
+    refreshToken: data.refresh_token ?? refreshToken,
+    expiresIn: Number(data.expires_in ?? 3600),
+  };
+}
+
+/**
+ * GET /trading/v1/options/accounts — list all trading accounts for the Bearer token.
+ *
+ * Cached + single-flighted. The account list changes rarely, but the UI polls
+ * `/api/account` and `/api/accounts` (and every engine checks the balance), and
+ * each of those used to be a fresh REST call. Deriv allows 60 REST requests per
+ * minute PER TOKEN, and burning that budget on a list that never changes is what
+ * left no headroom for the OTP handshake a trade needs — the "rate limit of
+ * requests per second" the user saw. One request now serves every caller.
+ */
+export type DerivAccountList = Array<{
   account_id: string;
   balance: number;
   currency: string;
   group: string;
   status: string;
   account_type: "demo" | "real";
-}>> {
-  const res = await fetch(`${DERIV_REST_BASE}/trading/v1/options/accounts`, {
-    headers: derivHeaders(bearerToken),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(
-      describeDerivHttpFailure("Fetching your Deriv accounts", res.status, text),
-    );
+}>;
+
+const ACCOUNTS_CACHE_TTL_MS = 30_000;
+const accountsCache = new Map<string, { value: DerivAccountList; expiresAt: number }>();
+const accountsInFlight = new Map<string, Promise<DerivAccountList>>();
+
+function accountsCacheKey(bearerToken: string): string {
+  // Token tail is enough to tell accounts apart without keeping the secret in a key.
+  return bearerToken.slice(-16);
+}
+
+/** Drop the cached account list for a token (after connect/disconnect/switch). */
+export function invalidateDerivAccountsCache(bearerToken?: string): void {
+  if (!bearerToken) {
+    accountsCache.clear();
+    return;
   }
-  const data = await res.json() as any;
-  return data.data ?? [];
+  accountsCache.delete(accountsCacheKey(bearerToken));
+}
+
+export async function getDerivAccounts(
+  bearerToken: string,
+  opts: { force?: boolean } = {},
+): Promise<DerivAccountList> {
+  const key = accountsCacheKey(bearerToken);
+  if (!opts.force) {
+    const cached = accountsCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    const inFlight = accountsInFlight.get(key);
+    if (inFlight) return inFlight;
+  }
+
+  const request = (async (): Promise<DerivAccountList> => {
+    const res = await fetch(`${DERIV_REST_BASE}/trading/v1/options/accounts`, {
+      headers: derivHeaders(bearerToken),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(
+        describeDerivHttpFailure("Fetching your Deriv accounts", res.status, text),
+      );
+    }
+    const data = (await res.json()) as any;
+    return data.data ?? [];
+  })();
+
+  accountsInFlight.set(key, request);
+  try {
+    const value = await request;
+    accountsCache.set(key, { value, expiresAt: Date.now() + ACCOUNTS_CACHE_TTL_MS });
+    return value;
+  } finally {
+    accountsInFlight.delete(key);
+  }
 }
 
 /**
@@ -165,9 +249,10 @@ export async function getOtpWebSocketUrl(
 }
 
 async function fetchOtpWebSocketUrl(
-  bearerToken: string,
+  initialBearerToken: string,
   accountId: string,
 ): Promise<string> {
+  let bearerToken = initialBearerToken;
   // The OTP endpoint sits behind Cloudflare and returns raw 502 HTML pages or
   // 503 {"errors":[{"code":"CircuitBreakerBusy",...}]} envelopes during brief
   // Deriv health probes. Those recover within seconds, so retry transient
@@ -207,6 +292,17 @@ async function fetchOtpWebSocketUrl(
 
     lastStatus = res.status;
     lastBody = await res.text().catch(() => "");
+
+    // A 401/403 means the access token lapsed (OAuth tokens last ~1h). Refresh
+    // it and retry instead of surfacing "session expired" to a connected user.
+    if ((res.status === 401 || res.status === 403) && attempt < maxAttempts) {
+      const refreshed = await ensureFreshBearerToken(accountId, bearerToken);
+      if (refreshed && refreshed !== bearerToken) {
+        bearerToken = refreshed;
+        logger.info({ attempt }, "OTP: refreshed expired token — retrying handshake");
+        continue;
+      }
+    }
 
     if (isTransientDerivFailure(res.status, lastBody) && attempt < maxAttempts) {
       const backoffMs = 1000 * 2 ** (attempt - 1); // 1s → 2s
@@ -1517,6 +1613,576 @@ export function invalidateBalanceCache() {
   balanceCacheByAccount.clear();
 }
 
+
+/**
+ * Make sure the Bearer token for an account is still valid, refreshing it with
+ * the stored OAuth refresh token when it is about to expire.
+ *
+ * OAuth access tokens last ~1 hour. Without this, a user who connected with
+ * "Sign in with Deriv" was silently signed out an hour later: every Deriv call
+ * returned 401 and the app showed the connect screen even though the user had
+ * never revoked anything. PAT connections carry no refresh token and never
+ * expire, so they are left untouched.
+ */
+const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
+
+export async function ensureFreshBearerToken(
+  accountId: string,
+  bearerToken: string,
+): Promise<string> {
+  try {
+    const { db, accountsTable } = await import("@workspace/db");
+    const { eq } = await import("drizzle-orm");
+    const rows = await db.select().from(accountsTable)
+      .where(eq(accountsTable.derivAccountId, accountId)).limit(1);
+    const row = rows[0];
+    if (!row) return bearerToken;
+    const refreshToken = row.refreshToken;
+    if (!refreshToken) return bearerToken; // PAT — never expires
+    const expiresAt = row.tokenExpiresAt ? new Date(row.tokenExpiresAt).getTime() : null;
+    // Refresh when the expiry is unknown (legacy OAuth rows) or imminent.
+    const needsRefresh =
+      expiresAt === null || Number.isNaN(expiresAt) || expiresAt - Date.now() < TOKEN_REFRESH_MARGIN_MS;
+    if (!needsRefresh) return bearerToken;
+
+    const refreshed = await refreshOAuthAccessToken(refreshToken);
+    const newExpiry = new Date(Date.now() + refreshed.expiresIn * 1000);
+    await db.update(accountsTable)
+      .set({
+        bearerToken: refreshed.accessToken,
+        refreshToken: refreshed.refreshToken,
+        tokenExpiresAt: newExpiry,
+        updatedAt: new Date(),
+      })
+      .where(eq(accountsTable.id, row.id));
+    // The account list cache is keyed by token tail — move it to the new token.
+    invalidateDerivAccountsCache(bearerToken);
+    logger.info({ accountId }, "Deriv OAuth token refreshed — connection kept alive");
+    return refreshed.accessToken;
+  } catch (err) {
+    logger.warn({ err, accountId }, "Deriv token refresh failed — using the existing token");
+    return bearerToken;
+  }
+}
+
+// ── Authenticated connection pool (ONE socket per Deriv account) ──────────────
+//
+// WHY THIS EXISTS
+//
+// Deriv's published limits are: 5 concurrent WebSockets per user, 60 REST
+// requests per minute per token, 100 messages per second per connection.
+//
+// The old code opened a BRAND-NEW authenticated WebSocket for every single
+// operation — each with its own OTP handshake (a REST call):
+//
+//     executeLiveTrade()            → OTP + socket
+//     waitForContractResult()       → OTP + socket, polling portfolio every 2 s
+//     executeBulkLiveTrades()       → OTP + socket
+//     waitForBulkContractResults()  → OTP + socket
+//     sellContract()                → OTP + socket
+//     fetchDerivProfitTable()       → OTP + socket
+//     DerivJournalManager           → OTP + a permanently held socket
+//
+// One manual trade therefore cost 2 sockets + 2 REST calls, an accumulator
+// round-trip up to 4 sockets + 4 REST calls, and a Twin-Hedge batch 2 more.
+// With bots running, several accounts and the journal manager's background
+// polling, the app sailed past both the 5-connection ceiling and the 60 REST
+// requests/minute budget — which is exactly the Deriv page users reported:
+//
+//     "You have reached the rate limit of requests per second. Please try later."
+//
+// THE FIX
+//
+// Every authenticated operation for an account now shares ONE persistent,
+// multiplexed WebSocket. Requests carry a `req_id` and are matched back to
+// their promise, subscriptions (transactions) ride along on the same socket,
+// and outgoing traffic is paced so the per-connection message rate stays far
+// below Deriv's ceiling. A trade costs ZERO extra sockets and ZERO extra REST
+// calls, so the app can trade as often as before without approaching a limit.
+
+/** Minimum gap between two outgoing messages on one connection (40 msg/s max). */
+const ACCOUNT_SEND_INTERVAL_MS = 25;
+/** Default per-request timeout on the pooled socket. */
+const ACCOUNT_REQUEST_TIMEOUT_MS = 20_000;
+/** How long a RateLimit error pauses the outgoing queue. */
+const ACCOUNT_RATE_LIMIT_PAUSE_MS = 2_000;
+/** Tear a connection down when it has been idle this long (frees the slot). */
+const ACCOUNT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+function isRateLimitError(msg: any): boolean {
+  const code = String(msg?.error?.code ?? "");
+  const text = String(msg?.error?.message ?? "").toLowerCase();
+  return code === "RateLimit" || text.includes("rate limit");
+}
+
+class DerivAccountConnection extends EventEmitter {
+  readonly accountId: string;
+  private bearerToken: string;
+  private ws: WebSocket | null = null;
+  private nextReqId = 1;
+  private pending = new Map<
+    number,
+    { resolve: (msg: any) => void; timer: ReturnType<typeof setTimeout> }
+  >();
+  private sendQueue: Array<() => void> = [];
+  private queueTimer: ReturnType<typeof setInterval> | null = null;
+  private lastSendMs = 0;
+  private pausedUntil = 0;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelay = 1_000;
+  private lastPongMs = Date.now();
+  private connecting: Promise<void> | null = null;
+  private closed = false;
+  /** Subscriptions that must be re-sent after a reconnect. */
+  private subscriptions: Array<Record<string, unknown>> = [];
+
+  constructor(accountId: string, bearerToken: string) {
+    super();
+    this.accountId = accountId;
+    this.bearerToken = bearerToken;
+    this.setMaxListeners(0);
+    this.queueTimer = setInterval(() => this.processQueue(), ACCOUNT_SEND_INTERVAL_MS);
+    this.queueTimer.unref?.();
+  }
+
+  isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** Swap in a freshly refreshed Bearer token without dropping the socket. */
+  setToken(token: string): void {
+    this.bearerToken = token;
+  }
+
+  /** Tail of the token this connection was opened with (identity check only). */
+  tokenTail(): string {
+    return this.bearerToken.slice(-12);
+  }
+
+  /** Adopt a refreshed token: use it for the next handshake/refresh. */
+  adoptToken(token: string): void {
+    this.bearerToken = token;
+  }
+
+  /** Send and wait for the response carrying this request's `req_id`. */
+  async request(msg: Record<string, unknown>, timeoutMs = ACCOUNT_REQUEST_TIMEOUT_MS): Promise<any> {
+    await this.ensureConnected();
+    const reqId = this.nextReqId++;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(reqId);
+        resolve(null);
+      }, timeoutMs);
+      this.pending.set(reqId, { resolve, timer });
+      this.enqueue(() => {
+        if (!this.isOpen()) {
+          const entry = this.pending.get(reqId);
+          if (entry) {
+            clearTimeout(entry.timer);
+            this.pending.delete(reqId);
+            resolve(null);
+          }
+          return;
+        }
+        this.sendNow({ ...msg, req_id: reqId });
+      });
+    });
+  }
+
+  /** Subscribe (no req_id) and remember it for automatic re-subscription. */
+  async subscribe(msg: Record<string, unknown>): Promise<void> {
+    this.subscriptions.push(msg);
+    await this.send(msg);
+  }
+
+  /** One-shot send without a response binding. */
+  async send(msg: Record<string, unknown>): Promise<void> {
+    await this.ensureConnected();
+    await new Promise<void>((resolve) => {
+      this.enqueue(() => {
+        if (this.isOpen()) this.sendNow(msg);
+        resolve();
+      });
+    });
+  }
+
+  private sendNow(payload: Record<string, unknown>): void {
+    if (!this.isOpen()) return;
+    this.lastSendMs = Date.now();
+    this.touchIdle();
+    try {
+      this.ws!.send(JSON.stringify(payload));
+    } catch (err) {
+      logger.debug({ err, accountId: this.accountId }, "AccountConnection: send failed");
+    }
+  }
+
+  private enqueue(task: () => void): void {
+    this.sendQueue.push(task);
+    this.processQueue();
+  }
+
+  private processQueue(): void {
+    if (Date.now() < this.pausedUntil) return;
+    if (!this.isOpen()) return;
+    if (this.sendQueue.length === 0) return;
+    if (Date.now() - this.lastSendMs < ACCOUNT_SEND_INTERVAL_MS) return;
+    const task = this.sendQueue.shift();
+    try {
+      task?.();
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private touchIdle(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      // No traffic for a while — give the connection slot back to Deriv.
+      if (this.pending.size === 0 && this.listenerCount("message") === 0) this.destroy();
+    }, ACCOUNT_IDLE_TIMEOUT_MS);
+    this.idleTimer.unref?.();
+  }
+
+  async ensureConnected(): Promise<void> {
+    if (this.closed) throw new Error("This trading connection was closed.");
+    if (this.isOpen()) return;
+    if (this.connecting) return this.connecting;
+    this.connecting = this.connect().finally(() => {
+      this.connecting = null;
+    });
+    return this.connecting;
+  }
+
+  private async connect(): Promise<void> {
+    let otpUrl: string;
+    try {
+      // Refresh an expiring OAuth token BEFORE the handshake, so a long-lived
+      // app never gets logged out an hour into a session.
+      this.bearerToken = await ensureFreshBearerToken(this.accountId, this.bearerToken);
+      otpUrl = await getOtpWebSocketUrl(this.bearerToken, this.accountId);
+    } catch (err) {
+      this.scheduleReconnect();
+      throw err instanceof Error ? err : new Error("Trading session handshake failed");
+    }
+    if (this.closed) return;
+
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(otpUrl, { perMessageDeflate: false });
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error("WebSocket creation failed"));
+        return;
+      }
+      this.ws = ws;
+
+      const openTimeout = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { ws.terminate(); } catch { /* ignore */ }
+        reject(new Error("Trading connection timed out"));
+      }, 15_000);
+
+      ws.on("open", () => {
+        this.reconnectDelay = 1_000;
+        this.emit("open");
+        this.lastPongMs = Date.now();
+        this.startPing();
+        this.touchIdle();
+        // Restore subscriptions (transaction feed) after every reconnect so the
+        // journal keeps updating in real time without a new handshake.
+        for (const sub of this.subscriptions) {
+          try { ws.send(JSON.stringify(sub)); } catch { /* ignore */ }
+        }
+        if (!settled) {
+          settled = true;
+          clearTimeout(openTimeout);
+          resolve();
+        }
+      });
+
+      ws.on("message", (data) => this.handleMessage(data));
+
+      ws.on("error", (err) => {
+        logger.debug({ msg: (err as Error).message, accountId: this.accountId },
+          "AccountConnection: socket error");
+        if (!settled) {
+          settled = true;
+          clearTimeout(openTimeout);
+          reject(err instanceof Error ? err : new Error("Trading connection error"));
+        }
+      });
+
+      ws.on("close", () => {
+        this.stopPing();
+        this.ws = null;
+        this.failPending();
+        if (!settled) {
+          settled = true;
+          clearTimeout(openTimeout);
+          reject(new Error("Trading connection closed before it was ready"));
+        }
+        if (!this.closed) this.scheduleReconnect();
+      });
+    });
+  }
+
+  private handleMessage(data: WebSocket.RawData): void {
+    let msg: any;
+    try {
+      msg = JSON.parse(data.toString());
+    } catch {
+      return;
+    }
+    this.lastPongMs = Date.now();
+
+    if (msg.req_id !== undefined && msg.req_id !== null) {
+      const entry = this.pending.get(Number(msg.req_id));
+      if (entry) {
+        clearTimeout(entry.timer);
+        this.pending.delete(Number(msg.req_id));
+        entry.resolve(msg);
+      }
+    }
+
+    if (isRateLimitError(msg)) {
+      // Deriv's throttle applies to the whole account: pause EVERYTHING for a
+      // moment rather than hammering the same limit with retries.
+      this.pausedUntil = Date.now() + ACCOUNT_RATE_LIMIT_PAUSE_MS;
+      logger.warn({ accountId: this.accountId, echo: msg.echo_req },
+        "AccountConnection: Deriv rate limit — pausing outgoing traffic");
+    }
+
+    if (msg.msg_type === "ping") {
+      try { this.ws?.send(JSON.stringify({ pong: 1 })); } catch { /* ignore */ }
+    }
+
+    // Everything else (transaction / profit_table pushes) goes to subscribers.
+    this.emit("message", msg);
+  }
+
+  private failPending(): void {
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.resolve(null);
+    }
+    this.pending.clear();
+    this.sendQueue = [];
+  }
+
+  private startPing(): void {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = setInterval(() => {
+      if (Date.now() - this.lastPongMs > 60_000) {
+        logger.debug({ accountId: this.accountId }, "AccountConnection: no pong — reconnecting");
+        try { this.ws?.terminate(); } catch { /* ignore */ }
+        return;
+      }
+      try { this.ws?.send(JSON.stringify({ ping: 1 })); } catch { /* ignore */ }
+    }, 25_000);
+    this.pingTimer.unref?.();
+  }
+
+  private stopPing(): void {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closed) return;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectDelay = Math.min(this.reconnectDelay * 1.6, 30_000);
+      void this.ensureConnected().catch(() => {
+        /* connect() already scheduled the next attempt */
+      });
+    }, this.reconnectDelay);
+    this.reconnectTimer.unref?.();
+  }
+
+  destroy(): void {
+    this.closed = true;
+    this.stopPing();
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
+    if (this.queueTimer) { clearInterval(this.queueTimer); this.queueTimer = null; }
+    this.failPending();
+    try { this.ws?.terminate(); } catch { /* ignore */ }
+    this.ws = null;
+    this.removeAllListeners();
+  }
+}
+
+// One connection per Deriv account id. Account ids are globally unique, so
+// different browser sessions connecting the SAME Deriv account share one socket
+// — correct, because Deriv's connection limit is per USER, not per browser.
+const accountConnections = new Map<string, DerivAccountConnection>();
+
+/**
+ * The pooled, persistent authenticated connection for an account.
+ *
+ * Keyed by ACCOUNT ID ALONE — never by token. When an OAuth token is refreshed
+ * mid-session the same connection simply adopts the new token; keying by token
+ * would open a second socket for the same account and eat into Deriv's
+ * 5-concurrent-WebSockets-per-user budget.
+ */
+export function getAccountConnection(
+  bearerToken: string,
+  accountId: string,
+): DerivAccountConnection {
+  let conn = accountConnections.get(accountId);
+  if (!conn) {
+    conn = new DerivAccountConnection(accountId, bearerToken);
+    accountConnections.set(accountId, conn);
+  } else if (bearerToken && bearerToken !== conn.tokenTail()) {
+    conn.adoptToken(bearerToken);
+  }
+  return conn;
+}
+
+/** Drop pooled connections for one account, or every account when omitted. */
+export function closeAccountConnections(accountId?: string): void {
+  if (accountId) {
+    const conn = accountConnections.get(accountId);
+    if (conn) {
+      conn.destroy();
+      accountConnections.delete(accountId);
+    }
+    return;
+  }
+  for (const conn of accountConnections.values()) conn.destroy();
+  accountConnections.clear();
+}
+
+/** Number of live authenticated sockets — exposed for diagnostics/healthz. */
+export function accountConnectionCount(): number {
+  let open = 0;
+  for (const conn of accountConnections.values()) if (conn.isOpen()) open++;
+  return open;
+}
+
+async function accountRequest(
+  bearerToken: string,
+  accountId: string,
+  msg: Record<string, unknown>,
+  timeoutMs = ACCOUNT_REQUEST_TIMEOUT_MS,
+): Promise<any> {
+  return getAccountConnection(bearerToken, accountId).request(msg, timeoutMs);
+}
+
+
+/**
+ * `ws`-shaped façade over a pooled connection.
+ *
+ * The bulk executor and (historically) the journal manager were written against
+ * a raw `ws` object. Rather than rewrite their battle-tested message routing,
+ * they receive this adapter: `send`/`on("message")`/`readyState` behave exactly
+ * like the socket they expect, but every call lands on the ONE pooled
+ * connection for the account, and `close()` is a no-op so a finished batch does
+ * not tear the connection down for the next one.
+ */
+export interface PooledSocket {
+  readonly readyState: number;
+  readonly isOpen: () => boolean;
+  send(payload: Record<string, unknown> | string): void;
+  on(event: "message", cb: (data: { toString(): string }) => void): void;
+  on(event: "open", cb: () => void): void;
+  // Kept for the bulk executor's batch-fatal error handling. On a pooled
+  // connection there is nothing to tear down (the pool owns reconnection), and
+  // on a directly-opened test socket these are wired to the real events.
+  on(event: "error", cb: (err: Error) => void): void;
+  on(event: "close", cb: () => void): void;
+  close(): void;
+  terminate(): void;
+  readonly connection: DerivAccountConnection;
+}
+
+
+/**
+ * Connect straight to a WebSocket URL and expose the same façade as
+ * `getPooledSocket`. Used only by callers that inject their own URL (tests).
+ */
+async function openDirectSocket(url: string): Promise<PooledSocket> {
+  const socket = new WebSocket(url, { perMessageDeflate: false });
+  // Buffer anything sent before the socket is up, and remember the "open"
+  // transition so a listener registered afterwards still fires.
+  let opened = false;
+  const preOpenQueue: string[] = [];
+  socket.once("open", () => {
+    opened = true;
+    for (const pending of preOpenQueue.splice(0)) {
+      try { socket.send(pending); } catch { /* ignore */ }
+    }
+  });
+  return {
+    get readyState() {
+      return socket.readyState;
+    },
+    isOpen: () => socket.readyState === WebSocket.OPEN,
+    send(payload) {
+      const text = typeof payload === "string" ? payload : JSON.stringify(payload);
+      if (socket.readyState === WebSocket.OPEN) socket.send(text);
+      else if (opened) { /* closing */ }
+      else preOpenQueue.push(text);
+    },
+    on(event: "message" | "open" | "error" | "close", cb: any) {
+      if (event === "open" && socket.readyState === WebSocket.OPEN) {
+        queueMicrotask(cb);
+        return;
+      }
+      socket.on(event, cb);
+    },
+    close() {
+      try { socket.close(); } catch { /* ignore */ }
+    },
+    terminate() {
+      try { socket.terminate(); } catch { /* ignore */ }
+    },
+    connection: null as unknown as DerivAccountConnection,
+  };
+}
+
+export async function getPooledSocket(
+  bearerToken: string,
+  accountId: string,
+): Promise<PooledSocket> {
+  const connection = getAccountConnection(bearerToken, accountId);
+  await connection.ensureConnected();
+  return {
+    get readyState() {
+      return connection.isOpen() ? WebSocket.OPEN : WebSocket.CLOSED;
+    },
+    isOpen: () => connection.isOpen(),
+    send(payload) {
+      const msg = typeof payload === "string" ? JSON.parse(payload) : payload;
+      void connection.send(msg);
+    },
+    on(event: "message" | "open" | "error" | "close", cb: any) {
+      if (event === "message") {
+        connection.on("message", (msg: any) => cb({ toString: () => JSON.stringify(msg) }));
+      } else if (event === "open") {
+        // The caller registers this AFTER awaiting us, by which time the pooled
+        // socket is usually already open — so replay it instead of hanging.
+        if (connection.isOpen()) queueMicrotask(cb);
+        else connection.on("open", cb);
+      }
+      // A pooled connection never errors or closes underneath a single caller:
+      // the pool transparently reconnects, so these events are intentionally
+      // not forwarded (a batch must not be declared dead by a transient drop).
+    },
+    close() {
+      /* pooled: never close on behalf of one caller */
+    },
+    terminate() {
+      /* pooled: never terminate on behalf of one caller */
+    },
+    connection,
+  };
+}
+
 // ── Persistent Journal WebSocket Manager ─────────────────────────────────────
 /**
  * DerivJournalManager
@@ -1531,17 +2197,21 @@ export function invalidateBalanceCache() {
  */
 /** Max transactions per Deriv profit_table request (Deriv hard limit is 500) */
 const JOURNAL_FETCH_LIMIT = 500;
+/**
+ * How many durable journal rows a cold start reads back. High enough to cover
+ * any realistic history for display, bounded so the read stays fast.
+ */
+const JOURNAL_DB_ROW_LIMIT = 5_000;
 
 class DerivJournalManager extends EventEmitter {
-  private ws: WebSocket | null = null;
+  private sock: PooledSocket | null = null;
   private bearerToken: string | null = null;
   private accountId: string | null = null;
   private cachedTransactions: any[] = [];
   private lastFetchMs = 0;
-  private reconnectDelay = 3000;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private firstFetchTimer: ReturnType<typeof setTimeout> | null = null;
   private lastPongMs = Date.now();
   /** Accumulates transactions across paginated fetches */
   private fetchAccumulator: any[] = [];
@@ -1557,6 +2227,10 @@ class DerivJournalManager extends EventEmitter {
   private static readonly MIN_QUICK_REFRESH_MS = 3_000;
   /** True while a paginated profit_table fetch is in progress — blocks new full chains */
   private isFetchingPages = false;
+  /** True once the pooled socket listener is attached (never attach twice). */
+  private listening = false;
+  /** True once this manager has hydrated its cache from Postgres. */
+  private hydratedFromDb = false;
 
   setCredentials(bearerToken: string, accountId: string) {
     const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
@@ -1564,26 +2238,26 @@ class DerivJournalManager extends EventEmitter {
     this.accountId = accountId;
     if (changed) {
       // Clear stale cache from the previous account immediately so the journal
-      // doesn't briefly show the wrong account's trades after switching.
+      // doesn't briefly show the wrong account's trades after switching. The
+      // durable copy in Postgres is re-read per account (see hydrateFromDb).
       this.cachedTransactions = [];
       this.fetchAccumulator = [];
       this.isFetchingPages = false;
       this.lastFetchMs = 0;
       this.lastRefreshSentMs = 0;
       this.lastQuickRefreshSentMs = 0;
+      this.hydratedFromDb = false;
       // Emit empty immediately so the frontend journal shows "loading" state
       this.emit("refreshed", []);
-      this.reconnectDelay = 3_000;
-      this.connect();
-      this.startRefreshTimer();
+      this.detach();
     }
+    void this.connect();
   }
 
-  // Backward-compat: accept PAT token only (no accountId → can't use OTP)
+  // Backward-compat: accept PAT token only (no accountId → can't use the pool)
   setToken(token: string) {
-    logger.info("JournalManager.setToken: token stored; awaiting accountId for OTP connection.");
+    logger.info("JournalManager.setToken: token stored; awaiting accountId for the pooled connection.");
     this.bearerToken = token;
-    // Don't connect until we have accountId
   }
 
   clearCredentials() {
@@ -1592,8 +2266,8 @@ class DerivJournalManager extends EventEmitter {
     this.cachedTransactions = [];
     this.fetchAccumulator = [];
     this.lastFetchMs = 0;
-    this.stopTimers();
-    if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
+    this.hydratedFromDb = false;
+    this.detach();
     logger.info("JournalManager: credentials cleared");
   }
 
@@ -1603,17 +2277,107 @@ class DerivJournalManager extends EventEmitter {
     return this.lastFetchMs > 0 && (Date.now() - this.lastFetchMs) < maxAgeMs;
   }
 
+  /** True once the on-disk (Postgres) journal has been read for this account. */
+  hasHydrated(): boolean { return this.hydratedFromDb; }
+
+  /**
+   * Seed the in-memory cache from the durable journal table.
+   *
+   * This is what survives a redeploy: the process's memory is gone but the
+   * trades are on disk, so the journal is populated the instant the page loads
+   * instead of showing "no trades" until Deriv has been re-paginated (which a
+   * rate limit can delay by minutes — the reported "my journal data vanished").
+   */
+  async hydrateFromDb(sessionId: string): Promise<void> {
+    if (!this.accountId) return;
+    this.hydratedFromDb = true;
+    try {
+      const { db, derivJournalTable } = await import("@workspace/db");
+      const { and, desc, eq } = await import("drizzle-orm");
+      const rows = await db.select().from(derivJournalTable)
+        .where(and(
+          eq(derivJournalTable.sessionId, sessionId),
+          eq(derivJournalTable.accountId, this.accountId),
+        ))
+        .orderBy(desc(derivJournalTable.purchaseTime))
+        .limit(JOURNAL_DB_ROW_LIMIT);
+      if (rows.length === 0) return;
+      // Never overwrite fresher live data with the disk snapshot.
+      if (this.cachedTransactions.length >= rows.length) return;
+      const parsed: any[] = [];
+      for (const row of rows) {
+        try {
+          parsed.push(JSON.parse(row.payloadJson));
+        } catch { /* skip corrupt row */ }
+      }
+      this.cachedTransactions = parsed;
+      this.lastFetchMs = Date.now();
+      logger.info({ count: parsed.length }, "JournalManager: hydrated journal from durable store");
+      this.emit("refreshed", this.cachedTransactions);
+    } catch (err) {
+      logger.debug({ err }, "JournalManager: journal hydration skipped");
+    }
+  }
+
+  /**
+   * Write transactions through to the durable journal.
+   * Fire-and-forget: the UI must never wait on (or fail because of) persistence.
+   */
+  private persistTransactions(sessionId: string | null, txs: any[]): void {
+    if (!sessionId || txs.length === 0 || !this.accountId) return;
+    const accountId = this.accountId;
+    void (async () => {
+      try {
+        const { pool } = await import("@workspace/db");
+        for (const tx of txs) {
+          const transactionId = String(tx.transaction_id ?? tx.contract_id ?? "");
+          if (!transactionId) continue;
+          await pool.query(
+            `INSERT INTO deriv_journal
+               (session_id, account_id, transaction_id, contract_id, symbol, contract_type,
+                buy_price, sell_price, purchase_time, sell_time, payload_json)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+             ON CONFLICT (session_id, account_id, transaction_id) DO UPDATE
+               SET sell_price = EXCLUDED.sell_price,
+                   sell_time  = EXCLUDED.sell_time,
+                   payload_json = EXCLUDED.payload_json`,
+            [
+              sessionId, accountId, transactionId,
+              tx.contract_id != null ? String(tx.contract_id) : null,
+              tx.underlying_symbol ?? null,
+              tx.contract_type ?? null,
+              tx.buy_price != null ? String(tx.buy_price) : null,
+              tx.sell_price != null ? String(tx.sell_price) : null,
+              tx.purchase_time != null ? Number(tx.purchase_time) : null,
+              tx.sell_time != null ? Number(tx.sell_time) : null,
+              JSON.stringify(tx),
+            ],
+          );
+        }
+      } catch (err) {
+        logger.debug({ err }, "JournalManager: durable journal write skipped");
+      }
+    })();
+  }
+
+  /** Transactions this manager knows about, tagged with their owning session. */
+  private get sessionId(): string | null {
+    return this._sessionId;
+  }
+
+  private _sessionId: string | null = null;
+
+  /** Bind the manager to a browser session so writes land in the right scope. */
+  bindSession(sessionId: string) { this._sessionId = sessionId; }
+
   /**
    * Quick refresh: fetches only the last 10 trades and MERGES them into the
    * existing cache. Used after real-time transaction `sell` events so the
-   * journal reflects the settled contract within ~1-2 seconds, without
-   * waiting for a full paginated profit_table chain.
-   *
-   * Rate-limited to once every 3 s to avoid Deriv per-account limits.
-   * Does NOT block or interact with the full pagination lock.
+   * journal reflects the settled contract within ~1-2 seconds, without waiting
+   * for a full paginated profit_table chain. Rate-limited to once every 3 s.
    */
   forceQuickRefresh() {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (!this.sock?.isOpen()) return;
     const now = Date.now();
     if (now - this.lastQuickRefreshSentMs < DerivJournalManager.MIN_QUICK_REFRESH_MS) {
       logger.debug({ msSinceLast: now - this.lastQuickRefreshSentMs }, "JournalManager: quickRefresh skipped (rate-limit)");
@@ -1621,46 +2385,52 @@ class DerivJournalManager extends EventEmitter {
     }
     this.lastQuickRefreshSentMs = now;
     // passthrough echoed back in the response so we can distinguish quick vs full
-    this.ws.send(JSON.stringify({
+    this.sock.send({
       profit_table: 1, description: 1, sort: "DESC", limit: 10,
       passthrough: { quick: true },
-    }));
+    });
     logger.debug("JournalManager: quick refresh sent (limit 10)");
   }
 
   forceRefresh() {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+    if (!this.sock?.isOpen()) return;
     // Block new chains while a paginated fetch is already in progress.
-    // With 5000+ trades, one refresh = 10+ sequential WS messages; starting
-    // a new chain mid-pagination causes concurrent bursts that hit Deriv's
-    // profit_table rate limit.
     if (this.isFetchingPages) {
       logger.debug("JournalManager: forceRefresh skipped (pagination in progress)");
       return;
     }
     const now = Date.now();
     if (now - this.lastRefreshSentMs < DerivJournalManager.MIN_REFRESH_INTERVAL_MS) {
-      // Rate-limit guard: too soon since the last profit_table request.
       logger.debug({ msSinceLast: now - this.lastRefreshSentMs }, "JournalManager: forceRefresh skipped (rate-limit guard)");
       return;
     }
     this.lastRefreshSentMs = now;
     this.isFetchingPages = true;
     this.fetchAccumulator = [];
-    this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
+    this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT });
   }
 
   private stopTimers() {
     if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
     if (this.refreshTimer) { clearInterval(this.refreshTimer); this.refreshTimer = null; }
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.txDebounceTimer) { clearTimeout(this.txDebounceTimer); this.txDebounceTimer = null; }
+    if (this.firstFetchTimer) { clearTimeout(this.firstFetchTimer); this.firstFetchTimer = null; }
+  }
+
+  /** Detach from the pooled socket: stop timers and remove our listener only. */
+  private detach() {
+    this.stopTimers();
+    if (this.sock && this.listening) {
+      this.sock.connection?.off?.("message", this.onMessage);
+      this.listening = false;
+    }
+    this.sock = null;
+    this.isFetchingPages = false;
   }
 
   private startRefreshTimer() {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
-    // Background safety-net poll — real-time updates come from the transaction subscription.
-    // Routes through forceRefresh() so the rate-limit guard is always enforced.
+    // Background safety-net poll — real-time updates come from the subscription.
     this.refreshTimer = setInterval(() => { this.forceRefresh(); }, 30_000);
   }
 
@@ -1670,171 +2440,135 @@ class DerivJournalManager extends EventEmitter {
     this.txDebounceTimer = setTimeout(() => {
       this.txDebounceTimer = null;
       this.forceRefresh();
-    }, 5_000); // 5 s after the quick refresh — gives Deriv time to fully settle
+    }, 5_000);
   }
 
   private async connect() {
-    if (this.ws) { try { this.ws.terminate(); } catch { /* ignore */ } this.ws = null; }
     if (!this.bearerToken || !this.accountId) return;
-
-    let otpUrl: string;
+    if (this.sock?.isOpen()) return;
     try {
-      otpUrl = await getOtpWebSocketUrl(this.bearerToken, this.accountId);
+      // RIDES THE SHARED POOLED SOCKET: the journal no longer owns a connection
+      // of its own, so it costs zero extra OTP handshakes and zero extra
+      // concurrent WebSockets against Deriv's 5-per-user ceiling.
+      this.sock = await getPooledSocket(this.bearerToken, this.accountId);
     } catch (err) {
-      logger.warn({ err }, "JournalManager: failed to get OTP URL, will retry");
-      this.scheduleReconnect();
+      logger.warn({ err }, "JournalManager: pooled connection unavailable, will retry");
+      setTimeout(() => { void this.connect(); }, 10_000).unref?.();
       return;
     }
-
-    try {
-      this.ws = new WebSocket(otpUrl, { perMessageDeflate: false });
-    } catch (err) {
-      logger.warn({ err }, "JournalManager: failed to create WS, will retry");
-      this.scheduleReconnect();
-      return;
+    const connection = this.sock.connection;
+    if (connection && !this.listening) {
+      connection.on("message", this.onMessage);
+      this.listening = true;
     }
+    this.lastPongMs = Date.now();
+    logger.info("JournalManager: attached to pooled account connection — fetching profit table in 5 s");
+    // Subscribe to real-time transaction events (re-sent automatically by the
+    // pool after every reconnect, so a drop neither loses trades nor costs an
+    // OTP handshake).
+    if (connection) void connection.subscribe({ transaction: 1, subscribe: 1 });
+    else this.sock.send({ transaction: 1, subscribe: 1 });
+    this.startPing();
+    this.startRefreshTimer();
+    // Delay the first profit_table request so a rate-limit window inherited
+    // from a previous connection has time to cool down.
+    if (this.firstFetchTimer) clearTimeout(this.firstFetchTimer);
+    this.firstFetchTimer = setTimeout(() => {
+      if (this.sock?.isOpen() && !this.isFetchingPages) {
+        this.fetchAccumulator = [];
+        this.isFetchingPages = true;
+        this.lastRefreshSentMs = Date.now();
+        this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT });
+      }
+    }, 5_000);
+  }
 
-    this.ws.on("open", () => {
-      this.lastPongMs = Date.now();
-      this.reconnectDelay = 10_000;
-      logger.info("JournalManager: connected via OTP WS — will fetch profit table in 5 s");
-      // Subscribe to real-time transaction events immediately (no rate-limit concern)
-      this.ws!.send(JSON.stringify({ transaction: 1, subscribe: 1 }));
-      this.startPing();
-      // Delay the first profit_table request by 5 s.
-      // Deriv's per-account rate limit persists across reconnects — if the previous
-      // session was rate-limited, firing immediately on the new connection hits the
-      // same limit before it has had time to cool down.
-      setTimeout(() => {
-        if (this.ws?.readyState === WebSocket.OPEN && !this.isFetchingPages) {
-          this.fetchAccumulator = [];
-          this.isFetchingPages = true;
-          this.lastRefreshSentMs = Date.now();
-          this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT }));
-        }
-      }, 5_000);
-    });
+  /** Pooled-socket message handler (bound once, survives reconnects). */
+  private onMessage = (raw: any): void => {
+    try {
+      const msg = typeof raw === "string" ? JSON.parse(raw) : JSON.parse(JSON.stringify(raw));
+      if (msg.msg_type === "profit_table" && msg.profit_table) {
+        const isQuick: boolean = msg.passthrough?.quick === true;
+        const batch: any[] = msg.profit_table.transactions ?? [];
+        this.lastPongMs = Date.now();
 
-    this.ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.msg_type === "profit_table" && msg.profit_table) {
-          const isQuick: boolean = msg.passthrough?.quick === true;
-          const batch: any[] = msg.profit_table.transactions ?? [];
-
-          if (isQuick) {
-            // Quick refresh response (limit: 10) — MERGE into existing cache so the
-            // journal shows the settled trade within ~1-2 s without replacing the
-            // full history (which would require a complete re-pagination).
-            if (batch.length > 0) {
-              const batchIds = new Set(batch.map((t: any) => t.transaction_id));
-              // Keep all cached trades that are not in the quick batch (avoid duplicates),
-              // then prepend the fresh batch at the front (most recent first).
-              const merged = [
-                ...batch,
-                ...this.cachedTransactions.filter((t: any) => !batchIds.has(t.transaction_id)),
-              ];
-              this.cachedTransactions = merged;
-              this.lastFetchMs = Date.now();
-              logger.info({ newInBatch: batch.length, total: merged.length }, "JournalManager: quick refresh merged — live trades updated");
-              this.emit("refreshed", this.cachedTransactions);
-            }
-            return; // Do not run pagination logic for quick refreshes
-          }
-
-          // Full paginated refresh
-          this.fetchAccumulator.push(...batch);
-
-          if (batch.length >= JOURNAL_FETCH_LIMIT) {
-            // There may be more pages — wait 5 s between page requests.
-            // Deriv enforces a per-account profit_table rate limit of roughly
-            // 1 request every 3-5 s. Sending pages back-to-back (even with 1.5 s
-            // gaps) triggers "RateLimit" errors that abort the whole chain.
-            // 5 s ensures we stay well below the limit regardless of account history size.
-            const offset = this.fetchAccumulator.length;
-            logger.info({ received: batch.length, totalSoFar: offset }, "JournalManager: fetching next page");
-            setTimeout(() => {
-              if (this.ws?.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, offset }));
-              } else {
-                // WS closed while waiting — release the lock
-                this.isFetchingPages = false;
-              }
-            }, 5_000);
-          } else {
-            // All pages received — commit to cache and release the in-progress lock
-            this.cachedTransactions = this.fetchAccumulator;
-            this.fetchAccumulator = [];
-            this.isFetchingPages = false;
+        if (isQuick) {
+          if (batch.length > 0) {
+            const batchIds = new Set(batch.map((t: any) => t.transaction_id));
+            const merged = [
+              ...batch,
+              ...this.cachedTransactions.filter((t: any) => !batchIds.has(t.transaction_id)),
+            ];
+            this.cachedTransactions = merged;
             this.lastFetchMs = Date.now();
-            logger.info({ count: this.cachedTransactions.length }, "JournalManager: full profit table refreshed");
+            this.persistTransactions(this.sessionId, batch);
+            logger.info({ newInBatch: batch.length, total: merged.length }, "JournalManager: quick refresh merged — live trades updated");
             this.emit("refreshed", this.cachedTransactions);
           }
+          return;
         }
-        // Real-time transaction events — immediate quick refresh on sell (contract settled)
-        if (msg.msg_type === "transaction" && msg.transaction) {
-          const actionType: string = msg.transaction.action ?? msg.transaction.action_type ?? "";
-          if (actionType === "sell") {
-            logger.info({ action: actionType, id: msg.transaction.contract_id }, "JournalManager: sell event — quick refresh + scheduled full refresh");
-            // 1. Immediate quick fetch (limit: 10) for near-live update within ~1-2 s
-            this.forceQuickRefresh();
-            // 2. Full refresh scheduled at 5 s to ensure complete accuracy
-            this.scheduleTransactionRefresh();
-          }
-        }
-        if (msg.msg_type === "pong" || msg.msg_type === "ping") {
-          this.lastPongMs = Date.now();
-        }
-        if (msg.error) {
-          logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error");
-          // Discard the partial accumulator — do NOT commit truncated results to cache.
+
+        // Full paginated refresh
+        this.fetchAccumulator.push(...batch);
+        this.persistTransactions(this.sessionId, batch);
+
+        if (batch.length >= JOURNAL_FETCH_LIMIT) {
+          // More pages may exist — space requests out (Deriv throttles
+          // profit_table to roughly one request every 3-5 s per account).
+          const offset = this.fetchAccumulator.length;
+          logger.info({ received: batch.length, totalSoFar: offset }, "JournalManager: fetching next page");
+          setTimeout(() => {
+            if (this.sock?.isOpen()) {
+              this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, offset });
+            } else {
+              this.isFetchingPages = false;
+            }
+          }, 5_000);
+        } else {
+          this.cachedTransactions = this.fetchAccumulator;
           this.fetchAccumulator = [];
           this.isFetchingPages = false;
-          if (msg.error.code === "RateLimit") {
-            // Honour the full MIN_REFRESH_INTERVAL before any new request.
-            this.lastRefreshSentMs = Date.now();
-            // Schedule a full retry after 15 s so the background timer doesn't
-            // have to wait a full 30 s cycle before the journal is populated.
-            logger.info("JournalManager: RateLimit — will retry profit_table in 15 s");
-            setTimeout(() => { this.forceRefresh(); }, 15_000);
-          }
+          this.lastFetchMs = Date.now();
+          logger.info({ count: this.cachedTransactions.length }, "JournalManager: full profit table refreshed");
+          this.emit("refreshed", this.cachedTransactions);
         }
-      } catch { /* ignore */ }
-    });
+      }
 
-    this.ws.on("error", (err) => {
-      logger.warn({ msg: (err as Error).message }, "JournalManager: WS error");
-    });
-
-    this.ws.on("close", () => {
-      if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
-      logger.info("JournalManager: WS closed, scheduling reconnect");
-      this.scheduleReconnect();
-    });
-  }
+      // Real-time transaction events — immediate quick refresh on sell
+      if (msg.msg_type === "transaction" && msg.transaction) {
+        const actionType: string = msg.transaction.action ?? msg.transaction.action_type ?? "";
+        if (actionType === "sell") {
+          logger.info({ action: actionType, id: msg.transaction.contract_id }, "JournalManager: sell event — quick refresh + scheduled full refresh");
+          this.forceQuickRefresh();
+          this.scheduleTransactionRefresh();
+        }
+      }
+      if (msg.msg_type === "pong" || msg.msg_type === "ping") this.lastPongMs = Date.now();
+      if (msg.error) {
+        logger.warn({ code: msg.error.code, message: msg.error.message }, "JournalManager: error");
+        // Discard the partial accumulator — never commit truncated results.
+        this.fetchAccumulator = [];
+        this.isFetchingPages = false;
+        if (msg.error.code === "RateLimit") {
+          this.lastRefreshSentMs = Date.now();
+          logger.info("JournalManager: RateLimit — will retry profit_table in 15 s");
+          setTimeout(() => { this.forceRefresh(); }, 15_000).unref?.();
+        }
+      }
+    } catch { /* ignore */ }
+  };
 
   private startPing() {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => {
-      if (Date.now() - this.lastPongMs > 60_000) {
-        logger.warn("JournalManager: no pong for 60s — reconnecting");
-        this.connect();
+      if (Date.now() - this.lastPongMs > 90_000) {
+        logger.warn("JournalManager: no data for 90s — reattaching to pooled connection");
+        this.detach();
+        void this.connect();
         return;
       }
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify({ ping: 1 }));
-      }
-    }, 25_000);
-  }
-
-  private scheduleReconnect() {
-    if (!this.bearerToken || !this.accountId) return;
-    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
-    this.reconnectTimer = setTimeout(() => {
-      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, 30_000);
-      logger.info({ delay: this.reconnectDelay }, "JournalManager: reconnecting");
-      this.connect();
-    }, this.reconnectDelay);
+      // The pool keeps the socket alive; this is only a liveness probe.
+    }, 30_000);
   }
 }
 
@@ -1846,6 +2580,7 @@ export function getJournalManager(sessionId: string): DerivJournalManager {
   let manager = journalManagers.get(sessionId);
   if (!manager) {
     manager = new DerivJournalManager();
+    manager.bindSession(sessionId);
     journalManagers.set(sessionId, manager);
   }
   return manager;
@@ -2065,49 +2800,19 @@ export async function sellContract(
   if (!bearerToken || !accountId) {
     throw new Error("No authenticated session — a Bearer token and account ID are required to sell a contract.");
   }
-  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
-
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
-    let settled = false;
-    const timeout = setTimeout(() => settleFail(new Error("Sell request timed out")), 15_000);
-
-    const settleFail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      try { ws.close(); } catch { /* ignore */ }
-      reject(err);
+  // Rides the account's pooled socket: no OTP handshake, no extra connection.
+  const msg = await accountRequest(
+    bearerToken, accountId, { sell: contractId, price: 0 }, 20_000,
+  );
+  if (!msg) throw new Error("Sell request timed out");
+  if (msg.error) throw new Error(msg.error.message ?? "Sell rejected by Deriv");
+  if (msg.msg_type === "sell" && msg.sell) {
+    return {
+      soldFor: Number(msg.sell.sold_for ?? 0),
+      balanceAfter: msg.sell.balance_after !== undefined ? Number(msg.sell.balance_after) : null,
     };
-
-    ws.on("open", () => {
-      ws.send(JSON.stringify({ sell: contractId, price: 0 }));
-    });
-
-    ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.error) {
-          settleFail(new Error(msg.error.message ?? "Sell rejected by Deriv"));
-          return;
-        }
-        if (msg.msg_type === "sell" && msg.sell) {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          try { ws.close(); } catch { /* ignore */ }
-          resolve({
-            soldFor: Number(msg.sell.sold_for ?? 0),
-            balanceAfter: msg.sell.balance_after !== undefined ? Number(msg.sell.balance_after) : null,
-          });
-        }
-      } catch (e) {
-        logger.error({ e }, "sellContract: error parsing message");
-      }
-    });
-
-    ws.on("error", (err) => settleFail(err));
-  });
+  }
+  throw new Error("Unexpected response from Deriv while selling the contract");
 }
 
 // ── Live trade execution via OTP WebSocket ────────────────────────────────────
@@ -2145,105 +2850,71 @@ export async function executeLiveTrade(
     );
   }
 
-  // Step 1: Get OTP WebSocket URL
-  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
-
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
-    const timeout = setTimeout(() => {
-      // settleFail is declared below; the callback runs long after.
-      settleFail(new Error("Trade execution timeout"));
-    }, 20_000);
-
-    let proposalId: string | null = null;
-    let askPrice: number | null = null;
-    let proposalAttempts = 0;
-    let settled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
-
-    // Step 2: Connected — no authorize message needed
-    // Step 3: Send proposal with `underlying_symbol`
-    const sendProposal = () => {
-      if (settled || ws.readyState !== WebSocket.OPEN) return;
-      proposalAttempts += 1;
-      const proposalParams: Record<string, unknown> = {
-        amount: params.stake,
-        basis: "stake",
-        contract_type: params.contractType,
-        currency: params.currency,
-        duration: params.duration,
-        duration_unit: params.durationUnit,
-        underlying_symbol: params.symbol,   // new field name
-      };
-      if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
-      // Accumulators: the compounding schedule and the exchange-side exit.
-      if (params.growthRate !== undefined) proposalParams.growth_rate = params.growthRate;
-      if (params.takeProfit !== undefined) proposalParams.limit_order = { take_profit: params.takeProfit };
-      logger.info({ proposalParams, proposalAttempts }, "executeLiveTrade: sending proposal");
-      ws.send(JSON.stringify({ proposal: 1, ...proposalParams }));
+  const buildProposal = (): Record<string, unknown> => {
+    const proposalParams: Record<string, unknown> = {
+      amount: params.stake,
+      basis: "stake",
+      contract_type: params.contractType,
+      currency: params.currency,
+      duration: params.duration,
+      duration_unit: params.durationUnit,
+      underlying_symbol: params.symbol,   // new field name
     };
+    if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
+    // Accumulators: the compounding schedule and the exchange-side exit.
+    if (params.growthRate !== undefined) proposalParams.growth_rate = params.growthRate;
+    if (params.takeProfit !== undefined) proposalParams.limit_order = { take_profit: params.takeProfit };
+    return proposalParams;
+  };
 
-    const settleFail = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timeout);
-      if (retryTimer) clearTimeout(retryTimer);
-      ws.close();
-      reject(err);
-    };
+  // Quote over the account's PERSISTENT socket. A throttled quote is retried
+  // with backoff instead of failing the trade; only a hard rejection settles it.
+  let proposalMsg: any = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    proposalMsg = await accountRequest(
+      bearerToken, accountId, { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
+    );
+    if (proposalMsg && !proposalMsg.error) break;
+    if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
+    if (attempt === 3) break;
+    const backoffMs = 600 * 2 ** (attempt - 1);
+    logger.warn(
+      { backoffMs, attempt, derivError: proposalMsg?.error },
+      "executeLiveTrade: transient quote error — re-quoting",
+    );
+    await sleep(backoffMs);
+  }
 
-    ws.on("open", sendProposal);
+  if (!proposalMsg) {
+    throw new Error("Trade execution timeout — Deriv did not answer the quote request.");
+  }
+  if (proposalMsg.error) {
+    logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
+    throw new Error(proposalMsg.error.message ?? "Trade rejected by Deriv");
+  }
+  if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
+    throw new Error("Deriv returned an unexpected response to the quote request.");
+  }
 
-    ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        logger.info({ msgType: msg.msg_type }, "executeLiveTrade: received message");
+  const proposalId = String(proposalMsg.proposal.id);
+  const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
+  logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
 
-        if (msg.error) {
-          // A throttled quote (rapid manual trades trip Deriv's per-call
-          // throttle) is re-quoted with backoff instead of failing the trade;
-          // only a confirmed proposal or a hard rejection settles it.
-          if (proposalId === null && proposalAttempts < 3 && isRetryableDerivError(msg)) {
-            const backoffMs = 600 * 2 ** (proposalAttempts - 1);
-            logger.warn({ backoffMs, proposalAttempts, derivError: msg.error }, "executeLiveTrade: transient quote error — re-quoting");
-            retryTimer = setTimeout(sendProposal, backoffMs);
-            return;
-          }
-          logger.error({ derivError: msg.error }, "executeLiveTrade: Deriv error");
-          settleFail(new Error(msg.error.message ?? "Trade rejected by Deriv"));
-          return;
-        }
+  const buyMsg = await accountRequest(
+    bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
+  );
+  if (!buyMsg) throw new Error("Trade execution timeout — Deriv did not confirm the purchase.");
+  if (buyMsg.error) throw new Error(buyMsg.error.message ?? "Trade rejected by Deriv");
+  if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
+    throw new Error("Deriv returned an unexpected response to the buy request.");
+  }
 
-        // Step 4: proposal received → send buy
-        if (msg.msg_type === "proposal" && msg.proposal) {
-          proposalId = String(msg.proposal.id);
-          askPrice = Number(msg.proposal.ask_price ?? params.stake);
-          logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
-          // New buy format: { buy: proposalId, price: askPrice }
-          ws.send(JSON.stringify({ buy: proposalId, price: askPrice }));
-        }
-
-        // Step 5: buy confirmed
-        if (msg.msg_type === "buy" && msg.buy) {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timeout);
-          if (retryTimer) clearTimeout(retryTimer);
-          ws.close();
-          resolve({
-            contractId: msg.buy.contract_id,
-            buyPrice: Number(msg.buy.buy_price),
-            entrySpot: Number(msg.buy.start_time ?? 0),
-            longcode: msg.buy.longcode ?? "",
-          });
-        }
-      } catch (e) {
-        logger.error({ e }, "executeLiveTrade: error parsing message");
-      }
-    });
-
-    ws.on("error", (err) => { settleFail(err); });
-  });
+  return {
+    contractId: buyMsg.buy.contract_id,
+    buyPrice: Number(buyMsg.buy.buy_price),
+    entrySpot: Number(buyMsg.buy.start_time ?? 0),
+    longcode: buyMsg.buy.longcode ?? "",
+  };
 }
 
 // ── Bulk live trade execution (one OTP WS for the WHOLE batch) ────────────────
@@ -2376,14 +3047,15 @@ export async function executeBulkLiveTrades(
   }
   if (params.length === 0) return [];
 
-  // One handshake for the entire batch — no per-leg OTP rate-limit exposure.
-  const otpUrl =
-    opts?.otpUrl ?? (await getOtpWebSocketUrl(bearerToken, accountId));
+  // The whole batch rides the account's PERSISTENT socket: no extra OTP
+  // handshake and no extra connection per batch. `opts.otpUrl` is still
+  // honoured for tests that inject a fake Deriv server.
+  const ws: PooledSocket = opts?.otpUrl
+    ? await openDirectSocket(opts.otpUrl)
+    : await getPooledSocket(bearerToken, accountId);
 
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
     const timeout = setTimeout(() => {
-      ws.close();
       reject(new Error("Bulk trade execution timeout"));
     }, BULK_EXECUTION_DEADLINE_MS);
 
@@ -2413,11 +3085,9 @@ export async function executeBulkLiveTrades(
       clearTimeout(timeout);
       for (const t of timers) clearTimeout(t);
       timers.clear();
-      try {
-        ws.close();
-      } catch {
-        /* ignore */
-      }
+      // The pooled socket stays open for the next trade; `ws.close()` is a
+      // deliberate no-op there (and for injected test sockets).
+      ws.close();
       if (err) reject(err);
       // Any leg that never got a confirmation is reported as an error leg so
       // the caller can settle it as "error" without losing the batch.
@@ -2466,7 +3136,7 @@ export async function executeBulkLiveTrades(
     const send = (payload: Record<string, unknown>): void => {
       // A dead socket mid-batch is batch-fatal: pending legs could never confirm.
       try {
-        ws.send(JSON.stringify(payload));
+        ws.send(payload);
       } catch (e) {
         finish(
           e instanceof Error
@@ -2674,83 +3344,63 @@ export async function waitForBulkContractResults(
   }
   if (contractIds.length === 0) return [];
 
-  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+  const found = new Map<number, ContractResult>();
+  const tableLimit = Math.min(100, contractIds.length + 20);
+  const deadline = Date.now() + timeoutMs + 10_000;
 
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
-    const found = new Map<number, ContractResult>();
-    let pollInterval: ReturnType<typeof setInterval> | null = null;
-    const tableLimit = Math.min(100, contractIds.length + 20);
+  const collectFromProfitTable = (msg: any): void => {
+    const txs: any[] = msg.profit_table?.transactions ?? [];
+    for (const id of contractIds) {
+      if (found.has(id)) continue;
+      const tx = txs.find((t) => Number(t.contract_id) === id);
+      if (!tx) continue;
+      const buyPrice = Number(tx.buy_price ?? 0);
+      const sellPrice = Number(tx.sell_price ?? 0);
+      found.set(id, {
+        contractId: id,
+        won: sellPrice - buyPrice > 0,
+        profit: sellPrice - buyPrice,
+        exitSpot: 0,
+        sellPrice,
+        entrySpot: buyPrice,
+      });
+    }
+  };
 
-    const overallTimeout = setTimeout(() => finishOkPartial(), timeoutMs + 10_000);
+  // Poll over the account's PERSISTENT socket — no OTP handshake, no extra
+  // connection, and the same socket the batch was bought over.
+  while (found.size < contractIds.length && Date.now() < deadline) {
+    let portfolioMsg: any = null;
+    let profitMsg: any = null;
+    try {
+      [portfolioMsg, profitMsg] = await Promise.all([
+        accountRequest(bearerToken, accountId, { portfolio: 1 }, 12_000),
+        accountRequest(
+          bearerToken, accountId,
+          { profit_table: 1, limit: tableLimit, sort: "DESC" },
+          12_000,
+        ),
+      ]);
+    } catch {
+      // Transient socket problem — retry until the deadline. The contract is
+      // safe on Deriv's side; the reconciler also covers a hard failure.
+      await sleep(1_000);
+      continue;
+    }
+    if (profitMsg) collectFromProfitTable(profitMsg);
+    if (found.size >= contractIds.length) break;
+    // `portfolio` tells us the legs are still open; keep polling. A transient
+    // null (socket hiccup) also just means "poll again".
+    if (!portfolioMsg && !profitMsg && Date.now() >= deadline) break;
+    await sleep(1_000);
+  }
 
-    const cleanup = () => {
-      clearTimeout(overallTimeout);
-      if (pollInterval) clearInterval(pollInterval);
-      try { ws.close(); } catch { /* ignore */ }
-    };
-
-    // Resolve with whatever settled; legs Deriv never journalued in time are
-    // reported as `missing` so the caller can settle them as errors without
-    // losing the rest of the batch.
-    const finishOkPartial = () => {
-      const results = contractIds.map((id) =>
-        found.get(id) ?? { contractId: id, won: false, profit: 0, exitSpot: 0, sellPrice: 0, entrySpot: 0, missing: true },
-      );
-      cleanup();
-      resolve(results);
-    };
-
-    const finishError = (err: Error) => { cleanup(); reject(err); };
-
-    // Every cycle sends BOTH: the portfolio tells us the contracts are still
-    // open, the profit_table returns settled prices as soon as Deriv journals
-    // them. Polling both avoids the "contract settled between two portfolio
-    // polls" race that would otherwise hang a 1-tick batch.
-    const poll = () => {
-      if (found.size >= contractIds.length) return;
-      try {
-        ws.send(JSON.stringify({ portfolio: 1 }));
-        ws.send(JSON.stringify({ profit_table: 1, limit: tableLimit, sort: "DESC" }));
-      } catch { /* ignore */ }
-    };
-
-    ws.on("open", () => {
-      poll();
-      pollInterval = setInterval(poll, 1_000);
-    });
-
-    ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.error) return; // transient poll error — keep polling
-
-        if (msg.msg_type === "profit_table") {
-          const txs: any[] = msg.profit_table?.transactions ?? [];
-          for (const id of contractIds) {
-            if (found.has(id)) continue;
-            const tx = txs.find((t) => Number(t.contract_id) === id);
-            if (tx) {
-              const buyPrice = Number(tx.buy_price ?? 0);
-              const sellPrice = Number(tx.sell_price ?? 0);
-              found.set(id, {
-                contractId: id,
-                won: sellPrice - buyPrice > 0,
-                profit: sellPrice - buyPrice,
-                exitSpot: 0,
-                sellPrice,
-                entrySpot: buyPrice,
-              });
-            }
-          }
-          if (found.size >= contractIds.length) finishOkPartial();
-        }
-      } catch { /* ignore */ }
-    });
-
-    ws.on("error", (err) => finishError(err instanceof Error ? err : new Error("Settlement WebSocket error")));
-    ws.on("close", () => finishError(new Error("Settlement WebSocket closed before contracts were confirmed")));
-  });
+  // Resolve with whatever settled; legs Deriv never journalued in time are
+  // reported as `missing` so the caller can settle them as errors without
+  // losing the rest of the batch.
+  return contractIds.map((id) =>
+    found.get(id) ?? { contractId: id, won: false, profit: 0, exitSpot: 0, sellPrice: 0, entrySpot: 0, missing: true },
+  );
 }
 
 // ── Profit table fetch via OTP WebSocket ──────────────────────────────────────
@@ -2763,40 +3413,18 @@ export async function fetchDerivProfitTable(
     logger.warn("fetchDerivProfitTable: no Bearer token or accountId — returning empty");
     return [];
   }
-
-  let otpUrl: string;
   try {
-    otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+    const msg = await accountRequest(
+      bearerToken, accountId,
+      { profit_table: 1, description: 1, sort: "DESC", limit },
+      15_000,
+    );
+    if (!msg || msg.error) return [];
+    return msg.profit_table?.transactions ?? [];
   } catch (err) {
-    logger.warn({ err }, "fetchDerivProfitTable: OTP fetch failed");
+    logger.warn({ err }, "fetchDerivProfitTable failed");
     return [];
   }
-
-  return new Promise((resolve) => {
-    try {
-      const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
-      const timeout = setTimeout(() => { ws.close(); resolve([]); }, 12_000);
-
-      ws.on("open", () => {
-        // No authorize — OTP URL is pre-authenticated
-        ws.send(JSON.stringify({ profit_table: 1, description: 1, sort: "DESC", limit }));
-      });
-
-      ws.on("message", (data) => {
-        try {
-          const msg = JSON.parse(data.toString());
-          if (msg.error) { clearTimeout(timeout); ws.close(); resolve([]); return; }
-          if (msg.msg_type === "profit_table" && msg.profit_table) {
-            clearTimeout(timeout);
-            ws.close();
-            resolve(msg.profit_table.transactions ?? []);
-          }
-        } catch { /* ignore */ }
-      });
-
-      ws.on("error", () => { clearTimeout(timeout); ws.close(); resolve([]); });
-    } catch { resolve([]); }
-  });
 }
 
 // ── Wait for contract result via OTP WebSocket ────────────────────────────────
@@ -2815,88 +3443,54 @@ export async function waitForContractResult(
     throw new Error("No authenticated session for contract result polling");
   }
 
-  const otpUrl = await getOtpWebSocketUrl(bearerToken, accountId);
+  // Poll over the account's PERSISTENT socket (portfolio + profit_table).
+  //
+  // The old implementation opened its own OTP WebSocket *per contract* and
+  // rejected the moment that socket closed, which marked perfectly healthy
+  // trades as failed. Riding the pooled connection removes both the connection
+  // churn (the rate limit) and the spurious failures; a transient hiccup now
+  // simply means "poll again" until the deadline.
+  const deadline = Date.now() + timeoutMs + 5_000;
 
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(otpUrl, { perMessageDeflate: false });
-    let settled = false;
-    let pollInterval: ReturnType<typeof setInterval> | null = null;
+  while (Date.now() < deadline) {
+    let portfolioMsg: any = null;
+    let profitMsg: any = null;
+    try {
+      [portfolioMsg, profitMsg] = await Promise.all([
+        accountRequest(bearerToken, accountId, { portfolio: 1 }, 12_000),
+        accountRequest(bearerToken, accountId, { profit_table: 1, limit: 10, sort: "DESC" }, 12_000),
+      ]);
+    } catch {
+      // Transient socket problem — keep polling until the deadline instead of
+      // marking a healthy trade as failed.
+      await sleep(2_000);
+      continue;
+    }
 
-    const overallTimeout = setTimeout(() => finishError(new Error("Contract result timeout")), timeoutMs + 10_000);
+    if (profitMsg && !profitMsg.error) {
+      const txs: any[] = profitMsg.profit_table?.transactions ?? [];
+      const tx = txs.find((t) => Number(t.contract_id) === contractId);
+      if (tx) {
+        const buyPrice = Number(tx.buy_price ?? 0);
+        const sellPrice = Number(tx.sell_price ?? 0);
+        const profit = sellPrice - buyPrice;
+        return {
+          contractId,
+          won: profit > 0,
+          profit,
+          exitSpot: 0,
+          sellPrice,
+          entrySpot: buyPrice,
+        };
+      }
+    }
 
-    const cleanup = () => {
-      clearTimeout(overallTimeout);
-      if (pollInterval) clearInterval(pollInterval);
-      try { ws.close(); } catch { /* ignore */ }
-    };
+    // Not settled yet. If the contract is no longer in the open portfolio and
+    // Deriv has not journalued it yet, keep polling — the journal entry is what
+    // gives us Deriv's exact profit.
+    void portfolioMsg;
+    await sleep(2_000);
+  }
 
-    const finishOk = (result: ContractResult) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(result);
-    };
-
-    const finishError = (err: Error) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(err);
-    };
-
-    ws.on("open", () => {
-      // No authorize — OTP URL is pre-authenticated
-      const poll = () => { if (!settled) ws.send(JSON.stringify({ portfolio: 1 })); };
-      poll();
-      // 4 s poll — digit contracts settle within 5-15 ticks (~5-15s at 1 Hz),
-      // so 4 s still catches settlement quickly while cutting WS message rate
-      // by 4× vs the old 1 s interval that was triggering Deriv's rate limit.
-      pollInterval = setInterval(poll, 2_000);
-    });
-
-    ws.on("message", (data) => {
-      try {
-        const msg = JSON.parse(data.toString());
-        if (msg.error) {
-          // Ignore transient poll errors; if portfolio itself fails, keep polling
-          return;
-        }
-
-        if (msg.msg_type === "portfolio") {
-          const contracts: any[] = msg.portfolio?.contracts ?? [];
-          const stillOpen = contracts.some((c) => Number(c.contract_id) === contractId);
-          if (stillOpen) return;
-          // Not in open portfolio — check profit_table for settled record
-          ws.send(JSON.stringify({ profit_table: 1, limit: 10, sort: "DESC" }));
-        }
-
-        if (msg.msg_type === "profit_table") {
-          const txs: any[] = msg.profit_table?.transactions ?? [];
-          const tx = txs.find((t) => Number(t.contract_id) === contractId);
-          if (tx) {
-            const buyPrice = Number(tx.buy_price ?? 0);
-            const sellPrice = Number(tx.sell_price ?? 0);
-            const profit = sellPrice - buyPrice;
-            finishOk({
-              contractId,
-              won: profit > 0,
-              profit,
-              exitSpot: 0,
-              sellPrice,
-              entrySpot: 0,
-            });
-          }
-          // Not settled yet — keep polling portfolio
-        }
-      } catch { /* ignore */ }
-    });
-
-    ws.on("error", (err) => { finishError(err); });
-
-    // Without a "close" handler, a silent WebSocket drop (no error event) hangs
-    // the promise until overallTimeout fires ~47s later — keeping isLoopRunning=true
-    // the whole time and causing the loop to warn "previous iteration still running"
-    // on every 3s tick. Immediate rejection on unexpected close is much safer.
-    ws.on("close", () => { finishError(new Error("Settlement WebSocket closed before contract was confirmed")); });
-  });
+  throw new Error("Contract result timeout — Deriv did not confirm settlement in time");
 }

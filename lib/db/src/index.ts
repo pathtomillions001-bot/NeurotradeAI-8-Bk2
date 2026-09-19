@@ -28,12 +28,35 @@ CREATE TABLE IF NOT EXISTS accounts (
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 ALTER TABLE accounts ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+-- OAuth access tokens expire (typically 1h). Storing the expiry lets the API
+-- refresh the token BEFORE it lapses, so a connected account is never silently
+-- logged out mid-session. refresh_token (already present) is exchanged for a
+-- new access token when this timestamp is near.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMP;
 ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_login_id_unique;
 CREATE UNIQUE INDEX IF NOT EXISTS accounts_session_login_unique ON accounts (session_id, login_id);
 CREATE INDEX IF NOT EXISTS accounts_session_active_idx ON accounts (session_id, is_active);
 
+-- ── Durable session links ─────────────────────────────────────────────────────
+-- Binds a lasting browser identity (a 1-year cookie / localStorage client id)
+-- and each tab identity to the account-scoped session that owns the connected
+-- Deriv account. Without this table the only durable identity was the session
+-- cookie, which the per-tab identity deliberately overrides — so every new tab,
+-- every closed-and-reopened tab and every browser restart looked like a brand
+-- new anonymous visitor ("logged out of my account").
+CREATE TABLE IF NOT EXISTS session_links (
+  id SERIAL PRIMARY KEY,
+  kind TEXT NOT NULL,          -- 'client' (durable) | 'cookie' | 'tab'
+  key TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS session_links_kind_key ON session_links (kind, key);
+CREATE INDEX IF NOT EXISTS session_links_session_idx ON session_links (session_id);
+
 CREATE TABLE IF NOT EXISTS ai_insights (
   id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
   type TEXT NOT NULL,
   title TEXT NOT NULL,
   description TEXT NOT NULL,
@@ -42,9 +65,12 @@ CREATE TABLE IF NOT EXISTS ai_insights (
   related_market TEXT,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE ai_insights ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+CREATE INDEX IF NOT EXISTS ai_insights_session_idx ON ai_insights (session_id, created_at);
 
 CREATE TABLE IF NOT EXISTS market_win_rates (
   id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
   symbol TEXT NOT NULL,
   contract_type TEXT NOT NULL,
   barrier INTEGER,
@@ -52,7 +78,9 @@ CREATE TABLE IF NOT EXISTS market_win_rates (
   trade_count INTEGER NOT NULL DEFAULT 0,
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
-CREATE UNIQUE INDEX IF NOT EXISTS market_win_rates_key ON market_win_rates (symbol, contract_type, barrier);
+ALTER TABLE market_win_rates ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+DROP INDEX IF EXISTS market_win_rates_key;
+CREATE UNIQUE INDEX IF NOT EXISTS market_win_rates_key ON market_win_rates (session_id, symbol, contract_type, barrier);
 
 CREATE TABLE IF NOT EXISTS settings (
   id SERIAL PRIMARY KEY,
@@ -119,6 +147,8 @@ CREATE TABLE IF NOT EXISTS trade_features (
   is_paper_trade INTEGER NOT NULL DEFAULT 0,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE trade_features ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+CREATE INDEX IF NOT EXISTS trade_features_session_idx ON trade_features (session_id);
 
 CREATE TABLE IF NOT EXISTS trade_intelligence_reports (
   id SERIAL PRIMARY KEY,
@@ -155,9 +185,12 @@ CREATE TABLE IF NOT EXISTS trade_intelligence_reports (
   day_of_week INTEGER,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+ALTER TABLE trade_intelligence_reports ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+CREATE INDEX IF NOT EXISTS trade_intel_session_idx ON trade_intelligence_reports (session_id, created_at);
 
 CREATE TABLE IF NOT EXISTS missed_opportunities (
   id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
   symbol TEXT NOT NULL,
   contract_type TEXT NOT NULL,
   barrier INTEGER,
@@ -176,9 +209,12 @@ CREATE TABLE IF NOT EXISTS missed_opportunities (
   created_at TIMESTAMP NOT NULL DEFAULT NOW(),
   evaluated_at TIMESTAMP
 );
+ALTER TABLE missed_opportunities ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+CREATE INDEX IF NOT EXISTS missed_opps_session_idx ON missed_opportunities (session_id, created_at);
 
 CREATE TABLE IF NOT EXISTS adaptive_thresholds (
   id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
   confidence_threshold NUMERIC(5, 2) DEFAULT '38',
   ev_threshold NUMERIC(10, 6) DEFAULT '-0.05',
   timing_threshold NUMERIC(5, 2) DEFAULT '38',
@@ -188,6 +224,35 @@ CREATE TABLE IF NOT EXISTS adaptive_thresholds (
   trades_analyzed INTEGER DEFAULT 0,
   updated_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+-- One adaptive row PER ACCOUNT. The previous single global row meant the last
+-- account to trade set the thresholds every other account then learned from.
+ALTER TABLE adaptive_thresholds ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+CREATE UNIQUE INDEX IF NOT EXISTS adaptive_thresholds_session_unique ON adaptive_thresholds (session_id);
+
+-- ── Durable Deriv journal cache ───────────────────────────────────────────────
+-- The profit-table history used to live ONLY in the server process's memory, so
+-- a restart/redeploy (or a rate-limited re-pagination) showed an empty journal
+-- for minutes — the "my trades disappeared" report. Every transaction Deriv
+-- returns is now written through to this table and served from it instantly.
+CREATE TABLE IF NOT EXISTS deriv_journal (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  account_id TEXT NOT NULL,
+  transaction_id TEXT NOT NULL,
+  contract_id TEXT,
+  symbol TEXT,
+  contract_type TEXT,
+  buy_price NUMERIC(20, 4),
+  sell_price NUMERIC(20, 4),
+  purchase_time INTEGER,
+  sell_time INTEGER,
+  payload_json TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS deriv_journal_unique
+  ON deriv_journal (session_id, account_id, transaction_id);
+CREATE INDEX IF NOT EXISTS deriv_journal_session_idx
+  ON deriv_journal (session_id, purchase_time DESC);
 
 CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
@@ -213,7 +278,12 @@ CREATE TABLE IF NOT EXISTS trades (
   closed_at TIMESTAMP
 );
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy';
+-- Deriv contract id, so an interrupted live trade can be settled from Deriv's
+-- own profit_table instead of being stuck as "open"/"error" forever.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 CREATE INDEX IF NOT EXISTS trades_session_created_idx ON trades (session_id, created_at);
+CREATE INDEX IF NOT EXISTS trades_unsettled_idx ON trades (status, created_at)
+  WHERE status IN ('open', 'error');
 `;
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

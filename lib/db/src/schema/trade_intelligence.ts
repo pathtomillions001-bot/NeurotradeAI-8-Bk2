@@ -7,6 +7,7 @@ import { pgTable, serial, text, boolean, integer, numeric, timestamp } from "dri
  */
 export const tradeIntelligenceReportsTable = pgTable("trade_intelligence_reports", {
   id:           serial("id").primaryKey(),
+  sessionId:    text("session_id").notNull().default("legacy"),
   tradeId:      integer("trade_id").notNull(),
   symbol:       text("symbol").notNull(),
   contractType: text("contract_type").notNull(),
@@ -60,6 +61,7 @@ export type TradeIntelligenceReport = typeof tradeIntelligenceReportsTable.$infe
  */
 export const missedOpportunitiesTable = pgTable("missed_opportunities", {
   id:           serial("id").primaryKey(),
+  sessionId:    text("session_id").notNull().default("legacy"),
   symbol:       text("symbol").notNull(),
   contractType: text("contract_type").notNull(),
   barrier:      integer("barrier"),
@@ -93,6 +95,7 @@ export type MissedOpportunity = typeof missedOpportunitiesTable.$inferSelect;
  */
 export const adaptiveThresholdsTable = pgTable("adaptive_thresholds", {
   id:                  serial("id").primaryKey(),
+  sessionId:           text("session_id").notNull().default("legacy"),
   confidenceThreshold: numeric("confidence_threshold", { precision: 5, scale: 2 }).default("38"),
   evThreshold:         numeric("ev_threshold",         { precision: 10, scale: 6 }).default("-0.05"),
   timingThreshold:     numeric("timing_threshold",     { precision: 5, scale: 2 }).default("38"),

@@ -2,6 +2,7 @@ import { pgTable, serial, text, integer, numeric, timestamp } from "drizzle-orm/
 
 export const tradeFeaturesTable = pgTable("trade_features", {
   id: serial("id").primaryKey(),
+  sessionId: text("session_id").notNull().default("legacy"),
   tradeId: integer("trade_id").notNull(),
   symbol: text("symbol").notNull(),
   contractType: text("contract_type").notNull(),

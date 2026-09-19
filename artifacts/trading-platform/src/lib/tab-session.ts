@@ -1,26 +1,24 @@
 /**
- * Per-tab session identity.
+ * Browser identity — durable + per-tab.
  *
- * HttpOnly cookies are shared by every tab in a browser profile, so two tabs
- * connected to two DIFFERENT Deriv accounts cannot be told apart by cookie
- * alone — the second connect would rotate the shared cookie and hijack the
- * first tab's identity (its engine toggles, journal and trades would suddenly
- * target the other account).
+ * TWO identities travel on every same-origin /api request:
  *
- * Each tab therefore ALSO carries its own session id, kept in `sessionStorage`
- * (which is per-tab by design):
+ *  1. `X-Client-Id` — a DURABLE id kept in `localStorage` (and mirrored in a
+ *     1-year HttpOnly cookie). It is minted once per browser profile and is
+ *     never rotated by connect/disconnect. It is what makes a connected Deriv
+ *     account stay connected across new tabs, closed tabs, browser restarts and
+ *     mobile tab eviction — the server links it to the account-scoped session
+ *     and re-binds any tab that lost its own identity (see session_links).
  *
- *   - `X-Tab-Session` header on every fetch/XHR (installed once globally by
- *     installTabSessionFetchPatch — every orval hook and every raw fetch call
- *     is covered with no per-call-site changes), and
- *   - `?tabSession=` query param on SSE EventSources (EventSource cannot set
- *     headers — see withTabSession).
+ *  2. `X-Tab-Session` — a PER-TAB id kept in `sessionStorage`, so two tabs in
+ *     one profile can hold two different Deriv accounts without the second
+ *     connect hijacking the first (the account cookie is shared across tabs).
  *
- * The server prefers the tab identity over the cookie and never writes cookies
- * for tab-identified requests, so tabs stay fully independent even in the same
- * profile. When the server rotates the session (connect → account session,
- * disconnect → fresh anonymous id) it returns the new id in the response body
- * and the tab adopts it via adoptTabSessionId.
+ * The server resolves these against its link table and returns the identity it
+ * actually used in the `x-session-id` response header; `adoptTabSessionId`
+ * stores it, so a tab that inherited the durable binding self-heals without a
+ * reload. SSE EventSources cannot set headers, so both ids also travel as query
+ * params via `withTabSession`.
  *
  * The risk acknowledgment travels the same way (`X-Risk-Ack` header, value in
  * sessionStorage): the acknowledgment is signed over one session id, so a
@@ -28,10 +26,14 @@
  */
 
 const TAB_SESSION_KEY = "neurotrade_tab_session";
+const CLIENT_ID_KEY = "neurotrade_client_id";
 const RISK_ACK_KEY = "neurotrade_risk_ack";
 
 export const TAB_SESSION_HEADER = "x-tab-session";
 export const TAB_SESSION_QUERY_PARAM = "tabSession";
+export const CLIENT_ID_HEADER = "x-client-id";
+export const CLIENT_ID_QUERY_PARAM = "clientId";
+export const RESOLVED_SESSION_HEADER = "x-session-id";
 export const RISK_ACK_HEADER = "x-risk-ack";
 
 const SESSION_ID_PATTERN = /^[a-f0-9-]{36}$/i;
@@ -50,37 +52,78 @@ function newSessionId(): string {
   });
 }
 
+function readStorage(store: "local" | "session", key: string): string | null {
+  try {
+    const value = (store === "local" ? localStorage : sessionStorage).getItem(key);
+    return value && SESSION_ID_PATTERN.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStorage(store: "local" | "session", key: string, value: string): void {
+  try {
+    (store === "local" ? localStorage : sessionStorage).setItem(key, value);
+  } catch {
+    /* storage unavailable (private mode / blocked cookies) — id still works this page life */
+  }
+}
+
+/**
+ * DURABLE browser identity — survives new tabs, tab close, browser restart.
+ * Deliberately in localStorage (NOT sessionStorage): sessionStorage is cleared
+ * the moment the tab closes, which is exactly when users expect to still be
+ * signed in.
+ */
+export function getClientId(): string {
+  let id = readStorage("local", CLIENT_ID_KEY);
+  if (!id) {
+    // One-time migration from the legacy per-tab id so an already-connected
+    // visitor keeps their account after this deploy.
+    id = readStorage("session", TAB_SESSION_KEY) ?? newSessionId();
+    writeStorage("local", CLIENT_ID_KEY, id);
+  }
+  return id;
+}
+
 /** This tab's session id, minted once and kept in per-tab sessionStorage. */
 export function getTabSessionId(): string {
-  let id: string | null = null;
-  try {
-    id = sessionStorage.getItem(TAB_SESSION_KEY);
-  } catch {
-    id = null;
-  }
-  if (!id || !SESSION_ID_PATTERN.test(id)) {
+  let id = readStorage("session", TAB_SESSION_KEY);
+  if (!id) {
     id = newSessionId();
-    try {
-      sessionStorage.setItem(TAB_SESSION_KEY, id);
-    } catch {
-      /* storage unavailable — the id still identifies this page lifetime */
-    }
+    writeStorage("session", TAB_SESSION_KEY, id);
   }
   return id;
 }
 
 /**
- * Adopt a server-issued session id (connect/disconnect rotation). Invalid
- * values are ignored so a malformed response can never desync the tab.
+ * Adopt a server-issued session id (connect/disconnect rotation, or the
+ * resolved identity returned in `x-session-id`). Invalid values are ignored so
+ * a malformed response can never desync the tab.
  */
 export function adoptTabSessionId(sessionId: unknown): void {
   if (typeof sessionId !== "string" || !SESSION_ID_PATTERN.test(sessionId))
     return;
-  try {
-    sessionStorage.setItem(TAB_SESSION_KEY, sessionId);
-  } catch {
-    /* ignore */
-  }
+  writeStorage("session", TAB_SESSION_KEY, sessionId);
+  actions.forEach((fn) => {
+    try {
+      fn();
+    } catch {
+      /* listener errors must never break identity handling */
+    }
+  });
+}
+
+// ── Session-change notifications ──────────────────────────────────────────────
+// Pages cache Deriv-account data keyed by nothing (react-query keys are plain
+// URLs), so when the server switches the session under them (a new tab
+// inheriting the durable binding, or a connect/disconnect rotation) they must
+// refetch. Listeners are notified only on an actual change.
+const actions = new Set<() => void>();
+
+export function onSessionChange(listener: () => void): () => void {
+  actions.add(listener);
+  return () => actions.delete(listener);
 }
 
 /** Signed risk-acknowledgment value for this tab (if it accepted). */
@@ -110,12 +153,15 @@ export function clearTabRiskAck(): void {
 }
 
 /**
- * Append the tab identity to an SSE/EventSource URL (EventSource cannot set
- * headers, so the server also accepts `?tabSession=`).
+ * Append tab + durable identity to an SSE/EventSource URL (EventSource cannot
+ * set headers, and a cross-site iframe may hide the cookies from the server).
  */
 export function withTabSession(url: string): string {
   const sep = url.includes("?") ? "&" : "?";
-  return `${url}${sep}${TAB_SESSION_QUERY_PARAM}=${encodeURIComponent(getTabSessionId())}`;
+  return (
+    `${url}${sep}${TAB_SESSION_QUERY_PARAM}=${encodeURIComponent(getTabSessionId())}` +
+    `&${CLIENT_ID_QUERY_PARAM}=${encodeURIComponent(getClientId())}`
+  );
 }
 
 function isSameOriginApi(url: string): boolean {
@@ -128,11 +174,11 @@ function isSameOriginApi(url: string): boolean {
 let fetchPatchInstalled = false;
 
 /**
- * Install a one-time global fetch patch that attaches the tab identity (and
- * the tab's risk acknowledgment, when present) to every same-origin /api
- * request. Covers orval hooks (customFetch calls global fetch) and every raw
- * fetch call site with zero per-call changes. External requests pass through
- * untouched; explicitly-set headers are never overwritten.
+ * Install a one-time global fetch patch that attaches both identities (and the
+ * tab's risk acknowledgment, when present) to every same-origin /api request.
+ * Covers orval hooks (customFetch calls global fetch) and every raw fetch call
+ * site with zero per-call changes. External requests pass through untouched;
+ * explicitly-set headers are never overwritten.
  */
 export function installTabSessionFetchPatch(): void {
   if (
@@ -162,8 +208,17 @@ export function installTabSessionFetchPatch(): void {
     const headers = new Headers(baseHeaders);
     if (!headers.has(TAB_SESSION_HEADER))
       headers.set(TAB_SESSION_HEADER, getTabSessionId());
+    if (!headers.has(CLIENT_ID_HEADER))
+      headers.set(CLIENT_ID_HEADER, getClientId());
     const ack = getTabRiskAck();
     if (ack && !headers.has(RISK_ACK_HEADER)) headers.set(RISK_ACK_HEADER, ack);
-    return originalFetch(input, { ...init, headers });
+    const response = await originalFetch(input, { ...init, headers });
+    // Server-resolved identity: keep this tab pointed at the session that
+    // actually served it (durable-binding inheritance, connect rotation…).
+    const resolved = response.headers.get(RESOLVED_SESSION_HEADER);
+    if (resolved && resolved !== readStorage("session", TAB_SESSION_KEY)) {
+      adoptTabSessionId(resolved);
+    }
+    return response;
   }) as typeof fetch;
 }

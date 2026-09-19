@@ -1,12 +1,18 @@
 import { db } from "@workspace/db";
 import { tradeFeaturesTable, tradesTable } from "@workspace/db";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
+import { getBrowserSessionId } from "./session";
 
-const calibrationCache = new Map<string, { bucket: number; actualRate: number; count: number }[]>();
-let cacheLoadedAt = 0;
+// Confidence calibration is learned from ONE account's trades, so the cache is
+// keyed per account. The previous single global cache let an account that had
+// never traded inherit another account's calibration curve.
+type CalibrationBuckets = Map<string, { bucket: number; actualRate: number; count: number }[]>;
+const calibrationBySession = new Map<string, CalibrationBuckets>();
+const cacheLoadedAtBySession = new Map<string, number>();
 const CACHE_TTL_MS = 5 * 60 * 1000;
 
-export async function loadCalibrationCache(): Promise<void> {
+export async function loadCalibrationCache(sessionId?: string): Promise<void> {
+  const scope = sessionId ?? getBrowserSessionId();
   try {
     const rows = await db
       .select({
@@ -15,7 +21,10 @@ export async function loadCalibrationCache(): Promise<void> {
         status: tradesTable.status,
       })
       .from(tradeFeaturesTable)
-      .innerJoin(tradesTable, eq(tradeFeaturesTable.tradeId, tradesTable.id))
+      .innerJoin(tradesTable, and(
+        eq(tradeFeaturesTable.tradeId, tradesTable.id),
+        eq(tradeFeaturesTable.sessionId, scope),
+      ))
       .where(sql`${tradesTable.status} IN ('won', 'lost')`);
 
     const buckets = new Map<string, Map<number, { wins: number; total: number }>>();
@@ -32,7 +41,7 @@ export async function loadCalibrationCache(): Promise<void> {
       ctBuckets.set(bucket, b);
     }
 
-    calibrationCache.clear();
+    const calibrationCache: CalibrationBuckets = new Map();
     for (const [ct, ctBuckets] of buckets) {
       const entries = [...ctBuckets.entries()]
         .map(([bucket, { wins, total }]) => ({
@@ -43,7 +52,8 @@ export async function loadCalibrationCache(): Promise<void> {
         .sort((a, b) => a.bucket - b.bucket);
       calibrationCache.set(ct, entries);
     }
-    cacheLoadedAt = Date.now();
+    calibrationBySession.set(scope, calibrationCache);
+    cacheLoadedAtBySession.set(scope, Date.now());
   } catch {
     // DB may not have trade_features yet
   }
@@ -53,23 +63,29 @@ export async function calibrateConfidence(
   rawConfidence: number,
   contractType: string,
 ): Promise<number> {
-  if (Date.now() - cacheLoadedAt > CACHE_TTL_MS) {
-    await loadCalibrationCache();
+  const scope = getBrowserSessionId();
+  const loadedAt = cacheLoadedAtBySession.get(scope) ?? 0;
+  if (Date.now() - loadedAt > CACHE_TTL_MS) {
+    await loadCalibrationCache(scope);
   }
+  const calibrationCache: CalibrationBuckets = calibrationBySession.get(scope) ?? new Map();
 
   const bucket = Math.floor(rawConfidence / 10) * 10;
   const entries = calibrationCache.get(contractType) ?? calibrationCache.get("*") ?? [];
 
-  const match = entries.find((e) => e.bucket === bucket && e.count >= 5);
+  const match = entries.find((e: { bucket: number; count: number }) => e.bucket === bucket && e.count >= 5);
   if (match) {
     return Math.round(match.actualRate * 100);
   }
 
   // Interpolate from nearby buckets with enough data
-  const nearby = entries.filter((e) => Math.abs(e.bucket - bucket) <= 20 && e.count >= 3);
+  const nearby = entries.filter(
+    (e: { bucket: number; count: number }) => Math.abs(e.bucket - bucket) <= 20 && e.count >= 3,
+  );
   if (nearby.length > 0) {
     const weighted = nearby.reduce(
-      (acc, e) => ({ rate: acc.rate + e.actualRate * e.count, count: acc.count + e.count }),
+      (acc: { rate: number; count: number }, e: { actualRate: number; count: number }) =>
+        ({ rate: acc.rate + e.actualRate * e.count, count: acc.count + e.count }),
       { rate: 0, count: 0 },
     );
     return Math.round((weighted.rate / weighted.count) * 100);

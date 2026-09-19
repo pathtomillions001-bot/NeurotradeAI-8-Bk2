@@ -10,6 +10,8 @@ export const accountsTable = pgTable("accounts", {
   token: text("token"),
   bearerToken: text("bearer_token"),
   refreshToken: text("refresh_token"),
+  /** When the OAuth access token expires (null for PATs, which do not expire). */
+  tokenExpiresAt: timestamp("token_expires_at"),
   derivAccountId: text("deriv_account_id"),
   currency: text("currency").notNull().default("USD"),
   balance: numeric("balance", { precision: 20, scale: 2 }).notNull().default("0"),

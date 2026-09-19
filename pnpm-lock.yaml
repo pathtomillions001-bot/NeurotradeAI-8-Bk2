@@ -525,6 +525,10 @@ importers:
       zod:
         specifier: 'catalog:'
         version: 3.25.76
+    devDependencies:
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
 
   lib/api-client-react:
     dependencies:

@@ -20,6 +20,7 @@
 
 import { db } from "@workspace/db";
 import { adaptiveThresholdsTable } from "@workspace/db";
+import { eq } from "drizzle-orm";
 import { logger } from "../logger";
 import { getBrowserSessionId } from "../session";
 
@@ -87,9 +88,11 @@ function freshState(): DynamicConfidenceState {
   };
 }
 
-// Cold-start seed loaded once from the single DB row (see loadFromDb). Every
-// account session starts from this snapshot and then adapts independently.
-let persistedSeed: DynamicConfidenceState | null = null;
+// Cold-start seeds, one PER ACCOUNT, loaded from each account's own
+// `adaptive_thresholds` row (see loadFromDb). An account with no row starts
+// from defaults and then adapts independently — it never inherits another
+// account's learned thresholds.
+const seedsBySession = new Map<string, DynamicConfidenceState>();
 
 const statesBySession = new Map<string, DynamicConfidenceState>();
 
@@ -97,16 +100,17 @@ function active(): DynamicConfidenceState {
   const key = getBrowserSessionId();
   let current = statesBySession.get(key);
   if (!current) {
+    const seed = seedsBySession.get(key) ?? null;
     current = freshState();
-    if (persistedSeed) {
+    if (seed) {
       current.agentAccuracy = Object.fromEntries(
-        Object.entries(persistedSeed.agentAccuracy).map(([id, rec]) => [id, { ...rec }]),
+        Object.entries(seed.agentAccuracy).map(([id, rec]) => [id, { ...rec }]),
       );
-      current.recentOutcomes = [...persistedSeed.recentOutcomes];
-      current.currentConfidenceThreshold = persistedSeed.currentConfidenceThreshold;
-      current.currentEvThreshold = persistedSeed.currentEvThreshold;
-      current.currentTimingThreshold = persistedSeed.currentTimingThreshold;
-      current.tradesAnalyzed = persistedSeed.tradesAnalyzed;
+      current.recentOutcomes = [...seed.recentOutcomes];
+      current.currentConfidenceThreshold = seed.currentConfidenceThreshold;
+      current.currentEvThreshold = seed.currentEvThreshold;
+      current.currentTimingThreshold = seed.currentTimingThreshold;
+      current.tradesAnalyzed = seed.tradesAnalyzed;
     }
     statesBySession.set(key, current);
   }
@@ -121,9 +125,9 @@ let initialized = false;
 export async function loadFromDb(): Promise<void> {
   if (initialized) return;
   try {
-    const rows = await db.select().from(adaptiveThresholdsTable).limit(1);
-    if (rows.length > 0) {
-      const row = rows[0];
+    // Restore EVERY account's own adaptive state (not one global row).
+    const rows = await db.select().from(adaptiveThresholdsTable);
+    for (const row of rows) {
       const seed = freshState();
       seed.currentConfidenceThreshold = Number(row.confidenceThreshold ?? 38);
       seed.currentEvThreshold = Number(row.evThreshold ?? -0.05);
@@ -148,15 +152,12 @@ export async function loadFromDb(): Promise<void> {
           }
         } catch { /* ignore */ }
       }
-      persistedSeed = seed;
+      seedsBySession.set(row.sessionId ?? "legacy", seed);
     }
     initialized = true;
     logger.info(
-      {
-        tradesAnalyzed: persistedSeed?.tradesAnalyzed ?? 0,
-        confidenceThreshold: persistedSeed?.currentConfidenceThreshold ?? 38,
-      },
-      "DynamicConfidenceEngine loaded from DB",
+      { sessions: seedsBySession.size },
+      "DynamicConfidenceEngine loaded per-account state from DB",
     );
   } catch (err) {
     logger.warn({ err }, "DynamicConfidenceEngine: could not load from DB — using defaults");
@@ -186,11 +187,18 @@ async function persistToDb(): Promise<void> {
       updatedAt:           new Date(),
     };
 
-    const existing = await db.select().from(adaptiveThresholdsTable).limit(1);
+    // ONE ROW PER ACCOUNT. The single global row meant the last account to
+    // trade rewrote the thresholds (and the recent-outcomes window) every other
+    // account then learned from — a second account's learning was silently
+    // replaced by the first account's.
+    const sessionId = getBrowserSessionId();
+    const existing = await db.select().from(adaptiveThresholdsTable)
+      .where(eq(adaptiveThresholdsTable.sessionId, sessionId)).limit(1);
     if (existing.length > 0) {
-      await db.update(adaptiveThresholdsTable).set(payload);
+      await db.update(adaptiveThresholdsTable).set(payload)
+        .where(eq(adaptiveThresholdsTable.id, existing[0].id));
     } else {
-      await db.insert(adaptiveThresholdsTable).values(payload as any);
+      await db.insert(adaptiveThresholdsTable).values({ ...payload, sessionId } as any);
     }
   } catch (err) {
     logger.warn({ err }, "DynamicConfidenceEngine: could not persist to DB");

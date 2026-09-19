@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { HealthCheckResponse } from "@workspace/api-zod";
 import { pool, schemaReady } from "@workspace/db";
-import { tickManager } from "../lib/deriv";
+import { accountConnectionCount, tickManager } from "../lib/deriv";
 import { logger } from "../lib/logger";
 
 const router: IRouter = Router();
@@ -163,6 +163,9 @@ router.get("/healthz", async (_req, res) => {
         : "Set DERIV_APP_ID on the api service (and VITE_DERIV_APP_ID on web, then rebuild web). Register your Railway <web-domain>/connect as a redirect URL at app.deriv.com/apps.",
     },
     tickFeed: tickManager.getTickHealth(),
+    // Authenticated sockets currently held. Deriv allows 5 concurrent
+    // WebSockets per user; the pool keeps this at one per traded account.
+    derivSockets: accountConnectionCount(),
     ts: new Date().toISOString(),
   });
 

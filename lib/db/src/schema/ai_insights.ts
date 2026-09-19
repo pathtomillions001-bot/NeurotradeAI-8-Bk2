@@ -4,6 +4,7 @@ import { z } from "zod/v4";
 
 export const aiInsightsTable = pgTable("ai_insights", {
   id: serial("id").primaryKey(),
+  sessionId: text("session_id").notNull().default("legacy"),
   type: text("type").notNull(),
   title: text("title").notNull(),
   description: text("description").notNull(),

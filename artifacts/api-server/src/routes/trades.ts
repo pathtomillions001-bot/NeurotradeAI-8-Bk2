@@ -96,16 +96,27 @@ async function getDerivTransactions(sessionId: string): Promise<any[]> {
   // which the UI displayed immediately, only for the number to jump once the
   // manager finished its full paginated sweep seconds later.
   //
-  // Fix: if the cache is empty (server just started or reconnecting), kick the
-  // manager so it begins paginating immediately and return empty so callers
-  // render a brief "loading" state. The next poll (5-10 s) will get the real
-  // full set — no more 500-trade intermediate snapshot.
+  // Fix (part 1): never return a truncated intermediate snapshot — either the
+  // full paginated set or the durable copy on disk.
   const cached = journalManager.getCached();
   if (cached.length > 0) {
     return cached;
   }
-  // Cache is empty — trigger background pagination and let the caller decide
-  // how to handle the momentary empty state (loading spinner / empty message).
+  // Fix (part 2): the cache is empty after a restart/redeploy or while Deriv is
+  // rate-limiting the re-pagination. The durable `deriv_journal` table holds
+  // every transaction we have ever seen for this account, so the journal is
+  // populated instantly from disk instead of showing "no trades" for minutes.
+  if (!journalManager.hasHydrated()) {
+    await journalManager.hydrateFromDb(sessionId);
+    const hydrated = journalManager.getCached();
+    if (hydrated.length > 0) {
+      // Refresh quietly in the background — the disk copy is already displayed.
+      journalManager.forceRefresh();
+      return hydrated;
+    }
+  }
+  // Nothing on disk yet (first ever load) — start paginating and let the caller
+  // render a brief loading state.
   journalManager.forceRefresh();
   return [];
 }
@@ -449,6 +460,12 @@ router.post("/", async (req, res): Promise<void> => {
       });
 
       // Wait for Deriv to settle the contract — ticks * 1s + 30s safety buffer
+      // Record Deriv's contract id immediately: if this request is interrupted
+      // (restart, dropped connection) the reconciler can still settle the trade
+      // from Deriv's profit table.
+      await db.update(tradesTable)
+        .set({ derivContractId: String(liveResult.contractId) })
+        .where(eq(tradesTable.id, openTrade.id));
       const contractResult = await waitForContractResult(
         token!, account!.derivAccountId ?? account!.loginId,
         liveResult.contractId, (tradeDuration + 30) * 1000,

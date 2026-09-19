@@ -1,5 +1,6 @@
 import { db } from "@workspace/db";
 import { tradeFeaturesTable } from "@workspace/db";
+import { getBrowserSessionId } from "./session";
 import type { MarketAnalysis } from "./ai-engine";
 import { getContractProposal } from "./deriv";
 import { calibrateConfidence, computeBreakevenWinRate, computeExpectedValue } from "./calibration";
@@ -110,6 +111,8 @@ export async function logTradeFeatures(
 ): Promise<void> {
   try {
     await db.insert(tradeFeaturesTable).values({
+      // scoped to the account that produced the trade
+      sessionId: getBrowserSessionId(),
       tradeId,
       symbol: opts.symbol,
       contractType: analysis.recommendedContractType,

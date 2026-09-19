@@ -2208,11 +2208,12 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
 
 // ── Trade Intelligence endpoints ──────────────────────────────────────────────
 
-router.get("/intelligence/summary", async (_req, res): Promise<void> => {
+router.get("/intelligence/summary", async (req, res): Promise<void> => {
   try {
+    // Everything here is scoped to THIS browser session / connected account.
     const [summary, missedSummary, dynamicStatus] = await Promise.all([
-      getIntelligenceSummary(),
-      getMissedOpportunitySummary(),
+      getIntelligenceSummary(req.sessionId),
+      getMissedOpportunitySummary(req.sessionId),
       Promise.resolve(getDynamicConfidenceStatus()),
     ]);
     res.json({ summary, missedSummary, dynamicStatus });
@@ -2221,31 +2222,33 @@ router.get("/intelligence/summary", async (_req, res): Promise<void> => {
   }
 });
 
-router.get("/intelligence/reports", async (_req, res): Promise<void> => {
+router.get("/intelligence/reports", async (req, res): Promise<void> => {
   try {
-    const rawLimit = Number(_req.query["limit"]);
+    const rawLimit = Number(req.query["limit"]);
     const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 50);
-    const reports = await getRecentReports(limit);
+    const reports = await getRecentReports(limit, req.sessionId);
     res.json(reports);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch intelligence reports" });
   }
 });
 
-router.get("/intelligence/missed", async (_req, res): Promise<void> => {
+router.get("/intelligence/missed", async (req, res): Promise<void> => {
   try {
-    const rawLimit = Number(_req.query["limit"]);
+    const rawLimit = Number(req.query["limit"]);
     const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 50);
-    const missed = await getRecentMissed(limit);
+    const missed = await getRecentMissed(limit, req.sessionId);
     res.json(missed);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch missed opportunities" });
   }
 });
 
-router.get("/intelligence/thresholds", async (_req, res): Promise<void> => {
+router.get("/intelligence/thresholds", async (req, res): Promise<void> => {
   try {
-    const status = getDynamicConfidenceStatus();
+    // Already per-account in memory (createSessionScoped) — this endpoint only
+    // surfaces the calling session's own adaptive state.
+    const status = runWithSessionId(req.sessionId, () => getDynamicConfidenceStatus());
     res.json(status);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch adaptive thresholds" });

@@ -14,6 +14,7 @@ import { loadCalibrationCache } from "./lib/calibration";
 import { loadRecoveryStateFromDb, resumeEngineIfEnabled, forceDayReset } from "./routes/ai";
 import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
+import { startTradeReconciler } from "./lib/trade-reconciler";
 import { pool, db, marketWinRatesTable, schemaReady } from "@workspace/db";
 import { browserSession } from "./lib/session";
 
@@ -76,6 +77,22 @@ async function bootstrapDb() {
       `ALTER TABLE settings ADD COLUMN IF NOT EXISTS bot_recovery_markup NUMERIC(5, 2) NOT NULL DEFAULT '10'`,
       `ALTER TABLE trades ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
       `UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy'`,
+      `ALTER TABLE accounts ADD COLUMN IF NOT EXISTS token_expires_at TIMESTAMP`,
+      `ALTER TABLE trades ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT`,
+      // Per-account intelligence / learning tables (previously global).
+      `ALTER TABLE trade_intelligence_reports ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE missed_opportunities ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE trade_features ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE adaptive_thresholds ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE ai_insights ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `ALTER TABLE market_win_rates ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
+      `DROP INDEX IF EXISTS market_win_rates_key`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS market_win_rates_key ON market_win_rates (session_id, symbol, contract_type, barrier)`,
+      `CREATE UNIQUE INDEX IF NOT EXISTS adaptive_thresholds_session_unique ON adaptive_thresholds (session_id)`,
+      `CREATE INDEX IF NOT EXISTS trade_intel_session_idx ON trade_intelligence_reports (session_id, created_at)`,
+      `CREATE INDEX IF NOT EXISTS missed_opps_session_idx ON missed_opportunities (session_id, created_at)`,
+      `CREATE INDEX IF NOT EXISTS trade_features_session_idx ON trade_features (session_id)`,
+      `CREATE INDEX IF NOT EXISTS trades_unsettled_idx ON trades (status, created_at) WHERE status IN ('open', 'error')`,
       `ALTER TABLE accounts DROP CONSTRAINT IF EXISTS accounts_login_id_unique`,
       `CREATE UNIQUE INDEX IF NOT EXISTS accounts_session_login_unique ON accounts (session_id, login_id)`,
       `CREATE UNIQUE INDEX IF NOT EXISTS settings_session_unique ON settings (session_id)`,
@@ -105,7 +122,15 @@ app.use(
     },
   }),
 );
-app.use(cors({ origin: true, credentials: true }));
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+    // The web client reads `x-session-id` to keep a tab pointed at the session
+    // that actually served it (durable-binding inheritance, connect rotation).
+    exposedHeaders: ["x-session-id"],
+  }),
+);
 app.use(cookieParser());
 app.use(browserSession);
 app.use(express.json());
@@ -134,6 +159,9 @@ dbReady.then(() => {
     .then(() => resumeEngineIfEnabled())
     .catch((err) => logger.warn({ err }, "Recovery state load / engine auto-resume on startup failed"));
   loadDynamicConfidence().catch((err) => logger.warn({ err }, "Dynamic confidence load on startup failed"));
+  // Settle any trade interrupted by a restart/disconnect from Deriv's own
+  // profit table — a live trade must never be stuck on "open"/"error".
+  startTradeReconciler();
   // Seed the learning agent's in-memory win-rate store from the database so the
   // AI has historical context immediately after a server restart rather than
   // starting from scratch and having to re-learn which markets/contracts perform well.

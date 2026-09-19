@@ -2,6 +2,7 @@ import { pgTable, serial, text, integer, numeric, timestamp, uniqueIndex } from 
 
 export const marketWinRatesTable = pgTable("market_win_rates", {
   id: serial("id").primaryKey(),
+  sessionId: text("session_id").notNull().default("legacy"),
   symbol: text("symbol").notNull(),
   contractType: text("contract_type").notNull(),
   barrier: integer("barrier"),
@@ -9,7 +10,7 @@ export const marketWinRatesTable = pgTable("market_win_rates", {
   tradeCount: integer("trade_count").notNull().default(0),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [
-  uniqueIndex("market_win_rates_key").on(t.symbol, t.contractType, t.barrier),
+  uniqueIndex("market_win_rates_key").on(t.sessionId, t.symbol, t.contractType, t.barrier),
 ]);
 
 export type MarketWinRate = typeof marketWinRatesTable.$inferSelect;

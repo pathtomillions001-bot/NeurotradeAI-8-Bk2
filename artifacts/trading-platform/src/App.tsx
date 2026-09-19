@@ -17,7 +17,7 @@ import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
 import Bots from "./pages/bots";
-import { withTabSession } from "@/lib/tab-session";
+import { onSessionChange, withTabSession } from "@/lib/tab-session";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { retry: 1, staleTime: 30000 } },
@@ -42,6 +42,16 @@ function getApiUrl(path: string) {
 // 3. Listens for the `day_reset` SSE event (may come from the server-side
 //    scheduler when the browser is not the trigger) and invalidates every
 //    daily-data React Query cache so all pages re-fetch immediately with no lag.
+function useSessionChangeRefresh() {
+  // The server may serve a this tab a DIFFERENT session than its own: a fresh
+  // tab inherits the durable browser binding, and connect/disconnect rotate the
+  // identity. Everything already cached belongs to the previous identity, so
+  // the whole cache is invalidated the moment that happens — otherwise the UI
+  // would keep showing the previous account's journal/intelligence.
+  const qc = useQueryClient();
+  useEffect(() => onSessionChange(() => qc.invalidateQueries()), [qc]);
+}
+
 function useMidnightReset() {
   const qc = useQueryClient();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -134,6 +144,7 @@ function useLandingGate() {
 
 function Router() {
   useMidnightReset();
+  useSessionChangeRefresh();
   const { showLanding, dismiss } = useLandingGate();
   const [location, setLocation] = useLocation();
 

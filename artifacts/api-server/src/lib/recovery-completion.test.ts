@@ -37,11 +37,13 @@ import {
 const MAX_STEPS = 5;
 const ORIGIN_PAYOUT = 1.4; // 0.70 * 0.4 = 0.28 target profit
 
-function inBrowserSession<T>(sessionId: string, action: () => T): T {
+// Identity resolution is async (it consults the durable session_links table),
+// so this helper is awaited at every call site.
+async function inBrowserSession<T>(sessionId: string, action: () => T): Promise<T> {
   let value!: T;
-  browserSession(
+  await browserSession(
     { cookies: { neurotrade_session: sessionId }, get: () => undefined, query: {} } as any,
-    { cookie: () => undefined } as any,
+    { cookie: () => undefined, setHeader: () => undefined } as any,
     () => { value = action(); },
   );
   return value;
@@ -469,20 +471,20 @@ describe("browser-session runtime isolation", () => {
   const sessionA = "11111111-1111-4111-8111-111111111111";
   const sessionB = "22222222-2222-4222-8222-222222222222";
 
-  it("keeps recovery debt in the browser session that recorded it", () => {
-    inBrowserSession(sessionA, () => {
+  it("keeps recovery debt in the browser session that recorded it", async () => {
+    await inBrowserSession(sessionA, () => {
       recoveryEngine.resetAll();
       recoveryEngine.recordOutcome(false, -0.7, 0.7, 3, "DIGITOVER", ORIGIN_PAYOUT);
     });
-    assert.equal(inBrowserSession(sessionB, () => recoveryEngine.getState().inRecovery), false);
-    assert.equal(inBrowserSession(sessionA, () => recoveryEngine.getState().unrecoveredAmount), 0.7);
+    assert.equal(await inBrowserSession(sessionB, () => recoveryEngine.getState().inRecovery), false);
+    assert.equal(await inBrowserSession(sessionA, () => recoveryEngine.getState().unrecoveredAmount), 0.7);
   });
 
-  it("keeps browser timezone offsets independent", () => {
-    inBrowserSession(sessionA, () => setTzOffset(-180));
-    inBrowserSession(sessionB, () => setTzOffset(300));
-    assert.equal(inBrowserSession(sessionA, getTzOffset), -180);
-    assert.equal(inBrowserSession(sessionB, getTzOffset), 300);
+  it("keeps browser timezone offsets independent", async () => {
+    await inBrowserSession(sessionA, () => setTzOffset(-180));
+    await inBrowserSession(sessionB, () => setTzOffset(300));
+    assert.equal(await inBrowserSession(sessionA, getTzOffset), -180);
+    assert.equal(await inBrowserSession(sessionB, getTzOffset), 300);
   });
 });
 

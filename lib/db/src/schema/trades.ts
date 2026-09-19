@@ -18,6 +18,9 @@ export const tradesTable = pgTable("trades", {
   exitPrice: numeric("exit_price", { precision: 20, scale: 6 }),
   aiConfidence: numeric("ai_confidence", { precision: 5, scale: 2 }),
   aiRiskScore: numeric("ai_risk_score", { precision: 5, scale: 2 }),
+  // Deriv contract id for live trades — lets the reconciler settle a trade that
+  // was interrupted by a restart/disconnect from Deriv's own profit_table.
+  derivContractId: text("deriv_contract_id"),
   isAutonomous: boolean("is_autonomous").notNull().default(false),
   agentReasoning: text("agent_reasoning"),
   duration: integer("duration"),

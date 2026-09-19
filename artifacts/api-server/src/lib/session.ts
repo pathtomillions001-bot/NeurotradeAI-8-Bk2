@@ -4,6 +4,15 @@ import type { NextFunction, Request, Response } from "express";
 
 const SESSION_COOKIE = "neurotrade_session";
 const RISK_COOKIE = "neurotrade_risk_ack";
+/**
+ * Durable browser identity.
+ *
+ * ONE value per browser profile, kept for a year, mirrored in localStorage and
+ * sent as `X-Client-Id` on every request. Unlike the session id it is never
+ * rotated by connect/disconnect, so it survives the loss of `sessionStorage`
+ * (new tab, closed tab, browser restart, mobile eviction) — see session_links.
+ */
+const CLIENT_COOKIE = "neurotrade_client";
 const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
 const sessionContext = new AsyncLocalStorage<string>();
 
@@ -20,13 +29,18 @@ const sessionContext = new AsyncLocalStorage<string>();
  *   - `?tabSession=` query param on the SSE EventSource (EventSource cannot
  *     set headers).
  *
- * When either is present and well-formed it wins over the cookie, and the
- * server never writes cookies for that request — tabs stay fully independent
- * even in the same profile. Clients without the header (older cached JS,
- * non-browser API users) keep the legacy cookie behaviour unchanged.
+ * A tab identity is only the FIRST step of resolution, never the last. It is
+ * resolved against `session_links` (see resolveSessionIdentity) so that a tab
+ * with no binding of its own inherits the durable browser binding instead of
+ * becoming an anonymous visitor — the root cause of "the app logged me out".
  */
 export const TAB_SESSION_HEADER = "x-tab-session";
 export const TAB_SESSION_QUERY_PARAM = "tabSession";
+export const CLIENT_ID_QUERY_PARAM = "clientId";
+/** Durable browser identity sent by the web app (localStorage mirror). */
+export const CLIENT_ID_HEADER = "x-client-id";
+/** Response header telling the client which session id actually served it. */
+export const RESOLVED_SESSION_HEADER = "x-session-id";
 /** Tab-scoped risk acknowledgment (cookies can't hold one value per tab). */
 export const RISK_ACK_HEADER = "x-risk-ack";
 
@@ -99,17 +113,135 @@ export function createSessionScoped<T extends object>(factory: () => T): {
   return { state, replace };
 }
 
+// ── Durable identity links ────────────────────────────────────────────────────
+//
+// `session_links` maps a lasting browser identity (and every tab identity) to
+// the account-scoped session that owns the connected Deriv account. Resolution
+// order is: tab link → durable client link → cookie link → the tab id itself.
+//
+// The link table is read on every request, so lookups go through a tiny
+// in-memory cache (busted whenever a link is written or cleared).
+
+export type LinkKind = "client" | "cookie" | "tab";
+
+interface LinkCacheEntry {
+  sessionId: string | null;
+  expiresAt: number;
+}
+
+const LINK_CACHE_TTL_MS = 10_000;
+const linkCache = new Map<string, LinkCacheEntry>();
+/** False until the first successful `session_links` read — skips the query entirely. */
+let linksTableReady = false;
+let linksTableEmpty = true;
+
+function linkCacheKey(kind: LinkKind, key: string): string {
+  return `${kind}:${key}`;
+}
+
+function cacheLink(kind: LinkKind, key: string, sessionId: string | null): void {
+  linkCache.set(linkCacheKey(kind, key), {
+    sessionId,
+    expiresAt: Date.now() + LINK_CACHE_TTL_MS,
+  });
+}
+
+/** Read the account-scoped session a durable identity is bound to (or null). */
+export async function resolveLinkedSession(
+  kind: LinkKind,
+  key: string,
+): Promise<string | null> {
+  if (!key) return null;
+  const cached = linkCache.get(linkCacheKey(kind, key));
+  if (cached && cached.expiresAt > Date.now()) return cached.sessionId;
+  // Nothing has ever been linked in this process and the table started empty —
+  // skip the round trip (the common case for anonymous visitors).
+  if (linksTableReady && linksTableEmpty) {
+    cacheLink(kind, key, null);
+    return null;
+  }
+  try {
+    const { pool } = await import("@workspace/db");
+    const result = await pool.query(
+      `SELECT session_id FROM session_links WHERE kind = $1 AND key = $2 LIMIT 1`,
+      [kind, key],
+    );
+    linksTableReady = true;
+    const sessionId = (result?.rows?.[0] as { session_id?: string } | undefined)?.session_id ?? null;
+    cacheLink(kind, key, sessionId);
+    return sessionId;
+  } catch {
+    // Older deployment without the table — behave exactly like before.
+    return null;
+  }
+}
+
+/**
+ * Bind a durable identity (and this tab) to an account-scoped session.
+ * Called on connect/switch; never on a plain page load.
+ */
+export async function linkSessionIdentity(args: {
+  sessionId: string;
+  clientId?: string | null;
+  cookieId?: string | null;
+  tabId?: string | null;
+}): Promise<void> {
+  const { sessionId } = args;
+  const entries: Array<[LinkKind, string | null | undefined]> = [
+    ["client", args.clientId],
+    ["cookie", args.cookieId],
+    ["tab", args.tabId],
+  ];
+  const { pool } = await import("@workspace/db");
+  for (const [kind, key] of entries) {
+    if (!key || !SESSION_ID_PATTERN.test(key)) continue;
+    try {
+      await pool.query(
+        `INSERT INTO session_links (kind, key, session_id, updated_at) VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (kind, key) DO UPDATE SET session_id = EXCLUDED.session_id, updated_at = NOW()`,
+        [kind, key, sessionId],
+      );
+      linksTableReady = true;
+      linksTableEmpty = false;
+      cacheLink(kind, key, sessionId);
+    } catch {
+      /* table missing on an older deployment — links are an optimisation */
+    }
+  }
+}
+
+/**
+ * Remove every identity binding that points at `sessionId`.
+ * Only an explicit user disconnect may call this.
+ */
+export async function clearSessionLinksForSession(sessionId: string): Promise<void> {
+  const stale = [...linkCache.entries()]
+    .filter(([, entry]) => entry.sessionId === sessionId)
+    .map(([key]) => key);
+  for (const key of stale) {
+    const [kind, ...rest] = key.split(":");
+    cacheLink(kind as LinkKind, rest.join(":"), null);
+  }
+  try {
+    const { pool } = await import("@workspace/db");
+    await pool.query(`DELETE FROM session_links WHERE session_id = $1`, [sessionId]);
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Anonymous browser session used to isolate Deriv credentials and account data.
  *
- * This is deliberately an opaque server-generated id in an HttpOnly cookie:
- * Deriv bearer/PAT tokens remain server-side and one browser can never select,
+ * The id itself is deliberately opaque (a server-generated UUID): Deriv
+ * bearer/PAT tokens remain server-side and one browser can never select,
  * disconnect, or trade another browser's account.
  */
-export function browserSession(req: Request, res: Response, next: NextFunction): void {
-  // Per-tab identity wins over the shared cookie (see TAB_SESSION_HEADER).
-  // Cookie reads/writes are skipped entirely so tabs can never clobber the
-  // shared jar — or each other — even in the same browser profile.
+export async function browserSession(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
   const tabCandidate = (
     req.get(TAB_SESSION_HEADER) ??
     (typeof req.query?.[TAB_SESSION_QUERY_PARAM] === "string"
@@ -117,21 +249,30 @@ export function browserSession(req: Request, res: Response, next: NextFunction):
       : "") ??
     ""
   ).trim();
-  if (SESSION_ID_PATTERN.test(tabCandidate)) {
-    req.sessionId = tabCandidate;
-    req.isTabSession = true;
-    sessionContext.run(tabCandidate, next);
-    return;
-  }
+  const headerClient = (
+    req.get(CLIENT_ID_HEADER) ??
+    (typeof req.query?.[CLIENT_ID_QUERY_PARAM] === "string"
+      ? (req.query[CLIENT_ID_QUERY_PARAM] as string)
+      : "") ??
+    ""
+  ).trim();
+  const cookieClient =
+    typeof req.cookies?.[CLIENT_COOKIE] === "string" ? req.cookies[CLIENT_COOKIE].trim() : "";
+  const cookieSession =
+    typeof req.cookies?.[SESSION_COOKIE] === "string" ? req.cookies[SESSION_COOKIE].trim() : "";
 
-  const existing = typeof req.cookies?.[SESSION_COOKIE] === "string"
-    ? req.cookies[SESSION_COOKIE].trim()
-    : "";
-  const sessionId = SESSION_ID_PATTERN.test(existing) ? existing : randomUUID();
+  const isTabSession = SESSION_ID_PATTERN.test(tabCandidate);
+  const clientId = SESSION_ID_PATTERN.test(headerClient)
+    ? headerClient
+    : SESSION_ID_PATTERN.test(cookieClient)
+      ? cookieClient
+      : null;
 
-  req.sessionId = sessionId;
-  if (sessionId !== existing) {
-    res.cookie(SESSION_COOKIE, sessionId, {
+  // The durable client id is a profile-wide constant, so it is safe (and
+  // necessary for iframe/third-party-cookie contexts) to always mirror it in a
+  // cookie. It is never rotated by connect/disconnect.
+  if (clientId && clientId !== cookieClient) {
+    res.cookie(CLIENT_COOKIE, clientId, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
@@ -139,6 +280,68 @@ export function browserSession(req: Request, res: Response, next: NextFunction):
       path: "/",
     });
   }
+
+  let sessionId: string;
+  let resolvedFromLink = false;
+
+  if (isTabSession) {
+    // A tab that has already been bound (connect, or inherited below) keeps it.
+    const tabLinked = await resolveLinkedSession("tab", tabCandidate);
+    if (tabLinked) {
+      sessionId = tabLinked;
+      resolvedFromLink = true;
+    } else {
+      // Brand-new tab, or `sessionStorage` was evicted. Inherit the durable
+      // browser binding instead of appearing signed out — and remember it for
+      // this tab so the next request takes the fast path.
+      const clientLinked = clientId ? await resolveLinkedSession("client", clientId) : null;
+      const cookieLinked = cookieSession
+        ? await resolveLinkedSession("cookie", cookieSession)
+        : null;
+      const inherited = clientLinked ?? cookieLinked;
+      if (inherited) {
+        sessionId = inherited;
+        resolvedFromLink = true;
+        void linkSessionIdentity({ sessionId: inherited, tabId: tabCandidate });
+      } else {
+        sessionId = tabCandidate;
+      }
+    }
+  } else {
+    const clientLinked = clientId ? await resolveLinkedSession("client", clientId) : null;
+    const cookieLinked = cookieSession ? await resolveLinkedSession("cookie", cookieSession) : null;
+    if (clientLinked) {
+      sessionId = clientLinked;
+      resolvedFromLink = true;
+    } else if (cookieLinked) {
+      sessionId = cookieLinked;
+      resolvedFromLink = true;
+    } else {
+      sessionId = cookieSession;
+    }
+  }
+
+  const isNewSession = !SESSION_ID_PATTERN.test(sessionId);
+  if (isNewSession) sessionId = randomUUID();
+
+  req.sessionId = sessionId;
+  req.isTabSession = isTabSession || undefined;
+  req.clientId = clientId;
+  req.sessionResolvedFromLink = resolvedFromLink;
+
+  // Real (non-tab) requests keep the legacy cookie behaviour so non-browser
+  // clients without the header are unchanged. Tab requests never touch the
+  // session cookie: the jar is shared, so writing would re-target every other
+  // tab still on cookie behaviour.
+  if (!isTabSession && (isNewSession || sessionId !== cookieSession)) {
+    setBrowserSessionCookie(res, sessionId);
+  }
+
+  // Tell the client which identity actually served the request. The web app
+  // adopts it when it differs from its own, so a tab that inherited the durable
+  // binding (or a user whose storage was lost) self-heals without a reload.
+  res.setHeader(RESOLVED_SESSION_HEADER, sessionId);
+
   sessionContext.run(sessionId, next);
 }
 
@@ -256,12 +459,15 @@ declare global {
     interface Request {
       sessionId: string;
       /**
-       * True when the session came from the per-tab header/query identity
-       * rather than the shared cookie. Handlers must not rotate cookies (or
-       * re-sign the cookie risk value) for such requests — the client keeps
-       * the session id and risk value in per-tab sessionStorage instead.
+       * True when the request carried a per-tab identity (header or SSE query
+       * param). Handlers must not rotate cookies for such requests — the client
+       * keeps the session id and risk value in per-tab sessionStorage instead.
        */
       isTabSession?: boolean;
+      /** Durable browser identity sent by the web client (may be absent). */
+      clientId?: string | null;
+      /** True when the session id came from a durable link rather than the tab id. */
+      sessionResolvedFromLink?: boolean;
     }
   }
 }

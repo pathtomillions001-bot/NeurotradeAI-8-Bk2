@@ -17,8 +17,9 @@
  */
 
 import { db } from "@workspace/db";
+import { getBrowserSessionId } from "../session";
 import { tradeIntelligenceReportsTable } from "@workspace/db";
-import { desc, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { CoordinatorOutput } from "./types";
 import { recordTradeOutcome as recordDynamicOutcome } from "./dynamic-confidence";
 import { logger } from "../logger";
@@ -304,6 +305,7 @@ export async function analyzeCompletedTrade(input: TradeIntelligenceInput): Prom
     recordDynamicOutcome(agentScores, won);
 
     await db.insert(tradeIntelligenceReportsTable).values({
+      sessionId: getBrowserSessionId(),
       tradeId,
       symbol,
       contractType,
@@ -353,20 +355,29 @@ export async function analyzeCompletedTrade(input: TradeIntelligenceInput): Prom
 
 // ── Query helpers ─────────────────────────────────────────────────────────────
 
-export async function getRecentReports(limit = 20) {
-  return db
-    .select()
-    .from(tradeIntelligenceReportsTable)
+export async function getRecentReports(limit = 20, sessionId?: string) {
+  const query = db.select().from(tradeIntelligenceReportsTable).$dynamic();
+  if (sessionId) {
+    query.where(eq(tradeIntelligenceReportsTable.sessionId, sessionId));
+  }
+  return query
     .orderBy(desc(tradeIntelligenceReportsTable.createdAt))
     .limit(limit);
 }
 
-export async function getIntelligenceSummary() {
+export async function getIntelligenceSummary(sessionId?: string) {
+  // Reports are PER CONNECTED ACCOUNT: the table used to be global, so a
+  // brand-new visitor was shown the trade intelligence of whoever traded last
+  // ("I have data for 200 trades I never made").
+  const scope = sessionId
+    ? eq(tradeIntelligenceReportsTable.sessionId, sessionId)
+    : undefined;
   // Sample of the most recent reports drives the qualitative breakdown
   // (findings, confidence assessment, timing) — a rolling window is fine for that.
   const reports = await db
     .select()
     .from(tradeIntelligenceReportsTable)
+    .where(scope)
     .orderBy(desc(tradeIntelligenceReportsTable.createdAt))
     .limit(100);
 
@@ -379,7 +390,8 @@ export async function getIntelligenceSummary() {
       wins:   sql<number>`count(*) filter (where ${tradeIntelligenceReportsTable.won} = true)`,
       losses: sql<number>`count(*) filter (where ${tradeIntelligenceReportsTable.won} = false)`,
     })
-    .from(tradeIntelligenceReportsTable);
+    .from(tradeIntelligenceReportsTable)
+    .where(scope);
   const totalCount  = Number(total)  || 0;
   const winsCount   = Number(wins)   || 0;
   const lossesCount = Number(losses) || 0;

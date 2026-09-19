@@ -43,6 +43,8 @@ export interface BotDefinition {
    * Range Sentinel). The UI renders a different console for these.
    */
   preLocked?: boolean;
+  /** Matches-only causal predictor with a tick-guarded execution lifecycle. */
+  matchPulse?: boolean;
   /**
    * Bots that lock ONE market + ONE user-chosen contract, then wait for health,
    * edge, the post-loss shield and the tick to all agree (the Kill-Shot Oracle).
@@ -161,6 +163,32 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "≈11%",
     nominalPayout: "8.93×",
+  },
+  {
+    id: "match-pulse",
+    name: "Match Pulse",
+    code: "BOT-MATCH-PULSE",
+    family: "match",
+    matchPulse: true,
+    contractLabel: "Matches only",
+    tagline: "Measure the pattern. Respect the tick.",
+    description:
+      "A selective Matches-only bot built around the next tick, not overdue-digit guesses. It tests its entire digit-selection rule on two unseen blocks, then rechecks the tick, probability and actual payout at the broker send boundary. Lock a scanned market or switch only to another qualified one. No qualified setup means no trade.",
+    edge: [
+      "All ten digits · supported order-0/1/2 conditional models · no fixed gap or due-digit bonus",
+      "Chronological validation + untouched audit; market-search and repeated-scan evidence correction",
+      "Distinct-tick clock, post-loss cooling and no patience override — even during recovery",
+      "Quote-time AND socket-send checks; one order at a time; unknown settlements freeze execution",
+      "Same debt-plus-markup recovery as Match Sniper, with pre-trade stake and loss-budget limits",
+      "Trades on your selected Deriv demo or real account; broker-feed and account checks before every order",
+    ],
+    accent: "teal",
+    icon: "activity",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [{ id: "both", label: "Matches only", contracts: ["DIGITMATCH"], desc: "The same Matches-only rule for normal and recovery entries" }],
+    nominalWinRate: "10% fair baseline",
+    nominalPayout: "Live-quoted",
   },
   {
     id: "barrier",

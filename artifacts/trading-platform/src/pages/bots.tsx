@@ -15,6 +15,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { BotConsole } from "@/components/bot-console";
+import { MatchPulseConsole } from "@/components/match-pulse-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
 import { KillShotFamilyConsole } from "@/components/killshot-family-console";
@@ -136,7 +137,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, onOpen, index }: {
                 <h3 className="text-sm font-bold text-white truncate">{bot.name}</h3>
                 {isThisRunning && (
                   <span className={`flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text}`}>
-                    <span className={`w-1 h-1 rounded-full ${a.dot} animate-pulse`} /> LIVE
+                    <span className={`w-1 h-1 rounded-full ${a.dot} animate-pulse`} /> {s?.pulse ? s.pulse.account ? s.pulse.account.isVirtual ? "DEMO" : "REAL" : "ACTIVE" : "LIVE"}
                   </span>
                 )}
               </div>
@@ -194,7 +195,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, onOpen, index }: {
                 onClick={onOpen}
                 className={`w-full h-9 text-xs font-semibold ${a.solidBtn} text-white`}
               >
-                <Activity className="w-3.5 h-3.5 mr-1.5" /> Open Live Session
+                <Activity className="w-3.5 h-3.5 mr-1.5" /> {s?.pulse ? "Open Session" : "Open Live Session"}
               </Button>
             ) : (
               <Button
@@ -333,7 +334,8 @@ export default function Bots() {
       )}
 
       {/* ── Console ────────────────────────────────────────────────────── */}
-      {/* Six consoles for six lifecycles:
+      {/* Dedicated consoles follow their bot lifecycle:
+          · matchPulse            — settings → scan → lock the best market or switch
           · accumulator           — compounding range: survival, EV ladder, market rotation
           · twinHedge             — two legs, one market, same tick (adaptive skew)
           · killShotFamily        — family oracle (locked or auto-switching)
@@ -341,7 +343,15 @@ export default function Bots() {
           · preLocked (Dual-Lock) — scan once → freeze the pair → run non-stop
           · everything else       — configure per trade */}
       <AnimatePresence>
-        {openBot?.accumulator ? (
+        {openBot?.matchPulse ? (
+          <MatchPulseConsole
+            bot={openBot}
+            open={openBotId !== null}
+            onOpenChange={open => { if (!open) setOpenBotId(null); }}
+            session={liveSession}
+            onSession={setSession}
+          />
+        ) : openBot?.accumulator ? (
           <AccumulatorConsole
             bot={openBot}
             open={openBotId !== null}

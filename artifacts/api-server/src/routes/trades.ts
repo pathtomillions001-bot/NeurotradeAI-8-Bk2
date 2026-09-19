@@ -1,5 +1,4 @@
 import { Router } from "express";
-import { currentTradingOwner } from "../lib/engine-arbiter";
 import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
@@ -18,13 +17,6 @@ import { evaluateManualAssist } from "../lib/speed-ai-engine";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
 const router = Router();
-router.use((req, res, next) => {
-  if (req.method === "POST" && ["/", "/bulk"].includes(req.path) && currentTradingOwner() === "match-pulse") {
-    res.status(409).json({ error: "Match Pulse owns execution, including any unresolved order. Stop and settle it before placing another trade." });
-    return;
-  }
-  next();
-});
 
 const DEMO_BALANCE = 10000;
 

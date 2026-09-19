@@ -333,14 +333,11 @@ if (useExternalPostgres) {
   });
   dbInstance = drizzlePg(poolInstance, { schema });
 } else {
-  // Explicit test URL uses an isolated in-memory DB per process; unit tests
-  // must never share a running preview's data directory or external credentials.
-  const dbDir = process.env.DATABASE_URL === "pglite:memory"
-    ? undefined
-    : path.resolve(process.cwd(), ".data/pglite");
-  if (dbDir) {
-    try { fs.mkdirSync(dbDir, { recursive: true }); } catch {}
-  }
+  // Use embedded PGlite with persistent disk storage
+  const dbDir = path.resolve(process.cwd(), ".data/pglite");
+  try {
+    fs.mkdirSync(dbDir, { recursive: true });
+  } catch {}
 
   const pglite = new PGlite(dbDir);
   pgliteInstance = pglite;

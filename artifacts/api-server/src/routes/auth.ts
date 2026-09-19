@@ -14,7 +14,6 @@ import {
 } from "../lib/deriv";
 import { ConnectDerivAccountBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
-import { currentTradingOwner } from "../lib/engine-arbiter";
 import {
   accountSessionId,
   clearSessionLinksForSession,
@@ -27,16 +26,6 @@ import {
 } from "../lib/session";
 
 const router = Router();
-// A pending Match Pulse position belongs to its original account. Switching or
-// deleting its credentials would orphan settlement and invalidate its buy guard.
-router.use((req, res, next) => {
-  if (req.method === "POST" && ["/connect", "/oauth/callback", "/switch-account", "/disconnect"].includes(req.path)
-      && currentTradingOwner() === "match-pulse") {
-    res.status(409).json({ error: "Stop Match Pulse and confirm any pending settlement before changing accounts." });
-    return;
-  }
-  next();
-});
 
 // PKCE state is bound to the browser session that initiated it. This prevents a
 // callback from one visitor being consumed by another visitor on the same app.

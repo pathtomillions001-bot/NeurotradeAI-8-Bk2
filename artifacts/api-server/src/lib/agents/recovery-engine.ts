@@ -397,89 +397,6 @@ export function getBotRecoveryStake(
  *   Leftover target profit is optional and is cleared on completion.
  * - Win while NOT in recovery: no-op (already normal).
  */
-/** Pure form of the SAME recovery transition, for atomic journal commits / paper replay. */
-export function reduceRecoveryOutcome(
-  current: RecoveryState,
-  won: boolean,
-  profit: number,
-  stakeUsed: number,
-  maxRecoverySteps: number,
-  contractType?: string,
-  payoutMultiplier = 1,
-): RecoveryState {
-  let next = { ...current };
-  const isMatch = contractType === "DIGITMATCH";
-
-  if (won) {
-    if (next.inRecovery) {
-      const settlement = settleRecoveryWin({
-        unrecoveredAmount: next.unrecoveredAmount,
-        remainingTargetProfit: next.remainingTargetProfit,
-        actualNetProfit: profit,
-      });
-
-      if (settlement.recoveryComplete) {
-        // Debt cleared — exit recovery immediately, even if target is $0.01 short.
-        const preservedBaseStake = next.baseStake;
-        next = { ...freshState(), resetDate: current.resetDate };
-        next.baseStake = preservedBaseStake;
-      } else {
-        next.unrecoveredAmount = settlement.remainingDebt;
-        next.remainingTargetProfit = settlement.remainingTargetProfit;
-        // A partial win breaks the loss streak, but recovery stays active until
-        // the remaining loss debt itself is repaid.
-        next.streakLossCount = 0;
-        next.consecutiveMatchLosses = 0;
-      }
-    }
-  } else {
-    if (!next.inRecovery) {
-      next.inRecovery               = true;
-      next.recoveryStep             = 1;
-      next.baseStake                = next.baseStake > 0 ? next.baseStake : stakeUsed;
-      next.unrecoveredAmount        = addMoney(stakeUsed);
-      next.streakLossCount          = 1;
-      next.streakStartAmount        = addMoney(stakeUsed);
-      // Preserve the profit the lost NORMAL trade was expected to earn. Auto
-      // recovery may size the next stake to debt + this amount, but the target
-      // is aspirational only — it never keeps recovery active after debt is paid.
-      const originPayout = Number.isFinite(payoutMultiplier) && payoutMultiplier > 1
-        ? payoutMultiplier
-        : 1;
-      next.originPayoutMultiplier   = originPayout;
-      // Capped at one base stake so the recovery stake is driven by the DEBT,
-      // never by how generous the losing contract's payout was. Keeps the main
-      // engine, the FAB and every specialist bot on identical numbers.
-      next.targetProfit             = recoveryTargetProfitFor(stakeUsed, originPayout);
-      next.remainingTargetProfit    = next.targetProfit;
-      // If the very first loss was a MATCH trade, start the counter
-      next.consecutiveMatchLosses   = isMatch ? 1 : 0;
-    } else {
-      const cap                = maxRecoverySteps > 0 ? maxRecoverySteps : 3;
-      next.recoveryStep       = Math.min(next.recoveryStep + 1, cap);
-      next.unrecoveredAmount  = addMoney(next.unrecoveredAmount, stakeUsed);
-      next.streakLossCount++;
-      next.streakStartAmount  = addMoney(next.streakStartAmount, stakeUsed);
-      // Track consecutive MATCH losses during recovery for the DIFF fallback gate.
-      // Reset to 0 when any non-MATCH trade loses (we're already on a DIFF attempt).
-      if (isMatch) {
-        next.consecutiveMatchLosses++;
-      } else {
-        // A non-MATCH loss during recovery — reset the MATCH counter so the next
-        // recovery cycle restarts with MATCH before falling back to DIFF again.
-        next.consecutiveMatchLosses = 0;
-      }
-    }
-  }
-
-  return next;
-}
-
-/** A separate paper ledger may use the same policy without touching account debt. */
-export function createRecoveryState(): RecoveryState {
-  return freshState();
-}
-
 export function recordOutcome(
   won: boolean,
   profit: number,
@@ -489,10 +406,75 @@ export function recordOutcome(
   payoutMultiplier = 1,
 ): RecoveryState {
   ensureFreshDay();
-  replaceState(reduceRecoveryOutcome({ ...state }, won, profit, stakeUsed, maxRecoverySteps, contractType, payoutMultiplier));
-  // Existing callers retain automatic persistence; transactional consumers can
-  // commit reduceRecoveryOutcome() alongside the journal, then seedState().
+  const isMatch = contractType === "DIGITMATCH";
+
+  if (won) {
+    if (state.inRecovery) {
+      const settlement = settleRecoveryWin({
+        unrecoveredAmount: state.unrecoveredAmount,
+        remainingTargetProfit: state.remainingTargetProfit,
+        actualNetProfit: profit,
+      });
+
+      if (settlement.recoveryComplete) {
+        // Debt cleared — exit recovery immediately, even if target is $0.01 short.
+        const preservedBaseStake = state.baseStake;
+        replaceState(freshState());
+        state.baseStake = preservedBaseStake;
+      } else {
+        state.unrecoveredAmount = settlement.remainingDebt;
+        state.remainingTargetProfit = settlement.remainingTargetProfit;
+        // A partial win breaks the loss streak, but recovery stays active until
+        // the remaining loss debt itself is repaid.
+        state.streakLossCount = 0;
+        state.consecutiveMatchLosses = 0;
+      }
+    }
+  } else {
+    if (!state.inRecovery) {
+      state.inRecovery               = true;
+      state.recoveryStep             = 1;
+      state.baseStake                = state.baseStake > 0 ? state.baseStake : stakeUsed;
+      state.unrecoveredAmount        = addMoney(stakeUsed);
+      state.streakLossCount          = 1;
+      state.streakStartAmount        = addMoney(stakeUsed);
+      // Preserve the profit the lost NORMAL trade was expected to earn. Auto
+      // recovery may size the next stake to debt + this amount, but the target
+      // is aspirational only — it never keeps recovery active after debt is paid.
+      const originPayout = Number.isFinite(payoutMultiplier) && payoutMultiplier > 1
+        ? payoutMultiplier
+        : 1;
+      state.originPayoutMultiplier   = originPayout;
+      // Capped at one base stake so the recovery stake is driven by the DEBT,
+      // never by how generous the losing contract's payout was. Keeps the main
+      // engine, the FAB and every specialist bot on identical numbers.
+      state.targetProfit             = recoveryTargetProfitFor(stakeUsed, originPayout);
+      state.remainingTargetProfit    = state.targetProfit;
+      // If the very first loss was a MATCH trade, start the counter
+      state.consecutiveMatchLosses   = isMatch ? 1 : 0;
+    } else {
+      const cap                = maxRecoverySteps > 0 ? maxRecoverySteps : 3;
+      state.recoveryStep       = Math.min(state.recoveryStep + 1, cap);
+      state.unrecoveredAmount  = addMoney(state.unrecoveredAmount, stakeUsed);
+      state.streakLossCount++;
+      state.streakStartAmount  = addMoney(state.streakStartAmount, stakeUsed);
+      // Track consecutive MATCH losses during recovery for the DIFF fallback gate.
+      // Reset to 0 when any non-MATCH trade loses (we're already on a DIFF attempt).
+      if (isMatch) {
+        state.consecutiveMatchLosses++;
+      } else {
+        // A non-MATCH loss during recovery — reset the MATCH counter so the next
+        // recovery cycle restarts with MATCH before falling back to DIFF again.
+        state.consecutiveMatchLosses = 0;
+      }
+    }
+  }
+
+  // Persist on EVERY outcome (win or loss, manual or autonomous) — fire-and-forget so
+  // callers never block on DB latency, but the call itself can never be forgotten since
+  // it lives here rather than at each call site.
   persistToDb().catch(() => {});
+
   return state;
 }
 

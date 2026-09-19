@@ -13,6 +13,7 @@ import { Link, useLocation } from "wouter";
 import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, CheckCircle2, Zap, FlaskConical, RefreshCw, AlertTriangle, Activity, LockKeyhole, TrendingDown } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { adoptTabSessionId, clearTabRiskAck, setTabRiskAck } from "@/lib/tab-session";
+import { markLandingDismissed } from "@/lib/landing-gate";
 
 // ── PKCE utilities ────────────────────────────────────────────────────────────
 
@@ -131,6 +132,9 @@ export default function Connect() {
           // their own identities untouched.
           adoptTabSessionId(data?.sessionId);
           setTabRiskAck(data?.riskAck);
+          // Connecting a Deriv account is entering the app: never show the
+          // first-visit funnel again for this browser.
+          markLandingDismissed();
           toast.success("Signed in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
@@ -158,6 +162,7 @@ export default function Connect() {
         onSuccess: (data) => {
           adoptTabSessionId((data as { sessionId?: unknown })?.sessionId);
           setTabRiskAck((data as { riskAck?: unknown })?.riskAck);
+          markLandingDismissed();
           toast.success("Logged in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
@@ -244,6 +249,7 @@ export default function Connect() {
       onSuccess: (data) => {
         adoptTabSessionId((data as { sessionId?: unknown })?.sessionId);
         setTabRiskAck((data as { riskAck?: unknown })?.riskAck);
+        markLandingDismissed();
         toast.success("Account connected — live trading on Deriv");
         setToken("");
         queryClient.invalidateQueries();

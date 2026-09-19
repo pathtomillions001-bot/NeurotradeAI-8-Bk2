@@ -8,7 +8,9 @@
     "build": "vite build --config vite.config.ts",
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node ./scripts/serve-production.mjs"
+    "start": "node ./scripts/serve-production.mjs",
+    "test": "tsx --test src/lib/landing-gate.test.ts",
+    "check:first-paint": "node scripts/first-paint-check.mjs"
   },
   "devDependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -73,7 +75,8 @@
     "vaul": "^1.1.2",
     "vite": "catalog:",
     "wouter": "^3.3.5",
-    "zod": "catalog:"
+    "zod": "catalog:",
+    "tsx": "catalog:"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

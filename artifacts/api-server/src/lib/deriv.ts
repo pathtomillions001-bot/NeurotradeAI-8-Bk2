@@ -25,16 +25,36 @@ import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { DigitTape, type DigitSnapshot } from "./digit-tape";
 import { logger } from "./logger";
-// The published index specifications (annualised volatility and tick interval)
-// live in the accumulator analysis module because the ACCU barrier theory is
-// built on them. It has no imports of its own, so this is a clean one-way edge
-// and there is exactly ONE definition of "how volatile is R_10" in the codebase.
-import { annualVolFor, tickSecondsFor, YEAR_SECONDS } from "./accumulator-analysis";
 import { RISE_FALL_PAYOUT } from "./payouts";
 import {
   describeDerivHttpFailure,
   isTransientDerivFailure,
 } from "./friendly-error";
+
+// ── Index specifications (annualised volatility and tick interval) ───────────
+// Single source of truth for "how volatile is R_10": the published
+// annualised volatilities Deriv uses to generate its synthetic indices, plus
+// each family's tick interval.
+
+/** Seconds in the year Deriv's volatility definitions use (365 d). */
+export const YEAR_SECONDS = 365 * 24 * 3600;
+
+const ANNUAL_VOL: Record<string, number> = {
+  R_10: 0.10, R_25: 0.25, R_50: 0.50, R_75: 0.75, R_100: 1.00,
+  "1HZ10V": 0.10, "1HZ15V": 0.15, "1HZ25V": 0.25, "1HZ30V": 0.30,
+  "1HZ50V": 0.50, "1HZ75V": 0.75, "1HZ90V": 0.90, "1HZ100V": 1.00,
+  JD10: 0.10, JD25: 0.25, JD50: 0.50, JD75: 0.75, JD100: 1.00,
+  RDBULL: 0.40, RDBEAR: 0.40,
+};
+
+/** Every Volatility-family index ticks every 2 s; the 1-second family every 1 s. */
+export function tickSecondsFor(symbol: string): number {
+  return symbol.startsWith("1HZ") ? 1 : 2;
+}
+
+export function annualVolFor(symbol: string): number {
+  return ANNUAL_VOL[symbol] ?? 0.25;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1695,12 +1715,11 @@ export async function ensureFreshBearerToken(
 //     waitForContractResult()       → OTP + socket, polling portfolio every 2 s
 //     executeBulkLiveTrades()       → OTP + socket
 //     waitForBulkContractResults()  → OTP + socket
-//     sellContract()                → OTP + socket
 //     fetchDerivProfitTable()       → OTP + socket
 //     DerivJournalManager           → OTP + a permanently held socket
 //
-// One manual trade therefore cost 2 sockets + 2 REST calls, an accumulator
-// round-trip up to 4 sockets + 4 REST calls, and a Twin-Hedge batch 2 more.
+// One manual trade therefore cost 2 sockets + 2 REST calls, and a bulk
+// batch of legs even more.
 // With bots running, several accounts and the journal manager's background
 // polling, the app sailed past both the 5-connection ceiling and the 60 REST
 // requests/minute budget — which is exactly the Deriv page users reported:
@@ -2727,128 +2746,6 @@ export async function getContractProposal(
   return null;
 }
 
-// ── Accumulator (ACCU) proposal ──────────────────────────────────────────────
-/**
- * Quote an accumulator on the public WS.
- *
- * ACCU is not a directional contract: it buys a compounding range. The request
- * therefore carries `growth_rate` (0.01–0.05, in 1 % steps) and an optional
- * `limit_order.take_profit`, and the response carries the ACTUAL two barriers
- * (absolute prices) that the range is built from. Those barriers are ground
- * truth for the whole analysis layer — `accumulator-analysis.ts` prefers a
- * calibrated barrier over its model whenever one has been seen.
- */
-export interface AccumulatorProposal {
-  proposalId: string;
-  askPrice: number;
-  payout: number;
-  /** Absolute upper/lower barriers as quoted by Deriv. */
-  highBarrier: number | null;
-  lowBarrier: number | null;
-  /** Band half-width as a fraction of spot, derived from the quoted barriers. */
-  barrierRatio: number | null;
-  spot: number;
-  longcode: string;
-  growthRate: number;
-  takeProfit: number | null;
-}
-
-export async function getAccumulatorProposal(
-  params: {
-    symbol: string;
-    stake: number;
-    currency: string;
-    durationTicks: number;
-    growthRate: number;
-    takeProfit?: number | null;
-  },
-): Promise<AccumulatorProposal | null> {
-  try {
-    const proposalParams: Record<string, unknown> = {
-      amount: params.stake,
-      basis: "stake",
-      contract_type: "ACCU",
-      currency: params.currency,
-      duration: params.durationTicks,
-      duration_unit: "t",
-      underlying_symbol: params.symbol,
-      growth_rate: params.growthRate,
-    };
-    if (params.takeProfit !== undefined && params.takeProfit !== null) {
-      proposalParams.limit_order = { take_profit: params.takeProfit };
-    }
-
-    const msg = await tickManager.request({ proposal: 1, ...proposalParams }, 10_000);
-    if (msg?.error) {
-      logger.debug({ symbol: params.symbol, err: msg.error }, "getAccumulatorProposal: Deriv error");
-      return null;
-    }
-    if (msg?.msg_type !== "proposal" || !msg.proposal) return null;
-
-    const proposal = msg.proposal;
-    const spot = Number(proposal.spot ?? 0);
-    const high = proposal.high_barrier !== undefined ? Number(proposal.high_barrier) : null;
-    const low = proposal.low_barrier !== undefined ? Number(proposal.low_barrier) : null;
-    let barrierRatio: number | null = null;
-    if (spot > 0 && high !== null && low !== null && Number.isFinite(high) && Number.isFinite(low)) {
-      // The band is symmetric about the previous spot; average the two sides so
-      // a one-sided rounding to the pip does not skew the reading.
-      barrierRatio = ((high - spot) + (spot - low)) / 2 / spot;
-      if (!(barrierRatio > 0)) barrierRatio = null;
-    }
-
-    const askPrice = Number(proposal.ask_price ?? params.stake);
-    const payout = Number(proposal.payout ?? askPrice);
-    return {
-      proposalId: String(proposal.id ?? ""),
-      askPrice,
-      payout,
-      highBarrier: Number.isFinite(high as number) ? high : null,
-      lowBarrier: Number.isFinite(low as number) ? low : null,
-      barrierRatio,
-      spot,
-      longcode: proposal.longcode ?? "",
-      growthRate: params.growthRate,
-      takeProfit: params.takeProfit ?? null,
-    };
-  } catch (e) {
-    logger.debug({ e }, "getAccumulatorProposal failed");
-    return null;
-  }
-}
-
-/**
- * Sell an open contract back to Deriv — the accumulator's exit.
- *
- * This is what makes the accumulator bot's risk management real rather than
- * theoretical: the bot can close a position at ANY tick after the first, so a
- * deteriorating market can be cashed out near par instead of being ridden to a
- * total loss. Runs on the authenticated OTP socket; `price: 0` means "accept
- * the market price".
- */
-export async function sellContract(
-  bearerToken: string,
-  accountId: string,
-  contractId: number | string,
-): Promise<{ soldFor: number; balanceAfter: number | null }> {
-  if (!bearerToken || !accountId) {
-    throw new Error("No authenticated session — a Bearer token and account ID are required to sell a contract.");
-  }
-  // Rides the account's pooled socket: no OTP handshake, no extra connection.
-  const msg = await accountRequest(
-    bearerToken, accountId, { sell: contractId, price: 0 }, 20_000,
-  );
-  if (!msg) throw new Error("Sell request timed out");
-  if (msg.error) throw new Error(msg.error.message ?? "Sell rejected by Deriv");
-  if (msg.msg_type === "sell" && msg.sell) {
-    return {
-      soldFor: Number(msg.sell.sold_for ?? 0),
-      balanceAfter: msg.sell.balance_after !== undefined ? Number(msg.sell.balance_after) : null,
-    };
-  }
-  throw new Error("Unexpected response from Deriv while selling the contract");
-}
-
 // ── Live trade execution via OTP WebSocket ────────────────────────────────────
 /**
  * Execute a live trade using the new OTP-authenticated WebSocket flow:
@@ -2970,8 +2867,8 @@ export async function executeLiveTrade(
  * prevent — so the batch sends ALL proposals in ONE unscheduled burst (same
  * event-loop tick, same millisecond). Deriv quotes them all off the same
  * underlying tick, and each buy goes out the instant its proposal returns, so
- * the whole batch (the UI caps it at 2–10 legs; the Twin-Hedge bot uses 2)
- * lands inside a few milliseconds — far shorter than any tick period.
+ * the whole batch (the UI caps it at 2–10 legs) lands inside a few
+ * milliseconds — far shorter than any tick period.
  *
  * The only delay path left is a THROTTLED leg, which is re-proposed with
  * exponential backoff instead of being marked failed — a momentary throttle

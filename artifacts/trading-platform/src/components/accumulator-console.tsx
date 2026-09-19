@@ -274,9 +274,11 @@ export function AccumulatorConsole({
     stopLoss: 5,
     maxRecoverySteps: 3,
     certainty: "strict",
-    marketMode: "switching" as "locked" | "switching",
-    lockedSymbol: "R_10",
   });
+  // The deploy mode is chosen AFTER the measurement pass, from what the scan
+  // actually found — the same order the other consoles use.
+  const [deployMode, setDeployMode] = useState<"locked" | "switching">("switching");
+  const [lockedSymbol, setLockedSymbol] = useState<string | null>(null);
   const set = <K extends keyof typeof config>(k: K, v: (typeof config)[K]) =>
     setConfig((prev) => ({ ...prev, [k]: v }));
 
@@ -355,7 +357,12 @@ export function AccumulatorConsole({
       });
       const data = (await res.json()) as ScanResult;
       setScan(data);
-      setSelected(data.best?.symbol ?? data.allScored[0]?.symbol ?? null);
+      const pick = data.best?.symbol
+        ?? data.allScored.find((c) => c.verdict === "CERTIFIED")?.symbol
+        ?? data.allScored[0]?.symbol
+        ?? null;
+      setSelected(pick);
+      setLockedSymbol(pick);
       setStep("scan-result");
     } catch {
       setStep("config");
@@ -399,8 +406,8 @@ export function AccumulatorConsole({
           takeProfit: config.takeProfit,
           stopLoss: config.stopLoss,
           certainty: config.certainty,
-          marketMode: config.marketMode,
-          lockedSymbol: config.marketMode === "locked" ? config.lockedSymbol : undefined,
+          marketMode: deployMode,
+          lockedSymbol: deployMode === "locked" ? lockedSymbol ?? undefined : undefined,
           recoveryAutoMode: true,
           maxRecoverySteps: config.maxRecoverySteps,
         }),
@@ -412,7 +419,7 @@ export function AccumulatorConsole({
     } catch { /* ignore */ } finally {
       setLoading(false);
     }
-  }, [bot, config, onSession]);
+  }, [bot, config, deployMode, lockedSymbol, onSession]);
 
   const handleStop = useCallback(async () => {
     setLoading(true);
@@ -543,52 +550,6 @@ export function AccumulatorConsole({
                     </p>
                   </div>
 
-                  <div>
-                    <span className="text-[10px] text-muted-foreground">Market mode</span>
-                    <div className="flex gap-1 mt-1">
-                      <button
-                        onClick={() => set("marketMode", "locked")}
-                        className={`flex-1 h-8 rounded-lg border text-[10px] font-semibold flex items-center justify-center gap-1.5 transition ${
-                          config.marketMode === "locked"
-                            ? `${a.solidBtn} text-white border-transparent`
-                            : "border-white/10 text-muted-foreground hover:text-white"
-                        }`}
-                      >
-                        <Lock className="w-3 h-3" /> Locked
-                      </button>
-                      <button
-                        onClick={() => set("marketMode", "switching")}
-                        className={`flex-1 h-8 rounded-lg border text-[10px] font-semibold flex items-center justify-center gap-1.5 transition ${
-                          config.marketMode === "switching"
-                            ? `${a.solidBtn} text-white border-transparent`
-                            : "border-white/10 text-muted-foreground hover:text-white"
-                        }`}
-                      >
-                        <Shuffle className="w-3 h-3" /> Auto-rotate
-                      </button>
-                    </div>
-                    <p className="text-[9px] leading-snug text-muted-foreground mt-1">
-                      {config.marketMode === "locked"
-                        ? "Locked: stay on the market the scan certified — the bot will hold fire rather than leave it."
-                        : "Auto-rotate: when the live monitors decide this market's survival no longer matches the reading it was opened on, the position is closed and every market is re-measured for a new home."}
-                    </p>
-                  </div>
-
-                  {config.marketMode === "locked" && (
-                    <label className="block">
-                      <span className="text-[10px] text-muted-foreground">Locked market</span>
-                      <select
-                        value={config.lockedSymbol}
-                        onChange={(e) => set("lockedSymbol", e.target.value)}
-                        className="w-full h-8 mt-0.5 rounded-lg bg-black/30 border border-white/10 text-xs px-2 text-white"
-                      >
-                        {(params?.markets ?? [{ symbol: "R_10", displayName: "Volatility 10 Index" }]).map((m) => (
-                          <option key={m.symbol} value={m.symbol}>{m.displayName}</option>
-                        ))}
-                      </select>
-                    </label>
-                  )}
-
                   <NumInput label="Stake per position" value={config.stake} onChange={(v) => set("stake", v)} min={0.35} step={0.5} suffix="USD" />
                   <NumInput label="Take profit" value={config.takeProfit} onChange={(v) => set("takeProfit", v)} min={1} step={1} suffix="USD" />
                   <NumInput label="Stop loss" value={config.stopLoss} onChange={(v) => set("stopLoss", v)} min={1} step={1} suffix="USD" />
@@ -599,26 +560,10 @@ export function AccumulatorConsole({
                   />
                 </div>
 
-                <div className="rounded-lg border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2">
-                  <p className="text-[9px] leading-relaxed text-amber-200/90">
-                    Recovery works differently here. A knockout loses exactly the stake, so there is no
-                    payout ratio to invert. The ledger computes the horizon
-                    n* = ⌈ln(1 + debt/stake)/ln(1+g)⌉ and takes the shot only if the measured
-                    survival curve clears (1+g)<sup>−n*</sup>. If n* runs past the {tickCap}-tick cap,
-                    or the odds do not clear, the debt is written down rather than chased.
-                  </p>
-                </div>
-
                 <Button onClick={handleScan} disabled={loading} className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
                   <ScanSearch className="w-4 h-4 mr-2" /> Measure every market
                 </Button>
-                <button
-                  onClick={() => void handleStart()}
-                  disabled={loading}
-                  className="w-full text-[10px] text-muted-foreground hover:text-white transition"
-                >
-                  or deploy now — the bot will hold fire until a market measures up
-                </button>
+
               </div>
             )}
 
@@ -666,6 +611,11 @@ export function AccumulatorConsole({
                       >
                         <div className="flex items-center justify-between gap-2">
                           <span className="text-[11px] text-white font-semibold truncate">{c.displayName}</span>
+                          {deployMode === "locked" && lockedSymbol === c.symbol && (
+                            <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-sky-400/40 bg-sky-400/10 text-sky-300">
+                              LOCKED
+                            </span>
+                          )}
                           <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded border ${VERDICT_TONE[c.verdict]}`}>
                             {c.verdict}
                           </span>
@@ -735,12 +685,62 @@ export function AccumulatorConsole({
                   </div>
                 )}
 
+                {/* Now that the markets have been measured, the deploy mode is a
+                    choice the result can actually inform: lock the market the
+                    scan certified, or let the bot rotate when the tape moves. */}
+                <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                  <span className="text-[10px] text-muted-foreground">Deploy mode</span>
+                  <div className="flex gap-1 mt-1">
+                    <button
+                      onClick={() => setDeployMode("switching")}
+                      className={`flex-1 h-8 rounded-lg border text-[10px] font-semibold flex items-center justify-center gap-1.5 transition ${
+                        deployMode === "switching"
+                          ? `${a.solidBtn} text-white border-transparent`
+                          : "border-white/10 text-muted-foreground hover:text-white"
+                      }`}
+                    >
+                      <Shuffle className="w-3 h-3" /> Auto-rotate
+                    </button>
+                    <button
+                      onClick={() => setDeployMode("locked")}
+                      className={`flex-1 h-8 rounded-lg border text-[10px] font-semibold flex items-center justify-center gap-1.5 transition ${
+                        deployMode === "locked"
+                          ? `${a.solidBtn} text-white border-transparent`
+                          : "border-white/10 text-muted-foreground hover:text-white"
+                      }`}
+                    >
+                      <Lock className="w-3 h-3" /> Locked
+                    </button>
+                  </div>
+                  <p className="text-[9px] leading-snug text-muted-foreground mt-1">
+                    {deployMode === "locked"
+                      ? `Locked to ${ranked.find((c) => c.symbol === lockedSymbol)?.displayName ?? lockedSymbol ?? "—"} — the bot stays there and holds fire rather than leaving it. Tap a market above to lock a different one.`
+                      : "Auto-rotate — when the live monitors decide the market it is on no longer matches the reading it was opened on, the position is closed and every market is re-measured for a new home."}
+                  </p>
+                  {deployMode === "locked" && (
+                    <label className="block mt-2">
+                      <span className="text-[10px] text-muted-foreground">Locked market</span>
+                      <select
+                        value={lockedSymbol ?? ""}
+                        onChange={(e) => { setLockedSymbol(e.target.value); setSelected(e.target.value); void handleExplain(e.target.value); }}
+                        className="w-full h-8 mt-0.5 rounded-lg bg-black/30 border border-white/10 text-xs px-2 text-white"
+                      >
+                        {ranked.map((c) => (
+                          <option key={c.symbol} value={c.symbol}>
+                            {c.displayName} — {c.verdict}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                </div>
+
                 <div className="flex gap-2">
                   <Button onClick={() => setStep("config")} variant="outline" className="flex-1 h-9 text-xs border-white/10">
                     Back
                   </Button>
                   <Button onClick={handleStart} disabled={loading} className={`flex-1 h-9 text-xs ${a.solidBtn} text-white font-bold`}>
-                    {isRunning ? "View session" : "Deploy"}
+                    {isRunning ? "View session" : deployMode === "locked" ? "Deploy locked" : "Deploy rotating"}
                   </Button>
                 </div>
                 {!scan.suitable && (

@@ -22,8 +22,13 @@ watchPatterns = [
 
 [deploy]
 startCommand = "pnpm --filter @workspace/trading-platform start"
-# SPA + /api reverse-proxy (see scripts/serve-production.mjs)
-healthcheckPath = "/"
+# Release-aware probe (see scripts/serve-production.mjs):
+#   { web: {sha, consoles[]}, api: {sha}, parity: "ok" | "skew",
+#     missingConsolesHere[] }
+# `/` answered 200 for a web service that had silently stopped picking up
+# commits; this path reports the build the service is actually serving and
+# whether its bot consoles still match the API's catalogue.
+healthcheckPath = "/__release"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

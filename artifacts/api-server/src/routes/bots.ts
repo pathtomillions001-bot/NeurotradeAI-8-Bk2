@@ -10,8 +10,10 @@
 
 import { Router } from "express";
 import matchPulseRouter from "./match-pulse";
-import { getMatchPulseStatus } from "../lib/match-pulse-engine";
-import { BOT_CATALOG, getBotDefinition, type BotSideMode } from "../lib/bot-catalog";
+import { MATCH_PULSE_ID, getMatchPulseStatus } from "../lib/match-pulse-engine";
+import { BOT_CATALOG, botConsoleId, botConsoleIds, getBotDefinition, type BotSideMode } from "../lib/bot-catalog";
+import { pickActiveBotId } from "../lib/bot-activity";
+import { API_RELEASE } from "../lib/release";
 import {
   startSession,
   stopSession,
@@ -195,33 +197,45 @@ router.get("/", (req, res) => {
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
   const twin = visibleTwinStatus(req.sessionId);
+  const accu = accumulator.getAccumulatorStatus();
   const pulse = getMatchPulseStatus();
   res.json({
+    release: API_RELEASE,
+    /** Console ids this catalogue expects the web bundle to implement. */
+    consoles: botConsoleIds(),
     bots: BOT_CATALOG.map(bot => {
-      if (bot.matchPulse) return { ...bot, session: pulse.running ? pulse : null };
+      // `console` is the contract: the web bundle must implement this id or it
+      // is an out-of-date build (see lib/bot-catalog.ts + lib/release.ts).
+      const console_ = botConsoleId(bot);
+      if (bot.matchPulse) return { ...bot, console: console_, session: pulse.running ? pulse : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
-        return { ...bot, session: dual.running ? dual : null };
+        return { ...bot, console: console_, session: dual.running ? dual : null };
       }
       if (bot.id === killshot.KILLSHOT_BOT_ID) {
-        return { ...bot, session: shot.running ? shot : null };
+        return { ...bot, console: console_, session: shot.running ? shot : null };
       }
       if (bot.killShotFamily) {
-        return { ...bot, session: fam.running && fam.botId === bot.id ? fam : null };
+        return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
       }
       if (bot.twinHedge) {
-        return { ...bot, session: twin.running ? twin : null };
+        return { ...bot, console: console_, session: twin.running ? twin : null };
       }
-      return { ...bot, session: status.running && status.botId === bot.id ? status : null };
+      if (bot.accumulator) {
+        return { ...bot, console: console_, session: accu.running ? accu : null };
+      }
+      return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
-    activeBotId: pulse.running ? "match-pulse" : dual.running
-      ? dualLock.DUAL_LOCK_BOT_ID
-      : shot.running
-        ? killshot.KILLSHOT_BOT_ID
-        : fam.running
-          ? (fam.botId ?? null)
-          : twin.running
-            ? (twin.botId ?? null)
-            : (status.running ? status.botId : null),
+    // Priority order is owned by lib/bot-activity.ts — the accumulator is part
+    // of it, so the catalogue and /status can never disagree again.
+    activeBotId: pickActiveBotId([
+      { botId: MATCH_PULSE_ID, running: pulse.running },
+      { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
+      { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
+      { botId: fam.botId ?? null, running: fam.running },
+      { botId: twin.botId ?? null, running: twin.running },
+      { botId: accumulator.ACCUMULATOR_BOT_ID, running: accu.running },
+      { botId: status.botId, running: status.running },
+    ]),
   });
 });
 

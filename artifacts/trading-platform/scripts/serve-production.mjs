@@ -60,8 +60,84 @@ proxy.on("error", (err, _req, res) => {
   }
 });
 
+/**
+ * Release manifest written by the Vite build (see vite.config.ts). Kept in
+ * memory: the file never changes while the container runs.
+ */
+function readOwnRelease() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(publicDir, "release.json"), "utf8"));
+  } catch {
+    return { service: "web", sha: "unknown", shortSha: "unknown", builtAt: null, environment: "unknown", consoles: [] };
+  }
+}
+const ownRelease = readOwnRelease();
+
+/**
+ * `/__release` — the release handshake between the two Railway services.
+ *
+ * The web bundle and the API deploy independently: when the web service lags,
+ * its consoles no longer match the catalogue the API serves, and the Bot Arena
+ * used to silently draw the wrong controls. This endpoint reports both sides
+ * and whether they agree, so a deploy/runbook check (or `pnpm check:release`)
+ * sees the skew immediately instead of after a user notices odd bot screens.
+ *
+ * Always answers 200 with a JSON body: it is also the web service's Railway
+ * healthcheck, and a slow/absent API must not take the site down — the `parity`
+ * field reports that instead.
+ */
+async function releaseReport() {
+  const web = ownRelease;
+  let api = null;
+  let apiError = null;
+  try {
+    const response = await fetch(`${upstream}/api/healthz`, {
+      // /api/healthz probes Deriv's OAuth endpoint (5 s cap) before answering.
+      signal: AbortSignal.timeout(8000),
+    });
+    if (response.ok) {
+      const body = await response.json();
+      api = { release: body.release ?? null, consoles: body.consoles ?? [] };
+    } else {
+      apiError = `API healthz responded ${response.status}`;
+    }
+  } catch (error) {
+    apiError = error instanceof Error ? error.message : String(error);
+  }
+
+  const webConsoles = new Set(web.consoles ?? []);
+  const apiConsoles = new Set(api?.consoles ?? []);
+  const missingHere = [...apiConsoles].filter(id => !webConsoles.has(id)).sort();
+  const missingOnApi = [...webConsoles].filter(id => !apiConsoles.has(id)).sort();
+
+  return {
+    status: "ok",
+    web,
+    /** What the API service reports about itself (null when unreachable). */
+    api: api ? { ...api.release, consoles: api.consoles } : null,
+    apiError,
+    parity: apiError || missingHere.length > 0 ? "skew" : "ok",
+    missingConsolesHere: missingHere,
+    consolesNotOnApi: missingOnApi,
+    hint:
+      missingHere.length > 0
+        ? `This web build (${web.shortSha}) cannot render ${missingHere.join(", ")} — redeploy the web service from main; do not Redeploy the old deployment.`
+        : undefined,
+    ts: new Date().toISOString(),
+  };
+}
+
 const server = http.createServer((req, res) => {
   const url = req.url ?? "/";
+
+  if (url === "/__release" || url.startsWith("/__release?")) {
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.setHeader("cache-control", "no-store");
+    releaseReport()
+      .then(report => res.end(JSON.stringify(report, null, 2)))
+      .catch(error => res.end(JSON.stringify({ status: "error", detail: String(error) })));
+    return undefined;
+  }
 
   if (url === "/api" || url.startsWith("/api/")) {
     return proxy.web(req, res, { target: upstream });

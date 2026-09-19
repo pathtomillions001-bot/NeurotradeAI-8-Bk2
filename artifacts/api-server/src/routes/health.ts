@@ -3,6 +3,8 @@ import { HealthCheckResponse } from "@workspace/api-zod";
 import { pool, schemaReady } from "@workspace/db";
 import { accountConnectionCount, tickManager } from "../lib/deriv";
 import { logger } from "../lib/logger";
+import { botConsoleIds } from "../lib/bot-catalog";
+import { API_RELEASE } from "../lib/release";
 
 const router: IRouter = Router();
 
@@ -153,6 +155,14 @@ router.get("/healthz", async (_req, res) => {
 
   res.json({
     ...base,
+    release: API_RELEASE,
+    /**
+     * Console ids the catalogue expects a web bundle to implement. The web
+     * service compares this set with its own build (`/__release`) — a mismatch
+     * means the two services are on different releases and the Bot Arena will
+     * show an "update available" panel instead of the wrong controls.
+     */
+    consoles: botConsoleIds(),
     db: dbDiag,
     deriv: {
       appIdConfigured: Boolean(APP_ID),

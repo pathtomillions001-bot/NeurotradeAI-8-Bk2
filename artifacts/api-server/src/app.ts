@@ -15,7 +15,6 @@ import { loadRecoveryStateFromDb, resumeEngineIfEnabled, forceDayReset } from ".
 import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { startTradeReconciler } from "./lib/trade-reconciler";
-import { restoreMatchPulseHolds } from "./lib/match-pulse-engine";
 import { pool, db, marketWinRatesTable, schemaReady } from "@workspace/db";
 import { browserSession } from "./lib/session";
 
@@ -106,7 +105,7 @@ async function bootstrapDb() {
   }
 }
 
-const dbReady = bootstrapDb().then(restoreMatchPulseHolds);
+const dbReady = bootstrapDb();
 const app: Express = express();
 app.set("trust proxy", 1);
 

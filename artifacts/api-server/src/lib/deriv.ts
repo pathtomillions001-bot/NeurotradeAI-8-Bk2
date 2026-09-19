@@ -23,7 +23,6 @@
 
 import WebSocket from "ws";
 import { EventEmitter } from "events";
-import { DigitTape, type DigitSnapshot } from "./digit-tape";
 import { logger } from "./logger";
 // The published index specifications (annualised volatility and tick interval)
 // live in the accumulator analysis module because the ACCU barrier theory is
@@ -826,7 +825,6 @@ class DerivTickManager extends EventEmitter {
   private digitBuffers = new Map<string, number[]>();
   private latestPrices = new Map<string, number>();
   private lastTickMs = new Map<string, number>();
-  private digitTape = new DigitTape();
 
   private pingTimer: ReturnType<typeof setInterval> | null = null;
   private staleTimer: ReturnType<typeof setInterval> | null = null;
@@ -872,11 +870,6 @@ class DerivTickManager extends EventEmitter {
     }
     logger.info({ count: symbols.length }, "TickManager starting on public WS");
     this.connect();
-  }
-
-  /** Execution-safe history with a monotonic tick identity and per-symbol provenance. */
-  getDigitSnapshot(symbol: string, count = 5000): DigitSnapshot | null {
-    return this.digitTape.snapshot(symbol, count);
   }
 
   getTicks(symbol: string, count = 100): number[] {
@@ -1118,11 +1111,6 @@ class DerivTickManager extends EventEmitter {
     const market = getMarketInfo(symbol);
     if (!market) return;
 
-    if (market.digitEnabled && !this.digitTape.push({
-      symbol, price, digit: extractLastDigit(price, market.pipSize), epoch,
-      receivedAt: Date.now(), source: "live",
-    }, tickSecondsFor(symbol) * 1000)) return;
-
     if (this.usingSimulated) this.stopSimulation();
 
     const prices = this.tickBuffers.get(symbol) ?? [];
@@ -1228,10 +1216,6 @@ class DerivTickManager extends EventEmitter {
   private pushSimulatedTick(market: (typeof DERIV_MARKETS)[0], price: number) {
     const factor = Math.pow(10, market.pipSize);
     const rounded = Math.round(price * factor) / factor;
-    if (market.digitEnabled) this.digitTape.push({
-      symbol: market.symbol, price: rounded, digit: extractLastDigit(rounded, market.pipSize),
-      epoch: Math.floor(Date.now() / 1000), receivedAt: Date.now(), source: "simulated",
-    }, tickSecondsFor(market.symbol) * 1000);
 
     const prices = this.tickBuffers.get(market.symbol) ?? [];
     prices.push(rounded);
@@ -1731,13 +1715,6 @@ function isRateLimitError(msg: any): boolean {
   return code === "RateLimit" || text.includes("rate limit");
 }
 
-/** Guards run at socket-send time, AFTER connection, throttling and queue waits. */
-export interface AccountRequestHooks {
-  beforeSend?: () => void;
-  /** Conservatively called immediately before handing the message to the socket. */
-  onSent?: () => void;
-}
-
 class DerivAccountConnection extends EventEmitter {
   readonly accountId: string;
   private bearerToken: string;
@@ -1790,19 +1767,16 @@ class DerivAccountConnection extends EventEmitter {
   }
 
   /** Send and wait for the response carrying this request's `req_id`. */
-  async request(msg: Record<string, unknown>, timeoutMs = ACCOUNT_REQUEST_TIMEOUT_MS, hooks?: AccountRequestHooks): Promise<any> {
+  async request(msg: Record<string, unknown>, timeoutMs = ACCOUNT_REQUEST_TIMEOUT_MS): Promise<any> {
     await this.ensureConnected();
     const reqId = this.nextReqId++;
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(reqId);
         resolve(null);
       }, timeoutMs);
       this.pending.set(reqId, { resolve, timer });
       this.enqueue(() => {
-        // A request which timed out while throttled MUST NOT be sent later.
-        // This is especially important for a buy whose caller has already stopped.
-        if (!this.pending.has(reqId)) return;
         if (!this.isOpen()) {
           const entry = this.pending.get(reqId);
           if (entry) {
@@ -1812,15 +1786,7 @@ class DerivAccountConnection extends EventEmitter {
           }
           return;
         }
-        try {
-          hooks?.beforeSend?.();
-          hooks?.onSent?.();
-          this.sendNow({ ...msg, req_id: reqId });
-        } catch (error) {
-          clearTimeout(timer);
-          this.pending.delete(reqId);
-          reject(error);
-        }
+        this.sendNow({ ...msg, req_id: reqId });
       });
     });
   }

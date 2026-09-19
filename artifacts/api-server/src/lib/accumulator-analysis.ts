@@ -42,6 +42,8 @@ export interface AccumulatorMarketInput {
   brokerMaxTicks?: number;
   /** Optional minimum duration returned by the broker. */
   brokerMinTicks?: number;
+  /** Per-growth-rate tick caps, e.g. { "0.05": 60, "0.01": 230 }. */
+  brokerMaxTicksByGrowth?: Record<string, number>;
 }
 
 export interface AccumulatorRiskEstimate {
@@ -119,6 +121,12 @@ export interface AccumulatorAnalysisOptions {
   brokerBarrierPct?: number;
   brokerMaxTicks?: number;
   brokerMinTicks?: number;
+  /**
+   * Per-growth-rate tick caps (keyed by growth rate, e.g. "0.05" → 60).
+   * ACCU max duration shrinks as growth rises, so the global max is only a
+   * ceiling — this map carries the actual cap for each tested rate.
+   */
+  brokerMaxTicksByGrowth?: Record<string, number>;
 }
 
 function clamp(n: number, lo: number, hi: number): number {
@@ -328,6 +336,8 @@ export function estimateAccumulatorRisk(
     brokerBarrierPct?: number;
     brokerMaxTicks?: number;
     brokerMinTicks?: number;
+    /** Per-growth-rate tick caps; the cap for THIS growth rate wins. */
+    brokerMaxTicksByGrowth?: Record<string, number>;
     bootstrapPaths?: number;
     seed?: number;
   } = {},
@@ -338,7 +348,16 @@ export function estimateAccumulatorRisk(
     && (options.brokerBarrierPct ?? 0) > 0
     ? options.brokerBarrierPct!
     : estimatedBarrierPct(growthRate);
-  const durationTicks = chooseDuration(options.durationTicks, options.brokerMinTicks, options.brokerMaxTicks);
+  // The per-growth-rate cap is the binding constraint: at 5% growth the
+  // exchange allows far fewer ticks than at 1%. Fall back to the global
+  // broker max only when no per-rate cap is known.
+  const perRateMax = options.brokerMaxTicksByGrowth
+    ? Number(options.brokerMaxTicksByGrowth[String(growthRate)])
+    : undefined;
+  const effectiveMax = perRateMax !== undefined && Number.isFinite(perRateMax)
+    ? perRateMax
+    : options.brokerMaxTicks;
+  const durationTicks = chooseDuration(options.durationTicks, options.brokerMinTicks, effectiveMax);
   const targetTicks = chooseTargetTicks(options.targetTicks, durationTicks, growthRate);
   const threshold = Math.max(1e-9, Math.abs(Math.log1p(barrierPct)));
   const events = barrierEvents(returns, barrierPct);
@@ -452,6 +471,7 @@ export function evaluateAccumulatorMarket(
       brokerBarrierPct: brokerBarrier,
       brokerMaxTicks: input.brokerMaxTicks ?? options.brokerMaxTicks,
       brokerMinTicks: input.brokerMinTicks ?? options.brokerMinTicks,
+      brokerMaxTicksByGrowth: input.brokerMaxTicksByGrowth ?? options.brokerMaxTicksByGrowth,
       bootstrapPaths: options.bootstrapPaths,
       seed: hashSymbol(input.symbol) + Math.round(growthRate * 1000),
     });

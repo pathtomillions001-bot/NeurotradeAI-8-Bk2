@@ -2137,6 +2137,12 @@ export interface AccumulatorContractSpec {
   available: boolean;
   minDurationTicks?: number;
   maxDurationTicks?: number;
+  /**
+   * Per-growth-rate tick caps when the broker reports them separately.
+   * ACCU max duration SHRINKS as the growth rate rises (5% allows far
+   * fewer ticks than 1%), so a single global max is only a ceiling.
+   */
+  maxTicksByGrowth?: Record<string, number>;
   growthRates: number[];
   barrierPct?: number;
   source: "broker" | "fallback";
@@ -2178,28 +2184,54 @@ export async function discoverAccumulatorContractSpec(
       ...(Array.isArray(msg.contracts_for?.contracts) ? msg.contracts_for.contracts : []),
       ...(Array.isArray(msg.available) ? msg.available : []),
     ] as any[];
-    const accu = rows.find((row) => String(row.contract_type ?? row.contractType ?? "").toUpperCase() === "ACCU");
-    if (!accu) return { ...fallback, available: false };
+    // ACCU may appear once, or once per growth rate — collect every row so
+    // per-growth tick caps survive discovery.
+    const accuRows = rows.filter((row) => String(row.contract_type ?? row.contractType ?? "").toUpperCase() === "ACCU");
+    if (!accuRows.length) return { ...fallback, available: false };
 
     const toNumber = (value: unknown): number | undefined => {
       const n = Number(value);
       return Number.isFinite(n) ? n : undefined;
     };
-    const ratesRaw = accu.growth_rate ?? accu.growth_rates ?? accu.growthRate;
-    const rates = (Array.isArray(ratesRaw) ? ratesRaw : [0.01, 0.02, 0.03, 0.04, 0.05])
+    // The Deriv contracts_for payload reports duration limits as
+    // `min_contract_duration` / `max_contract_duration` (tick counts for
+    // ACCU). The old code read `min_duration`/`max_duration`, which the API
+    // never sends — so the engine believed it had no broker bounds and the
+    // exchange rejected every buy with "Invalid input (duration or
+    // date_expiry)". Legacy names are kept as fallbacks for older payloads.
+    const readMin = (row: any) => toNumber(row.min_contract_duration ?? row.min_duration ?? row.minimum_duration ?? row.min_ticks);
+    const readMax = (row: any) => toNumber(row.max_contract_duration ?? row.max_duration ?? row.maximum_duration ?? row.max_ticks);
+    const readGrowth = (row: any) => {
+      const raw = row.growth_rate ?? row.growthRate;
+      const n = toNumber(raw);
+      return n === undefined ? undefined : (n > 1 ? n / 100 : n);
+    };
+    const readBarrier = (row: any) => toNumber(row.barrier ?? row.dynamic_barrier ?? row.barrier_pct);
+
+    const allMins = accuRows.map(readMin).filter((n): n is number => n !== undefined);
+    const allMaxes = accuRows.map(readMax).filter((n): n is number => n !== undefined);
+    const allGrowthRows = accuRows
+      .map((row) => ({ growth: readGrowth(row), max: readMax(row) }))
+      .filter((r): r is { growth: number; max: number } => r.growth !== undefined && r.growth >= 0.01 && r.growth <= 0.05 && r.max !== undefined);
+    const maxTicksByGrowth: Record<string, number> | undefined =
+      allGrowthRows.length >= 2
+        ? Object.fromEntries(allGrowthRows.map((r) => [String(r.growth), r.max]))
+        : undefined;
+    const ratesFromRows = accuRows
+      .map((row) => (Array.isArray(row.growth_rate ?? row.growth_rates) ? (row.growth_rate ?? row.growth_rates) : [readGrowth(row)]))
+      .flat()
       .map((x) => Number(x))
       .filter((x) => Number.isFinite(x))
       .map((x) => x > 1 ? x / 100 : x)
       .filter((x) => x >= 0.01 && x <= 0.05);
-    const min = toNumber(accu.min_duration ?? accu.minimum_duration ?? accu.min_ticks);
-    const max = toNumber(accu.max_duration ?? accu.maximum_duration ?? accu.max_ticks);
-    const barrier = toNumber(accu.barrier ?? accu.dynamic_barrier ?? accu.barrier_pct);
+    const barrier = accuRows.map(readBarrier).find((n) => n !== undefined);
     return {
       symbol,
       available: true,
-      minDurationTicks: min,
-      maxDurationTicks: max,
-      growthRates: rates.length ? [...new Set(rates)] : fallback.growthRates,
+      minDurationTicks: allMins.length ? Math.min(...allMins) : undefined,
+      maxDurationTicks: allMaxes.length ? Math.min(...allMaxes) : undefined,
+      maxTicksByGrowth,
+      growthRates: ratesFromRows.length ? [...new Set(ratesFromRows)] : fallback.growthRates,
       barrierPct: barrier !== undefined ? (barrier > 1 ? barrier / 100 : barrier) : undefined,
       source: "broker",
     };

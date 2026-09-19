@@ -8,6 +8,8 @@ import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { SpeedAIFab } from "./speed-ai-fab";
 import { AccountSwitcher } from "./account-switcher";
+import { LiveBotIndicator } from "./live-bot-indicator";
+import { useLiveBots } from "@/lib/live-bots";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -87,6 +89,10 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
 export function Layout({ children }: { children: ReactNode }) {
   const [location] = useLocation();
   const [mobileOpen, setMobileOpen] = useState(false);
+  // The single source of truth for "which bot is live right now" — polled
+  // every 5s + SSE, so a bot that starts in the background appears within
+  // seconds and survives a page refresh (the poll re-runs on mount).
+  const liveBots = useLiveBots();
 
   // Close mobile menu on location change
   useEffect(() => {
@@ -152,14 +158,29 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           <span className="font-bold text-base tracking-tight">NeuroTrade</span>
         </div>
-        <div className="ml-auto">
-          {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href))) && (
-            <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
-              {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href)))?.label}
-            </span>
+        <div className="ml-auto flex items-center gap-2">
+          {liveBots.length > 0 ? (
+            <LiveBotIndicator compact live={liveBots} />
+          ) : (
+            navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href))) && (
+              <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
+                {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href)))?.label}
+              </span>
+            )
           )}
         </div>
       </header>
+
+      {/* Live bot indicator — desktop, fixed to the top-right of every page.
+          z-30: below the z-40/50 console dialogs (which show the same bot
+          in full detail) but above all page content. */}
+      <div className="hidden md:block fixed top-3 right-4 z-30 pointer-events-none">
+        {liveBots.length > 0 && (
+          <div className="pointer-events-auto">
+            <LiveBotIndicator live={liveBots} />
+          </div>
+        )}
+      </div>
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">

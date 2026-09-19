@@ -56,6 +56,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
+import { registerLiveBot } from "./live-registry";
 import {
   evaluateCandidate,
   evaluateLiveEntry,
@@ -603,6 +604,9 @@ export async function startSession(config: FamilyConfig): Promise<{ ok: boolean;
     contract: shotLabel(config.contract),
   }, "Kill-Shot family session starting");
   broadcast();
+
+  // Publish to the cross-session live registry (lib/live-registry.ts).
+  registerLiveBot("killshot-family", () => getStatus());
 
   // Pin the whole loop chain to the owner's session context so every
   // session-scoped store it touches resolves to this account.

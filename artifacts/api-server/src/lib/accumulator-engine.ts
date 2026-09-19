@@ -49,6 +49,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
+import { registerLiveBot } from "./live-registry";
 
 export const ACCUMULATOR_BOT_ID = "accumulators";
 export const ACCUMULATOR_BOT_NAME = "Accumulator Edge Navigator";
@@ -367,6 +368,19 @@ export async function scanAccumulatorMarkets(
   let usedBrokerDiscovery = false;
   const health = tickManager.getTickHealth();
 
+  // Account-scoped discovery: contracts_for on an authenticated socket
+  // returns the limits that apply to THIS account's buys.
+  let token: string | undefined;
+  let accountId: string | undefined;
+  let currency = "USD";
+  if (ownerSessionId) {
+    const accounts = await db.select().from(accountsTable)
+      .where(eq(accountsTable.sessionId, ownerSessionId)).limit(1).catch(() => [] as any[]);
+    token = accounts[0]?.bearerToken ?? accounts[0]?.token ?? null;
+    accountId = accounts[0]?.derivAccountId ?? accounts[0]?.loginId ?? undefined;
+    currency = accounts[0]?.currency ?? "USD";
+  }
+
   for (let i = 0; i < markets.length; i++) {
     const market = markets[i]!;
     broadcastSSE("bot_scan_progress", {
@@ -392,9 +406,11 @@ export async function scanAccumulatorMarkets(
     };
     // In simulated mode there is no reason to spend 10 seconds per market on
     // a public broker metadata request. Live mode discovers account/broker
-    // limits and the engine clamps to them before it can deploy.
+    // limits and the engine clamps to them before it can deploy. The account
+    // credentials are passed through so account-scoped duration limits are
+    // read, not just the public catalogue view.
     if (!health.usingSimulated) {
-      spec = await discoverAccumulatorContractSpec(market.symbol);
+      spec = await discoverAccumulatorContractSpec(market.symbol, currency, token, accountId);
       if (spec.source === "broker") usedBrokerDiscovery = true;
     }
     if (!spec.available) {
@@ -408,6 +424,7 @@ export async function scanAccumulatorMarkets(
       brokerBarrierPct: spec.barrierPct,
       brokerMaxTicks: spec.maxDurationTicks,
       brokerMinTicks: spec.minDurationTicks,
+      brokerMaxTicksByGrowth: spec.maxTicksByGrowth,
     }, {
       growthRate: params.growthRate,
       growthRates: spec.growthRates,
@@ -519,6 +536,9 @@ export async function startSession(config: AccumulatorConfig): Promise<{ ok: boo
     message: `🧮 ${trustedConfig.marketMode === "locked" ? "Locked" : "Switching"} on ${trustedConfig.displayName} · ${(measured.growthRate * 100).toFixed(0)}% growth · ${measured.targetTicks} target ticks · broker duration ${measured.durationTicks} ticks`,
   });
   broadcast();
+
+  // Publish to the cross-session live registry (lib/live-registry.ts).
+  registerLiveBot("accumulator", () => getStatus());
 
   const loopSessionId = trustedConfig.ownerSessionId ?? getBrowserSessionId();
   runWithSessionId(loopSessionId, () => runLoop({ ...trustedConfig, ownerSessionId: loopSessionId }).catch((err) => {
@@ -632,22 +652,31 @@ async function liveSettlement(
   symbol: string,
   stake: number,
   candidate: AccumulatorCandidate,
+  buyParams: { growthRate?: number; durationTicks?: number } = {},
 ): Promise<Settlement> {
-  const targetProfit = stake * candidate.netReturnMultiplier;
+  // Self-healed params win over the scan-time candidate: the broker is the
+  // ground truth for what it accepts.
+  const effDuration = Math.max(1, Math.round(buyParams.durationTicks ?? candidate.durationTicks));
+  const effGrowth = buyParams.growthRate ?? candidate.growthRate;
+  // A contract shortened by the heal compounds for fewer ticks, so it earns
+  // proportionally less — scale the early-close target to stay reachable
+  // (otherwise the monitor would only ever see a natural expiry).
+  const scale = Math.min(1, effDuration / candidate.durationTicks);
+  const targetProfit = stake * candidate.netReturnMultiplier * scale;
   const opened = await executeLiveTrade(token, {
     symbol,
     contractType: "ACCU",
     stake: roundMoney(stake),
-    duration: candidate.durationTicks,
+    duration: effDuration,
     durationUnit: "t",
     currency,
     accountId,
-    growthRate: candidate.growthRate,
+    growthRate: effGrowth,
     // Exchange-side TP is a first line of defence. The local monitor repeats
     // the check because broker fills can race the quote and the live gate.
     takeProfit: roundMoney(targetProfit),
   });
-  const deadline = Date.now() + Math.max(45_000, candidate.durationTicks * 3_000 + 15_000);
+  const deadline = Date.now() + Math.max(45_000, effDuration * 3_000 + 15_000);
   let ticks = 0;
   let lastPrice = opened.buyPrice;
   while (Date.now() < deadline && session.running && !session.stopRequested) {
@@ -689,7 +718,7 @@ async function liveSettlement(
           profit: finalProfit,
           won: finalProfit > 0,
           ticks: numberOr(state.tick_passed ?? state.tick_count, ticks),
-          closedEarly: numberOr(state.tick_passed, candidate.durationTicks) < candidate.durationTicks,
+          closedEarly: numberOr(state.tick_passed, effDuration) < effDuration,
           knockedOut: finalProfit <= -stake + 1e-8,
           entryPrice: opened.buyPrice,
           exitPrice: numberOr(state.sell_price ?? state.bid_price, opened.buyPrice + finalProfit),
@@ -770,6 +799,59 @@ async function trySwitch(
   return best;
 }
 
+/** Mutable state of the broker duration self-heal ladder (per session). */
+export interface AccuDurationHealState {
+  /** Healed growth rate, once the ladder had to drop below the candidate's. */
+  growthRate?: number;
+  /** Per-growth-rate tick caps learned from broker rejections. */
+  maxTicksByGrowth: Map<string, number>;
+  /** How many rejections this ladder has absorbed. */
+  healCount: number;
+}
+
+/** After this many absorbed rejections the ladder is exhausted and the
+ *  failure falls through to the normal execution-strike handling. 10 covers
+ *  a full 40%-step shrink from the 230-tick maximum (10 steps) plus the
+ *  growth-rate drop. */
+export const ACCUMULATOR_HEAL_LIMIT = 10;
+
+/**
+ * One step of the broker duration self-heal ladder.
+ *
+ * The exchange rejects an ACCU buy with "Invalid input (duration or
+ * date_expiry) for this contract type (ACCU)" when the duration is outside
+ * the growth-rate-specific tick window. The max ALLOWABLE ticks SHRINK as
+ * the growth rate rises (5% allows far fewer ticks than 1%), and the public
+ * contracts_for view does not always publish the per-rate cap — the buy
+ * itself is the ground truth. Ladder:
+ *   1. shorten the duration by 40% (floored at the broker minimum);
+ *   2. if already at the floor, drop the growth rate one step (its cap is
+ *      looser); the current — already minimal — duration stays.
+ * Pure on purpose: the session loop owns the state and applies the plan.
+ * Returns null when the ladder is exhausted (duration at the floor AND
+ * growth at the lowest step), so the caller can fall back to counting a
+ * strike — a genuinely unbuyable configuration still stops the session.
+ */
+export function planAccumulatorDurationHeal(
+  heal: AccuDurationHealState,
+  currentGrowthRate: number,
+  currentDurationTicks: number,
+): { growthRate: number; maxTicks?: number } | null {
+  if (heal.healCount >= ACCUMULATOR_HEAL_LIMIT) return null;
+  heal.healCount++;
+  const minD = Math.max(1, ACCUMULATOR_MIN_DURATION_TICKS);
+  const shrunken = Math.round(currentDurationTicks * 0.6);
+  if (shrunken >= minD && shrunken < currentDurationTicks) {
+    return { growthRate: currentGrowthRate, maxTicks: shrunken };
+  }
+  const ladder = [...ACCUMULATOR_GROWTH_RATES].sort((a, b) => b - a);
+  const idx = ladder.findIndex((g) => Math.abs(g - currentGrowthRate) < 1e-9);
+  if (idx >= 0 && idx < ladder.length - 1) {
+    return { growthRate: ladder[idx + 1]! };
+  }
+  return null;
+}
+
 async function runLoop(config: AccumulatorConfig): Promise<void> {
   const ownerSessionId = config.ownerSessionId;
   if (!ownerSessionId) {
@@ -799,6 +881,36 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
   let displayName = candidate.displayName;
   let waits = 0;
   let executionErrors = 0;
+
+  // ── Broker duration self-heal ────────────────────────────────────────────
+  // The exchange rejects an ACCU buy with "Invalid input (duration or
+  // date_expiry) for this contract type (ACCU)" when the duration is outside
+  // the growth-rate-specific tick window: the max ALLOWABLE ticks shrink as
+  // the growth rate rises (5% allows far fewer ticks than 1%), and the
+  // public contracts_for view does not always publish the per-rate cap. The
+  // buy itself is the ground truth, so on that rejection we re-clamp —
+  // shorter duration first, then a lower growth rate (whose cap is looser) —
+  // and RETRY without counting a strike. Healed caps persist for the rest
+  // of the session (and are remembered per growth rate), so the first heal
+  // is the only expensive one.
+  const heal: AccuDurationHealState = { maxTicksByGrowth: new Map(), healCount: 0 };
+
+  const effectiveBuyParams = () => {
+    const growthRate = heal.growthRate ?? candidate.growthRate;
+    const known = heal.maxTicksByGrowth.get(String(growthRate));
+    const durationTicks = known !== undefined
+      ? Math.max(1, Math.min(candidate.durationTicks, Math.round(known)))
+      : candidate.durationTicks;
+    return { growthRate, durationTicks };
+  };
+  const applyDurationHeal = (): boolean => {
+    const { growthRate, durationTicks } = effectiveBuyParams();
+    const plan = planAccumulatorDurationHeal(heal, growthRate, durationTicks);
+    if (!plan) return false;
+    if (plan.growthRate !== growthRate) heal.growthRate = plan.growthRate;
+    if (plan.maxTicks !== undefined) heal.maxTicksByGrowth.set(String(plan.growthRate), plan.maxTicks);
+    return true;
+  };
 
   while (session.running && !session.stopRequested) {
     try {
@@ -871,9 +983,12 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
         broadcast();
         return;
       }
+      // What the exchange will actually be asked for (scan candidate, clamped
+      // by any broker duration heal from earlier rounds of this session).
+      const buyParams = effectiveBuyParams();
       session.currentStake = stake;
-      session.currentContractType = `ACCU ${(candidate.growthRate * 100).toFixed(0)}% · ${candidate.targetTicks}t target`;
-      session.message = `${recovery ? "🎯 Recovery" : "⚡ Entry"} ${displayName} · ${(candidate.growthRate * 100).toFixed(0)}% growth · $${stake.toFixed(2)} · survival floor ${Math.round(candidate.survivalLower * 100)}%`;
+      session.currentContractType = `ACCU ${(buyParams.growthRate * 100).toFixed(0)}% · ${buyParams.durationTicks}t`;
+      session.message = `${recovery ? "🎯 Recovery" : "⚡ Entry"} ${displayName} · ${(buyParams.growthRate * 100).toFixed(0)}% growth · $${stake.toFixed(2)} · survival floor ${Math.round(candidate.survivalLower * 100)}%`;
       broadcast();
 
       const journal = await db.insert(tradesTable).values({
@@ -887,8 +1002,8 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
         aiConfidence: String(Math.round(candidate.survivalLower * 100)),
         aiRiskScore: String(Math.round(candidate.knockoutProbability * 100)),
         isAutonomous: true,
-        agentReasoning: `${isLive ? "" : "[PAPER] "}[ACCUMULATOR] ${recovery ? "RECOVERY " : ""}${candidate.reason} · target ${candidate.targetTicks} ticks · duration ${candidate.durationTicks} ticks · compounded ${candidate.compoundedFactor.toFixed(3)}× · full-stake knockout risk ${Math.round(candidate.knockoutProbability * 100)}%`,
-        duration: candidate.durationTicks,
+        agentReasoning: `${isLive ? "" : "[PAPER] "}[ACCUMULATOR] ${recovery ? "RECOVERY " : ""}${candidate.reason} · target ${candidate.targetTicks} ticks · duration ${buyParams.durationTicks} ticks @ ${(buyParams.growthRate * 100).toFixed(0)}% growth · compounded ${candidate.compoundedFactor.toFixed(3)}× · full-stake knockout risk ${Math.round(candidate.knockoutProbability * 100)}%`,
+        duration: buyParams.durationTicks,
         durationUnit: "t",
       }).returning();
       const row = journal[0];
@@ -896,9 +1011,21 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
       let settlement: Settlement;
       try {
         settlement = isLive
-          ? await liveSettlement(token!, accountId, currency, symbol, stake, candidate)
+          ? await liveSettlement(token!, accountId, currency, symbol, stake, candidate, buyParams)
           : await paperSettlement(symbol, stake, candidate);
       } catch (err) {
+        const rawErrText = err instanceof Error ? err.message : String(err);
+        // "Invalid input (duration or date_expiry) for this contract type
+        // (ACCU)." — the broker's per-growth-rate tick window. This is
+        // RECOVERABLE: re-clamp and retry; it must not burn a strike or
+        // stop a session (that is exactly the failure the bot died from).
+        if (isLive && /invalid input\s*\(duration|duration or date_expiry/i.test(rawErrText) && applyDurationHeal()) {
+          const { growthRate, durationTicks } = effectiveBuyParams();
+          session.message = `🔁 ACCU broker duration heal #${heal.healCount} → retry at ${durationTicks} ticks @ ${(growthRate * 100).toFixed(0)}% growth (${friendlyErrorMessage(err, { max: 120 })})`;
+          broadcast();
+          await sleep(500);
+          continue;
+        }
         await db.update(tradesTable).set({
           status: "error",
           profit: "0",

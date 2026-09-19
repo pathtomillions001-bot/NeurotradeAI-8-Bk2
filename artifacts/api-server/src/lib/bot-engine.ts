@@ -62,6 +62,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
+import { registerLiveBot } from "./live-registry";
 import {
   antiPatternPenalty,
   botPrecisionScore,
@@ -350,6 +351,9 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
 
   logger.info({ config, inheritedRecovery: sharedRecovery.inRecovery }, "Specialist bot session starting");
   broadcast();
+
+  // Publish to the cross-session live registry (lib/live-registry.ts).
+  registerLiveBot("specialist", () => getStatus());
 
   // Pin the whole loop chain (plus its error/finally handlers) to the
   // owner's session context so every session-scoped store it touches

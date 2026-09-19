@@ -55,6 +55,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
+import { registerLiveBot } from "./live-registry";
 import {
   evaluateMarket,
   screenAndRank,
@@ -445,6 +446,9 @@ export async function startSession(config: DualLockConfig): Promise<{ ok: boolea
     survival: config.lockedAnalysis?.survival,
   }, "Dual-Lock session starting");
   broadcast();
+
+  // Publish to the cross-session live registry (lib/live-registry.ts).
+  registerLiveBot("dual-lock", () => getStatus());
 
   // Pin the whole loop chain to the owner's session context so every
   // session-scoped store it touches resolves to this account.

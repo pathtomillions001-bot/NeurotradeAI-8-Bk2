@@ -15,7 +15,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck, Layers, ArrowRightLeft, Gauge,
+  ChevronLeft, X, ShieldCheck, Layers, Shuffle, Gauge,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -104,7 +104,12 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
-  const [marketMode, setMarketMode] = useState<MarketMode>("locked");
+  /**
+   * No global mode toggle — like the Match Nexus console, LOCK and SWITCHING
+   * are the two deploy buttons under the candidate card, and a runner-up row
+   * SELECTS the market the buttons will deploy.
+   */
+  const [selectedSym, setSelectedSym] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
     scanning: null, scanned: 0, total: 20,
   });
@@ -135,6 +140,7 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
   useEffect(() => {
     if (!open) return;
     setScanResult(null);
+    setSelectedSym(null);
     setStep(isRunning ? "running" : "config");
     // Restore the live session state from the API when re-opening the panel.
     fetch("/api/bots/twin/status")
@@ -193,6 +199,7 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
       const data = await res.json();
       if (!res.ok) { toast.error(data.error ?? "Scan failed"); setStep("config"); return; }
       setScanResult(data as ScanResult);
+      setSelectedSym(null);
       setStep("scan-result");
     } catch {
       toast.error("Could not connect to the analysis engine");
@@ -335,91 +342,107 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
             {/* SCAN RESULT */}
             {step === "scan-result" && scanResult && (
               <div className="p-4 space-y-3">
-                {/* Mode choice — AFTER the scan, per the product rule. */}
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => setMarketMode("locked")}
-                    className={`rounded-xl border p-2.5 text-left transition-colors ${
-                      marketMode === "locked" ? `${a.panelBorder} ${a.panelBg}` : "border-white/5 bg-white/[0.02] hover:bg-white/[0.05]"
-                    }`}
-                  >
-                    <span className={`flex items-center gap-1.5 text-[11px] font-bold ${marketMode === "locked" ? a.text : "text-white/60"}`}>
-                      <Lock className="w-3 h-3" /> LOCK
-                    </span>
-                    <p className="text-[9px] text-muted-foreground mt-1 leading-snug">
-                      Freeze the chosen market for the session. Hazard decay only warns.
-                    </p>
-                  </button>
-                  <button
-                    onClick={() => setMarketMode("switching")}
-                    className={`rounded-xl border p-2.5 text-left transition-colors ${
-                      marketMode === "switching" ? `${a.panelBorder} ${a.panelBg}` : "border-white/5 bg-white/[0.02] hover:bg-white/[0.05]"
-                    }`}
-                  >
-                    <span className={`flex items-center gap-1.5 text-[11px] font-bold ${marketMode === "switching" ? a.text : "text-white/60"}`}>
-                      <ArrowRightLeft className="w-3 h-3" /> SWITCHING
-                    </span>
-                    <p className="text-[9px] text-muted-foreground mt-1 leading-snug">
-                      Rotate to the next best scanned market when 4/5 exposure decays. Contracts never rotate.
-                    </p>
-                  </button>
-                </div>
+                {(() => {
+                  const c = scanResult.allScored.find(x => x.symbol === selectedSym) ?? scanResult.best;
+                  if (!c) {
+                    return (
+                      <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-2">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                          <p className="text-xs font-semibold text-amber-300">No market scanned yet</p>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
+                      </div>
+                    );
+                  }
+                  const isBest = c.symbol === scanResult.best?.symbol;
+                  const borderline = isBest && !scanResult.suitable;
+                  return (
+                    <>
+                      <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
+                        <div className="flex items-center justify-between">
+                          <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
+                            {isBest ? "Best boundary market" : "Selected from scan"}
+                          </p>
+                          <span className={`text-[10px] font-mono ${c.recoveryViable ? "text-green-400" : "text-red-400"}`}>
+                            {c.recoveryViable ? "RECOVERY DIGESTS DEBT" : "BELOW DIGEST LINE"}
+                          </span>
+                        </div>
+                        <p className="text-sm font-bold text-white">{c.displayName}</p>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <Stat label="Gap hazard (worst)" value={pct(c.gapHazardWorst)}
+                                tone={c.gapHazardWorst <= 0.23 ? "text-green-400" : "text-amber-300"} />
+                          <Stat label="Avoidance q̂ (worst)" value={pct(c.safeLcb)} />
+                          <Stat label="Recovery digest line" value={pct(c.recoveryBreakEven)} tone="text-cyan-300" />
+                          <Stat label="Simulated survival" value={pct(c.survival)}
+                                tone={c.survival >= 0.6 ? "text-green-400" : "text-amber-300"} />
+                          <Stat label="Crossing rate" value={pct(c.crossingRate)} />
+                          <Stat label="Loss clustering ξ" value={c.clusterRatio.toFixed(2)} />
+                        </div>
+                        <p className="text-[9px] text-muted-foreground leading-relaxed">{c.reason}</p>
+                      </div>
 
-                {scanResult.best ? (
-                  <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
-                    <div className="flex items-center justify-between">
-                      <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>Best boundary market</p>
-                      <span className={`text-[10px] font-mono ${scanResult.best.recoveryViable ? "text-green-400" : "text-red-400"}`}>
-                        {scanResult.best.recoveryViable ? "RECOVERY DIGESTS DEBT" : "BELOW DIGEST LINE"}
-                      </span>
-                    </div>
-                    <p className="text-sm font-bold text-white">{scanResult.best.displayName}</p>
-                    <div className="grid grid-cols-2 gap-1.5">
-                      <Stat label="Gap hazard (worst)" value={pct(scanResult.best.gapHazardWorst)}
-                            tone={scanResult.best.gapHazardWorst <= 0.23 ? "text-green-400" : "text-amber-300"} />
-                      <Stat label="Avoidance q̂ (worst)" value={pct(scanResult.best.safeLcb)} />
-                      <Stat label="Recovery digest line" value={pct(scanResult.best.recoveryBreakEven)} tone="text-cyan-300" />
-                      <Stat label="Simulated survival" value={pct(scanResult.best.survival)}
-                            tone={scanResult.best.survival >= 0.6 ? "text-green-400" : "text-amber-300"} />
-                      <Stat label="Crossing rate" value={pct(scanResult.best.crossingRate)} />
-                      <Stat label="Loss clustering ξ" value={scanResult.best.clusterRatio.toFixed(2)} />
-                    </div>
-                    <p className="text-[9px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
-                    <Button onClick={() => handleDeploy(scanResult.best!, marketMode)} disabled={loading}
-                            className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                      {marketMode === "locked"
-                        ? <><Lock className="w-4 h-4 mr-2" /> Lock &amp; Deploy — {scanResult.best.displayName}</>
-                        : <><ArrowRightLeft className="w-4 h-4 mr-2" /> Deploy with market switching</>}
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-2">
-                    <div className="flex items-center gap-2">
-                      <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-                      <p className="text-xs font-semibold text-amber-300">No market scanned yet</p>
-                    </div>
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
-                  </div>
-                )}
+                      {c.recoveryViable ? (
+                        <>
+                          {borderline && (
+                            <p className="text-[10px] text-muted-foreground leading-relaxed px-1">
+                              This market clears the digest line but not the scan's full deployment bar.
+                              Deploying it is a deliberate choice — the bot keeps measuring and the
+                              switch button lets it move on when the boundary structure cools.
+                            </p>
+                          )}
+                          {/* Match-Nexus placement: the two deploy actions, stacked, under the card. */}
+                          <div className="space-y-2">
+                            <Button onClick={() => handleDeploy(c, "locked")} disabled={loading}
+                                    className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
+                              <Lock className="w-4 h-4 mr-2" />
+                              {borderline ? `Lock ${c.displayName} anyway` : `Trade Locked on ${c.displayName}`}
+                            </Button>
+                            <Button onClick={() => handleDeploy(c, "switching")} disabled={loading}
+                                    variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
+                              <Shuffle className="w-3.5 h-3.5 mr-2" />
+                              {borderline ? "Start with Smart Market Switching" : "Trade with Smart Market Switching"}
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-2.5">
+                          <p className="text-[10px] text-amber-200 leading-relaxed flex items-start gap-1.5">
+                            <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                            <span>
+                              Below the digest line: on this stream BOTH recovery legs lose too often for the
+                              ladder to repay itself, so deploying it is disabled. Select another market below
+                              or re-scan — the boundary structure moves.
+                            </span>
+                          </p>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
 
                 {scanResult.allScored.length > 1 && (
                   <div className="space-y-1 pt-1 border-t border-white/5">
-                    <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Scanned universe — deploy any</p>
-                    {scanResult.allScored.slice(0, 8).map((c, i) => (
-                      <button key={c.symbol} onClick={() => handleDeploy(c, marketMode)}
-                              disabled={loading || !c.recoveryViable}
-                              title={c.recoveryViable ? c.reason : "Recovery pair cannot digest debt on this stream"}
-                              className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-white/[0.03] hover:bg-white/[0.07] disabled:opacity-40 text-left">
-                        <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
-                        {!c.recoveryViable && <AlertTriangle className="w-3 h-3 text-amber-400 flex-shrink-0" />}
-                        <span className="font-mono text-[10px] text-muted-foreground/70">
-                          q̂ {pct(c.safeLcb)}/{pct(c.recoveryBreakEven)}
-                        </span>
-                        <span className={`font-mono font-bold ${c.survival >= 0.6 ? "text-green-400" : "text-amber-400"}`}>
-                          {pct(c.survival)}
-                        </span>
-                      </button>
-                    ))}
+                    <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Scanned universe — select to deploy</p>
+                    {scanResult.allScored.slice(0, 8).map(c => {
+                      const isSel = c.symbol === (scanResult.allScored.find(x => x.symbol === selectedSym)?.symbol ?? scanResult.best?.symbol);
+                      return (
+                        <button key={c.symbol} onClick={() => setSelectedSym(c.symbol)}
+                                title={c.recoveryViable ? c.reason : "Recovery pair cannot digest debt on this stream"}
+                                className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors ${
+                                  isSel ? `${a.panelBorder} ${a.panelBg} ring-1 ring-inset` : "border border-transparent bg-white/[0.03] hover:bg-white/[0.07]"
+                                }`}>
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${c.recoveryViable ? "bg-green-400" : "bg-red-400"}`} />
+                          <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
+                          <span className="font-mono text-[10px] text-muted-foreground/70">
+                            q̂ {pct(c.safeLcb)}/{pct(c.recoveryBreakEven)}
+                          </span>
+                          <span className={`font-mono font-bold ${c.survival >= 0.6 ? "text-green-400" : "text-amber-400"}`}>
+                            {pct(c.survival)}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
 

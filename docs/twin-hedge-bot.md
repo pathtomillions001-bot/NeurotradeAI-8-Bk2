@@ -95,12 +95,23 @@ digest test with Benjamini–Hochberg screening across the whole universe, and a
 mechanics (debt-driven recovery stakes, max steps, TP/SL) that prints
 P(take-profit before stop-loss).
 
-The console then offers the only choice this bot makes:
+The console then offers the only choice this bot makes, presented the same way
+as in the Match Nexus console — two stacked deploy buttons directly under the
+candidate card, no separate mode toggle:
 
-- **LOCK** — freeze the chosen market for the session; hazard decay warns only.
-- **SWITCHING** — when the live gate stays shut (dry stream) or the hazard
-  measurably decays, the engine re-scores the scanned universe and rotates to
-  a market that beats the current one by ≥6 points. **Contracts never rotate.**
+- **`Trade Locked on {market}`** (primary) — freeze the chosen market for the
+  session; hazard decay warns only.
+- **`Trade with Smart Market Switching`** (outline) — when the live gate stays
+  shut (dry stream) or the hazard measurably decays, the engine re-scores the
+  scanned universe and rotates to a market that beats the current one by ≥6
+  points. **Contracts never rotate.**
+
+A market selected from the scanned-universe list shows the same two buttons for
+that market; a market the scan refuses to deploy on (below the digest line) is
+explained instead. When the best market is viable but under the composite
+deployment floor, the buttons become `Lock {market} anyway` /
+`Start with Smart Market Switching` — the deliberate-choice pattern, the same
+as the Kill-Shot family consoles.
 
 ## Recovery / staking system — the same as every other bot
 

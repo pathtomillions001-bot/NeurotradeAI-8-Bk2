@@ -3,6 +3,7 @@ import { HealthCheckResponse } from "@workspace/api-zod";
 import { pool, schemaReady } from "@workspace/db";
 import { accountConnectionCount, tickManager } from "../lib/deriv";
 import { logger } from "../lib/logger";
+import { deploymentRelease } from "../lib/deployment-release";
 
 const router: IRouter = Router();
 
@@ -153,6 +154,7 @@ router.get("/healthz", async (_req, res) => {
 
   res.json({
     ...base,
+    release: deploymentRelease,
     db: dbDiag,
     deriv: {
       appIdConfigured: Boolean(APP_ID),

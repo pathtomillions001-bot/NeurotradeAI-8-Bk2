@@ -15,6 +15,9 @@
     },
     {
       "path": "../../lib/api-zod"
+    },
+    {
+      "path": "../../lib/deployment-contract"
     }
   ]
 }

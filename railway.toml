@@ -1,0 +1,30 @@
+# Production web-service fallback.
+#
+# The custom domain currently points at the Railway service created from the
+# repository root (service name "NeurotradeAI-8-Bk2"). Keeping a root config
+# prevents that service from auto-detecting the wrong workspace or redeploying
+# an old cached image. The API service MUST keep its custom config path set to
+# /artifacts/api-server/railway.toml.
+
+[build]
+builder = "RAILPACK"
+buildCommand = "pnpm --filter @workspace/trading-platform build"
+watchPatterns = [
+  "/artifacts/trading-platform/**",
+  "/lib/api-client-react/**",
+  "/lib/api-spec/**",
+  "/lib/deployment-contract/**",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+  "/.npmrc",
+  "/railway.toml",
+]
+
+[deploy]
+startCommand = "pnpm --filter @workspace/trading-platform start"
+# Unlike "/", this verifies the built browser release and compatibility marker.
+healthcheckPath = "/__healthz"
+healthcheckTimeout = 300
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10

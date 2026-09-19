@@ -9,7 +9,7 @@
     "serve": "vite preview --config vite.config.ts --host 0.0.0.0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "node ./scripts/serve-production.mjs",
-    "test": "tsx --test src/lib/landing-gate.test.ts src/lib/match-pulse.test.ts",
+    "test": "tsx --test src/lib/landing-gate.test.ts src/lib/match-pulse.test.ts src/lib/deployment-release.test.ts",
     "check:first-paint": "node scripts/first-paint-check.mjs"
   },
   "devDependencies": {
@@ -143,6 +143,7 @@
     "wouter": "^3.3.5",
     "zod": "catalog:",
     "http-proxy": "^1.18.1",
-    "serve-handler": "^6.1.6"
+    "serve-handler": "^6.1.6",
+    "@workspace/deployment-contract": "workspace:*"
   }
 }

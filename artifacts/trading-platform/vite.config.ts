@@ -1,8 +1,9 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+import { BOT_CONSOLE_CONTRACT_VERSION } from "@workspace/deployment-contract";
 
 // Default to 5000 — Replit's standard webview port, required for autoStart preview.
 const rawPort = process.env.PORT ?? "5000";
@@ -14,9 +15,48 @@ if (Number.isNaN(port) || port <= 0) {
 // Default to "/" — safe for any hosting context.
 const basePath = process.env.BASE_PATH ?? "/";
 
+const releaseMetadata = {
+  commit:
+    process.env.RAILWAY_GIT_COMMIT_SHA?.trim() ||
+    process.env.GITHUB_SHA?.trim() ||
+    process.env.GIT_COMMIT_SHA?.trim() ||
+    "development",
+  service:
+    process.env.RAILWAY_SERVICE_NAME?.trim() ||
+    process.env.SERVICE_NAME?.trim() ||
+    "trading-platform",
+  botConsoleContract: BOT_CONSOLE_CONTRACT_VERSION,
+};
+
+const releaseModuleId = "virtual:neurotrade-release";
+const resolvedReleaseModuleId = `\0${releaseModuleId}`;
+
+/** Provide build provenance to the browser and to the production healthcheck. */
+function releaseMetadataPlugin(): Plugin {
+  return {
+    name: "neurotrade-release-metadata",
+    resolveId(id) {
+      return id === releaseModuleId ? resolvedReleaseModuleId : null;
+    },
+    load(id) {
+      return id === resolvedReleaseModuleId
+        ? `export default ${JSON.stringify(releaseMetadata)};`
+        : null;
+    },
+    generateBundle() {
+      this.emitFile({
+        type: "asset",
+        fileName: "release.json",
+        source: `${JSON.stringify(releaseMetadata, null, 2)}\n`,
+      });
+    },
+  };
+}
+
 export default defineConfig({
   base: basePath,
   plugins: [
+    releaseMetadataPlugin(),
     react(),
     tailwindcss(),
     runtimeErrorOverlay(),
@@ -37,7 +77,12 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(import.meta.dirname, "src"),
-      "@assets": path.resolve(import.meta.dirname, "..", "..", "attached_assets"),
+      "@assets": path.resolve(
+        import.meta.dirname,
+        "..",
+        "..",
+        "attached_assets",
+      ),
     },
     dedupe: ["react", "react-dom"],
   },

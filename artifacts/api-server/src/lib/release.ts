@@ -6,9 +6,9 @@
  * The web bundle and the API are TWO independent Railway services built from
  * two different watch paths. Nothing used to tie them together, so a web
  * service that stopped picking up commits could keep serving an old Bot Arena
- * against a current API. That is exactly how Match Pulse, Twin-Hedge Edge and
- * the Compounding Range Sentinel ended up rendering their *previous* controls
- * on production while this checkout (one build, one commit) looked correct:
+ * against a current API. That is exactly how new bot consoles ended up
+ * rendering their *previous* controls on production while this checkout (one
+ * build, one commit) looked correct:
  *
  *   production web  = 39300a9 (PR #27, 2026-09-14)  ← stale bundle
  *   production api  = 1d7b39f (PR #33, 2026-09-19)  ← current

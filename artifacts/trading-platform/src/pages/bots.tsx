@@ -95,8 +95,8 @@ function useBotStatus(onUpdate: (status: BotSessionStatus | null) => void) {
 // The web bundle and the API deploy independently. When the web service lags a
 // release behind, the API advertises consoles this bundle has never heard of —
 // and the old code silently drew them with the generic specialist console, so
-// Match Pulse / Twin-Hedge Edge / Compounding Range Sentinel simply "looked
-// different" with no error anywhere. This panel replaces that silence.
+// bots simply "looked different" with no error anywhere. This panel replaces
+// that silence.
 
 function ReleaseSkewPanel({ skew, apiRelease }: {
   skew: ReturnType<typeof consoleSkew>;
@@ -208,7 +208,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
                 <h3 className="text-sm font-bold text-white truncate">{bot.name}</h3>
                 {isThisRunning && (
                   <span className={`flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text}`}>
-                    <span className={`w-1 h-1 rounded-full ${a.dot} animate-pulse`} /> {s?.pulse ? s.pulse.account ? s.pulse.account.isVirtual ? "DEMO" : "REAL" : "ACTIVE" : "LIVE"}
+                    <span className={`w-1 h-1 rounded-full ${a.dot} animate-pulse`} /> LIVE
                   </span>
                 )}
               </div>
@@ -276,7 +276,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
                 onClick={onOpen}
                 className={`w-full h-9 text-xs font-semibold ${a.solidBtn} text-white`}
               >
-                <Activity className="w-3.5 h-3.5 mr-1.5" /> {s?.pulse ? "Open Session" : "Open Live Session"}
+                <Activity className="w-3.5 h-3.5 mr-1.5" /> Open Live Session
               </Button>
             ) : (
               <Button
@@ -431,8 +431,7 @@ export default function Bots() {
           (lib/console-registry.ts). A bot whose console this bundle does not
           implement is shown as an explicit "needs a newer build" panel — the
           old hard-coded chain fell through to the generic specialist console,
-          which is how a stale web release silently rendered the wrong controls
-          for Match Pulse, Twin-Hedge Edge and the Compounding Range Sentinel. */}
+          which is how a stale web release silently rendered the wrong controls. */}
       <AnimatePresence>
         {openBot && openResolution ? (
           openResolution.ok ? (

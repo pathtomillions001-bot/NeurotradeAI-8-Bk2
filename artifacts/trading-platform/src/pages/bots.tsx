@@ -10,18 +10,13 @@ import { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Bot, Sparkles, Lock, Activity, ChevronRight,
+  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { BotConsole } from "@/components/bot-console";
-import { MatchPulseConsole } from "@/components/match-pulse-console";
-import { DualLockConsole } from "@/components/dual-lock-console";
-import { KillShotConsole } from "@/components/killshot-console";
-import { KillShotFamilyConsole } from "@/components/killshot-family-console";
-import { TwinHedgeConsole } from "@/components/twin-hedge-console";
-import { AccumulatorConsole } from "@/components/accumulator-console";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
+import { consoleSkew, resolveConsole } from "@/lib/console-registry";
+import { WEB_RELEASE, releasePair, type ReleaseInfo } from "@/lib/release";
 import { withTabSession } from "@/lib/tab-session";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
@@ -33,7 +28,14 @@ function useBotCatalogue() {
       const res = await fetch("/api/bots");
       if (!res.ok) throw new Error("Could not load the bot catalogue");
       const data = await res.json();
-      return data as { bots: BotCardData[]; activeBotId: string | null };
+      return data as {
+        bots: BotCardData[];
+        activeBotId: string | null;
+        /** API build identity — used to tell web/API release skew apart. */
+        release?: ReleaseInfo;
+        /** Console ids the API's catalogue expects this bundle to implement. */
+        consoles?: string[];
+      };
     },
     refetchInterval: 15_000,
     staleTime: 10_000,
@@ -88,12 +90,81 @@ function useBotStatus(onUpdate: (status: BotSessionStatus | null) => void) {
   return { session, setSession: handle };
 }
 
+// ── Release skew ──────────────────────────────────────────────────────────────
+//
+// The web bundle and the API deploy independently. When the web service lags a
+// release behind, the API advertises consoles this bundle has never heard of —
+// and the old code silently drew them with the generic specialist console, so
+// Match Pulse / Twin-Hedge Edge / Compounding Range Sentinel simply "looked
+// different" with no error anywhere. This panel replaces that silence.
+
+function ReleaseSkewPanel({ skew, apiRelease }: {
+  skew: ReturnType<typeof consoleSkew>;
+  apiRelease?: ReleaseInfo;
+}) {
+  const names = skew.bots.map(b => b.name);
+  return (
+    <Card className="border-amber-500/40 bg-amber-500/[0.06]">
+      <CardContent className="p-4 space-y-2">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-300 flex-shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <p className="text-sm font-semibold text-amber-200">
+              This page is an older release than the server
+            </p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              The server is running a bot console this build does not have
+              {names.length > 0 ? <> ({names.join(", ")})</> : null}
+              {skew.missing.length > 0 ? <> — required {skew.missing.join(", ")}</> : null}.
+              Reload the page first; if this message persists, the web service is serving a stale
+              build and needs a redeploy from <span className="font-mono">main</span>.
+            </p>
+            <p className="text-[10px] font-mono text-amber-200/80">
+              {releasePair(apiRelease)} · bundle {WEB_RELEASE.environment}
+              {WEB_RELEASE.builtAt ? ` · built ${WEB_RELEASE.builtAt}` : ""}
+            </p>
+          </div>
+          <Button variant="outline" size="sm" className="border-amber-500/40 text-amber-200 hover:bg-amber-500/10"
+            onClick={() => window.location.reload()}>
+            <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Reload
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Opened when the API asks for a console this bundle cannot render. */
+function UnsupportedConsolePanel({ bot, consoleId }: { bot: BotCardData; consoleId: string }) {
+  return (
+    <Card className="border-amber-500/40 bg-amber-500/[0.06]">
+      <CardContent className="p-5 space-y-2 text-center">
+        <AlertTriangle className="w-6 h-6 text-amber-300 mx-auto" />
+        <p className="text-sm font-semibold text-amber-200">
+          {bot.name} needs a newer build of this page
+        </p>
+        <p className="text-xs text-muted-foreground">
+          The server drives this bot with console <span className="font-mono">{consoleId}</span>,
+          which this bundle does not include. Reload — and if that does not help, the web service
+          is behind the API and must be redeployed from <span className="font-mono">main</span>.
+        </p>
+        <Button variant="outline" size="sm" className="border-amber-500/40 text-amber-200 hover:bg-amber-500/10"
+          onClick={() => window.location.reload()}>
+          <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Reload
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Bot card ──────────────────────────────────────────────────────────────────
 
-function BotCard({ bot, isThisRunning, anotherRunning, onOpen, index }: {
+function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpen, index }: {
   bot: BotCardData;
   isThisRunning: boolean;
   anotherRunning: boolean;
+  /** Set when this bundle cannot render the bot's console (stale build). */
+  unsupportedConsole?: string;
   onOpen: () => void;
   index: number;
 }) {
@@ -190,7 +261,17 @@ function BotCard({ bot, isThisRunning, anotherRunning, onOpen, index }: {
 
           {/* Controls */}
           <div className="pt-1 mt-auto">
-            {isThisRunning ? (
+            {unsupportedConsole ? (
+              // Never open the wrong controls: the API asked for a console this
+              // bundle does not implement (stale web release).
+              <Button
+                onClick={onOpen}
+                variant="outline"
+                className="w-full h-9 text-xs font-semibold border-amber-500/40 text-amber-200 hover:bg-amber-500/10"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 mr-1.5" /> Update Required
+              </Button>
+            ) : isThisRunning ? (
               <Button
                 onClick={onOpen}
                 className={`w-full h-9 text-xs font-semibold ${a.solidBtn} text-white`}
@@ -251,6 +332,11 @@ export default function Bots() {
 
   const openBot = bots.find(b => b.id === openBotId) ?? null;
 
+  // A bundle that lags the API behind cannot render every console the
+  // catalogue advertises. Detect it, show it, and never open the wrong one.
+  const skew = consoleSkew(bots, data?.consoles);
+  const openResolution = openBot ? resolveConsole(openBot) : null;
+
   return (
     <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">
 
@@ -286,6 +372,9 @@ export default function Bots() {
         </div>
       </div>
 
+      {/* ── Release skew (stale web bundle vs current API) ─────────────── */}
+      {skew.skewed && <ReleaseSkewPanel skew={skew} apiRelease={data?.release} />}
+
       {/* ── Bot grid ───────────────────────────────────────────────────── */}
       {isLoading && (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
@@ -320,86 +409,44 @@ export default function Bots() {
 
       {!isLoading && !isError && (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          {bots.map((bot, i) => (
-            <BotCard
-              key={bot.id}
-              bot={bot}
-              index={i}
-              isThisRunning={activeBotId === bot.id}
-              anotherRunning={!!activeBotId && activeBotId !== bot.id}
-              onOpen={() => setOpenBotId(bot.id)}
-            />
-          ))}
+          {bots.map((bot, i) => {
+            const resolution = resolveConsole(bot);
+            return (
+              <BotCard
+                key={bot.id}
+                bot={bot}
+                index={i}
+                isThisRunning={activeBotId === bot.id}
+                anotherRunning={!!activeBotId && activeBotId !== bot.id}
+                unsupportedConsole={resolution.ok ? undefined : resolution.id}
+                onOpen={() => setOpenBotId(bot.id)}
+              />
+            );
+          })}
         </div>
       )}
 
       {/* ── Console ────────────────────────────────────────────────────── */}
-      {/* Dedicated consoles follow their bot lifecycle:
-          · matchPulse            — settings → scan → lock the best market or switch
-          · accumulator           — compounding range: survival, EV ladder, market rotation
-          · twinHedge             — two legs, one market, same tick (adaptive skew)
-          · killShotFamily        — family oracle (locked or auto-switching)
-          · oneShot (Kill-Shot)   — choose one contract → AI locks one market → wait
-          · preLocked (Dual-Lock) — scan once → freeze the pair → run non-stop
-          · everything else       — configure per trade */}
+      {/* The console is chosen by the contract id the API sends with each bot
+          (lib/console-registry.ts). A bot whose console this bundle does not
+          implement is shown as an explicit "needs a newer build" panel — the
+          old hard-coded chain fell through to the generic specialist console,
+          which is how a stale web release silently rendered the wrong controls
+          for Match Pulse, Twin-Hedge Edge and the Compounding Range Sentinel. */}
       <AnimatePresence>
-        {openBot?.matchPulse ? (
-          <MatchPulseConsole
-            bot={openBot}
-            open={openBotId !== null}
-            onOpenChange={open => { if (!open) setOpenBotId(null); }}
-            session={liveSession}
-            onSession={setSession}
-          />
-        ) : openBot?.accumulator ? (
-          <AccumulatorConsole
-            bot={openBot}
-            open={openBotId !== null}
-            onOpenChange={open => { if (!open) setOpenBotId(null); }}
-            session={liveSession}
-            onSession={setSession}
-          />
-        ) : openBot?.twinHedge ? (
-          <TwinHedgeConsole
-            bot={openBot}
-            open={openBotId !== null}
-            onOpenChange={open => { if (!open) setOpenBotId(null); }}
-            session={liveSession}
-            onSession={setSession}
-          />
-        ) : openBot?.killShotFamily ? (
-          <KillShotFamilyConsole
-            bot={openBot}
-            open={openBotId !== null}
-            onOpenChange={open => { if (!open) setOpenBotId(null); }}
-            session={liveSession}
-            onSession={setSession}
-          />
-        ) : openBot?.oneShot ? (
-          <KillShotConsole
-            bot={openBot}
-            open={openBotId !== null}
-            onOpenChange={open => { if (!open) setOpenBotId(null); }}
-            session={liveSession}
-            onSession={setSession}
-          />
-        ) : openBot?.preLocked ? (
-          <DualLockConsole
-            bot={openBot}
-            open={openBotId !== null}
-            onOpenChange={open => { if (!open) setOpenBotId(null); }}
-            session={liveSession}
-            onSession={setSession}
-          />
-        ) : (
-          <BotConsole
-            bot={openBot}
-            open={openBotId !== null}
-            onOpenChange={open => { if (!open) setOpenBotId(null); }}
-            session={liveSession}
-            onSession={setSession}
-          />
-        )}
+        {openBot && openResolution ? (
+          openResolution.ok ? (
+            <openResolution.Console
+              bot={openBot}
+              open={openBotId !== null}
+              onOpenChange={open => { if (!open) setOpenBotId(null); }}
+              session={liveSession}
+              onSession={setSession}
+            />
+          ) : (
+            <UnsupportedConsolePanel bot={openBot} consoleId={openResolution.id} />
+          )
+        ) : null}
       </AnimatePresence>
     </div>
   );

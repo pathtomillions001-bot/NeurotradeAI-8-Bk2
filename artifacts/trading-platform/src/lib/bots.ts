@@ -50,6 +50,13 @@ export interface BotCardData {
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
   /** Twin-Hedge Edge — two legs, one market, same tick. */
   twinHedge?: boolean;
+  /**
+   * Console id + revision the API expects this bot to be driven by
+   * (e.g. "match-pulse@1"). The web bundle only renders bots whose console it
+   * implements; anything else is reported as a stale bundle instead of being
+   * silently drawn with the generic specialist console.
+   */
+  console?: string;
   session: BotSessionStatus | null;
 }
 

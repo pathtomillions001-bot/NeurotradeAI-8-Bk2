@@ -127,6 +127,9 @@ import {
 
 /** Ticks of history a market read needs before it may be considered at all. */
 const MIN_HISTORY_TICKS = 260;
+
+/** Catalogue id of the Compounding Range Sentinel (the accumulator bot). */
+export const ACCUMULATOR_BOT_ID = "accumulator";
 /** Ticks pulled for the survival curve / horizon estimate. */
 const HISTORY_TICKS = 5000;
 /** Live ticks the monitors need before they are trusted. */

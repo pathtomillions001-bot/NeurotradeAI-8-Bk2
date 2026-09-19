@@ -472,3 +472,32 @@ export const BOT_CATALOG: BotDefinition[] = [
 export function getBotDefinition(botId: string): BotDefinition | undefined {
   return BOT_CATALOG.find(b => b.id === botId);
 }
+
+// ── Bot console contract ──────────────────────────────────────────────────────
+//
+// Every bot is driven by a dedicated console component in the web bundle. The
+// web service and the API service deploy INDEPENDENTLY, so the API has to state
+// which console each bot needs; an out-of-date web bundle then detects that it
+// cannot render a bot and says so instead of quietly opening the generic
+// specialist console (the production incident: Match Pulse, Twin-Hedge Edge and
+// the Compounding Range Sentinel all rendered their previous UI).
+//
+// The `@N` suffix is a REVISION: bump it whenever a console's behaviour or
+// layout changes materially, so bundles built before the change are detected
+// even though the bot id itself never changed.
+
+/** Console id + revision the web bundle must implement to drive this bot. */
+export function botConsoleId(bot: BotDefinition): string {
+  if (bot.matchPulse) return "match-pulse@1";
+  if (bot.accumulator) return "accumulator@1";
+  if (bot.twinHedge) return "twin-hedge@2";
+  if (bot.preLocked) return "dual-lock@1";
+  if (bot.oneShot) return "killshot@1";
+  if (bot.killShotFamily) return "killshot-family@1";
+  return "specialist@1";
+}
+
+/** Every console id this catalogue can ask a web bundle to render. */
+export function botConsoleIds(): string[] {
+  return [...new Set(BOT_CATALOG.map(botConsoleId))].sort();
+}

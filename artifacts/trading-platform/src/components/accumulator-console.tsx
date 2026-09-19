@@ -1,16 +1,33 @@
 /**
- * Compounding Range Sentinel console — the accumulator bot's control room.
+ * Compounding Range Sentinel console — accumulator (range compounding) bot.
  *
- * The console is deliberately a MEASUREMENT INSTRUMENT first, because that is
- * what an accumulator is: a band the platform sizes from its own volatility
- * model so that the chance of staying inside equals 1/(1+g). Expected value
- * therefore multiplies by λ = p(1+g) per tick, and the only honest edge is a
- * realised tick volatility below the one the band was cut from.
+ * Frontend spec (from screenshots + user text):
+ * - The compounding ladder: Barriers re-centre on previous spot every tick.
+ *   Survive a tick and value compounds by 2%; touch a barrier once and whole stake is gone —
+ *   no partial payout to invert. Deriv cuts band from index's own volatility so survival is worth
+ *   exactly 98.039% — break-even — only edge is realised volatility coming in below band.
+ * - Break-even p 0.98039, Hold cap 164t, Payout @ cap 25.7×
+ * - Growth rate (compounding per tick): 1% 2% 3% 4% 5% — Higher growth pays faster but needs
+ *   higher survival rate AND shorter hold (cap shrinks from 230 ticks at 1% to 60 ticks at 5%).
+ * - Certainty profile: Elite / Strict / Balanced — λ lower ≥1.0015 with conservative EV ≥2%,
+ *   800 ticks, FDR 10%. σ ratio is checked, not demanded.
+ * - Stake per position USD, Take profit USD, Stop loss USD, Max recovery steps
+ * - Recovery buys a LONGER horizon at same stake — never a bigger one.
+ * - Measure every market
  *
- * So the flow is: pick the growth rate (the compounding rate, which sets BOTH
- * the payout schedule and the break-even survival) → measure every market →
- * read λ and its lower bound per market → deploy only if something certified →
- * watch the live survival, the value, and the exit policy work.
+ * Backend sync (verified):
+ * - Engine: lib/accumulator-engine.ts — λ = p·(1+g), EV multiplies by λ per tick, Deriv sizes range
+ *   so fresh band is exactly fair (R_10 bands σ_tick × 99%/95% quantiles), only honest edge is
+ *   realised vol < barrier vol, measured via Kaplan–Meier over consecutive in-range runs,
+ *   holds to horizon where LOWER confidence bound of EV peaks, FDR-controlled via Benjamini–Hochberg,
+ *   refusal is feature when λ≤1, sell-at-par risk mgmt (Page–Hinkley, Wald SPRT, Bernoulli CUSUM,
+ *   2 flags cash out), recovery by horizon n* = ⌈ln(1+D/stake)/ln(1+g)⌉ logarithmic, flat-stake ladder
+ *   dominates doubled, Markov entry 4-state magnitude chain (tight/normal/wide/breach) with
+ *   Krichevsky–Trofimov smoothing, rotation not resignation (locked holds, switching re-measures)
+ * - Analysis: lib/accumulator-analysis.ts — growth rates 1-5%, tick caps, barrier calibrations,
+ *   break-even p = 1/(1+g), vol ratio, λ, Wilson intervals
+ * - API: /api/bots/accumulator/params, /scan, /explain, /start, /stop, /status — session-isolated
+ * - Console ID: accumulator@1
  */
 
 import { useState, useEffect, useCallback } from "react";

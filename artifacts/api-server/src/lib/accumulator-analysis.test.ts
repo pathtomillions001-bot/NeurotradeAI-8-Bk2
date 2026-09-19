@@ -8,6 +8,12 @@ import {
   evaluateAccumulatorMarket,
   recoveryStakeForAccumulator,
 } from "./accumulator-analysis";
+import {
+  ACCUMULATOR_HEAL_LIMIT,
+  planAccumulatorDurationHeal,
+  type AccuDurationHealState,
+} from "./accumulator-engine";
+import { discoverAccumulatorContractSpec, tickManager } from "./deriv";
 
 function flatPrices(n: number, price = 1000): number[] {
   return Array.from({ length: n }, () => price);
@@ -109,4 +115,125 @@ test("accumulator recovery stake uses compounded net return and caps risk", () =
   assert.ok(Math.abs(stake - (2 * 1.1) / 0.0828567) < 1e-8);
   const capped = recoveryStakeForAccumulator(1000, { netReturnMultiplier: 0.08 }, 10, 50, 100);
   assert.equal(capped, 10); // 10% of the available balance is the tighter cap
+});
+
+// ── Broker duration limits & self-heal ───────────────────────────────────────
+//
+// The exchange rejects an ACCU buy with "Invalid input (duration or
+// date_expiry)" when the duration is outside the growth-rate-specific tick
+// window. Max allowable ticks SHRINK as growth rises, so the analysis must
+// clamp per growth rate, discovery must read the REAL contracts_for field
+// names, and the engine must self-heal on the rejection instead of stopping.
+
+test("per-growth-rate tick cap clamps the analysed duration", () => {
+  const caps = { "0.01": 230, "0.02": 170, "0.03": 110, "0.04": 80, "0.05": 60 };
+  // A requested 60-tick duration is fine at 1% growth but must be clamped
+  // at the tighter cap for higher growth rates.
+  const at1 = estimateAccumulatorRisk(flatPrices(300), 0.01, {
+    targetTicks: 8, durationTicks: 60, brokerMaxTicksByGrowth: caps, bootstrapPaths: 40,
+  });
+  assert.equal(at1.durationTicks, 60);
+  const at5 = estimateAccumulatorRisk(flatPrices(300), 0.05, {
+    targetTicks: 8, durationTicks: 60, brokerMaxTicksByGrowth: caps, bootstrapPaths: 40,
+  });
+  assert.ok(at5.durationTicks <= 60);
+  // And a longer requested duration is clamped to the per-rate cap, not the
+  // (looser) global broker max.
+  const longAt5 = estimateAccumulatorRisk(flatPrices(300), 0.05, {
+    targetTicks: 8, durationTicks: 230, brokerMaxTicks: 230, brokerMaxTicksByGrowth: caps, bootstrapPaths: 40,
+  });
+  assert.equal(longAt5.durationTicks, 60);
+  // The target never exceeds the (clamped) duration.
+  assert.ok(longAt5.targetTicks < longAt5.durationTicks);
+});
+
+test("evaluateAccumulatorMarket applies the per-growth cap per row", () => {
+  const caps = { "0.01": 230, "0.05": 60 };
+  const rows = evaluateAccumulatorMarket(
+    { symbol: "R_10", displayName: "Calm", prices: flatPrices(300), brokerMaxTicks: 230, brokerMaxTicksByGrowth: caps },
+    { growthRate: "auto", growthRates: [0.01, 0.05], targetTicks: 8, durationTicks: 230, bootstrapPaths: 40 },
+  );
+  const byRate = new Map(rows.map((r) => [r.growthRate, r.durationTicks]));
+  assert.equal(byRate.get(0.05), 60);
+  assert.equal(byRate.get(0.01), 230);
+});
+
+test("contract discovery reads the real contracts_for duration fields", async (t) => {
+  // The Deriv payload uses `min_contract_duration` / `max_contract_duration`
+  // (tick counts for ACCU). One row per growth rate, each with its own cap.
+  const mock = t.mock.method(tickManager, "request", (async () => ({
+    contracts_for: {
+      available: [
+        { contract_type: "CALL", min_contract_duration: "1", max_contract_duration: "500" },
+        { contract_type: "ACCU", growth_rate: 0.01, min_contract_duration: "1", max_contract_duration: "230", barrier: "0.0005" },
+        { contract_type: "ACCU", growth_rate: 0.05, min_contract_duration: "1", max_contract_duration: "60" },
+      ],
+    },
+  })) as any);
+  const spec = await discoverAccumulatorContractSpec("R_10");
+  assert.equal(spec.source, "broker");
+  assert.equal(spec.available, true);
+  assert.equal(spec.minDurationTicks, 1);
+  // The global max is the TIGHTEST observed cap (conservative ceiling).
+  assert.equal(spec.maxDurationTicks, 60);
+  assert.ok(spec.maxTicksByGrowth, "per-growth caps must be captured");
+  assert.equal(spec.maxTicksByGrowth!["0.01"], 230);
+  assert.equal(spec.maxTicksByGrowth!["0.05"], 60);
+  assert.equal(spec.barrierPct, 0.0005);
+  mock.mock.restore();
+});
+
+test("contract discovery still accepts the legacy single-row payload", async (t) => {
+  const mock = t.mock.method(tickManager, "request", (async () => ({
+    contracts_for: {
+      available: [
+        { contract_type: "ACCU", growth_rate: [0.01, 0.02, 0.03, 0.04, 0.05], min_contract_duration: "1", max_contract_duration: "230" },
+      ],
+    },
+  })) as any);
+  const spec = await discoverAccumulatorContractSpec("R_10");
+  assert.equal(spec.source, "broker");
+  assert.equal(spec.maxDurationTicks, 230);
+  assert.equal(spec.maxTicksByGrowth, undefined, "a single row has no per-rate spread");
+  assert.deepEqual(spec.growthRates, [0.01, 0.02, 0.03, 0.04, 0.05]);
+  mock.mock.restore();
+});
+
+test("duration self-heal ladder shortens, then lowers growth, then exhausts", () => {
+  const heal: AccuDurationHealState = { maxTicksByGrowth: new Map(), healCount: 0 };
+
+  // Step 1: shrink the duration (40% off 60 → 36).
+  const step1 = planAccumulatorDurationHeal(heal, 0.05, 60)!;
+  assert.equal(step1.growthRate, 0.05);
+  assert.equal(step1.maxTicks, 36);
+
+  // Step 2: shrink again (36 → 22).
+  const step2 = planAccumulatorDurationHeal(heal, 0.05, 36)!;
+  assert.equal(step2.maxTicks, 22);
+
+  // Walk the ladder down until the duration hits the floor.
+  let duration = step2.maxTicks!;
+  let guard = 0;
+  while (guard++ < 20) {
+    const plan = planAccumulatorDurationHeal(heal, 0.05, duration)!;
+    if (plan.growthRate !== 0.05) break; // growth got lowered
+    duration = plan.maxTicks!;
+  }
+  // Once the floor is reached, the NEXT step must lower the growth rate.
+  const lowerGrowth = planAccumulatorDurationHeal(heal, 0.05, duration)!;
+  assert.ok(lowerGrowth.growthRate < 0.05, "the ladder lowers growth at the duration floor");
+  assert.equal(lowerGrowth.maxTicks, undefined, "the (floor) duration stays under the looser growth");
+
+  // A fresh ladder at the LOWEST growth rate with the duration at the floor
+  // is exhausted — the caller then falls back to counting a strike.
+  const stuck: AccuDurationHealState = { maxTicksByGrowth: new Map(), healCount: 0 };
+  let floor = 15;
+  let steps = 0;
+  while (steps++ < 20) {
+    const plan = planAccumulatorDurationHeal(stuck, 0.01, floor);
+    if (!plan) break;
+    if (plan.maxTicks !== undefined) floor = plan.maxTicks;
+    if (plan.growthRate !== 0.01) break;
+  }
+  assert.ok(steps <= ACCUMULATOR_HEAL_LIMIT + 2, "exhaustion must be bounded");
 });

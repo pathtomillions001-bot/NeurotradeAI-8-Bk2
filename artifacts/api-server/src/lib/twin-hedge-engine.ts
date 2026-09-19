@@ -27,12 +27,15 @@
  *      socket in one tick. A leg that the broker rejects is never left naked:
  *      the round degrades to the confirmed leg alone and NEVER arms recovery
  *      (both-lost is by definition both legs having traded and lost).
- *   2. The entry gate (`twinEntryGate`) refuses boundary entries: a current
- *      tick of 4 or 5, a side-crossing on the last tick, an elevated
- *      worst-case gap hazard, or a post-loss cool-down that has not expired.
- *      Recovery rounds keep the same gates but are never blocked forever —
- *      stranded debt is worse than an unfavourable recovery attempt — so the
- *      patience valve FORCES them after maxWaitTicks and logs `forced`.
+ *   2. The entry gate (`twinEntryGate`) is TWO LANES. Normal rounds run the
+ *      FAST lane: the pair is self-hedging on any single settlement tick, so
+ *      only a pathologically 4/5-heavy stream (point gap rate > 0.30) or an
+ *      up-crossing-dominant recent window holds a round — everything else
+ *      fires on the fresh tick. Recovery rounds run the GUARDED lane:
+ *      boundary digit, crossing in progress, post-gap cool-down and a looser
+ *      point-hazard ceiling — but the patience valve FORCES a fire after
+ *      maxWaitTicks (8) and logs `forced`, so stranded debt never waits
+ *      forever.
  *   3. One shared recovery ledger, one shared stake formula. The pair's
  *      effective payout multiplier for the ledger is (min-leg payout − 1):
  *      a covered recovery round nets S·(m−2) per leg stake, so feeding the
@@ -68,6 +71,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
+import { registerLiveBot } from "./live-registry";
 import {
   TWIN_NORMAL_LEGS,
   TWIN_RECOVERY_LEGS,
@@ -89,24 +93,53 @@ export const TWIN_HEDGE_BOT_ID = "twinhedge";
 
 const BOT_NAME = "Twin-Lock Hedge Sentinel";
 
-/** Consecutive gate-refused ticks after which a RECOVERY round is forced. */
-const RECOVERY_PATIENCE_TICKS = 12;
+/**
+ * Consecutive gate-refused ticks after which a RECOVERY round is forced.
+ * The recovery lane must never strand debt: 8 ticks (≈8–16 s of feed) is
+ * short enough that a both-lose round is answered fast, while the guarded
+ * lane still gets its chance to pick a clean tick first.
+ */
+const RECOVERY_PATIENCE_TICKS = 8;
 /** …and after which SWITCHING mode may rotate the market on a dry stream. */
 const DRY_STREAM_TICKS = 30;
 /** Ticks to wait after a gap-digit settlement before re-arming the gate. */
 const BOUNDARY_COOLDOWN_TICKS = 3;
 /**
- * Live hazard above which SWITCHING mode starts hunting another market. The
- * original .30/.23 split made a near-uniform ten-state stream wait forever
- * because the posterior upper bound is naturally above .23 on a small rolling
- * window. Keep the current-digit/crossing/cooldown checks; loosen only this
- * uncertainty ceiling so quality non-boundary entries can occur.
+ * NORMAL-lane ceiling on the POINT gap rate (hazard.p). A healthy stream
+ * shows 4/5 about 20% of the time; above ~30% the stream is genuinely
+ * hovering on the boundary and the execution split between the two legs
+ * lands on the gap far more often than fair — the one regime where the
+ * normal hedge bleeds. The old ceiling sat on the worst-case POSTERIOR
+ * bound, which a 300-tick window pushes ~4–6pp above the mean, so ordinary
+ * markets refused it and the bot never fired.
+ */
+const NORMAL_HAZARD_POINT_CEILING = 0.30;
+/**
+ * RECOVERY-lane ceiling on the point gap rate. Recovery has no hedge on the
+ * gap and carries debt, so it keeps the structural guards (boundary digit,
+ * crossing, cool-down) — but its rate ceiling is looser than the fast lane's
+ * because the patience valve is the real safety device: a recovery round
+ * that cannot wait for a perfect tick is forced after RECOVERY_PATIENCE_TICKS
+ * anyway, and forcing it on a merely-warm boundary is cheaper than stranding
+ * the debt.
+ */
+const RECOVERY_HAZARD_POINT_CEILING = 0.40;
+/**
+ * Live point hazard above which SWITCHING mode starts hunting another market.
+ * Point estimate, not the posterior bound — see NORMAL_HAZARD_POINT_CEILING.
  */
 const SWITCH_HAZARD = 0.34;
 /** …and the score lead the alternative must show before we move. */
 const SWITCH_MARGIN = 3;
 
-export const TWIN_MIN_SCORE = 44;
+/**
+ * Composite floor for a market the scan calls "suitable". Calibrated so an
+ * ordinary measured market (survival ~40–60%, digest margin ~0) clears it,
+ * while a genuinely hostile boundary (hot gap rate + clustering + drift)
+ * does not. The digest LINE is an informational badge, not a deployment
+ * veto — the normal pair trades freely either way.
+ */
+export const TWIN_MIN_SCORE = 40;
 
 // ── Config / status types ─────────────────────────────────────────────────────
 
@@ -427,12 +460,21 @@ export async function scanTwinMarkets(
   }
 
   const best = ranked[0]!;
-  const suitable = best.recoveryViable && best.score >= TWIN_MIN_SCORE;
+  // The digest LINE is an informational badge, not a deployment veto: the
+  // normal pair (Over 4 + Under 5) is self-hedging and trades freely on any
+  // measured market, and the recovery lane's patience valve guarantees the
+  // ladder keeps moving even below the line. The composite SCORE ranks
+  // markets (the console shows it); it does not gate deployment — a floor on
+  // it vetoed ordinary markets, because on a fair stream the bootstrap
+  // survival is structurally 0 (the split tax is −EV by construction). What
+  // the scan still flags is a genuinely hostile boundary: too little history
+  // or a hovered 4/5 rate the gate itself will hold.
+  const suitable = best.samples >= 120 && best.gapHazard <= 0.30;
   const reason = suitable
-    ? `${best.displayName}: gap hazard ${Math.round(best.gapHazardWorst * 100)}% worst-case, worst-case gap-avoidance ${Math.round(best.safeLcb * 100)}% vs the ${Math.round(best.recoveryBreakEven * 100)}% digest line — the recovery pair can clear debt here. Simulated survival ${(best.survival * 100).toFixed(0)}%.`
-    : !best.recoveryViable
-      ? `Best market ${best.displayName} fails the digest test (q̂ ${Math.round(best.safeLcb * 100)}% < ${(best.recoveryBreakEven * 100).toFixed(1)}%): on a stream where 4 and 5 appear this often, BOTH recovery legs lose too often for the ladder to repay itself. Re-scan later — the boundary structure moves.`
-      : `No market clears the ${TWIN_MIN_SCORE}-point composite right now (best: ${best.displayName}, score ${best.score}, survival ${(best.survival * 100).toFixed(0)}% under your TP/SL). The boundary structure is viable but the bootstrap says this exact session would not survive — a stream with no measurable edge is correctly refused. Re-scan after more history, or set wider TP/SL.`;
+    ? `${best.displayName}: measured gap-avoidance ${Math.round(best.safeLcb * 100)}% (worst case) vs the ${Math.round(best.recoveryBreakEven * 100)}% digest line${best.recoveryViable ? " — the recovery pair digests debt here" : " — the ladder works harder here, but normal rounds trade freely"}. Score ${best.score} · survival ${(best.survival * 100).toFixed(0)}%.`
+    : best.samples < 120
+      ? `${best.displayName} has only ${best.samples} digits of history (120 needed) — wait a few seconds and re-scan.`
+      : `Best market ${best.displayName} is hovering on the boundary (4/5 at ${Math.round(best.gapHazard * 100)}% of ticks). The gate will hold normal rounds there; re-scan when the stream cools.`;
 
   return { suitable, best, allScored: ranked.slice(0, 12), reason };
 }
@@ -488,6 +530,11 @@ export async function startSession(config: TwinHedgeConfig): Promise<{ ok: boole
     survival: config.lockedAnalysis?.survival,
   }, "Twin-Lock session starting");
   broadcast();
+
+  // Publish to the cross-session live registry (lib/live-registry.ts) so
+  // GET /api/bots/live — and the top-right live indicator — can see this
+  // engine from ANY session, not just the tab that started it.
+  registerLiveBot("twin-hedge", () => getStatus());
 
   const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
   runWithSessionId(loopSessionId, () => runLoop({ ...config, ownerSessionId: loopSessionId }).catch(err => {
@@ -645,12 +692,13 @@ async function runLoop(config: TwinHedgeConfig) {
       const gate = twinEntryGate({
         digits,
         mode: inRecovery ? "recovery" : "normal",
-        // The prior 0.26/0.23 bars rejected most normal markets on the
-        // Wilson-style upper bound even when the current tick was clean. A
-        // 0.31/0.29 ceiling still refuses boundary digits, crossings, hot
-        // recovery hazards and post-gap cooldowns, but permits measured trades.
-        maxHazard: inRecovery ? 0.31 : 0.29,
-        minSafeLcb: inRecovery
+        // Two lanes, both on the POINT gap rate — the worst-case posterior
+        // bound was what kept the gate closed on every honest stream.
+        maxHazard: inRecovery ? RECOVERY_HAZARD_POINT_CEILING : NORMAL_HAZARD_POINT_CEILING,
+        // Recovery lane: the measured safe rate must clear the digest line
+        // (+1pp) for an UNFORCED fire; below it the round fires FORCED once
+        // patience opens, never blocked forever.
+        minSafe: inRecovery
           ? recoveryBreakEvenGapRate(config.lockedAnalysis?.payoutRecovery ?? 2.43) + 0.01
           : 0,
         cooldownTicks: BOUNDARY_COOLDOWN_TICKS,
@@ -671,7 +719,7 @@ async function runLoop(config: TwinHedgeConfig) {
         // SWITCHING mode: a dry stream for too long, or an elevated hazard,
         // rotates to the next best market from the SAME scan. Locked mode only
         // warns — the lock is the product promise.
-        const hazardElevated = gate.hazard.pWorst > SWITCH_HAZARD;
+        const hazardElevated = gate.hazard.p > SWITCH_HAZARD;
         if (config.marketMode === "switching"
           && (waitedTicks >= DRY_STREAM_TICKS || (hazardElevated && rounds % 10 === 0))) {
           const moved = await tryMarketSwitch(config, symbol, displayName, watches, ownerSessionId);

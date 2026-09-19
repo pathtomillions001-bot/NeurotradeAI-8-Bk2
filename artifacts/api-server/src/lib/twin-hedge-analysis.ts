@@ -53,9 +53,17 @@
  *                   are the both-lose trigger; down-crossings are the
  *                   both-win windfall) with a Wald–Wolfowitz runs z on the
  *                   side-of-boundary indicator.
- *  - `twinEntryGate` the pure per-tick fire/no-fire decision, with separate
- *                   (stricter) thresholds for recovery rounds and a patience
- *                   valve so a conclusive setup never waits forever.
+ *  - `boundaryAsymmetry` the recent-window (down − up)/(down + up) crossing
+ *                   read the fast lane uses to stay out of up-crossing-dominant
+ *                   regimes — the one microstructure that feeds both-lose.
+ *  - `twinEntryGate` the pure per-tick fire/no-fire decision, TWO LANES:
+ *                   NORMAL is a fast lane (point gap-rate + crossing
+ *                   dominance only — the pair is self-hedging on any single
+ *                   settlement tick, so there is little to check and speed is
+ *                   the product), RECOVERY is a guarded lane (boundary digit,
+ *                   crossing, cool-down, hazard ceiling) with a patience
+ *                   valve that FORCES a fire so stranded debt never waits
+ *                   forever.
  *  - `simulateTwinSession` a block bootstrap that replays the REAL digit
  *                   stream through the REAL round mechanics — same-tick
  *                   settlement with an execution-jitter probability,
@@ -385,25 +393,52 @@ export function gapRunStats(digits: number[]): {
 
 // ── Live entry gate (pure; the engine calls it once per fresh tick) ───────────
 
+/**
+ * Recent-window crossing asymmetry: (down − up) / (down + up) over the last
+ * `window` ticks. Positive = down-crossings dominate (the both-WIN windfall
+ * direction for the normal pair), negative = up-crossings dominate (the
+ * both-LOSE trigger). 0 when the stream barely crosses.
+ */
+export function boundaryAsymmetry(digits: number[], window = 120): number {
+  const w = digits.slice(-window);
+  if (w.length < 10) return 0;
+  let up = 0;
+  let down = 0;
+  for (let i = 1; i < w.length; i++) {
+    const prevLow = w[i - 1]! <= 4;
+    const curLow = w[i]! <= 4;
+    if (prevLow !== curLow) {
+      if (prevLow) up++;
+      else down++;
+    }
+  }
+  const total = up + down;
+  return total > 0 ? (down - up) / total : 0;
+}
+
 export interface TwinGateInput {
   digits: number[];
   mode: "normal" | "recovery";
-  /** Worst-case gap hazard the gate will still fire under (posterior UCB). */
+  /** Point gap-rate (hazard.p) the gate will still fire under. The old
+   *  worst-case-posterior ceiling was unreachable on ordinary streams (a
+   *  300-tick window's 95th-percentile bound sits ~4–6pp above the mean),
+   *  which is what kept the gate closed forever. The point estimate is the
+   *  honest rate; the worst case is still priced by the scan + breaker. */
   maxHazard: number;
-  /** For recovery: the SAFE-rate floor q̂_LCB must clear this (= q* + margin). */
-  minSafeLcb?: number;
-  /** Ticks to skip after the round that triggered recovery (boundary cool-down). */
+  /** Recovery lane only: the MEASURED safe rate q̂ must clear this
+   *  (= q* + margin) or the round fires FORCED (never blocked forever). */
+  minSafe?: number;
+  /** Recovery lane only: ticks to skip after a gap-digit settlement. */
   cooldownTicks?: number;
-  /** How many consecutive clean ticks since the boundary (engine-computed). */
+  /** Recovery lane only: clean ticks since the boundary (engine-computed). */
   ticksSinceBoundary?: number;
   /** How long the current setup has already waited (patience valve). */
   waitedTicks?: number;
-  /** After this many waited ticks a gate refusal no longer blocks a RECOVERY
-   *  fire (debt must be digested) — normal rounds keep waiting. */
+  /** After this many waited ticks every recovery-lane refusal is overridden
+   *  — debt must be digested, so the valve forces a fire. */
   maxWaitTicks?: number;
-  /** True when the last digit was ≥5 and the one before it ≤4 etc. — the
-   *  engine computes the last two digits' side flip itself; this is the
-   *  pre-computed convenience flag. */
+  /** Recovery lane only: the last two digits flipped sides of the boundary
+   *  (engine pre-computes; a crossing in progress). */
   crossedOnLastTick?: boolean;
 }
 
@@ -411,13 +446,39 @@ export interface TwinGateVerdict {
   fire: boolean;
   reason: string;
   hazard: EdgeHazard;
-  /** True when the fire was forced by the patience valve. */
+  /** True when the fire was forced by the patience valve / digest override. */
   forced?: boolean;
 }
 
+/**
+ * TWO LANES, one gate:
+ *
+ *   NORMAL (fast lane) — the pair is self-hedging: on any single settlement
+ *   tick exactly one leg wins, so the per-tick analysis can be cheap. Only
+ *   two things can make a normal round bad, and both are measurable in one
+ *   pass over the stream:
+ *     (a) a pathologically 4/5-heavy stream (point gap rate above the
+ *         ceiling) — the boundary is being hovered, so the execution split
+ *         between the two legs lands on the gap far more often than fair;
+ *     (b) up-crossings dominating the recent window — up-crossings are the
+ *         both-lose trigger, down-crossings are the both-win windfall, so a
+ *         strongly negative asymmetry is the one regime where the hedge
+ *         systematically bleeds.
+ *   Anything else FIRES on the fresh tick. No boundary-digit refusals, no
+ *   crossing refusals, no cool-downs: a current tick of 4 or 5 only matters
+ *   through (a), and a crossing in progress is priced by (b) plus the
+ *   settlement skew — gating it out was the "no trades ever" behaviour.
+ *
+ *   RECOVERY (guarded lane) — the pair has NO hedge on the gap (both legs
+ *   die on 4 or 5) and it carries debt, so the structural guards stay:
+ *   boundary digit, crossing in progress, post-gap cool-down, hazard
+ *   ceiling. But the patience valve FORCES a fire once it opens — stranded
+ *   debt is worse than an unfavourable recovery round, and a recovery gate
+ *   that never opens is as broken as one that is always open.
+ */
 export function twinEntryGate(input: TwinGateInput): TwinGateVerdict {
   const {
-    digits, mode, maxHazard, minSafeLcb = 0,
+    digits, mode, maxHazard, minSafe = 0,
     cooldownTicks = 0, ticksSinceBoundary = Infinity,
     waitedTicks = 0, maxWaitTicks = 12, crossedOnLastTick = false,
   } = input;
@@ -426,65 +487,67 @@ export function twinEntryGate(input: TwinGateInput): TwinGateVerdict {
     return { fire: false, reason: "warming up — 30+ ticks of history required", hazard: edgeHazard(digits) };
   }
   const hazard = edgeHazard(digits);
+
+  // ── NORMAL: fast lane ────────────────────────────────────────────────────
+  if (mode === "normal") {
+    if (hazard.p > maxHazard) {
+      return {
+        fire: false,
+        reason: `gap rate ${Math.round(hazard.p * 100)}% > ${Math.round(maxHazard * 100)}% — the stream is hovering on 4/5`,
+        hazard,
+      };
+    }
+    const asym = boundaryAsymmetry(digits);
+    if (asym < -0.2) {
+      return {
+        fire: false,
+        reason: `up-crossings dominate (${Math.round(asym * 100)}% asymmetry) — the both-lose trigger is hot`,
+        hazard,
+      };
+    }
+    return {
+      fire: true,
+      reason: `gap ${Math.round(hazard.p * 100)}% · crossings ${asym >= 0.05 ? "favoured" : "balanced"}`,
+      hazard,
+    };
+  }
+
+  // ── RECOVERY: guarded lane ───────────────────────────────────────────────
+  const patienceOpen = waitedTicks >= maxWaitTicks;
   const last = digits[digits.length - 1]!;
 
-  // 1) Never ENTER from a boundary digit. If the current tick is 4 or 5 the
-  //    stream is sitting on the boundary and the next settlement is maximally
-  //    exposed to a half-tick execution split. (Recovery rounds fired by debt
-  //    may still go after the cool-down — see the patience valve below.)
-  if (isGapDigit(last)) {
-    if (!(mode === "recovery" && waitedTicks >= maxWaitTicks)) {
-      return { fire: false, reason: `current tick is the gap digit ${last} — refusing a boundary entry`, hazard };
-    }
+  if (isGapDigit(last) && !patienceOpen) {
+    return { fire: false, reason: `current tick is the gap digit ${last} — waiting for the stream to move`, hazard };
+  }
+  if (crossedOnLastTick && !patienceOpen) {
+    return { fire: false, reason: "boundary crossing in progress on the last tick", hazard };
+  }
+  if (ticksSinceBoundary < cooldownTicks && !patienceOpen) {
+    return {
+      fire: false,
+      reason: `post-gap cool-down (${Math.floor(ticksSinceBoundary)}/${cooldownTicks} ticks)`,
+      hazard,
+    };
+  }
+  if (hazard.p > maxHazard && !patienceOpen) {
+    return {
+      fire: false,
+      reason: `gap rate ${Math.round(hazard.p * 100)}% > ${Math.round(maxHazard * 100)}% ceiling`,
+      hazard,
+    };
   }
 
-  // 2) Never fire ON a crossing tick (up or down). A side flip in progress is
-  //    exactly the microstructure where leg A and leg B can settle on opposite
-  //    sides of the boundary.
-  if (crossedOnLastTick) {
-    if (!(mode === "recovery" && waitedTicks >= maxWaitTicks)) {
-      return { fire: false, reason: "boundary crossing in progress on the last tick", hazard };
-    }
-  }
-
-  // 3) Cool-down after a gap-hit loss: give the stream `cooldownTicks` ticks
-  //    to move away from the boundary before re-arming.
-  if (ticksSinceBoundary < cooldownTicks) {
-    if (!(mode === "recovery" && waitedTicks >= maxWaitTicks)) {
-      return {
-        fire: false,
-        reason: `post-gap cool-down (${Math.floor(ticksSinceBoundary)}/${cooldownTicks} ticks)`,
-        hazard,
-      };
-    }
-  }
-
-  // 4) The hazard ceiling — worst-case posterior bound must sit under the bar.
-  if (hazard.pWorst > maxHazard) {
-    if (!(mode === "recovery" && waitedTicks >= maxWaitTicks)) {
-      return {
-        fire: false,
-        reason: `gap hazard ${Math.round(hazard.pWorst * 100)}% > ${Math.round(maxHazard * 100)}% ceiling`,
-        hazard,
-      };
-    }
-  }
-
-  // 5) Recovery-only: the SAFE lower bound must clear the break-even q*. A
-  //    recovery round that cannot mathematically digest the ladder is still
-  //    fired (the debt must be attacked) — but it is FIRED FORCED, and the
-  //    reason is logged, because refusing to recover strands the debt worse
-  //    than an unfavourable recovery does.
-  let forced = false;
-  if (mode === "recovery" && minSafeLcb > 0 && hazard.safeLcb < minSafeLcb) {
-    forced = true;
-  }
+  // The digest floor: q̂ must clear break-even for an UNFORCED fire. Below it
+  // the round still fires once patience opens — but the verdict says FORCED,
+  // because refusing to recover strands the debt worse than an unfavourable
+  // recovery does.
+  const forced = minSafe > 0 && hazard.safe < minSafe;
 
   return {
     fire: true,
     reason: forced
-      ? `recovery forced despite q̂ ${Math.round(hazard.safeLcb * 100)}% < ${(minSafeLcb * 100).toFixed(1)}% break-even`
-      : `hazard ${Math.round(hazard.pWorst * 100)}% under ceiling · q̂ ${Math.round(hazard.safeLcb * 100)}%`,
+      ? `recovery forced despite q̂ ${Math.round(hazard.safe * 100)}% < ${(minSafe * 100).toFixed(1)}% digest line`
+      : `gap ${Math.round(hazard.p * 100)}% under ceiling · q̂ ${Math.round(hazard.safe * 100)}%`,
     hazard,
     forced,
   };
@@ -665,8 +728,17 @@ export interface TwinHedgeCandidate {
   safeLcb: number;
   /** Break-even q* for the recovery pair at this market's live payouts. */
   recoveryBreakEven: number;
-  /** True when safeLcb clears recoveryBreakEven — recovery digests debt here. */
+  /**
+   * Measured digest: the POINT safe rate clears break-even. This is the
+   * deployment badge — a stream where 4/5 appear at or below the break-even
+   * frequency lets the ladder repay on average. It is deliberately the point
+   * estimate: the old worst-case LCB test vetoed nearly every real market
+   * (a 300-tick window's 5th-percentile bound sits a few points below the
+   * mean), which is what kept the deploy buttons locked forever.
+   */
   recoveryViable: boolean;
+  /** The old strict test (worst-case LCB clears q*) — a quality badge, not a veto. */
+  recoveryViableWorst: boolean;
   crossingRate: number;
   crossingAsymmetry: number;
   runsZ: number;
@@ -715,7 +787,8 @@ export function evaluateTwinMarket(
   const pRecMin = Math.min(pOver5, pUnder4);
   const pNormAvg = (pOver4 + pUnder5) / 2;
   const qStar = recoveryBreakEvenGapRate(pRecMin);
-  const recoveryViable = hazard.safeLcb >= qStar;
+  const recoveryViable = hazard.safe >= qStar;
+  const recoveryViableWorst = hazard.safeLcb >= qStar;
 
   const sim = simulateTwinSession(digits, {
     ...opts,
@@ -724,21 +797,27 @@ export function evaluateTwinMarket(
   });
 
   // ── Composite score ───────────────────────────────────────────────────────
-  // Survival dominates (it prices everything), then recovery digest margin,
-  // then hazard level, then penalties for crossing churn, drift and clustering.
+  // Survival dominates (it prices everything), then the MEASURED digest
+  // margin, then gap level (point — the worst-case bound is a small-sample
+  // artefact and would punish every honest stream), then crossing churn,
+  // drift and clustering.
   let score = 0;
-  score += clamp(sim.survival, 0, 1) * 45;
-  score += clamp((hazard.safeLcb - qStar) / 0.06, 0, 1) * 20;
-  score += clamp((0.22 - hazard.pWorst) / 0.12, 0, 1) * 10;
+  score += clamp(sim.survival, 0, 1) * 40;
+  score += clamp((hazard.safe - qStar) / 0.05, 0, 1) * 20;
+  score += clamp((0.24 - hazard.p) / 0.12, 0, 1) * 12;
   score += clamp((0.25 - crossing.rate) / 0.12, 0, 1) * 8;
   score += clamp((3 - station.z) / 3, 0, 1) * 7;
-  score += clamp((1.25 - runs.clusterRatio) / 0.5, 0, 1) * 5;
+  score += clamp((1.25 - runs.clusterRatio) / 0.5, 0, 1) * 3;
   score = Math.round(clamp(score, 0, 100));
 
   if (n < 120) signals.push(`BLOCKED: only ${n} digits in buffer (120 needed)`);
-  if (!recoveryViable) {
-    signals.push(`BLOCKED: recovery pair cannot digest debt here — worst-case gap-avoidance ${Math.round(hazard.safeLcb * 100)}% < break-even ${(qStar * 100).toFixed(1)}%`);
+  if (!recoveryViableWorst && recoveryViable) {
+    signals.push(`INFO: worst-case gap-avoidance ${Math.round(hazard.safeLcb * 100)}% is under the ${(qStar * 100).toFixed(1)}% digest line — recovery rounds work harder here, the measured rate clears it`);
   }
+  if (!recoveryViable) {
+    signals.push(`INFO: measured gap-avoidance ${Math.round(hazard.safe * 100)}% is under the ${(qStar * 100).toFixed(1)}% digest line — the ladder takes longer to repay; normal rounds still trade freely`);
+  }
+  if (hazard.p > 0.26) signals.push(`WARN: gap digits are ${Math.round(hazard.p * 100)}% of the stream (>26%) — the boundary is being hovered`);
   if (station.z > 3) signals.push(`WARN: gap-hazard drift across blocks (z ${station.z})`);
   if (runs.clusterRatio > 1.35) signals.push(`WARN: gap digits cluster (ξ ${runs.clusterRatio}) — both-lose events pair up`);
   if (crossing.asymmetry < -0.12) signals.push(`WARN: up-crossings dominate (${Math.round(crossing.asymmetry * 100)}% asymmetry) — both-lose risk elevated`);
@@ -746,8 +825,8 @@ export function evaluateTwinMarket(
   if (pNormAvg >= 1.0 && (pOver4 + pUnder5) >= 2.001) signals.push("normal pair pays over stakes (mOver+mUnder ≥ 2)");
 
   const reason = recoveryViable
-    ? `${displayName}: gap hazard ${Math.round(hazard.pWorst * 100)}% worst-case, q̂ ${Math.round(hazard.safeLcb * 100)}% ≥ ${(qStar * 100).toFixed(1)}% digest line, survival ${(sim.survival * 100).toFixed(0)}%`
-    : `${displayName}: refused — the recovery pair needs q ≥ ${(qStar * 100).toFixed(1)}% and this stream's worst case is ${Math.round(hazard.safeLcb * 100)}%`;
+    ? `${displayName}: measured gap-avoidance ${Math.round(hazard.safe * 100)}% clears the ${(qStar * 100).toFixed(1)}% digest line (worst case ${Math.round(hazard.safeLcb * 100)}%), survival ${(sim.survival * 100).toFixed(0)}%`
+    : `${displayName}: below the ${(qStar * 100).toFixed(1)}% digest line (measured q̂ ${Math.round(hazard.safe * 100)}%) — the ladder works harder here; normal rounds trade freely and the patience valve keeps recovery moving`;
 
   return {
     symbol,
@@ -765,6 +844,7 @@ export function evaluateTwinMarket(
     safeLcb: hazard.safeLcb,
     recoveryBreakEven: round(qStar),
     recoveryViable,
+    recoveryViableWorst,
     crossingRate: crossing.rate,
     crossingAsymmetry: crossing.asymmetry,
     runsZ: crossing.runsZ,

@@ -100,41 +100,81 @@ test("crossingStats: alternation raises the rate, blocks lower it", () => {
   assert.ok(b.rate < 0.05, `blocked stream should rarely cross, got ${b.rate}`);
 });
 
-// ── 3. Entry gate ─────────────────────────────────────────────────────────────
+// ── 3. Entry gate — the two lanes ────────────────────────────────────────────
 
-test("gate refuses when the current tick IS a gap digit (normal never forces)", () => {
-  const digits = noGap(300);
-  digits[digits.length - 1] = 4;
-  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.23, waitedTicks: 999, maxWaitTicks: 12 });
-  assert.equal(v.fire, false);
-  assert.match(v.reason, /gap digit 4/);
+test("fast lane FIRES on a fair uniform stream — the case the old gate refused forever", () => {
+  // A fair stream shows 4/5 ~20% of the time; its worst-case POSTERIOR bound
+  // sits above the old 0.23–0.29 ceilings most of the time, so the gate
+  // closed and the bot never traded. The fast lane judges the point rate
+  // instead and must fire.
+  const digits = uniform(600, 11);
+  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.30 });
+  assert.equal(v.fire, true, v.reason);
 });
 
-test("gate refuses on a boundary-crossing tick", () => {
+test("fast lane fires even when the current tick IS a gap digit (the pair is self-hedged)", () => {
+  // Entering on 4 or 5 only matters through the stream's overall 4/5 rate —
+  // on one settlement tick exactly one leg wins either way. A gap-free stream
+  // with a single trailing 4 must still trade.
+  const digits = noGap(300);
+  digits[digits.length - 1] = 4;
+  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.30, waitedTicks: 999, maxWaitTicks: 12 });
+  assert.equal(v.fire, true, v.reason);
+});
+
+test("fast lane fires on a crossing tick — crossings are priced by the window, not the instant", () => {
   const digits = noGap(300);
   digits[digits.length - 2] = 2;   // LOW
   digits[digits.length - 1] = 7;   // HIGH — crossed on last tick
-  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.99, crossedOnLastTick: true });
-  assert.equal(v.fire, false);
-  assert.match(v.reason, /crossing/);
+  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.30, crossedOnLastTick: true });
+  assert.equal(v.fire, true, v.reason);
 });
 
-test("gate RECOVERY forces fire after the patience valve instead of stranding debt", () => {
+test("fast lane refuses a pathologically 4/5-heavy stream", () => {
+  const digits = gapHeavy(300, 23, 0.45);
+  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.30 });
+  assert.equal(v.fire, false);
+  assert.match(v.reason, /gap rate/);
+});
+
+test("fast lane refuses an up-crossing-dominant stream (the both-lose trigger is hot)", () => {
+  // Long calm low side (no crossings), then a tail that climbs over the
+  // boundary twice and comes back down once: 2 up-crossings vs 1
+  // down-crossing in the recent window → asymmetry ≈ −0.33 < −0.2.
+  const digits: number[] = [];
+  for (let i = 0; i < 110; i++) digits.push(i % 2 === 0 ? 2 : 3);
+  digits.push(4, 5, 6, 3, 4, 5, 6, 7);
+  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.99 });
+  assert.equal(v.fire, false);
+  assert.match(v.reason, /up-crossings/);
+});
+
+test("recovery lane holds on a boundary digit, then the patience valve FORCES the fire", () => {
   const digits = gapHeavy(300, 17, 0.4);
-  const held = twinEntryGate({ digits, mode: "recovery", maxHazard: 0.26, waitedTicks: 3, maxWaitTicks: 12 });
+  const held = twinEntryGate({ digits, mode: "recovery", maxHazard: 0.40, waitedTicks: 3, maxWaitTicks: 12 });
   assert.equal(held.fire, false);
   assert.match(held.reason, /hazard|gap|cool-down/);
   // Past the valve, debt must be attacked even on an unfavourable stream —
   // and the verdict says FORCED because q̂ sits under the digest line.
-  const forced = twinEntryGate({ digits, mode: "recovery", maxHazard: 0.26, waitedTicks: 12, maxWaitTicks: 12, minSafeLcb: 0.83 });
+  const forced = twinEntryGate({ digits, mode: "recovery", maxHazard: 0.40, waitedTicks: 12, maxWaitTicks: 12, minSafe: 0.83 });
   assert.equal(forced.fire, true);
   assert.equal(forced.forced, true);
   assert.match(forced.reason, /forced/i);
 });
 
+test("recovery lane fires unforced when the measured safe rate clears the digest line", () => {
+  const digits = noGap(600, 9);
+  const v = twinEntryGate({
+    digits, mode: "recovery", maxHazard: 0.40, minSafe: 0.83,
+    waitedTicks: 0, maxWaitTicks: 8, ticksSinceBoundary: 5,
+  });
+  assert.equal(v.fire, true, v.reason);
+  assert.notEqual(v.forced, true);
+});
+
 test("gate fires on a clean gap-free stream away from the boundary", () => {
   const digits = noGap(600);
-  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.23, ticksSinceBoundary: 10 });
+  const v = twinEntryGate({ digits, mode: "normal", maxHazard: 0.30, ticksSinceBoundary: 10 });
   assert.equal(v.fire, true, v.reason);
 });
 
@@ -167,9 +207,21 @@ test("evaluateTwinMarket: gap-free market is recovery-viable, gap-heavy is not",
   const clean = evaluateTwinMarket("R_100", "Clean", noGap(400, 21), base);
   const hot = evaluateTwinMarket("R_50", "Hot", gapHeavy(400, 22, 0.42), base);
   assert.equal(clean.recoveryViable, true, clean.reason);
+  assert.equal(clean.recoveryViableWorst, true);
   assert.equal(hot.recoveryViable, false);
   assert.ok(clean.score > hot.score);
-  assert.ok(hot.signals.some(s => s.startsWith("BLOCKED")));
+  // The hostile boundary is WARNed about, not silently BLOCKed: the digest
+  // line is a badge and the gate is what holds the actual trades.
+  assert.ok(hot.signals.some(s => s.startsWith("WARN") || s.startsWith("INFO")));
+});
+
+test("evaluateTwinMarket: a fair uniform market is tradeable (score clears the floor, no BLOCKED signal)", () => {
+  // The regime that kept the bot idle: honest 20% gap rate, no structure.
+  // It must rank as a deployable market — the normal pair is self-hedged.
+  const base = { stake: 1, takeProfit: 10, stopLoss: 5, maxRecoverySteps: 3, markupPercent: 10, maxStake: 500 };
+  const fair = evaluateTwinMarket("R_75", "Fair", uniform(400, 41), base);
+  assert.ok(!fair.signals.some(s => s.startsWith("BLOCKED")), JSON.stringify(fair.signals));
+  assert.ok(fair.gapHazard <= 0.30, `gap ${fair.gapHazard}`);
 });
 
 test("screenAndRankTwin puts viable markets first and flags significance", () => {

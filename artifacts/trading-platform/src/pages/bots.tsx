@@ -6,7 +6,8 @@
  * specialist, arm its side/digit, set risk, and watch its own telemetry run.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -319,16 +320,40 @@ export default function Bots() {
 
   const { session, setSession } = useBotStatus(onConsoleSession);
   const { data, isLoading, isError, error, refetch } = useBotCatalogue();
+  const [location] = useLocation();
+
+  // `?open=<botId>` — deep link from the global live indicator ("Open" in the
+  // top-right chip): auto-opens that bot's live console. The param is kept in
+  // the URL on purpose, so refreshing the page re-opens the SAME live session
+  // (a bot must stay visible and controllable across refreshes).
+  const openParam = useMemo(() => {
+    const m = /[?&]open=([\w-]+)/.exec(location ?? "");
+    return m ? m[1] : null;
+  }, [location]);
+
+  useEffect(() => {
+    if (!openParam || !data) return;
+    if (data.bots.some(b => b.id === openParam)) setOpenBotId(openParam);
+  }, [openParam, data]);
 
   // The console's own SSE copy wins when it is open (it is more immediate);
   // otherwise fall back to the page-level session.
   const liveSession = sessionFromConsole ?? session;
-  const activeBotId = liveSession?.running ? liveSession.botId : null;
 
+  // A bot may be LIVE even when the page-level /status poll is pointing at a
+  // DIFFERENT engine (or the catalogue's own per-bot session says so). Merge
+  // both sources so a running bot is never rendered as idle — the root of the
+  // "it's trading but I can't see it" bug.
   const bots = (data?.bots ?? []).map(bot => ({
     ...bot,
-    session: liveSession?.running && liveSession.botId === bot.id ? liveSession : null,
+    session:
+      liveSession?.running && liveSession.botId === bot.id
+        ? liveSession
+        : (bot.session?.running ? bot.session : null),
   }));
+
+  const runningBot = bots.find(b => b.session?.running) ?? null;
+  const activeBotId = runningBot?.id ?? (liveSession?.running ? liveSession.botId : null);
 
   const openBot = bots.find(b => b.id === openBotId) ?? null;
 
@@ -355,12 +380,14 @@ export default function Bots() {
               <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
               <div>
                 <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Active Bot</p>
-                <p className="text-xs font-semibold text-primary">{liveSession?.botName ?? activeBotId}</p>
+                <p className="text-xs font-semibold text-primary">
+                  {runningBot?.session?.botName ?? liveSession?.botName ?? activeBotId}
+                </p>
               </div>
               <span className={`text-sm font-mono font-bold ${
-                (liveSession?.totalProfit ?? 0) >= 0 ? "text-green-400" : "text-red-400"
+                (runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0) >= 0 ? "text-green-400" : "text-red-400"
               }`}>
-                {(liveSession?.totalProfit ?? 0) >= 0 ? "+" : "-"}${Math.abs(liveSession?.totalProfit ?? 0).toFixed(2)}
+                {(runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0) >= 0 ? "+" : "-"}${Math.abs(runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0).toFixed(2)}
               </span>
             </div>
           ) : (

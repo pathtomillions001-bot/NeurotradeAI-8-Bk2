@@ -43,6 +43,7 @@ interface TwinCandidate {
   safeLcb: number;
   recoveryBreakEven: number;
   recoveryViable: boolean;
+  recoveryViableWorst?: boolean;
   crossingRate: number;
   crossingAsymmetry: number;
   stationarityZ: number;
@@ -364,8 +365,14 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                           <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
                             {isBest ? "Best boundary market" : "Selected from scan"}
                           </p>
-                          <span className={`text-[10px] font-mono ${c.recoveryViable ? "text-green-400" : "text-red-400"}`}>
-                            {c.recoveryViable ? "RECOVERY DIGESTS DEBT" : "BELOW DIGEST LINE"}
+                          <span className={`text-[10px] font-mono ${
+                            c.recoveryViable ? "text-green-400"
+                            : c.recoveryViableWorst ? "text-green-400/70"
+                            : "text-amber-300"
+                          }`}>
+                            {c.recoveryViable ? "RECOVERY DIGESTS DEBT"
+                              : c.recoveryViableWorst ? "DIGESTS ON MEASURED RATE"
+                              : "BELOW DIGEST LINE"}
                           </span>
                         </div>
                         <p className="text-sm font-bold text-white">{c.displayName}</p>
@@ -382,41 +389,40 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                         <p className="text-[9px] text-muted-foreground leading-relaxed">{c.reason}</p>
                       </div>
 
-                      {c.recoveryViable ? (
-                        <>
-                          {borderline && (
-                            <p className="text-[10px] text-muted-foreground leading-relaxed px-1">
-                              This market clears the digest line but not the scan's full deployment bar.
-                              Deploying it is a deliberate choice — the bot keeps measuring and the
-                              switch button lets it move on when the boundary structure cools.
-                            </p>
-                          )}
-                          {/* Match-Nexus placement: the two deploy actions, stacked, under the card. */}
-                          <div className="space-y-2">
-                            <Button onClick={() => handleDeploy(c, "locked")} disabled={loading}
-                                    className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                              <Lock className="w-4 h-4 mr-2" />
-                              {borderline ? `Lock ${c.displayName} anyway` : `Trade Locked on ${c.displayName}`}
-                            </Button>
-                            <Button onClick={() => handleDeploy(c, "switching")} disabled={loading}
-                                    variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
-                              <Shuffle className="w-3.5 h-3.5 mr-2" />
-                              {borderline ? "Start with Smart Market Switching" : "Trade with Smart Market Switching"}
-                            </Button>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-2.5">
-                          <p className="text-[10px] text-amber-200 leading-relaxed flex items-start gap-1.5">
-                            <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
-                            <span>
-                              Below the digest line: on this stream BOTH recovery legs lose too often for the
-                              ladder to repay itself, so deploying it is disabled. Select another market below
-                              or re-scan — the boundary structure moves.
-                            </span>
-                          </p>
-                        </div>
+                      {/* Deploy is ALWAYS available — the digest line is a badge, not a
+                          veto. Normal rounds are self-hedged and trade freely on any
+                          measured market; the recovery lane's patience valve keeps the
+                          ladder moving even below the line. */}
+                      {!c.recoveryViable && (
+                        <p className="text-[10px] text-amber-200/90 leading-relaxed px-1 flex items-start gap-1.5">
+                          <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                          <span>
+                            Below the digest line: recovery rounds work harder here, but the normal
+                            pair (Over 4 + Under 5) is self-hedged and trades freely, and the
+                            patience valve keeps recovery moving. Select another market below if
+                            you want the measured digest — the boundary structure moves.
+                          </span>
+                        </p>
                       )}
+                      {borderline && (
+                        <p className="text-[10px] text-muted-foreground leading-relaxed px-1">
+                          This market did not clear the scan's full suitability bar.
+                          Deploying it is a deliberate choice — the bot keeps measuring and the
+                          switch button lets it move on when the boundary structure cools.
+                        </p>
+                      )}
+                      <div className="space-y-2">
+                        <Button onClick={() => handleDeploy(c, "locked")} disabled={loading}
+                                className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
+                          <Lock className="w-4 h-4 mr-2" />
+                          {borderline ? `Lock ${c.displayName} anyway` : `Trade Locked on ${c.displayName}`}
+                        </Button>
+                        <Button onClick={() => handleDeploy(c, "switching")} disabled={loading}
+                                variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
+                          <Shuffle className="w-3.5 h-3.5 mr-2" />
+                          {borderline ? "Start with Smart Market Switching" : "Trade with Smart Market Switching"}
+                        </Button>
+                      </div>
                     </>
                   );
                 })()}
@@ -428,11 +434,13 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                       const isSel = c.symbol === (scanResult.allScored.find(x => x.symbol === selectedSym)?.symbol ?? scanResult.best?.symbol);
                       return (
                         <button key={c.symbol} onClick={() => setSelectedSym(c.symbol)}
-                                title={c.recoveryViable ? c.reason : "Recovery pair cannot digest debt on this stream"}
+                                title={c.reason}
                                 className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs text-left transition-colors ${
                                   isSel ? `${a.panelBorder} ${a.panelBg} ring-1 ring-inset` : "border border-transparent bg-white/[0.03] hover:bg-white/[0.07]"
                                 }`}>
-                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${c.recoveryViable ? "bg-green-400" : "bg-red-400"}`} />
+                          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                            c.recoveryViable ? "bg-green-400" : c.recoveryViableWorst ? "bg-green-400/50" : "bg-amber-400"
+                          }`} />
                           <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
                           <span className="font-mono text-[10px] text-muted-foreground/70">
                             q̂ {pct(c.safeLcb)}/{pct(c.recoveryBreakEven)}

@@ -27,6 +27,7 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
+import { registerLiveBot } from "./live-registry";
 import {
   evaluateNexusCandidate,
   screenNexusCandidates,
@@ -453,6 +454,9 @@ export async function startSession(config: NexusConfig): Promise<{ ok: boolean; 
     activeRead: config.lockedAnalysis ?? null,
     message: `🔮 Match Nexus live — ${config.marketMode === "locked" ? `locked on ${config.displayName}` : "switching mode"} · Matches ${config.digit} · τ ${config.card.tau.toFixed(2)}σ · gap ${config.card.gapStats.currentGap}t · hazard ×${config.card.gapStats.hazardRelative.toFixed(2)}`,
   });
+
+  // Publish to the cross-session live registry (lib/live-registry.ts).
+  registerLiveBot("match-nexus", () => getStatus());
 
   const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
   runWithSessionId(loopSessionId, () => runLoop(config).catch(err => {

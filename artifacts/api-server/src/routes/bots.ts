@@ -24,6 +24,7 @@ import {
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import * as twinHedge from "../lib/twin-hedge-engine";
+import { listLiveBots } from "../lib/live-registry";
 import * as accumulator from "../lib/accumulator-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
@@ -1140,6 +1141,10 @@ router.post("/nexus/stop", (req, res) => {
 router.get("/status", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
+  // Twin-Lock was missing from this chain — a running Twin session was
+  // invisible to the page-level status poll (the "background bot" bug).
+  const twin = visibleTwinStatus(req.sessionId);
+  if (twin.running) { res.json(twin); return; }
   const accu = visibleAccumulatorStatus(req.sessionId);
   if (accu.running) { res.json(accu); return; }
   const shot = visibleKillShotStatus(req.sessionId);
@@ -1149,6 +1154,46 @@ router.get("/status", (req, res) => {
   const fam = visibleFamilyStatus(req.sessionId);
   if (fam.running) { res.json(fam); return; }
   res.json(visibleStatus(req.sessionId));
+});
+
+// ── Live sessions — the source of truth for "what is trading right now" ─────
+//
+// `GET /status` returns ONE engine (the first it finds) and `GET /` only
+// annotates the catalogue, so a page that polls the wrong engine — or a
+// refreshed tab that never opened the running bot's console — could watch a
+// bot trade in the background with nothing on screen. The layout's live
+// indicator polls THIS endpoint (plus the SSE `bot_update` stream for
+// immediacy), so every engine running for this session is visible, openable
+// and stoppable from any page, immediately after a refresh.
+//
+// Privacy follows the same rule as every other status endpoint: the full
+// status is only visible to the session that owns the engine; any other
+// session sees a minimal `{ running: true, masked: true }` marker, so a
+// background engine is never silently invisible — without leaking one
+// visitor's telemetry to another.
+
+router.get("/live", (req, res) => {
+  const entries: Array<{ botId: string; botName: string; console: string; status: unknown }> = [];
+
+  // Every engine that is actually running, read through the cross-session
+  // live registry: each registration is probed under its OWNING session's
+  // context, so engines started by other tabs/sessions are visible here too
+  // (engine state is session-scoped — a direct isRunning() call from this
+  // request's context would only ever see THIS session's own engines).
+  for (const { ownerSessionId, status } of listLiveBots()) {
+    const botId = String(status.botId);
+    const def = getBotDefinition(botId);
+    const console_ = def ? botConsoleId(def) : "specialist@1";
+    entries.push(
+      ownerSessionId === req.sessionId
+        ? { botId, botName: status.botName ?? def?.name ?? botId, console: console_, status }
+        : { botId, botName: status.botName ?? def?.name ?? botId, console: console_, status: { running: true, masked: true } },
+    );
+  }
+
+  // The engine arbiter allows at most ONE executor per account, so entries
+  // from different accounts are the multi-tab case only.
+  res.json({ bots: entries, activeBotId: entries[0]?.botId ?? null });
 });
 
 // ── Scan (specialist) ─────────────────────────────────────────────────────────

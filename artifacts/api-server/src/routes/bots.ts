@@ -24,6 +24,7 @@ import {
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import * as twinHedge from "../lib/twin-hedge-engine";
+import * as accumulator from "../lib/accumulator-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
 import * as matchNexus from "../lib/match-nexus-engine";
@@ -181,12 +182,105 @@ function visibleStatus(sessionId: string) {
   };
 }
 
+// ── Accumulator Edge Navigator ────────────────────────────────────────────────
+
+function visibleAccumulatorStatus(sessionId: string) {
+  const status = accumulator.getStatus();
+  const owner = accumulator.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return {
+    ...status,
+    running: false,
+    sessionId: null,
+    config: undefined,
+    accumulator: undefined,
+    topMarkets: [],
+    message: "Accumulator console ready",
+  };
+}
+
+router.get("/accumulator/status", (req, res) => {
+  res.json(visibleAccumulatorStatus(req.sessionId));
+});
+
+router.post("/accumulator/scan", async (req, res): Promise<void> => {
+  const parsed = accumulator.validateAccumulatorConfig(req.body ?? {});
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  try {
+    const result = await accumulator.scanAccumulatorMarkets(req.sessionId, parsed.params);
+    res.json(result);
+  } catch (err) {
+    logger.error({ err }, "Accumulator scan failed");
+    res.status(500).json({ error: "Accumulator scan failed" });
+  }
+});
+
+router.post("/accumulator/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const parsed = accumulator.validateAccumulatorConfig(body);
+  if (!parsed.ok) {
+    res.status(400).json({ error: parsed.error });
+    return;
+  }
+  const symbol = typeof body.symbol === "string" ? body.symbol : "";
+  if (!isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: "Run the ACCU analysis first — a measured market is required" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find((item) => item.symbol === symbol);
+  const analysis = body.analysis;
+  if (!analysis || analysis.symbol !== symbol || analysis.deployable !== true) {
+    res.status(400).json({ error: "This bot only deploys a candidate whose conservative survival and lower-EV gates passed" });
+    return;
+  }
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  const owner = accumulator.getOwnerSessionId();
+  if (accumulator.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running the Accumulator bot. Your Deriv account was not touched." });
+    return;
+  }
+  const result = await accumulator.startSession({
+    ownerSessionId: req.sessionId,
+    symbol,
+    displayName: market?.displayName ?? String(body.displayName ?? symbol),
+    marketMode,
+    stake: parsed.params.stake,
+    stopLoss: parsed.params.stopLoss,
+    takeProfit: parsed.params.takeProfit,
+    maxRecoverySteps: parsed.params.maxRecoverySteps,
+    growthRate: parsed.params.growthRate,
+    targetTicks: Number(analysis.targetTicks) || parsed.params.targetTicks,
+    durationTicks: Number(analysis.durationTicks) || parsed.params.durationTicks,
+    analysis,
+    rankedCandidates: Array.isArray(body.ranked) ? body.ranked : [analysis],
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: visibleAccumulatorStatus(req.sessionId) });
+});
+
+router.post("/accumulator/stop", (req, res) => {
+  const owner = accumulator.getOwnerSessionId();
+  if (accumulator.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's accumulator." });
+    return;
+  }
+  accumulator.stopSession();
+  res.json({ ok: true, status: visibleAccumulatorStatus(req.sessionId) });
+});
+
 // ── Catalogue ─────────────────────────────────────────────────────────────────
 
 router.get("/", (req, res) => {
   const status = visibleStatus(req.sessionId);
   const dual = visibleDualStatus(req.sessionId);
   const twin = visibleTwinStatus(req.sessionId);
+  const accu = visibleAccumulatorStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
   const nexus = visibleNexusStatus(req.sessionId);
@@ -200,6 +294,9 @@ router.get("/", (req, res) => {
       }
       if (bot.id === twinHedge.TWIN_HEDGE_BOT_ID) {
         return { ...bot, console: console_, session: twin.running ? twin : null };
+      }
+      if (bot.id === accumulator.ACCUMULATOR_BOT_ID) {
+        return { ...bot, console: console_, session: accu.running ? accu : null };
       }
       if (bot.id === killshot.KILLSHOT_BOT_ID) {
         return { ...bot, console: console_, session: shot.running ? shot : null };
@@ -219,6 +316,7 @@ router.get("/", (req, res) => {
     activeBotId: pickActiveBotId([
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
       { botId: twinHedge.TWIN_HEDGE_BOT_ID, running: twin.running },
+      { botId: accumulator.ACCUMULATOR_BOT_ID, running: accu.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: matchNexus.MATCH_NEXUS_BOT_ID, running: nexus.running },
       { botId: fam.botId ?? null, running: fam.running },
@@ -767,15 +865,16 @@ router.post("/family/start", async (req, res): Promise<void> => {
     }
     let lockedSymbol: string | undefined;
     if (marketMode === "locked") {
-      if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
-        res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+      // The selected scan card is itself the lock. Older web bundles omitted
+      // lockedSymbol on the Locked button, so default to the measured market.
+      const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
+        ? body.lockedSymbol
+        : requested;
+      if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
+        res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
         return;
       }
-      if (!isAutomatedMarket(body.lockedSymbol)) {
-        res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
-        return;
-      }
-      lockedSymbol = body.lockedSymbol;
+      lockedSymbol = requestedLocked;
     }
     const card = body.card ?? body.analysis?.card;
     if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
@@ -841,15 +940,16 @@ router.post("/family/start", async (req, res): Promise<void> => {
 
   let lockedSymbol: string | undefined;
   if (marketMode === "locked") {
-    if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
-      res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+    // The selected scan card is itself the lock. Older web bundles omitted
+    // lockedSymbol on the Locked button, so default to the measured market.
+    const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
+      ? body.lockedSymbol
+      : requested;
+    if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
+      res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
       return;
     }
-    if (!isAutomatedMarket(body.lockedSymbol)) {
-      res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
-      return;
-    }
-    lockedSymbol = body.lockedSymbol;
+    lockedSymbol = requestedLocked;
   }
 
   const card = body.card ?? body.analysis?.card;
@@ -978,15 +1078,17 @@ router.post("/nexus/start", async (req, res): Promise<void> => {
   }
   let lockedSymbol: string | undefined;
   if (marketMode === "locked") {
-    if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
-      res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+    // The selected scan card is itself the lock. Older web bundles omitted
+    // lockedSymbol on the Locked button, so default to the measured market
+    // instead of turning an otherwise valid post-analysis click into a 400.
+    const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
+      ? body.lockedSymbol
+      : requested;
+    if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
+      res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
       return;
     }
-    if (!isAutomatedMarket(body.lockedSymbol)) {
-      res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
-      return;
-    }
-    lockedSymbol = body.lockedSymbol;
+    lockedSymbol = requestedLocked;
   }
   const card = body.card ?? body.analysis?.card;
   if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
@@ -1010,7 +1112,9 @@ router.post("/nexus/start", async (req, res): Promise<void> => {
     lockedSymbol,
     symbol: market.symbol,
     displayName: market.displayName,
-    digit: Number.isInteger(body.digit) ? Number(body.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5),
+    digit: Number.isInteger(body.digit)
+      ? Number(body.digit)
+      : (Number.isInteger(body.analysis?.digit) ? Number(body.analysis.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5)),
     card,
     lockedAnalysis: body.analysis,
   });
@@ -1036,6 +1140,8 @@ router.post("/nexus/stop", (req, res) => {
 router.get("/status", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
+  const accu = visibleAccumulatorStatus(req.sessionId);
+  if (accu.running) { res.json(accu); return; }
   const shot = visibleKillShotStatus(req.sessionId);
   if (shot.running) { res.json(shot); return; }
   const nexus = visibleNexusStatus(req.sessionId);
@@ -1111,15 +1217,16 @@ router.post("/:botId/start", async (req, res): Promise<void> => {
     }
     let lockedSymbol: string | undefined;
     if (marketMode === "locked") {
-      if (typeof body.lockedSymbol !== "string" || !body.lockedSymbol) {
-        res.status(400).json({ error: "lockedSymbol is required in locked-market mode" });
+      // The selected scan card is itself the lock. Older web bundles omitted
+      // lockedSymbol on the Locked button, so default to the measured market.
+      const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
+        ? body.lockedSymbol
+        : requested;
+      if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
+        res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
         return;
       }
-      if (!isAutomatedMarket(body.lockedSymbol)) {
-        res.status(400).json({ error: `${body.lockedSymbol} cannot be analysed or traded by this bot` });
-        return;
-      }
-      lockedSymbol = body.lockedSymbol;
+      lockedSymbol = requestedLocked;
     }
     const card = body.card ?? body.analysis?.card;
     if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {

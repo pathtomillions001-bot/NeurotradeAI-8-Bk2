@@ -29,6 +29,8 @@ export const WEB_CONSOLE_IDS = [
   "killshot-family@1",
   /** Twin-Lock Hedge Sentinel — paired same-tick execution, both-lost recovery. */
   "twin-hedge@1",
+  /** Accumulator Edge Navigator — broker-aware compounding/knockout console. */
+  "accumulator@1",
 ] as const;
 
 export type WebConsoleId = (typeof WEB_CONSOLE_IDS)[number];

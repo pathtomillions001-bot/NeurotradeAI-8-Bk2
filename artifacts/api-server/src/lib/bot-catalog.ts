@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "twinhedge";
+  family: SpecialistFamily | "duallock" | "killshot" | "twinhedge" | "accumulator";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -64,6 +64,8 @@ export interface BotDefinition {
    * The UI renders a dedicated console for this bot.
    */
   twinHedge?: boolean;
+  /** Accumulator console: broker-constrained compounding and knockout risk. */
+  accumulator?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -399,6 +401,34 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalPayout: "8.93×",
   },
   {
+    id: "accumulators",
+    name: "Accumulator Edge Navigator",
+    code: "BOT-ACCU",
+    family: "accumulator",
+    contractLabel: "ACCU · compounded growth",
+    tagline: "Survive the range · compound carefully",
+    description:
+      "A dedicated Accumulator console for Deriv ACCU contracts. It measures price-return volatility, a two-state safe/knockout Markov model, block-bootstrap survival, regime heat and the compounded break-even line before it allows an entry. Growth rate, contract duration and take-profit are kept distinct: the broker's dynamic barrier is discovered at runtime, and a knockout is booked as a full-stake loss.",
+    edge: [
+      "Broker-aware ACCU flow: contracts_for → proposal with growth_rate and exchange-side take_profit → live open-contract monitor → pooled-socket sell",
+      "Compounded economics: target ticks use (1 + growth rate)^ticks, so the gate compares conservative survival with 1 / compounded factor rather than a digit-bot payout multiplier",
+      "Dynamic-barrier screening with broker quote preferred and an explicitly labelled fallback estimate when metadata is unavailable",
+      "Block bootstrap preserves short-range dependence; a safe/knockout Markov read catches hazard after a recent shock and a hot-volatility regime pauses entries",
+      "Early close and market switching are risk controls, not profit guarantees; a full-stake knockout, account limits and stale-feed conditions stop the loop",
+      "Accumulator recovery sizes against actual compounded net return and records the actual net profit or full-stake loss into the shared account ledger",
+    ],
+    accent: "orange",
+    icon: "trend",
+    accumulator: true,
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "ACCU growth contract", contracts: ["ACCU"], desc: "The engine selects a broker-supported growth rate and market after survival analysis" },
+    ],
+    nominalWinRate: "survival measured live",
+    nominalPayout: "compounds per tick",
+  },
+  {
     id: "twinhedge",
     name: "Twin-Lock Hedge Sentinel",
     code: "BOT-TWINHEDGE",
@@ -456,6 +486,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
+  if (bot.accumulator) return "accumulator@1";
   if (bot.twinHedge) return "twin-hedge@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";

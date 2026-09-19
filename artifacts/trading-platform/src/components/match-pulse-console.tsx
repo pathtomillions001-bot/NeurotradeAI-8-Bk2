@@ -1,4 +1,26 @@
-/** Match Pulse follows the specialist console flow: settings → scan → deploy → monitor. */
+/**
+ * Match Pulse console — Matches-only specialist with strict contract lock.
+ *
+ * Frontend spec (from screenshots + user text):
+ * - Contract Sovereignty / Strict Contract Lock / Matches only
+ * - AI selects the digit. Normal and recovery trades stay in Matches.
+ * - Trading account [Connect an account]
+ * - Risk Parameters / Session Boundaries: Base stake, Take profit, Stop loss, Stop after losses
+ * - Recovery Engine / Match Sniper policy: Debt + markup recovery, Max recovery steps, Markup on debt
+ * - Same debt-based recovery as Match Sniper. Markup saves automatically and is shared by the bots.
+ * - Neural Scan All Markets
+ *
+ * Backend sync (verified):
+ * - Engine: lib/match-pulse-engine.ts — tick-guarded lifecycle, one order in flight,
+ *   quote-time AND socket-send checks, post-loss cooling, same debt+markup recovery
+ *   as Match Sniper (lib/agents/recovery-engine.ts + recovery-math.ts)
+ * - Analysis: lib/match-pulse-analysis.ts — all 10 digits, order-0/1/2 conditional models,
+ *   chronological validation + untouched audit, evidence correction
+ * - Execution: lib/match-pulse-execution.ts — broker-feed checks, payout verification,
+ *   session-isolated via lib/session.ts + engine-arbiter.ts
+ * - API: /api/bots/match-pulse/scan, /start, /stop, /status — session-scoped receipt
+ * - Console ID: match-pulse@1 (bot-catalog.ts ↔ console-contract.ts ↔ console-registry.ts)
+ */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { motion } from "framer-motion";

@@ -1,15 +1,26 @@
 /**
- * Twin-Hedge Edge console (auto-configured twin pair).
+ * Twin-Hedge Edge console — auto-configured twin pair, 4/5 dead-zone hunter.
  *
- * The user sets ONE thing: risk. The contract plan is fixed —
+ * Frontend spec (from screenshots + user text):
+ * - Auto-configured pairs · equal stakes · same tick
+ * - Normal shot: Over 4 + Under 5 — Complementary, exactly one leg always wins (1.95×). Net −5%: price of hedge.
+ * - Recovery shot: Over 5 + Under 4 — Wins +143% net on any digit but 4/5. The 4/5 dead zone is what analysis hunts.
+ * - No pair picker, no digit picker, no market picker — AI measures every market,
+ *   keeps closed digit out of {4,5} at every gated entry, decides locked vs switching itself.
+ * - Stake per leg (normal shot) USD, Take profit USD, Stop loss USD, Max recovery steps
+ * - Recovery stakes are not yours to set — shared ledger sizes them from debt (markup from Settings),
+ *   exactly like every other bot. Both legs of a shot always carry SAME stake and open on SAME tick.
  *
- *   normal   : Over 4 + Under 5   (equal stakes, same tick — one leg always wins)
- *   recovery : Over 5 + Under 4   (equal stakes, same tick — dead zone {4,5})
- *
- * and the market + its mode (locked/switching) are DECIDED BY THE ANALYSIS.
- * The console is the control room: measure all markets, read what the
- * out-of-sample simulation found, deploy, and watch the 4/5 gate work —
- * including the same-tick proof strip for every shot.
+ * Backend sync (verified):
+ * - Engine: lib/twin-avoid-engine.ts — three-fused 4/5 model (forgetting Dirichlet half-life 69 ticks
+ *   + order-1 Markov on last digit + order-2 Markov on last two digits, inverse-variance fused),
+ *   hard vetos (4/5 hot cluster 3+ of last 6, post-4/5 state, >22% baseline, post-loss cooldown),
+ *   worst-case gate P̂(4/5)+1.25σ < baseline, self-referential bars (30th percentile recovery / 55th normal),
+ *   out-of-sample survival P(TP before SL), market mode decided by analysis (clear winner LOCKED,
+ *   tight cluster SWITCHING with hysteresis), Page–Hinkley live 4/5 drift monitor, shared recovery ledger
+ * - Analysis: lib/twin-avoid-analysis.ts — OOS replay with exact engine rules
+ * - API: /api/bots/twin/scan, /start, /stop, /status — session-isolated, single-executor arbiter
+ * - Console ID: twin-hedge@2 (bumped 2026-09-18 from v1 → v2 for new UI/flow)
  */
 
 import { useState, useEffect, useCallback } from "react";

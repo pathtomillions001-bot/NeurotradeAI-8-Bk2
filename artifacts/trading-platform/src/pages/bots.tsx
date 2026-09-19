@@ -19,6 +19,7 @@ import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
 import { KillShotFamilyConsole } from "@/components/killshot-family-console";
 import { TwinHedgeConsole } from "@/components/twin-hedge-console";
+import { AccumulatorConsole } from "@/components/accumulator-console";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
 
@@ -332,14 +333,23 @@ export default function Bots() {
       )}
 
       {/* ── Console ────────────────────────────────────────────────────── */}
-      {/* Five consoles for five lifecycles:
+      {/* Six consoles for six lifecycles:
+          · accumulator           — compounding range: survival, EV ladder, market rotation
           · twinHedge             — two legs, one market, same tick (adaptive skew)
           · killShotFamily        — family oracle (locked or auto-switching)
           · oneShot (Kill-Shot)   — choose one contract → AI locks one market → wait
           · preLocked (Dual-Lock) — scan once → freeze the pair → run non-stop
           · everything else       — configure per trade */}
       <AnimatePresence>
-        {openBot?.twinHedge ? (
+        {openBot?.accumulator ? (
+          <AccumulatorConsole
+            bot={openBot}
+            open={openBotId !== null}
+            onOpenChange={open => { if (!open) setOpenBotId(null); }}
+            session={liveSession}
+            onSession={setSession}
+          />
+        ) : openBot?.twinHedge ? (
           <TwinHedgeConsole
             bot={openBot}
             open={openBotId !== null}

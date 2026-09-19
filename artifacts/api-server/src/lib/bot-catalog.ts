@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "twin";
+  family: SpecialistFamily | "duallock" | "killshot" | "twin" | "accumulator";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -57,6 +57,12 @@ export interface BotDefinition {
   killShotFamily?: KillShotFamily;
   /** Twin-Hedge Edge — places TWO complementary legs on the SAME tick. */
   twinHedge?: boolean;
+  /**
+   * Compounding Range Sentinel — the accumulator bot. The UI renders a console
+   * with a growth-rate picker, a horizon read-out and the live survival/EV
+   * table instead of the digit/barrier controls the other families use.
+   */
+  accumulator?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -397,6 +403,41 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "80%+ at gated entries",
     nominalPayout: "1.95× / 2.43× legs",
+  },
+  {
+    id: "accumulator",
+    name: "Compounding Range Sentinel",
+    code: "BOT-ACCU",
+    family: "accumulator",
+    accumulator: true,
+    contractLabel: "Accumulator (range compounding)",
+    tagline: "Range survival · measured, never assumed",
+    description:
+      "Buys Accumulator contracts — the only deal in this app where the payout compounds and the position can be sold at any tick. It does not predict direction. It measures how often the index actually stays inside the range Deriv's own barrier defines, compares that with the break-even the compounding rate demands, and trades only when the measured survival beats it with statistical significance. When the market stops agreeing with the measurement it sells the position at par and moves to the market that does.",
+    edge: [
+      "THE WHOLE GAME IS ONE NUMBER — λ = p·(1+g). Expected value multiplies by λ every tick, so holding n ticks is worth λⁿ. Deriv sizes the range so a fresh band is exactly fair (published R_10 bands are σ_tick × the 99%/95% quantiles to four significant figures), which means the only honest edge is realized volatility coming in BELOW the volatility the barrier was built from — and that ratio is measurable from thousands of ticks",
+      "MEASURED, NOT MODELLED — the empirical survival curve is Kaplan–Meier over consecutive in-range runs (Deriv's own Stats list), so the payout schedule (contractual, exact) and the survival curve (measured, with a confidence band) are both known and their product is the EV curve. The bot holds to the horizon where the LOWER confidence bound of that product peaks",
+      "EVERY CANDIDATE IS FDR-CONTROLLED — the scan tests every market × growth rate and puts the p-values through Benjamini–Hochberg, because the best of 100 noise draws always looks like an edge",
+      "REFUSAL IS A FEATURE — when nothing clears break-even, the bot says so and holds fire. A compounding contract cannot be rescued by an exit rule or a bigger stake once λ ≤ 1, so 'no trade' is the correct output and the console shows exactly why",
+      "SELL-AT-PAR RISK MANAGEMENT — the position can be sold at any tick, so a deteriorating market is closed near par instead of ridden to a 100% loss. Page–Hinkley, a Wald SPRT with stated error probabilities and a Bernoulli CUSUM watch the live in-range rate; two flags cash the contract out, and the exchange-side take-profit still guarantees the target even if the process dies",
+      "RECOVERY BY HORIZON, NEVER BY MARTINGALE — a loss is always the WHOLE stake, so escalating the stake only enlarges what the next breach destroys. Debt is cleared by holding longer: n* = ⌈ln(1+D/stake)/ln(1+g)⌉, which is logarithmic in the debt. The bot proves the flat-stake ladder dominates the doubled one on identical ticks, and refuses the recovery outright when the measured survival cannot carry the horizon",
+      "MARKOV ENTRY STATE — a 4-state magnitude chain (tight / normal / wide / breach) reads P(next tick stays in range | the state the market is in right now), with Krichevsky–Trofimov smoothing, so entries are conditioned on the volatility state rather than the unconditional average",
+      "ROTATION, NOT RESIGNATION — locked mode holds one market and raises the alert; switching mode closes a market whose measured edge has died and immediately moves the session to whichever market now measures best",
+    ],
+    accent: "teal",
+    icon: "activity",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      {
+        id: "both",
+        label: "Accumulator",
+        contracts: ["ACCU"],
+        desc: "One compounding range contract — growth rate chosen, horizon measured",
+      },
+    ],
+    nominalWinRate: "measured per market",
+    nominalPayout: "(1+g)^n",
   },
 ];
 

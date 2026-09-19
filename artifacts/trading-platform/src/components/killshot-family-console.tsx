@@ -1,11 +1,5 @@
 /**
- * Kill-Shot Family Oracle console (Over/Under · Even/Odd · Matches/Differs).
- *
- * Same measurement as the Kill-Shot Oracle, but presented simply. The bot owns a
- * contract family; the user picks the side (and digit where it applies), chooses
- * LOCKED market (the edge may move, the market won't) or SWITCHING (the bot
- * moves to the best market), and the session runs to TP, SL or stop. No walls of
- * numbers: one verdict, one measured line, one reason.
+ * Kill-Shot Family Oracle console (Over/Under · Even/Odd · Matches/Differs + Match Nexus).
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -115,8 +109,9 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   });
   const { data: settings } = useGetSettings();
 
-  const family: Family = bot?.killShotFamily ?? "overunder";
-  const [side, setSide] = useState<string>("both");
+  const isNexus = bot?.id === "match-nexus";
+  const family: Family = isNexus ? "matchdiffer" : (bot?.killShotFamily ?? "overunder");
+  const [side, setSide] = useState<string>(isNexus ? "match" : "both");
   const [digit, setDigit] = useState<number>(5);
   const [overDigit, setOverDigit] = useState<number>(4);
   const [underDigit, setUnderDigit] = useState<number>(6);
@@ -126,6 +121,10 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   const [config, setConfig] = useState({ stake: 1, takeProfit: 10, stopLoss: 5, maxRecoverySteps: 3 });
   const set = <K extends keyof typeof config>(k: K, v: number) =>
     setConfig(prev => ({ ...prev, [k]: v }));
+
+  useEffect(() => {
+    if (isNexus) setSide("match");
+  }, [isNexus, open]);
 
   useEffect(() => {
     if (!settings) return;
@@ -144,13 +143,11 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
       const m = (session?.config as any)?.marketMode;
       if (m === "locked" || m === "switching") setMarketMode(m);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRunning]);
   useEffect(() => {
     if (!open) return;
     setScanResult(null);
     setStep(isRunning ? "running" : "config");
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   const applyStatus = useCallback((d: BotSessionStatus) => onSession(d), [onSession]);
@@ -187,15 +184,21 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   const a = ACCENTS[bot.accent];
   const Icon = BOT_ICON[bot.icon] ?? Target;
 
-  const sideLabels: Record<string, string> = family === "overunder"
-    ? { over: "Over only", under: "Under only", both: "Over & Under" }
-    : family === "parity"
-      ? { even: "Even only", odd: "Odd only", both: "Even & Odd" }
-      : { match: "Matches", differ: "Differs", both: "Matches & Differs" };
-  const sideOptions = family === "overunder" ? ["over", "under", "both"]
+  const sideLabels: Record<string, string> = isNexus
+    ? { match: "Matches — Quantum Singularity" }
+    : family === "overunder"
+      ? { over: "Over only", under: "Under only", both: "Over & Under" }
+      : family === "parity"
+        ? { even: "Even only", odd: "Odd only", both: "Even & Odd" }
+        : { match: "Matches", differ: "Differs", both: "Matches & Differs" };
+  const sideOptions = isNexus ? ["match"] : family === "overunder" ? ["over", "under", "both"]
     : family === "parity" ? ["even", "odd", "both"] : ["match", "differ", "both"];
 
   const contractLabel = () => {
+    if (isNexus) {
+      const d = aiDigit ? "AI picks best digit" : `Digit ${digit}`;
+      return `Matches (Quantum) · ${d}`;
+    }
     if (family === "parity") return sideLabels[side]!;
     if (family === "overunder") {
       if (side === "over") return `Over ${overDigit}`;
@@ -207,7 +210,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   };
 
   const buildBody = () => {
-    const body: Record<string, unknown> = { botId: bot.id, side, certainty, ...config };
+    const body: Record<string, unknown> = { botId: bot.id, side: isNexus ? "match" : side, certainty, ...config };
     if (family === "overunder") {
       if (side === "over" || side === "both") body.overDigit = overDigit;
       if (side === "under" || side === "both") body.underDigit = underDigit;
@@ -217,13 +220,17 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
     return body;
   };
 
+  const scanEndpoint = isNexus ? "/api/bots/nexus/scan" : "/api/bots/family/scan";
+  const startEndpoint = isNexus ? "/api/bots/nexus/start" : "/api/bots/family/start";
+  const stopEndpoint = isNexus ? "/api/bots/nexus/stop" : "/api/bots/family/stop";
+
   const handleScan = async () => {
     setLoading(true);
     setStep("scanning");
     setScanResult(null);
     setProgress({ scanning: null, scanned: 0, total: 19 });
     try {
-      const res = await fetch("/api/bots/family/scan", {
+      const res = await fetch(scanEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(buildBody()),
@@ -241,7 +248,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   const handleStart = async (c: Candidate, mode: "locked" | "switching") => {
     setLoading(true);
     try {
-      const res = await fetch("/api/bots/family/start", {
+      const res = await fetch(startEndpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -261,7 +268,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
       setStep("running");
       toast.success(
         mode === "locked"
-          ? `🔒 Locked on ${c.displayName} — the edge may move, the market won't`
+          ? `🔒 Locked on ${c.displayName} — edge rotates, market won't`
           : `🔁 Deployed on ${c.displayName} — auto-switching when it cools`,
       );
     } catch {
@@ -272,7 +279,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   const handleStop = async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/bots/family/stop", { method: "POST" });
+      const res = await fetch(stopEndpoint, { method: "POST" });
       const data = await res.json();
       onSession(data.status ?? null);
       toast.success("Session stopped");
@@ -322,7 +329,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
             aria-label={`${bot.name} console`}
             className={`fixed bottom-20 right-4 z-50 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border ${a.panelBorder} bg-[#080d17] shadow-2xl ${a.cardGlow}`}
           >
-            {/* Header */}
             <div className={`flex items-center justify-between gap-2 p-4 border-b border-white/5 bg-gradient-to-r ${a.headerGrad}`}>
               <div className="flex items-center gap-2.5 min-w-0">
                 <div className={`w-9 h-9 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}>
@@ -342,13 +348,11 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
               </button>
             </div>
 
-            {/* CONFIG */}
             {step === "config" && (
               <div className="p-4 space-y-4">
-                {/* Side */}
                 <div className="space-y-1.5">
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Side</p>
-                  <div className="grid grid-cols-3 gap-1.5">
+                  <div className={`grid gap-1.5 ${sideOptions.length === 1 ? "grid-cols-1" : "grid-cols-3"}`}>
                     {sideOptions.map(s => (
                       <button key={s} onClick={() => setSide(s)}
                         className={`px-2 py-2 rounded-lg text-[11px] font-semibold transition-colors ${
@@ -360,7 +364,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                   </div>
                 </div>
 
-                {/* Digits — Over/Under picks its own digit per side */}
                 {family === "overunder" && (
                   <div className="space-y-2">
                     {(side === "over" || side === "both") && (
@@ -396,7 +399,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                   </div>
                 )}
 
-                {/* Digit (match/differ) */}
                 {family === "matchdiffer" && (
                   <>
                     <button onClick={() => setAiDigit(v => !v)}
@@ -406,7 +408,9 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                         aiDigit ? `${a.dot} border-transparent` : "border-white/20"}`}>
                         {aiDigit && <span className="text-[8px] text-black font-bold">✓</span>}
                       </span>
-                      <span className={aiDigit ? a.text : "text-muted-foreground"}>Let the AI pick the best digit</span>
+                      <span className={aiDigit ? a.text : "text-muted-foreground"}>
+                        {isNexus ? "Let Quantum Singularity pick the best digit (6-model)" : "Let the AI pick the best digit"}
+                      </span>
                     </button>
                     {!aiDigit && (
                       <div className="space-y-1.5">
@@ -426,7 +430,13 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                   </>
                 )}
 
-                {/* Proof */}
+                {isNexus && (
+                  <div className="rounded-lg px-2.5 py-2 border border-fuchsia-500/20 bg-fuchsia-500/5 text-[10px] leading-relaxed text-muted-foreground">
+                    <p className="font-semibold text-fuchsia-300">Quantum Singularity</p>
+                    <p>6 experts · gap p60-p95 · hazard×1.25 · geo overdue {"<0.32"} · Platt+Brier · e-value · FMCI ladder · match-tuned shield gap≥4 hazard≥1.4</p>
+                  </div>
+                )}
+
                 <div className="space-y-1.5">
                   <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Proof required</p>
                   <div className="grid grid-cols-3 gap-1.5">
@@ -457,17 +467,16 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
 
                 <Button onClick={handleScan} disabled={loading}
                         className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                  <ScanSearch className="w-4 h-4 mr-2" /> Measure every market
+                  <ScanSearch className="w-4 h-4 mr-2" /> {isNexus ? "Quantum scan — 19×10 = 190 candidates" : "Measure every market"}
                 </Button>
               </div>
             )}
 
-            {/* SCANNING */}
             {step === "scanning" && (
               <div className="p-6 space-y-4 text-center">
                 <Loader2 className={`w-8 h-8 ${a.text} animate-spin mx-auto`} />
                 <div>
-                  <p className="text-sm font-semibold text-white">Fitting, then measuring out of sample</p>
+                  <p className="text-sm font-semibold text-white">{isNexus ? "6-model singularity — 190 candidates" : "Fitting, then measuring out of sample"}</p>
                   <p className="text-[11px] text-muted-foreground mt-1">
                     {progress.scanning ? `${progress.scanning}…` : "Preparing…"}
                   </p>
@@ -482,7 +491,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
               </div>
             )}
 
-            {/* SCAN RESULT */}
             {step === "scan-result" && scanResult && (
               <div className="p-4 space-y-3">
                 {scanResult.best && scanResult.suitable ? (
@@ -553,7 +561,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
               </div>
             )}
 
-            {/* RUNNING */}
             {step === "running" && (
               <div className="p-4 space-y-3">
                 <div className={`rounded-xl p-3 border ${isRunning ? `${a.panelBg} ${a.panelBorder}` : "bg-secondary/30 border-border"}`}>

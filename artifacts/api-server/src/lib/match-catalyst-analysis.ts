@@ -471,17 +471,21 @@ export class MatchCatalystEnsemble {
   private ctxCount = new Map<string, number>();
   // E3: Outcome Chain (3rd order)
   private chain3 = { www: 0, wwl: 0, wlw: 0, wll: 0, lww: 0, lwl: 0, llw: 0, lll: 0 };
-  // E4: Weibull Survival Hazard (gap-based)
+  // E4: Weibull Survival Hazard (gap-based) — CACHED
   private gapHits = new Map<number, { wins: number; n: number }>();
   private sinceWin = 0;
+  private cachedWeibull: WeibullFit | null = null;
+  private weibullDirty = true;
   // E5: 3-State HMM
   private hmm: HmmParams;
   private hotBelief: number;
   // E6: Transition Row
   private rowOut = new Array<number>(10).fill(0);
   private rowHit = new Array<number>(100).fill(0);
-  // E7: Spectral Cycle
+  // E7: Spectral Cycle — CACHED
   private winSeries: number[] = [];
+  private cachedSpectralP = 0;
+  private spectralDirty = true;
 
   // Hedge weights
   private logW: number[];
@@ -497,10 +501,9 @@ export class MatchCatalystEnsemble {
   private qCache = 0;
   private qFresh = false;
 
-  // Multi-scale z readings
-  private z10: number[] = [];
-  private z30: number[] = [];
-  private z100: number[] = [];
+  // Cached gap stats (expensive — reused by predict and computeGapStats)
+  private cachedGapStats: GapStats | null = null;
+  private gapStatsDirty = true;
 
   constructor(targetDigit: number, breakEven: number, hmm?: HmmParams, targetShotRate = 0.035) {
     this.targetDigit = targetDigit;
@@ -602,41 +605,43 @@ export class MatchCatalystEnsemble {
     return { p: clamp((hits + prior) / (total + priorN), 1e-4, 1 - 1e-4), n: total };
   }
 
-  /** E4: Weibull Survival Hazard (smooth, parametric, censored-aware) */
+  /** E4: Weibull Survival Hazard (smooth, parametric, censored-aware) — CACHED */
   private readWeibullSurvival(): { p: number; n: number } {
-    // Collect gap data for this digit
-    const gaps: number[] = [];
-    let lastSeen = -1;
-    for (let i = 0; i < this.digits.length; i++) {
-      if (this.digits[i] === this.targetDigit) {
-        if (lastSeen >= 0) gaps.push(i - lastSeen - 1);
-        lastSeen = i;
+    // Use cached Weibull fit when available (only refit when digit appears)
+    if (this.weibullDirty || !this.cachedWeibull) {
+      const gaps: number[] = [];
+      let lastSeen = -1;
+      for (let i = 0; i < this.digits.length; i++) {
+        if (this.digits[i] === this.targetDigit) {
+          if (lastSeen >= 0) gaps.push(i - lastSeen - 1);
+          lastSeen = i;
+        }
       }
-    }
-    if (gaps.length < 8) {
-      // Fallback to binned hazard with pooling
-      const g = this.sinceWin;
-      let wins = 0, n = 0;
-      for (let d = -1; d <= 1; d++) {
-        const cell = this.gapHits.get(g + d);
-        if (cell) { wins += cell.wins; n += cell.n; }
+      if (gaps.length >= 8) {
+        this.cachedWeibull = fitWeibull(gaps);
       }
-      if (n < 6) return { p: this.marginal, n };
-      const prior = 5 * this.marginal;
-      return { p: clamp((wins + prior) / (n + 5), 1e-4, 1 - 1e-4), n };
+      this.weibullDirty = false;
     }
 
-    // Fit Weibull to this digit's gaps
-    const wb = fitWeibull(gaps);
-    const hNow = weibullHazard(this.sinceWin, wb.k, wb.lambda);
-    const hMedian = weibullHazard(wb.median, wb.k, wb.lambda);
+    if (this.cachedWeibull && this.cachedWeibull.convergence) {
+      const wb = this.cachedWeibull;
+      const hNow = weibullHazard(this.sinceWin, wb.k, wb.lambda);
+      const hMedian = weibullHazard(wb.median, wb.k, wb.lambda);
+      const hazardRatio = hMedian > 1e-9 ? hNow / hMedian : 1;
+      const p = clamp(this.marginal * hazardRatio, 1e-4, 1 - 1e-4);
+      return { p, n: this.digits.length };
+    }
 
-    // Convert hazard ratio to a probability estimate
-    // h(t) / h_baseline > 1 means the digit is more likely to appear now
-    const hazardRatio = hMedian > 1e-9 ? hNow / hMedian : 1;
-    // Map hazard ratio to probability: base rate * hazard ratio, clamped
-    const p = clamp(this.marginal * hazardRatio, 1e-4, 1 - 1e-4);
-    return { p, n: gaps.length };
+    // Fallback to binned hazard with pooling (fast path)
+    const g = this.sinceWin;
+    let wins = 0, n = 0;
+    for (let d = -1; d <= 1; d++) {
+      const cell = this.gapHits.get(g + d);
+      if (cell) { wins += cell.wins; n += cell.n; }
+    }
+    if (n < 6) return { p: this.marginal, n };
+    const prior = 5 * this.marginal;
+    return { p: clamp((wins + prior) / (n + 5), 1e-4, 1 - 1e-4), n };
   }
 
   /** E5: 3-State Regime HMM (hot/warm/cold — captures the middle ground) */
@@ -664,42 +669,39 @@ export class MatchCatalystEnsemble {
     return { p: clamp(p, 1e-4, 1 - 1e-4), n: total };
   }
 
-  /** E7: Spectral Cycle Detector (autocorrelation at lags 1-20) */
+  /** E7: Spectral Cycle Detector — CACHED (recompute every 50 ticks) */
   private readSpectralCycle(): { p: number; n: number } {
     const series = this.winSeries;
     if (series.length < 40) return { p: this.marginal, n: 0 };
 
-    const n = series.length;
-    const m = mean(series);
+    // Only recompute every 50 ticks — autocorrelation changes slowly
+    if (this.spectralDirty || this.nSeen % 50 === 0) {
+      const n = series.length;
+      const m = mean(series);
 
-    // Compute autocorrelation at lags 1-20
-    let bestLag = 0;
-    let bestACF = 0;
-    let den = 0;
-    for (let i = 0; i < n; i++) den += (series[i]! - m) ** 2;
-    if (den < 1e-12) return { p: this.marginal, n: 0 };
+      let bestLag = 0;
+      let bestACF = 0;
+      let den = 0;
+      for (let i = 0; i < n; i++) den += (series[i]! - m) ** 2;
+      if (den < 1e-12) { this.cachedSpectralP = this.marginal; this.spectralDirty = false; return { p: this.marginal, n: 0 }; }
 
-    for (let lag = 1; lag <= Math.min(20, Math.floor(n / 3)); lag++) {
-      let num = 0;
-      for (let i = lag; i < n; i++) num += (series[i]! - m) * (series[i - lag]! - m);
-      const acf = num / den;
-      if (Math.abs(acf) > Math.abs(bestACF)) {
-        bestACF = acf;
-        bestLag = lag;
+      for (let lag = 1; lag <= Math.min(20, Math.floor(n / 3)); lag++) {
+        let num = 0;
+        for (let i = lag; i < n; i++) num += (series[i]! - m) * (series[i - lag]! - m);
+        const acf = num / den;
+        if (Math.abs(acf) > Math.abs(bestACF)) { bestACF = acf; bestLag = lag; }
       }
+
+      if (Math.abs(bestACF) < 0.12) { this.cachedSpectralP = this.marginal; this.spectralDirty = false; return { p: this.marginal, n: series.length }; }
+
+      const phaseSinceLast = this.sinceWin % bestLag;
+      const expectedInPhase = phaseSinceLast >= bestLag - 1;
+      const cycleBoost = bestACF * (expectedInPhase ? 0.15 : -0.05);
+      this.cachedSpectralP = clamp(this.marginal + cycleBoost, 1e-4, 1 - 1e-4);
+      this.spectralDirty = false;
     }
 
-    if (Math.abs(bestACF) < 0.12) return { p: this.marginal, n: series.length };
-
-    // Use the cycle to predict: if acf > 0, the pattern repeats
-    // Look at what happened bestLag ticks after the last occurrence
-    const phaseSinceLast = this.sinceWin % bestLag;
-    const expectedInPhase = phaseSinceLast >= bestLag - 1;
-
-    // Weight the prediction by the autocorrelation strength
-    const cycleBoost = bestACF * (expectedInPhase ? 0.15 : -0.05);
-    const p = clamp(this.marginal + cycleBoost, 1e-4, 1 - 1e-4);
-    return { p, n: series.length };
+    return { p: this.cachedSpectralP, n: this.winSeries.length };
   }
 
   /** Multi-scale convergence: does the edge agree at 10, 30, 100 tick horizons? */
@@ -774,8 +776,12 @@ export class MatchCatalystEnsemble {
     const zRel = this.standardise(z);
     const gate = this.windowGate();
 
-    // Gap stats with Weibull fit
-    const gapStats = computeGapStats(this.digits, this.targetDigit);
+    // Gap stats with Weibull fit — CACHED (only recomputed when digit appears)
+    if (this.gapStatsDirty || !this.cachedGapStats) {
+      this.cachedGapStats = computeGapStats(this.digits, this.targetDigit);
+      this.gapStatsDirty = false;
+    }
+    const gapStats = this.cachedGapStats;
 
     return {
       raw: round(raw, 6),
@@ -883,6 +889,13 @@ export class MatchCatalystEnsemble {
     this.wins.push(won);
     if (this.digits.length > 12000) { this.digits.shift(); this.wins.shift(); }
     this.nSeen++;
+
+    // Mark caches as dirty when the target digit appears (gap data changes)
+    if (won === 1) {
+      this.weibullDirty = true;
+      this.gapStatsDirty = true;
+    }
+    // Spectral cache refreshed every 50 ticks (handled in readSpectralCycle)
   }
 }
 

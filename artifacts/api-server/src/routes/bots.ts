@@ -28,14 +28,14 @@ import { listLiveBots } from "../lib/live-registry";
 import * as accumulator from "../lib/accumulator-engine";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
-import * as matchNexus from "../lib/match-nexus-engine";
+import * as matchCatalyst from "../lib/match-catalyst-engine";
 import {
   TWIN_NORMAL_LEGS,
   TWIN_RECOVERY_LEGS,
   recoveryBreakEvenGapRate,
 } from "../lib/twin-hedge-analysis";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
-import { type NexusCertainty } from "../lib/match-nexus-analysis";
+import { type CatalystCertainty } from "../lib/match-catalyst-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
@@ -70,8 +70,8 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
   if (bot.oneShot) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
   if (bot.twinHedge) return { ok: false, error: `${bot.name} uses the /twin endpoints` };
-  // match-nexus uses its own engine, not the generic specialist route
-  if (botId === "match-nexus") return { ok: false, error: `${bot.name} uses the /nexus endpoints` };
+  // match-catalyst uses its own engine, not the generic specialist route
+  if (botId === "match-catalyst") return { ok: false, error: `${bot.name} uses the /catalyst endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -284,7 +284,7 @@ router.get("/", (req, res) => {
   const accu = visibleAccumulatorStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
-  const nexus = visibleNexusStatus(req.sessionId);
+  const catalyst = visibleCatalystStatus(req.sessionId);
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
@@ -302,13 +302,13 @@ router.get("/", (req, res) => {
       if (bot.id === killshot.KILLSHOT_BOT_ID) {
         return { ...bot, console: console_, session: shot.running ? shot : null };
       }
-      if (bot.id === matchNexus.MATCH_NEXUS_BOT_ID) {
-        return { ...bot, console: console_, session: nexus.running ? nexus : null };
+      if (bot.id === matchCatalyst.MATCH_CATALYST_BOT_ID) {
+        return { ...bot, console: console_, session: catalyst.running ? catalyst : null };
       }
       if (bot.killShotFamily) {
         // For family bots, show whichever family engine is running that matches this bot id
-        if (bot.id === "match-nexus") {
-          return { ...bot, console: console_, session: nexus.running ? nexus : null };
+        if (bot.id === "match-catalyst") {
+          return { ...bot, console: console_, session: catalyst.running ? catalyst : null };
         }
         return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
       }
@@ -319,7 +319,7 @@ router.get("/", (req, res) => {
       { botId: twinHedge.TWIN_HEDGE_BOT_ID, running: twin.running },
       { botId: accumulator.ACCUMULATOR_BOT_ID, running: accu.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
-      { botId: matchNexus.MATCH_NEXUS_BOT_ID, running: nexus.running },
+      { botId: matchCatalyst.MATCH_CATALYST_BOT_ID, running: catalyst.running },
       { botId: fam.botId ?? null, running: fam.running },
       { botId: status.botId, running: status.running },
     ]),
@@ -643,8 +643,8 @@ async function killshotRisk(sessionId: string, body: any) {
 function parseCertainty(raw: unknown): Certainty {
   return raw === "elite" || raw === "balanced" ? raw : "strict";
 }
-function parseNexusCertainty(raw: unknown): NexusCertainty {
-  return raw === "elite" || raw === "balanced" ? raw as NexusCertainty : "strict";
+function parseCatalystCertainty(raw: unknown): CatalystCertainty {
+  return raw === "elite" || raw === "balanced" ? raw as CatalystCertainty : "strict";
 }
 
 router.post("/killshot/scan", async (req, res): Promise<void> => {
@@ -806,19 +806,19 @@ router.get("/family/status", (req, res) => {
 router.post("/family/scan", async (req, res): Promise<void> => {
   const body = req.body ?? {};
   const botId = String(body?.botId ?? "");
-  // Match Nexus has its own superior engine — intercept here so the generic family engine is not used
-  if (botId === "match-nexus") {
-    const parsed = parseNexusSpec(botId, body);
+  // Match Catalyst has its own superior engine — intercept here so the generic family engine is not used
+  if (botId === "match-catalyst") {
+    const parsed = parseCatalystSpec(botId, body);
     if (!parsed.ok) {
       res.status(400).json({ error: parsed.error });
       return;
     }
     try {
       const risk = await killshotRisk(req.sessionId, body);
-      const result = await matchNexus.scanForNexus(req.sessionId, parsed.spec, risk);
+      const result = await matchCatalyst.scanForCatalyst(req.sessionId, parsed.spec, risk);
       res.json(result);
     } catch (err) {
-      logger.error({ err }, "Match Nexus scan failed");
+      logger.error({ err }, "Match Catalyst scan failed");
       res.status(500).json({ error: "Scan failed" });
     }
     return;
@@ -843,8 +843,8 @@ router.post("/family/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
   const botId = String(body.botId ?? "");
 
-  if (botId === "match-nexus") {
-    const parsed = parseNexusSpec(botId, body);
+  if (botId === "match-catalyst") {
+    const parsed = parseCatalystSpec(botId, body);
     if (!parsed.ok) {
       res.status(400).json({ error: parsed.error });
       return;
@@ -882,12 +882,12 @@ router.post("/family/start", async (req, res): Promise<void> => {
       res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
       return;
     }
-    const existingOwner = matchNexus.getOwnerSessionId();
-    if (matchNexus.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    const existingOwner = matchCatalyst.getOwnerSessionId();
+    if (matchCatalyst.isRunning() && existingOwner && existingOwner !== req.sessionId) {
       res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
       return;
     }
-    const result = await matchNexus.startSession({
+    const result = await matchCatalyst.startSession({
       ownerSessionId: req.sessionId,
       botId: parsed.spec.botId,
       spec: parsed.spec,
@@ -907,7 +907,7 @@ router.post("/family/start", async (req, res): Promise<void> => {
       res.status(409).json({ error: result.error });
       return;
     }
-    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
     return;
   }
 
@@ -994,29 +994,29 @@ router.post("/family/stop", (req, res) => {
     res.status(409).json({ error: "You cannot stop another browser session's bot." });
     return;
   }
-  const nexusOwner = matchNexus.getOwnerSessionId();
-  if (matchNexus.isRunning() && nexusOwner && nexusOwner === req.sessionId) {
-    matchNexus.stopSession();
-    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+  const catalystOwner = matchCatalyst.getOwnerSessionId();
+  if (matchCatalyst.isRunning() && catalystOwner && catalystOwner === req.sessionId) {
+    matchCatalyst.stopSession();
+    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
     return;
   }
   killshotFamily.stopSession();
   res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
 });
 
-// ── Match Nexus — Quantum Singularity ────────────────────────────────────────
+// ── Match Catalyst — Quantum Singularity ────────────────────────────────────────
 
-function visibleNexusStatus(sessionId: string) {
-  const status = matchNexus.getStatus();
-  const owner = matchNexus.getOwnerSessionId();
+function visibleCatalystStatus(sessionId: string) {
+  const status = matchCatalyst.getStatus();
+  const owner = matchCatalyst.getOwnerSessionId();
   if (!owner || owner === sessionId) return status;
   return { ...status, running: false, sessionId: null, config: undefined, deployed: undefined, familyWatch: undefined };
 }
 
-function parseNexusSpec(botId: string, body: any):
-  { ok: true; spec: matchNexus.NexusDeploySpec } | { ok: false; error: string } {
-  if (botId !== "match-nexus") return { ok: false, error: "Unknown bot" };
-  const certainty = parseNexusCertainty(body?.certainty);
+function parseCatalystSpec(botId: string, body: any):
+  { ok: true; spec: matchCatalyst.CatalystDeploySpec } | { ok: false; error: string } {
+  if (botId !== "match-catalyst") return { ok: false, error: "Unknown bot" };
+  const certainty = parseCatalystCertainty(body?.certainty);
   const hasDigit = body?.digit !== undefined && body?.digit !== null && body?.digit !== "";
   let digit: number | undefined;
   if (hasDigit) {
@@ -1035,29 +1035,29 @@ function parseNexusSpec(botId: string, body: any):
   };
 }
 
-router.get("/nexus/status", (req, res) => {
-  res.json(visibleNexusStatus(req.sessionId));
+router.get("/catalyst/status", (req, res) => {
+  res.json(visibleCatalystStatus(req.sessionId));
 });
 
-router.post("/nexus/scan", async (req, res): Promise<void> => {
-  const parsed = parseNexusSpec(String(req.body?.botId ?? "match-nexus"), req.body);
+router.post("/catalyst/scan", async (req, res): Promise<void> => {
+  const parsed = parseCatalystSpec(String(req.body?.botId ?? "match-catalyst"), req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
   }
   try {
     const risk = await killshotRisk(req.sessionId, req.body);
-    const result = await matchNexus.scanForNexus(req.sessionId, parsed.spec, risk);
+    const result = await matchCatalyst.scanForCatalyst(req.sessionId, parsed.spec, risk);
     res.json(result);
   } catch (err) {
-    logger.error({ err }, "Match Nexus scan failed");
+    logger.error({ err }, "Match Catalyst scan failed");
     res.status(500).json({ error: "Scan failed" });
   }
 });
 
-router.post("/nexus/start", async (req, res): Promise<void> => {
+router.post("/catalyst/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
-  const parsed = parseNexusSpec(String(body.botId ?? "match-nexus"), body);
+  const parsed = parseCatalystSpec(String(body.botId ?? "match-catalyst"), body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
@@ -1096,12 +1096,12 @@ router.post("/nexus/start", async (req, res): Promise<void> => {
     res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
     return;
   }
-  const existingOwner = matchNexus.getOwnerSessionId();
-  if (matchNexus.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+  const existingOwner = matchCatalyst.getOwnerSessionId();
+  if (matchCatalyst.isRunning() && existingOwner && existingOwner !== req.sessionId) {
     res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
     return;
   }
-  const result = await matchNexus.startSession({
+  const result = await matchCatalyst.startSession({
     ownerSessionId: req.sessionId,
     botId: parsed.spec.botId,
     spec: parsed.spec,
@@ -1123,17 +1123,17 @@ router.post("/nexus/start", async (req, res): Promise<void> => {
     res.status(409).json({ error: result.error });
     return;
   }
-  res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+  res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
 });
 
-router.post("/nexus/stop", (req, res) => {
-  const owner = matchNexus.getOwnerSessionId();
-  if (matchNexus.isRunning() && owner && owner !== req.sessionId) {
+router.post("/catalyst/stop", (req, res) => {
+  const owner = matchCatalyst.getOwnerSessionId();
+  if (matchCatalyst.isRunning() && owner && owner !== req.sessionId) {
     res.status(409).json({ error: "You cannot stop another browser session's bot." });
     return;
   }
-  matchNexus.stopSession();
-  res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+  matchCatalyst.stopSession();
+  res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
 });
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -1149,8 +1149,8 @@ router.get("/status", (req, res) => {
   if (accu.running) { res.json(accu); return; }
   const shot = visibleKillShotStatus(req.sessionId);
   if (shot.running) { res.json(shot); return; }
-  const nexus = visibleNexusStatus(req.sessionId);
-  if (nexus.running) { res.json(nexus); return; }
+  const catalyst = visibleCatalystStatus(req.sessionId);
+  if (catalyst.running) { res.json(catalyst); return; }
   const fam = visibleFamilyStatus(req.sessionId);
   if (fam.running) { res.json(fam); return; }
   res.json(visibleStatus(req.sessionId));
@@ -1199,18 +1199,18 @@ router.get("/live", (req, res) => {
 // ── Scan (specialist) ─────────────────────────────────────────────────────────
 
 router.post("/:botId/scan", async (req, res): Promise<void> => {
-  if (req.params["botId"] === "match-nexus") {
-    const parsed = parseNexusSpec("match-nexus", req.body);
+  if (req.params["botId"] === "match-catalyst") {
+    const parsed = parseCatalystSpec("match-catalyst", req.body);
     if (!parsed.ok) {
       res.status(400).json({ error: parsed.error });
       return;
     }
     try {
       const risk = await killshotRisk(req.sessionId, req.body);
-      const result = await matchNexus.scanForNexus(req.sessionId, parsed.spec, risk);
+      const result = await matchCatalyst.scanForCatalyst(req.sessionId, parsed.spec, risk);
       res.json(result);
     } catch (err) {
-      logger.error({ err }, "Match Nexus scan failed");
+      logger.error({ err }, "Match Catalyst scan failed");
       res.status(500).json({ error: "Scan failed" });
     }
     return;
@@ -1238,9 +1238,9 @@ router.post("/:botId/scan", async (req, res): Promise<void> => {
 
 router.post("/:botId/start", async (req, res): Promise<void> => {
   const botId = req.params["botId"]!;
-  if (botId === "match-nexus") {
+  if (botId === "match-catalyst") {
     const body = req.body ?? {};
-    const parsed = parseNexusSpec(botId, body);
+    const parsed = parseCatalystSpec(botId, body);
     if (!parsed.ok) {
       res.status(400).json({ error: parsed.error });
       return;
@@ -1278,12 +1278,12 @@ router.post("/:botId/start", async (req, res): Promise<void> => {
       res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
       return;
     }
-    const existingOwner = matchNexus.getOwnerSessionId();
-    if (matchNexus.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    const existingOwner = matchCatalyst.getOwnerSessionId();
+    if (matchCatalyst.isRunning() && existingOwner && existingOwner !== req.sessionId) {
       res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
       return;
     }
-    const result = await matchNexus.startSession({
+    const result = await matchCatalyst.startSession({
       ownerSessionId: req.sessionId,
       botId: parsed.spec.botId,
       spec: parsed.spec,
@@ -1303,7 +1303,7 @@ router.post("/:botId/start", async (req, res): Promise<void> => {
       res.status(409).json({ error: result.error });
       return;
     }
-    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
     return;
   }
 
@@ -1338,14 +1338,14 @@ router.post("/:botId/start", async (req, res): Promise<void> => {
 
 router.post("/:botId/stop", (req, res) => {
   const botId = req.params["botId"]!;
-  if (botId === "match-nexus") {
-    const owner = matchNexus.getOwnerSessionId();
-    if (matchNexus.isRunning() && owner && owner !== req.sessionId) {
+  if (botId === "match-catalyst") {
+    const owner = matchCatalyst.getOwnerSessionId();
+    if (matchCatalyst.isRunning() && owner && owner !== req.sessionId) {
       res.status(409).json({ error: "You cannot stop another browser session's specialist bot." });
       return;
     }
-    matchNexus.stopSession();
-    res.json({ ok: true, status: visibleNexusStatus(req.sessionId) });
+    matchCatalyst.stopSession();
+    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
     return;
   }
 

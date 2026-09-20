@@ -3,7 +3,7 @@
  *
  * The server's `GET /api/bots/live` is the single source of truth for every
  * engine (specialist, Dual-Lock, Twin-Lock, Accumulator, Kill-Shot, Kill-Shot
- * family, Match Nexus) — the layout's live indicator polls it every few
+ * family, Match Catalyst) — the layout's live indicator polls it every few
  * seconds so a bot that starts in the background is visible the moment this
  * tab next polls (and immediately after any refresh). The SSE `bot_update`
  * stream keeps the indicator in step between polls without waiting.
@@ -57,8 +57,8 @@ export function stopPathForBot(botId: string): string {
       return "/api/bots/accumulator/stop";
     case "killshot":
       return "/api/bots/killshot/stop";
-    case "match-nexus":
-      return "/api/bots/nexus/stop";
+    case "match-catalyst":
+      return "/api/bots/catalyst/stop";
     case "ks-overunder":
     case "ks-parity":
     case "ks-matchdiff":

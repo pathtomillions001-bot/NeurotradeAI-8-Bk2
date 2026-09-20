@@ -106,7 +106,7 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
   const [loading, setLoading] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   /**
-   * No global mode toggle — like the Match Nexus console, LOCK and SWITCHING
+   * No global mode toggle — like the Match Catalyst console, LOCK and SWITCHING
    * are the two deploy buttons under the candidate card, and a runner-up row
    * SELECTS the market the buttons will deploy.
    */

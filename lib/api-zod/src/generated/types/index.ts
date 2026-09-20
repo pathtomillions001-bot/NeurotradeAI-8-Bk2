@@ -19,6 +19,8 @@ export * from './aiInsightType';
 export * from './aiRecommendation';
 export * from './aiRecommendationDirection';
 export * from './apiError';
+export * from './bulkSyncReport';
+export * from './bulkSyncReportVerdict';
 export * from './bulkTradeInput';
 export * from './bulkTradeInputDirection';
 export * from './bulkTradeInputDurationUnit';

@@ -13,6 +13,7 @@ import { friendlyErrorMessage } from "../lib/friendly-error";
 import { getLocalTodayStart } from "../lib/tz";
 import { getFallbackPayout } from "../lib/payouts";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
+import { decideLegSettlement, summarizeBulkSync } from "../lib/bulk-sync";
 import { evaluateManualAssist } from "../lib/speed-ai-engine";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 
@@ -689,6 +690,17 @@ router.post("/bulk", async (req, res): Promise<void> => {
   const currency = account?.currency ?? "USD";
   const isLiveTrade = !paperTradeMode && !!token;
 
+  // A batch is ONE entry: if the wallet cannot cover the whole batch, Deriv
+  // opens the first legs and rejects the rest — a partial batch, which is the
+  // one outcome a "synchronized bulk" must never produce. Refuse the batch up
+  // front, with the arithmetic, so the user decides instead of discovering it.
+  if (isLiveTrade && account && stake * count > balance) {
+    res.status(400).json({
+      error: `Batch of ${count} × ${stake.toFixed(2)} = ${(stake * count).toFixed(2)} ${currency} exceeds your ${balance.toFixed(2)} ${currency} balance. Reduce the stake or the number of legs — a batch is only synchronized if every leg can open.`,
+    });
+    return;
+  }
+
   // ── AI context: run ONCE for the whole batch (all legs are identical) ──────
   const preferredContractTypes = [contractType];
   const tradingSettings = buildTradingSettingsForManual(settings.length > 0 ? settings[0] : null, preferredContractTypes);
@@ -790,28 +802,58 @@ router.post("/bulk", async (req, res): Promise<void> => {
   const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
   recoveryEngine.setPersistenceSession(req.sessionId);
 
+  /**
+   * Settle one leg.
+   *
+   * Four outcomes, and the distinction between them is the whole point:
+   *
+   *  - `failed`  → Deriv REFUSED the leg / it never opened. `error`, and the
+   *                reason is written into the journal.
+   *  - `pending` → the leg's buy WAS confirmed by Deriv (we hold the contract
+   *                id) but the settlement sweep did not see it settled in time.
+   *                The row stays `open` with its contract id, so the
+   *                reconciliation sweep settles it from Deriv's own profit
+   *                table. It is NEVER written as "error": the money moved, and
+   *                calling a live contract failed is exactly how a batch of
+   *                perfectly good trades "did not execute".
+   *  - `won` / `lost` → settled, with Deriv's exact profit.
+   */
   const settleTradeRow = async (
     row: typeof tradesTable.$inferSelect,
-    opts: { won: boolean; profit: number; entryPrice: number; exitPrice: number; failed?: string },
+    opts: {
+      won?: boolean;
+      profit: number;
+      entryPrice: number;
+      exitPrice: number;
+      failed?: string;
+      pending?: string;
+      derivContractId?: number | string | null;
+    },
   ) => {
-    const status = opts.failed ? "error" : opts.won ? "won" : "lost";
-    const actualPayout = !opts.failed && opts.won ? stake + opts.profit : 0;
+    const isPending = !opts.failed && !!opts.pending;
+    const status = opts.failed ? "error" : isPending ? "open" : opts.won ? "won" : "lost";
+    const actualPayout = !opts.failed && !isPending && opts.won ? stake + opts.profit : 0;
     const [closedTrade] = await db.update(tradesTable).set({
       status,
       payout: String(actualPayout),
-      profit: String(Math.round(opts.profit * 100) / 100),
+      profit: String(isPending ? 0 : Math.round(opts.profit * 100) / 100),
       entryPrice: String(opts.entryPrice),
       exitPrice: String(opts.exitPrice),
-      closedAt: new Date(),
+      ...(opts.derivContractId ? { derivContractId: String(opts.derivContractId) } : {}),
+      // A pending leg is unsettled by definition — leaving closed_at null is
+      // what makes the reconciler pick it up.
+      closedAt: isPending ? null : new Date(),
       agentReasoning: opts.failed
         ? `[${isLiveTrade ? "LIVE" : "PAPER"} BULK — FAILED: ${opts.failed}] ${(analysis as any).reasoning ?? ""}`
-        : (openTrades[0]?.agentReasoning ?? null) as string,
+        : isPending
+          ? `[LIVE BULK — AWAITING SETTLEMENT: ${opts.pending}] ${(analysis as any).reasoning ?? ""}`
+          : (openTrades[0]?.agentReasoning ?? null) as string,
     }).where(eq(tradesTable.id, row.id)).returning();
 
-    if (!opts.failed) {
-      recordTradeOutcome(symbol, contractType, barrier ?? null, opts.won, opts.profit, stake);
+    if (!opts.failed && !isPending) {
+      recordTradeOutcome(symbol, contractType, barrier ?? null, !!opts.won, opts.profit, stake);
       if (recoveryEngine.isTrackedContract(contractType)) {
-        recoveryEngine.recordOutcome(opts.won, opts.profit, stake, maxSteps, contractType, payoutMultiplier);
+        recoveryEngine.recordOutcome(!!opts.won, opts.profit, stake, maxSteps, contractType, payoutMultiplier);
       }
       // Fire-and-forget: Trade Intelligence analysis for this leg
       if (savedCoordinatorOutput) {
@@ -821,25 +863,29 @@ router.post("/bulk", async (req, res): Promise<void> => {
           contractType,
           barrier:      barrier ?? null,
           stake,
-          won:          opts.won,
+          won:          !!opts.won,
           profit:       opts.profit,
           output:       savedCoordinatorOutput,
         }).catch(() => {});
       }
     }
 
-    broadcastSSE("trade_completed", {
-      trade: {
-        id: closedTrade.id, symbol, displayName, contractType: normalizeDerivContractType(contractType),
-        barrier: barrier ?? null, stake, payout: actualPayout,
-        profit: Math.round(opts.profit * 100) / 100, won: !opts.failed && opts.won,
-        status, duration: tradeDuration,
-        durationUnit: durationUnit ?? "t",
-        createdAt: closedTrade.createdAt.toISOString(), closedAt: new Date().toISOString(),
-        aiConfidence: winProbability, isAutonomous: isAutonomous ?? false,
-        source: isLiveTrade ? "live" : "paper",
-      }
-    }, req.sessionId);
+    // A pending leg is not "completed" — the journal refresh below (and the
+    // reconciler) is what moves it, so no completion event is broadcast for it.
+    if (!isPending) {
+      broadcastSSE("trade_completed", {
+        trade: {
+          id: closedTrade.id, symbol, displayName, contractType: normalizeDerivContractType(contractType),
+          barrier: barrier ?? null, stake, payout: actualPayout,
+          profit: Math.round(opts.profit * 100) / 100, won: !opts.failed && opts.won,
+          status, duration: tradeDuration,
+          durationUnit: durationUnit ?? "t",
+          createdAt: closedTrade.createdAt.toISOString(), closedAt: new Date().toISOString(),
+          aiConfidence: winProbability, isAutonomous: isAutonomous ?? false,
+          source: isLiveTrade ? "live" : "paper",
+        }
+      }, req.sessionId);
+    }
 
     return closedTrade;
   };
@@ -857,9 +903,13 @@ router.post("/bulk", async (req, res): Promise<void> => {
 
   const closedRows: typeof tradesTable.$inferSelect[] = [];
 
+  let syncReport: ReturnType<typeof summarizeBulkSync> | null = null;
+
   if (isLiveTrade) {
     try {
-      // ── Phase 1: open EVERY leg on the same tick, over one shared WS ──────
+      // ── Phase 1: every leg quoted together, then committed in ONE burst
+      //             inside ONE tick window (the tick window is read from the
+      //             live feed, so the commit lands early in a fresh tick). ────
       const legs = await executeBulkLiveTrades(token!, account!.derivAccountId ?? account!.loginId,
         Array.from({ length: count }, () => ({
           symbol,
@@ -870,13 +920,27 @@ router.post("/bulk", async (req, res): Promise<void> => {
           currency,
           barrier,
         })),
+        { tickWindow: tickManager.getTickWindow(symbol) },
       );
 
+      // The contract id is written the instant Deriv confirms it — exactly as
+      // the single-trade path does. If this request is interrupted from here on
+      // (restart, redeploy, dropped connection) the reconciliation sweep can
+      // still settle each leg from Deriv's own profit table instead of leaving
+      // N identical rows to be guess-matched later.
+      for (const [i, leg] of legs.entries()) {
+        if ("error" in leg) continue;
+        try {
+          await db.update(tradesTable)
+            .set({ derivContractId: String(leg.contract.contractId) })
+            .where(eq(tradesTable.id, openTrades[i]!.id));
+        } catch { /* best-effort — the reconciler's fuzzy match still applies */ }
+      }
+
       // ── Phase 2: settle EVERY leg in ONE sweep (same closing tick) ────────
-      const openedIndexes = legs
-        .map((leg, i) => (!("error" in leg) && leg.contractId > 0 ? i : -1))
-        .filter((i) => i >= 0);
-      const contractIds = openedIndexes.map((i) => (legs[i] as { contractId: number }).contractId);
+      const contractIds = legs
+        .filter((leg) => !("error" in leg) && leg.contract.contractId > 0)
+        .map((leg) => (leg as { contract: { contractId: number } }).contract.contractId);
 
       const results = contractIds.length > 0
         ? await waitForBulkContractResults(
@@ -885,30 +949,67 @@ router.post("/bulk", async (req, res): Promise<void> => {
           )
         : [];
 
+      const syncLegs: Parameters<typeof summarizeBulkSync>[0] = [];
+      let confirmedCount = 0;
+
       for (let i = 0; i < count; i++) {
         const leg = legs[i]!;
-        if ("error" in leg) {
-          closedRows.push(await settleTradeRow(openTrades[i]!, {
-            won: false, profit: 0, entryPrice: 0, exitPrice: 0,
-            failed: friendlyErrorMessage(leg.error),
-          }));
-          continue;
-        }
-        const pos = openedIndexes.indexOf(i);
-        const result = results.find((r) => r.contractId === leg.contractId);
-        if (!result || result.missing) {
-          closedRows.push(await settleTradeRow(openTrades[i]!, {
-            won: false, profit: 0, entryPrice: leg.buyPrice, exitPrice: leg.buyPrice,
-            failed: "Settlement result not confirmed — check the Deriv journal",
-          }));
-          continue;
-        }
+        const opened = !("error" in leg);
+        const result = opened
+          ? results.find((r) => r.contractId === (leg as { contract: { contractId: number } }).contract.contractId) ?? null
+          : null;
+
+        // ONE decision point for "what does this leg's row say" — pure and
+        // unit-tested, because the difference between `open` and `error` here is
+        // the difference between a real Deriv contract and a trade the app
+        // claims never happened.
+        const outcome = decideLegSettlement({
+          opened,
+          failureMessage: opened ? null : friendlyErrorMessage((leg as { error: Error }).error),
+          contractId: opened ? (leg as { contract: { contractId: number } }).contract.contractId : undefined,
+          buyPrice: opened ? (leg as { contract: { buyPrice: number } }).contract.buyPrice : undefined,
+          stake,
+          result: result
+            ? {
+                won: result.won,
+                profit: result.profit,
+                entrySpot: result.entrySpot,
+                exitSpot: result.exitSpot,
+                missing: result.missing,
+              }
+            : null,
+        });
+
+        syncLegs.push({
+          opened,
+          receipt: leg.receipt,
+          exitedAtMs: outcome.status === "won" || outcome.status === "lost" ? result?.exitedAtMs : undefined,
+        });
+        if (outcome.status === "won" || outcome.status === "lost") confirmedCount++;
+
         closedRows.push(await settleTradeRow(openTrades[i]!, {
-          won: result.won, profit: result.profit,
-          entryPrice: result.entrySpot || leg.buyPrice,
-          exitPrice: result.exitSpot || leg.buyPrice,
+          profit: outcome.status === "won" || outcome.status === "lost" ? outcome.profit : 0,
+          entryPrice: outcome.status === "error" ? 0 : outcome.entryPrice,
+          exitPrice: outcome.status === "error" ? 0 : outcome.exitPrice,
+          derivContractId: outcome.status === "error" ? undefined : outcome.derivContractId,
+          failed: outcome.status === "error" ? outcome.note : undefined,
+          pending: outcome.status === "open" ? outcome.note : undefined,
         }));
       }
+
+      syncReport = summarizeBulkSync(syncLegs, { confirmed: confirmedCount });
+      logger.info(
+        {
+          symbol, count,
+          verdict: syncReport.verdict,
+          sameEntryTick: syncReport.sameEntryTick,
+          sameExitTick: syncReport.sameExitTick,
+          entryTimes: syncReport.entryTimesMs,
+          localConfirmSpreadMs: syncReport.localConfirmSpreadMs,
+          splitTickLegs: syncReport.splitTickLegs,
+        },
+        "Bulk batch synchrony report",
+      );
 
       // Sync live balance ONCE for the whole batch
       try {
@@ -957,7 +1058,10 @@ router.post("/bulk", async (req, res): Promise<void> => {
     journalManager.forceRefresh();
   }
 
-  res.status(201).json({ trades: closedRows.map(formatTrade), count });
+  // The synchrony report travels with the result: the UI can only be trusted to
+  // say "all 5 opened on the same tick" if the server measured it on Deriv's own
+  // start times instead of assuming it.
+  res.status(201).json({ trades: closedRows.map(formatTrade), count, sync: syncReport });
 });
 
 // ── Shared: compute the core stat shape from a trade list ───────────────────────

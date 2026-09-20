@@ -36,7 +36,9 @@ export const ConnectDerivAccountResponse = zod.object({
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
-  "connectedAt": zod.string().optional()
+  "connectedAt": zod.string().optional(),
+  "sessionId": zod.string().optional().describe('Account-scoped session id after a connect rotation. Per-tab clients adopt it into sessionStorage; cookie clients ignore it.\n'),
+  "riskAck": zod.string().optional().describe('Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack.\n')
 })
 
 
@@ -53,7 +55,9 @@ export const GetAccountResponse = zod.object({
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
-  "connectedAt": zod.string().optional()
+  "connectedAt": zod.string().optional(),
+  "sessionId": zod.string().optional().describe('Account-scoped session id after a connect rotation. Per-tab clients adopt it into sessionStorage; cookie clients ignore it.\n'),
+  "riskAck": zod.string().optional().describe('Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack.\n')
 })
 
 
@@ -70,7 +74,9 @@ export const GetAccountsResponseItem = zod.object({
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
-  "connectedAt": zod.string().optional()
+  "connectedAt": zod.string().optional(),
+  "sessionId": zod.string().optional().describe('Account-scoped session id after a connect rotation. Per-tab clients adopt it into sessionStorage; cookie clients ignore it.\n'),
+  "riskAck": zod.string().optional().describe('Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack.\n')
 })
 export const GetAccountsResponse = zod.array(GetAccountsResponseItem)
 
@@ -92,7 +98,9 @@ export const SwitchAccountResponse = zod.object({
   "email": zod.string().nullish(),
   "fullName": zod.string().nullish(),
   "country": zod.string().nullish(),
-  "connectedAt": zod.string().optional()
+  "connectedAt": zod.string().optional(),
+  "sessionId": zod.string().optional().describe('Account-scoped session id after a connect rotation. Per-tab clients adopt it into sessionStorage; cookie clients ignore it.\n'),
+  "riskAck": zod.string().optional().describe('Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack.\n')
 })
 
 
@@ -101,7 +109,9 @@ export const SwitchAccountResponse = zod.object({
  */
 export const DisconnectAccountResponse = zod.object({
   "success": zod.boolean(),
-  "message": zod.string().nullish()
+  "message": zod.string().nullish(),
+  "sessionId": zod.string().optional().describe('Fresh anonymous session id after a rotation (e.g. disconnect). Per-tab clients adopt it into sessionStorage; cookie clients ignore it.\n'),
+  "riskAck": zod.string().optional().describe('Signed risk-acknowledgment value for sessionId, for per-tab clients to store and resend as X-Risk-Ack.\n')
 })
 
 

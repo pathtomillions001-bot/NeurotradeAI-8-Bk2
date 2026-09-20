@@ -701,26 +701,46 @@ export default function MarketDetail() {
         });
 
         const results: any[] = Array.isArray(bulkResult?.trades) ? bulkResult.trades : [];
+        // The server measures synchrony on Deriv's own contract start times and
+        // sends the verdict back. The UI reports what actually happened — it
+        // never claims a same-tick entry the broker did not confirm.
+        const sync: { verdict?: string; summary?: string; splitTickLegs?: number[] } | null =
+          bulkResult?.sync ?? null;
 
         const wonCount = results.filter(r => r.status === "won").length;
         const errorCount = results.filter(r => r.status === "error").length;
-        const settledCount = results.length - errorCount;
-        const totalProfit = results.reduce((sum, r) => sum + Number(r.profit ?? 0), 0);
+        // `open` = bought on Deriv, settlement not journalled yet. It is NOT a
+        // failure, and saying so is what made healthy batches look dead.
+        const pendingCount = results.filter(r => r.status === "open").length;
+        const settled = results.filter(r => r.status === "won" || r.status === "lost");
+        const totalProfit = settled.reduce((sum, r) => sum + Number(r.profit ?? 0), 0);
         const first = results[0];
+        const tickNote =
+          sync?.verdict === "synchronized"
+            ? " · same tick ✓"
+            : sync?.verdict === "split"
+              ? " · ⚠ entry ticks split"
+              : sync?.verdict === "unverified"
+                ? " · entry tick unverified"
+                : "";
+
         if (results.length === 0) {
-          toast.error("Bulk trades failed to execute");
+          toast.error(sync?.summary ?? "Bulk trades failed to execute");
         } else if (results.length === 1) {
-          toast.success(`Trade ` + (first.status === "won" ? "WON 🎉" : "LOST") + ` — ` + (first.status === "won" ? "+" : "") + `$` + Number(first.profit ?? 0).toFixed(2));
+          toast.success(`Trade ` + (first.status === "won" ? "WON 🎉" : first.status === "open" ? "OPEN" : "LOST") + ` — ` + (first.status === "won" ? "+" : "") + `$` + Number(first.profit ?? 0).toFixed(2));
         } else if (errorCount > 0) {
-          toast.error(`Bulk complete: ${wonCount}/${settledCount} won — $${totalProfit.toFixed(2)} · ${errorCount} leg(s) failed to execute`);
+          toast.error(`Bulk: ${wonCount}/${settled.length} won — $${totalProfit.toFixed(2)} · ${errorCount} leg(s) never reached your Deriv account${tickNote}`);
+        } else if (pendingCount > 0) {
+          toast.info(`Bulk placed: ${wonCount}/${results.length} settled${pendingCount ? `, ${pendingCount} awaiting Deriv confirmation` : ""} — $${totalProfit.toFixed(2)}${tickNote}`);
+        } else if (wonCount === results.length) {
+          toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` WON 🎉 — +$` + totalProfit.toFixed(2) + tickNote);
+        } else if (wonCount === 0) {
+          toast.error(`Bulk complete: 0/` + results.length + ` won — $` + totalProfit.toFixed(2) + tickNote);
         } else {
-          if (wonCount === results.length) {
-            toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` WON 🎉 — +$` + totalProfit.toFixed(2));
-          } else if (wonCount === 0) {
-            toast.error(`Bulk complete: 0/` + results.length + ` won — $` + totalProfit.toFixed(2));
-          } else {
-            toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` won — $` + totalProfit.toFixed(2));
-          }
+          toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` won — $` + totalProfit.toFixed(2) + tickNote);
+        }
+        if (sync?.verdict === "split" && sync.summary) {
+          toast.warning(sync.summary);
         }
         setTradeDialog(false);
         queryClient.invalidateQueries();
@@ -1249,7 +1269,7 @@ export default function MarketDetail() {
                   <div className="flex items-start gap-1.5 p-2 rounded-lg bg-amber-500/5 border border-amber-500/15">
                     <AlertTriangle className="w-3 h-3 text-amber-400 mt-0.5 shrink-0" />
                     <p className="text-[10px] leading-relaxed text-amber-300/80">
-                      Bulk over-exposes your account. Trades are filtered for precision — enable <span className="font-bold text-amber-300">NeuroAI Assist</span> for well-timed, synchronized entries.
+                      Bulk over-exposes your account. All {bulkCount} legs are quoted, then <span className="font-bold text-amber-300">committed in one burst inside a single tick</span> so they open on the same digit and close together. The server verifies it on Deriv's own start times and reports the result.
                     </p>
                   </div>
                 </div>

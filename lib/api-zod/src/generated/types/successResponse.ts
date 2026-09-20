@@ -10,4 +10,10 @@ export interface SuccessResponse {
   success: boolean;
   /** @nullable */
   message?: string | null;
+  /** Fresh anonymous session id after a rotation (e.g. disconnect). Per-tab clients adopt it into sessionStorage; cookie clients ignore it.
+   */
+  sessionId?: string;
+  /** Signed risk-acknowledgment value for sessionId, for per-tab clients to store and resend as X-Risk-Ack.
+   */
+  riskAck?: string;
 }

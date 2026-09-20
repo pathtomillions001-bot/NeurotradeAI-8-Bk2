@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { WebSocketServer } from "ws";
 import {
+  commitDelayMs,
   executeBulkLiveTrades,
   isRetryableDerivError,
   parseBulkLegRef,
@@ -226,7 +227,10 @@ describe("executeBulkLiveTrades against a hostile fake Deriv", () => {
           !("error" in leg),
           `leg ${i} executed, got: ${"error" in leg ? leg.error.message : ""}`,
         );
-        if (!("error" in leg)) assert.equal(leg.contractId, 1000 + i);
+        if (!("error" in leg)) assert.equal(leg.contract.contractId, 1000 + i);
+        // Every leg rode the batch's ONE commit burst: no leg was split off.
+        assert.equal(leg.receipt.burst, 0, `leg ${i} rode the first burst`);
+        assert.equal(leg.receipt.splitTick, false, `leg ${i} was not split`);
         // No leg may ever buy twice (late original + retry double-fire).
         assert.equal(buysPerLeg.get(i), 1, `leg ${i} bought exactly once`);
       }

@@ -12,8 +12,14 @@
  * This registry closes the gap: each engine registers its OWN status getter
  * once when a session starts (in the starting session's ambient context).
  * `listLiveBots()` then re-reads every registration under the OWNING
- * session's context (runWithSessionId), so a /live poll from ANY session sees
- * every engine that is actually running, regardless of whose tab is asking.
+ * session's context (runWithSessionId), so a /live poll from ANY session can
+ * discover which engines are actually running — the ROUTE then decides what
+ * each session is allowed to see (strictly its own account's engines).
+ *
+ * Multi-account: registrations are namespaced by OWNING session, so two
+ * connected Deriv accounts may run the same engine family at the same time
+ * (the execution arbiter is per-account) without clobbering each other's
+ * registration.
  *
  * Self-cleaning: entries whose owner is no longer running are dropped on the
  * next poll — engines have many stop paths (circuit breakers, feed stalls,
@@ -34,32 +40,57 @@ export interface LiveBotStatusShape {
 }
 
 interface LiveBotRegistration {
+  /** Engine key (e.g. "killshot-family", "neuroai", "autonomous"). */
+  key: string;
+  /** The account-scoped session that started (and owns) the engine. */
   ownerSessionId: string;
   status: () => LiveBotStatusShape | null;
 }
 
 const registrations = new Map<string, LiveBotRegistration>();
 
-/**
- * Called by an engine's startSession (in the starting session's ambient
- * context) to publish its live status. `key` identifies the engine
- * (e.g. "killshot-family"); re-registering replaces the previous entry.
- */
-export function registerLiveBot(key: string, status: () => LiveBotStatusShape | null): void {
-  registrations.set(key, {
-    ownerSessionId: getBrowserSessionId(),
-    status,
-  });
+function registryKey(key: string, ownerSessionId: string): string {
+  return `${key}::${ownerSessionId}`;
 }
 
-/** Drop a registration (best-effort; polling cleans up stale entries anyway). */
+/**
+ * Called by an engine's startSession (in the starting session's ambient
+ * context) to publish its live status. `key` identifies the engine family
+ * (e.g. "killshot-family"); re-registering the same family for the SAME
+ * owning session replaces the previous entry, while a DIFFERENT owning
+ * session gets its own entry (two Deriv accounts can run the same family).
+ */
+export function registerLiveBot(key: string, status: () => LiveBotStatusShape | null): void {
+  const ownerSessionId = getBrowserSessionId();
+  registrations.set(registryKey(key, ownerSessionId), { key, ownerSessionId, status });
+}
+
+/**
+ * Drop a registration (best-effort; polling cleans up stale entries anyway).
+ *
+ * Called under the owning session it removes exactly that session's entry.
+ * Called from a foreign context (no entry for the ambient session) it falls
+ * back to removing every entry for the key — the historical behaviour, kept
+ * for cleanup paths that have no session context.
+ */
 export function unregisterLiveBot(key: string): void {
-  registrations.delete(key);
+  const ambient = getBrowserSessionId();
+  const hasOwnEntry = [...registrations.values()].some(
+    r => r.key === key && r.ownerSessionId === ambient,
+  );
+  for (const [k, reg] of [...registrations.entries()]) {
+    if (reg.key !== key) continue;
+    if (hasOwnEntry ? reg.ownerSessionId === ambient : true) registrations.delete(k);
+  }
 }
 
 /**
  * Every engine that is ACTUALLY running right now, with its full status read
  * under the owning session's context. Safe to call from any request context.
+ *
+ * NOTE: this lists engines of ALL sessions — including other connected Deriv
+ * accounts. Callers (GET /api/bots/live) are responsible for scoping the
+ * result to the requesting account; other accounts' engines are never shown.
  */
 export function listLiveBots(): Array<{
   ownerSessionId: string;

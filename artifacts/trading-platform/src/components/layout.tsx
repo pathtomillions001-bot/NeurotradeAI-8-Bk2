@@ -159,27 +159,19 @@ export function Layout({ children }: { children: ReactNode }) {
           <span className="font-bold text-base tracking-tight">NeuroTrade</span>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          {liveBots.length > 0 ? (
-            <LiveBotIndicator compact live={liveBots} />
-          ) : (
-            navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href))) && (
-              <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">
-                {navItems.find((n) => n.href === location || (n.href !== "/" && location.startsWith(n.href)))?.label}
-              </span>
-            )
-          )}
+          <LiveBotIndicator compact live={liveBots} />
         </div>
       </header>
 
-      {/* Live bot indicator — desktop, fixed to the top-right of every page.
+      {/* Active-engine indicator — desktop, fixed to the top-right of every
+          page. ALWAYS rendered: "No bot running" when idle, the live engine
+          (AI Bots section, NeuroAI FAB or autonomous) when trading.
           z-30: below the z-40/50 console dialogs (which show the same bot
           in full detail) but above all page content. */}
       <div className="hidden md:block fixed top-3 right-4 z-30 pointer-events-none">
-        {liveBots.length > 0 && (
-          <div className="pointer-events-auto">
-            <LiveBotIndicator live={liveBots} />
-          </div>
-        )}
+        <div className="pointer-events-auto">
+          <LiveBotIndicator live={liveBots} />
+        </div>
       </div>
 
       {/* Main content */}

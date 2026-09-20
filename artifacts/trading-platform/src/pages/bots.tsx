@@ -365,37 +365,17 @@ export default function Bots() {
   return (
     <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">
 
-      {/* ── Header ─────────────────────────────────────────────────────── */}
+      {/* ── Header ──────────────────────────────────────────────────────
+          The "active engine" popup used to live here too ("No bot running" /
+          "Active Bot"). It is now the SINGLE global indicator fixed to the
+          menu bar (components/live-bot-indicator.tsx), which also covers the
+          NeuroAI Quantum FAB and the main autonomous engine. */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold tracking-tight flex items-center gap-2.5">
             <Bot className="w-6 h-6 text-primary" />
             AI Bot Arena
           </h1>
-        </div>
-
-        <div className="flex items-center gap-2">
-          {activeBotId ? (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-primary/25 bg-primary/5">
-              <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-              <div>
-                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Active Bot</p>
-                <p className="text-xs font-semibold text-primary">
-                  {runningBot?.session?.botName ?? liveSession?.botName ?? activeBotId}
-                </p>
-              </div>
-              <span className={`text-sm font-mono font-bold ${
-                (runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0) >= 0 ? "text-green-400" : "text-red-400"
-              }`}>
-                {(runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0) >= 0 ? "+" : "-"}${Math.abs(runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0).toFixed(2)}
-              </span>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-card">
-              <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/50" />
-              <p className="text-xs text-muted-foreground">No bot running</p>
-            </div>
-          )}
         </div>
       </div>
 

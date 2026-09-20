@@ -2,16 +2,17 @@
  * Global "what is trading right now" state.
  *
  * The server's `GET /api/bots/live` is the single source of truth for every
- * engine (specialist, Dual-Lock, Kill-Shot, Kill-Shot family) — the layout's
- * live indicator polls it every few
- * seconds so a bot that starts in the background is visible the moment this
- * tab next polls (and immediately after any refresh). The SSE `bot_update`
+ * engine in the app — the specialist bots in the AI Bots section, the
+ * NeuroAI Quantum FAB ("neuroai") and the main autonomous engine
+ * ("autonomous"). The layout's live indicator polls it every few seconds so
+ * an engine that starts in the background is visible the moment this tab
+ * next polls (and immediately after any refresh). The SSE `bot_update`
  * stream keeps the indicator in step between polls without waiting.
  *
- * Privacy: the API masks status details for engines owned by ANOTHER browser
- * session (same rule as every other status endpoint) — the indicator then
- * shows a plain "engine active" marker so nothing runs invisibly, without
- * leaking one visitor's telemetry to another.
+ * Strict account isolation: the API returns ONLY the engines owned by the
+ * connected Deriv account behind THIS session (session ids are derived from
+ * the Deriv login) — an engine running under a different Deriv account is
+ * never listed, so the indicator is always "what is my account doing".
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -44,8 +45,12 @@ export interface LiveBot {
 }
 
 /**
- * The stop endpoint for each bot family. Everything not named here rides the
+ * The stop endpoint for each engine. Everything not named here rides the
  * generic specialist route (`/api/bots/:botId/stop`).
+ *
+ * The two app-level engines stop through their OWN routes:
+ *  - "neuroai"    → the NeuroAI Quantum FAB session
+ *  - "autonomous" → the main autonomous engine (toggle off)
  */
 export function stopPathForBot(botId: string): string {
   switch (botId) {
@@ -57,10 +62,40 @@ export function stopPathForBot(botId: string): string {
     case "ks-parity":
     case "ks-matchdiff":
       return "/api/bots/family/stop";
+    case "neuroai":
+      return "/api/speed-ai/stop";
+    case "autonomous":
+      return "/api/ai/engine/toggle";
     default:
       return `/api/bots/${botId}/stop`;
   }
 }
+
+/**
+ * Extra POST body for non-bots stop endpoints. The autonomous engine is
+ * toggled (running:false); everything else stops with an empty body.
+ */
+export function stopBodyForBot(botId: string): Record<string, unknown> | undefined {
+  if (botId === "autonomous") return { running: false };
+  return undefined;
+}
+
+/**
+ * Where the "Open" action should take the user for each engine.
+ *  - catalogue bots  → their live console on the AI Bots page
+ *  - "neuroai"       → the NeuroAI FAB panel (opened via a window event,
+ *                      the FAB button lives on every page)
+ *  - "autonomous"    → the dashboard, which hosts the engine's live card
+ * Returns null when there is no dedicated target (the engine is always
+ * reachable through its own UI, so nothing is lost).
+ */
+export function openPathForBot(botId: string): string | null {
+  if (botId === "neuroai" || botId === "autonomous") return null;
+  return `/bots?open=${botId}`;
+}
+
+/** Event name the layout uses to ask the NeuroAI FAB to open its panel. */
+export const OPEN_SPEED_AI_EVENT = "neurotrade:open-speed-ai";
 
 /**
  * All engines currently running for THIS session (the arbiter caps it at one).

@@ -876,36 +876,45 @@ router.get("/status", (req, res) => {
 // refreshed tab that never opened the running bot's console — could watch a
 // bot trade in the background with nothing on screen. The layout's live
 // indicator polls THIS endpoint (plus the SSE `bot_update` stream for
-// immediacy), so every engine running for this session is visible, openable
+// immediacy), so every engine running for THIS ACCOUNT is visible, openable
 // and stoppable from any page, immediately after a refresh.
 //
-// Privacy follows the same rule as every other status endpoint: the full
-// status is only visible to the session that owns the engine; any other
-// session sees a minimal `{ running: true, masked: true }` marker, so a
-// background engine is never silently invisible — without leaking one
-// visitor's telemetry to another.
+// STRICT ACCOUNT ISOLATION: session ids are derived from the connected Deriv
+// login, so `req.sessionId` IS the account. The live registry can see engines
+// of every connected account (it is cross-session on purpose — that is what
+// lets the registry find them), but this route returns ONLY the engines
+// owned by the requesting account. A bot, a NeuroAI Quantum FAB session or
+// the autonomous engine running under ANOTHER Deriv account is never listed
+// here — not even as a masked marker.
+//
+// The registry covers every executor family: the specialist bots in the AI
+// Bots section, the NeuroAI Quantum FAB ("neuroai") and the main autonomous
+// engine ("autonomous") — so the indicator always knows which engine is
+// active, wherever in the app it was started.
 
 router.get("/live", (req, res) => {
   const entries: Array<{ botId: string; botName: string; console: string; status: unknown }> = [];
 
   // Every engine that is actually running, read through the cross-session
   // live registry: each registration is probed under its OWNING session's
-  // context, so engines started by other tabs/sessions are visible here too
-  // (engine state is session-scoped — a direct isRunning() call from this
-  // request's context would only ever see THIS session's own engines).
+  // context (engine state is session-scoped — a direct isRunning() call from
+  // this request's context would only ever see THIS session's own engines).
+  // Then scope the result to THIS request's account.
   for (const { ownerSessionId, status } of listLiveBots()) {
+    if (ownerSessionId !== req.sessionId) continue;
     const botId = String(status.botId);
     const def = getBotDefinition(botId);
-    const console_ = def ? botConsoleId(def) : "specialist@1";
-    entries.push(
-      ownerSessionId === req.sessionId
-        ? { botId, botName: status.botName ?? def?.name ?? botId, console: console_, status }
-        : { botId, botName: status.botName ?? def?.name ?? botId, console: console_, status: { running: true, masked: true } },
-    );
+    // Catalogue bots link to their console page; the app-level engines have
+    // no catalogue entry — the frontend routes them to their own UI.
+    const console_ =
+      botId === "neuroai" ? "neuroai"
+      : botId === "autonomous" ? "autonomous"
+      : def ? botConsoleId(def) : "specialist@1";
+    entries.push({ botId, botName: status.botName ?? def?.name ?? botId, console: console_, status });
   }
 
-  // The engine arbiter allows at most ONE executor per account, so entries
-  // from different accounts are the multi-tab case only.
+  // The engine arbiter allows at most ONE executor per account, so there is
+  // at most one entry per account.
   res.json({ bots: entries, activeBotId: entries[0]?.botId ?? null });
 });
 

@@ -65,6 +65,7 @@ import {
 } from "./engine-arbiter";
 import type { RecoveryTradeRecord } from "./speed-recovery-state";
 import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
+import { registerLiveBot } from "./live-registry";
 
 export { recordRecoveryOutcome } from "./speed-recovery-state";
 export type { SpeedRecoveryState } from "./speed-recovery-state";
@@ -1451,6 +1452,31 @@ function broadcast() {
   const ownerSessionId = session.config?.ownerSessionId;
   if (!ownerSessionId) return;
   broadcastSSE("speed_ai_update", getStatus(), ownerSessionId);
+  // Also publish on the shared `bot_update` stream so the layout's live
+  // indicator (which listens to bot_update) sees the NeuroAI FAB session
+  // exactly like any other engine. The payload carries botId so consumers
+  // that filter by bot ignore it, and the live registry's /live poll picks
+  // it up for the owning account only.
+  broadcastSSE("bot_update", liveBotStatus(), ownerSessionId);
+}
+
+/** The NeuroAI FAB session expressed as a LiveBotStatus for the registry. */
+function liveBotStatus() {
+  const s = getStatus();
+  return {
+    running: s.running,
+    botId: "neuroai",
+    botName: "NeuroAI Quantum FAB",
+    totalProfit: s.totalProfit,
+    tradeCount: s.tradeCount,
+    winCount: s.winCount,
+    lossCount: s.lossCount,
+    inRecovery: s.inRecovery,
+    recoveryStep: s.recoveryStep,
+    currentMarket: s.currentMarket,
+    currentContractType: s.currentContractType,
+    message: s.message,
+  };
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -1562,6 +1588,11 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
   // (session state, recovery ledger, signal pools, arbiter lock) resolves to
   // this account — deterministically, regardless of call-site context.
   const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
+  // Publish to the cross-session live registry (lib/live-registry.ts) so the
+  // global live indicator lists this account's NeuroAI session like any
+  // other engine. The registration is namespaced to THIS account's session,
+  // so a session running under another Deriv account is never shown here.
+  runWithSessionId(loopSessionId, () => registerLiveBot("neuroai", liveBotStatus));
   runWithSessionId(loopSessionId, () => runLoop(config).catch(err => {
     logger.error({ err }, "NeuroAI FAB runLoop error");
     session.running = false;

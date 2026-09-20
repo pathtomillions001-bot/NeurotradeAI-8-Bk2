@@ -5,6 +5,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { useCallback, useEffect, useRef, useState } from "react";
 import NotFound from "@/pages/not-found";
 import { Layout } from "@/components/layout";
+import { LiveBotsProvider } from "@/lib/live-bots";
 import LandingPage from "./pages/landing";
 
 import Dashboard from "./pages/dashboard";
@@ -227,6 +228,10 @@ function Router() {
   }
 
   return (
+    // One `/api/bots/live` poll for the whole app: the layout's status popup
+    // and the Bot Arena cards read the same answer, so they cannot disagree
+    // about which bot is running (or which Deriv account it is running on).
+    <LiveBotsProvider>
     <Layout>
       <Switch>
         <Route path="/" component={Dashboard} />
@@ -242,6 +247,7 @@ function Router() {
         <Route component={NotFound} />
       </Switch>
     </Layout>
+    </LiveBotsProvider>
   );
 }
 

@@ -8,6 +8,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Checkbox } from "@/components/ui/checkbox";
 import { motion } from "framer-motion";
 import { useState, useEffect, useRef } from "react";
+import { refreshLiveBots } from "@/lib/live-bots";
 import { toast } from "sonner";
 import { Link, useLocation } from "wouter";
 import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, CheckCircle2, Zap, FlaskConical, RefreshCw, AlertTriangle, Activity, LockKeyhole, TrendingDown } from "lucide-react";
@@ -138,6 +139,7 @@ export default function Connect() {
           toast.success("Signed in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
+          refreshLiveBots();
           // Redirect to dashboard after short delay so the user sees the success state
           setTimeout(() => setLocation("/"), 1200);
         })
@@ -166,6 +168,7 @@ export default function Connect() {
           toast.success("Logged in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
+          refreshLiveBots();
           setTimeout(() => setLocation("/"), 1200);
         },
         onError: (err: unknown) => {
@@ -253,6 +256,7 @@ export default function Connect() {
         toast.success("Account connected — live trading on Deriv");
         setToken("");
         queryClient.invalidateQueries();
+        refreshLiveBots();
         setTimeout(() => setLocation("/"), 1200);
       },
       onError: (err: unknown) => {
@@ -313,6 +317,7 @@ export default function Connect() {
         }
         toast.success("Account unlinked successfully");
         queryClient.invalidateQueries();
+        refreshLiveBots();
       },
       onError: (err: any) => {
         toast.error(err?.error || "Failed to disconnect account");
@@ -349,6 +354,7 @@ export default function Connect() {
       onSuccess: (switched) => {
         toast.success(`Switched to ${switched.isVirtual ? "Demo" : "Real"} — ${switched.loginId}`);
         queryClient.invalidateQueries();
+        refreshLiveBots();
       },
       onError: (err: unknown) => {
         const msg = err instanceof ApiError

@@ -19,6 +19,7 @@ import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/li
 import { consoleSkew, resolveConsole } from "@/lib/console-registry";
 import { WEB_RELEASE, releasePair, type ReleaseInfo } from "@/lib/release";
 import { withTabSession } from "@/lib/tab-session";
+import { BotStatusPopup } from "@/components/bot-status-popup";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
 
@@ -374,29 +375,11 @@ export default function Bots() {
           </h1>
         </div>
 
-        <div className="flex items-center gap-2">
-          {activeBotId ? (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-primary/25 bg-primary/5">
-              <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-              <div>
-                <p className="text-[9px] uppercase tracking-wider text-muted-foreground">Active Bot</p>
-                <p className="text-xs font-semibold text-primary">
-                  {runningBot?.session?.botName ?? liveSession?.botName ?? activeBotId}
-                </p>
-              </div>
-              <span className={`text-sm font-mono font-bold ${
-                (runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0) >= 0 ? "text-green-400" : "text-red-400"
-              }`}>
-                {(runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0) >= 0 ? "+" : "-"}${Math.abs(runningBot?.session?.totalProfit ?? liveSession?.totalProfit ?? 0).toFixed(2)}
-              </span>
-            </div>
-          ) : (
-            <div className="flex items-center gap-2 px-3 py-2 rounded-lg border border-border bg-card">
-              <span className="w-1.5 h-1.5 rounded-full bg-muted-foreground/50" />
-              <p className="text-xs text-muted-foreground">No bot running</p>
-            </div>
-          )}
-        </div>
+        {/* The status popup — the SAME element as the floating one in the
+            layout (single source: GET /api/bots/live). The arena is the one
+            place that also wants the idle state spelled out, so it asks for
+            it; everywhere else the popup stays silent while nothing runs. */}
+        <BotStatusPopup showIdle />
       </div>
 
       {/* ── Release skew (stale web bundle vs current API) ─────────────── */}

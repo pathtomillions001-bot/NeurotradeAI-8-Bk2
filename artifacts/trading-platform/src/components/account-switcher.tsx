@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useGetAccounts, useSwitchAccount, useGetAccount } from "@workspace/api-client-react";
 import { ApiError } from "@workspace/api-client-react";
+import { refreshLiveBots } from "@/lib/live-bots";
 
 interface DerivAccount {
   id: number;
@@ -55,6 +56,10 @@ export function AccountSwitcher() {
         setOpen(false);
         // Invalidate everything — balance, journal, engine state all depend on the account
         queryClient.invalidateQueries();
+        // …and re-scope the bot-status popup NOW. The account decides whether
+        // a running bot is "yours" or "running on another account"; waiting for
+        // the next 5s live poll would attribute it to the account just left.
+        refreshLiveBots();
       },
       onError: (err: unknown) => {
         const msg = err instanceof ApiError

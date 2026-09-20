@@ -50,6 +50,9 @@ const MARKERS = {
   splash: 'data-testid="boot-splash"',
   layout: ">Risk Calc<",
   landing: ">Market Open<",
+  // The ONE bot-status popup (components/bot-status-popup.tsx). The Bot Arena
+  // asks for its idle state, so it must be in the first paint of /bots.
+  popup: "No bot running",
 };
 
 function describe(html) {
@@ -62,6 +65,7 @@ function describe(html) {
 const cases = [
   { url: "/", expect: "splash" },
   { url: "/bots", expect: "layout", note: "refresh on Bots stays on Bots" },
+  { url: "/bots", expect: "popup", note: "the merged bot-status popup paints its idle state" },
   { url: "/trades", expect: "layout", note: "refresh on Journal stays on Journal" },
   { url: "/connect", expect: "layout", note: "OAuth landing route is never gated" },
   { url: "/connect?code=abc&state=xyz", expect: "layout", note: "OAuth callback with query works" },

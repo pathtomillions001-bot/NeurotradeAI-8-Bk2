@@ -20,6 +20,7 @@
  * explicit stop), so a single withdrawal call would be error-prone.
  */
 
+import { notedBotAccount } from "./account-scope";
 import { getBrowserSessionId, runWithSessionId } from "./session";
 
 /**
@@ -36,6 +37,13 @@ export interface LiveBotStatusShape {
 interface LiveBotRegistration {
   ownerSessionId: string;
   status: () => LiveBotStatusShape | null;
+  /**
+   * The Deriv account this bot was started on (see lib/account-scope.ts).
+   * Captured at REGISTRATION time, synchronously, from the session note the
+   * start route wrote — so a later account switch cannot re-attribute a bot
+   * that is already trading.
+   */
+  accountLoginId: string | null;
 }
 
 const registrations = new Map<string, LiveBotRegistration>();
@@ -49,6 +57,7 @@ export function registerLiveBot(key: string, status: () => LiveBotStatusShape | 
   registrations.set(key, {
     ownerSessionId: getBrowserSessionId(),
     status,
+    accountLoginId: notedBotAccount(),
   });
 }
 
@@ -64,8 +73,10 @@ export function unregisterLiveBot(key: string): void {
 export function listLiveBots(): Array<{
   ownerSessionId: string;
   status: LiveBotStatusShape;
+  /** Deriv login the bot was started on, or null for an unattributed engine. */
+  accountLoginId: string | null;
 }> {
-  const live: Array<{ ownerSessionId: string; status: LiveBotStatusShape }> = [];
+  const live: Array<{ ownerSessionId: string; status: LiveBotStatusShape; accountLoginId: string | null }> = [];
   for (const [key, reg] of [...registrations.entries()]) {
     let status: LiveBotStatusShape | null;
     try {
@@ -74,7 +85,7 @@ export function listLiveBots(): Array<{
       status = null;
     }
     if (status && status.running && status.botId) {
-      live.push({ ownerSessionId: reg.ownerSessionId, status });
+      live.push({ ownerSessionId: reg.ownerSessionId, status, accountLoginId: reg.accountLoginId });
       continue;
     }
     registrations.delete(key);

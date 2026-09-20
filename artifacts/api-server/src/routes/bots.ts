@@ -24,6 +24,7 @@ import {
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
 import { listLiveBots } from "../lib/live-registry";
+import { activeAccountLoginId, botAccountScope, isOwnAccountScope, stampActiveAccount, type AccountScope } from "../lib/account-scope";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
 import * as prism from "../lib/match-prism-engine";
@@ -179,33 +180,38 @@ function visibleStatus(sessionId: string) {
 
 // ── Catalogue ─────────────────────────────────────────────────────────────────
 
-router.get("/", (req, res) => {
-  const status = visibleStatus(req.sessionId);
-  const dual = visibleDualStatus(req.sessionId);
-  const shot = visibleKillShotStatus(req.sessionId);
-  const fam = visibleFamilyStatus(req.sessionId);
+/**
+ * The catalogue, scoped to the ACCOUNT this browser is currently on.
+ *
+ * `session` is only attached to a bot that is trading the ACTIVE account, so
+ * the arena cannot show "LIVE" (or a P&L) for a bot running on an account the
+ * user has since switched away from. `activeBotId` follows the same rule.
+ *
+ * The source is the live registry rather than four per-engine `getStatus()`
+ * calls: it is the same source `/live` and the layout's popup use, it already
+ * resolves each engine under its OWNING session's context, and it carries the
+ * account stamp. The four-call version had its own priority list that could
+ * (and did) drift from `/live`.
+ */
+router.get("/", async (req, res): Promise<void> => {
+  const activeAccount = await activeAccountLoginId(req.sessionId);
+  const mine = listLiveBots()
+    .filter(b => b.ownerSessionId === req.sessionId)
+    .filter(b => isOwnAccountScope(botAccountScope(b.accountLoginId, activeAccount)));
+
+  const runningId = pickActiveBotId(mine.map(b => ({ botId: String(b.status.botId), running: true })));
+  const runningStatus = mine.find(b => String(b.status.botId) === runningId)?.status ?? null;
+
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
-    bots: BOT_CATALOG.map(bot => {
-      const console_ = botConsoleId(bot);
-      if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
-        return { ...bot, console: console_, session: dual.running ? dual : null };
-      }
-      if (bot.id === killshot.KILLSHOT_BOT_ID) {
-        return { ...bot, console: console_, session: shot.running ? shot : null };
-      }
-      if (bot.killShotFamily) {
-        return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
-      }
-      return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
-    }),
-    activeBotId: pickActiveBotId([
-      { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
-      { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
-      { botId: fam.botId ?? null, running: fam.running },
-      { botId: status.botId, running: status.running },
-    ]),
+    bots: BOT_CATALOG.map(bot => ({
+      ...bot,
+      console: botConsoleId(bot),
+      session: runningId === bot.id ? runningStatus : null,
+    })),
+    activeBotId: runningId,
+    account: { loginId: activeAccount },
   });
 });
 
@@ -334,6 +340,10 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     return;
   }
 
+  // Stamp the ACCOUNT this bot is about to trade. The registration the engine
+  // performs a moment later reads it synchronously, so a switch to another
+  // linked account cannot re-attribute a bot that is already running.
+  await stampActiveAccount(req.sessionId);
   const result = await dualLock.startSession({
     ownerSessionId: req.sessionId,
     symbol: market.symbol,
@@ -448,6 +458,10 @@ router.post("/killshot/start", async (req, res): Promise<void> => {
     return;
   }
 
+  // Stamp the ACCOUNT this bot is about to trade. The registration the engine
+  // performs a moment later reads it synchronously, so a switch to another
+  // linked account cannot re-attribute a bot that is already running.
+  await stampActiveAccount(req.sessionId);
   const result = await killshot.startSession({
     ownerSessionId: req.sessionId,
     symbol: market.symbol,
@@ -632,6 +646,10 @@ router.post("/family/start", async (req, res): Promise<void> => {
     return;
   }
 
+  // Stamp the ACCOUNT this bot is about to trade. The registration the engine
+  // performs a moment later reads it synchronously, so a switch to another
+  // linked account cannot re-attribute a bot that is already running.
+  await stampActiveAccount(req.sessionId);
   const result = await killshotFamily.startSession({
     ownerSessionId: req.sessionId,
     botId: parsed.spec.botId,
@@ -822,6 +840,10 @@ router.post("/prism/start", async (req, res): Promise<void> => {
   const digit = parsed.spec.digit;
   const chosenDigit = card.digit !== undefined && digit === undefined ? Number(card.digit) : (digit ?? Number(card.digit ?? 0));
 
+  // Stamp the ACCOUNT this bot is about to trade. The registration the engine
+  // performs a moment later reads it synchronously, so a switch to another
+  // linked account cannot re-attribute a bot that is already running.
+  await stampActiveAccount(req.sessionId);
   const result = await prism.startSession({
     ownerSessionId: req.sessionId,
     botId: parsed.spec.botId,
@@ -857,16 +879,36 @@ router.post("/prism/stop", (req, res) => {
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
-router.get("/status", (req, res) => {
+router.get("/status", async (req, res): Promise<void> => {
+  // ACCOUNT-SCOPED, like `/` and `/live`: an engine trading a DIFFERENT linked
+  // Deriv account is not this account's running bot, and reporting it here is
+  // how the arena used to stamp a foreign bot's P&L on the wrong card. The
+  // foreign engine is still listed by `/live` (never invisible, always
+  // stoppable) — it just does not answer "what is running on MY account".
+  const activeAccount = await activeAccountLoginId(req.sessionId);
+  const ownedByThisAccount = (botId: string): boolean => {
+    const reg = listLiveBots().find(
+      b => b.ownerSessionId === req.sessionId && String(b.status.botId) === botId,
+    );
+    // No registration: the engine predates the registry, so trust its own
+    // status rather than hiding a running bot.
+    return reg ? isOwnAccountScope(botAccountScope(reg.accountLoginId, activeAccount)) : true;
+  };
+
   const dual = visibleDualStatus(req.sessionId);
-  if (dual.running) { res.json(dual); return; }
+  if (dual.running && ownedByThisAccount(dualLock.DUAL_LOCK_BOT_ID)) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
-  if (shot.running) { res.json(shot); return; }
+  if (shot.running && ownedByThisAccount(killshot.KILLSHOT_BOT_ID)) { res.json(shot); return; }
   const fam = visibleFamilyStatus(req.sessionId);
-  if (fam.running) { res.json(fam); return; }
+  if (fam.running && ownedByThisAccount(String(fam.botId))) { res.json(fam); return; }
   const pm = visiblePrismStatus(req.sessionId);
-  if (pm.running) { res.json(pm); return; }
-  res.json(visibleStatus(req.sessionId));
+  if (pm.running && ownedByThisAccount(String(pm.botId))) { res.json(pm); return; }
+  const specialist = visibleStatus(req.sessionId);
+  if (specialist.running && !ownedByThisAccount(String(specialist.botId))) {
+    res.json({ ...specialist, running: false, botId: null });
+    return;
+  }
+  res.json(specialist);
 });
 
 // ── Live sessions — the source of truth for "what is trading right now" ─────
@@ -885,28 +927,57 @@ router.get("/status", (req, res) => {
 // background engine is never silently invisible — without leaking one
 // visitor's telemetry to another.
 
-router.get("/live", (req, res) => {
-  const entries: Array<{ botId: string; botName: string; console: string; status: unknown }> = [];
+router.get("/live", async (req, res): Promise<void> => {
+  // The account this browser is looking at RIGHT NOW. Every engine that is
+  // running for this session is reported against it: a bot started on another
+  // linked account keeps its own scope instead of being presented as this
+  // account's live bot (see lib/account-scope.ts).
+  const activeAccount = await activeAccountLoginId(req.sessionId);
+  const entries: Array<{
+    botId: string;
+    botName: string;
+    console: string;
+    /** Deriv login the bot is trading, when it is this session's own bot. */
+    account: string | null;
+    scope: AccountScope | "other-session";
+    status: unknown;
+  }> = [];
 
   // Every engine that is actually running, read through the cross-session
   // live registry: each registration is probed under its OWNING session's
   // context, so engines started by other tabs/sessions are visible here too
   // (engine state is session-scoped — a direct isRunning() call from this
   // request's context would only ever see THIS session's own engines).
-  for (const { ownerSessionId, status } of listLiveBots()) {
+  for (const { ownerSessionId, status, accountLoginId } of listLiveBots()) {
     const botId = String(status.botId);
     const def = getBotDefinition(botId);
     const console_ = def ? botConsoleId(def) : "specialist@1";
-    entries.push(
-      ownerSessionId === req.sessionId
-        ? { botId, botName: status.botName ?? def?.name ?? botId, console: console_, status }
-        : { botId, botName: status.botName ?? def?.name ?? botId, console: console_, status: { running: true, masked: true } },
-    );
+    const botName = status.botName ?? def?.name ?? botId;
+    if (ownerSessionId !== req.sessionId) {
+      // Another browser session: unchanged contract — a marker, and NOT the
+      // other session's login id (that account is not this visitor's business).
+      entries.push({ botId, botName, console: console_, account: null, scope: "other-session", status: { running: true, masked: true } });
+      continue;
+    }
+    entries.push({
+      botId,
+      botName,
+      console: console_,
+      account: accountLoginId,
+      scope: botAccountScope(accountLoginId, activeAccount),
+      status,
+    });
   }
 
-  // The engine arbiter allows at most ONE executor per account, so entries
-  // from different accounts are the multi-tab case only.
-  res.json({ bots: entries, activeBotId: entries[0]?.botId ?? null });
+  // `activeBotId` is the bot the user can actually control on THIS account.
+  // A bot running on a different linked account is still reported (it must
+  // never be invisible) but it is not this account's active bot.
+  const mine = entries.find(e => e.scope === "this-account" || e.scope === "unattributed");
+  res.json({
+    bots: entries,
+    activeBotId: mine?.botId ?? null,
+    account: { loginId: activeAccount },
+  });
 });
 
 // ── Scan (specialist) ─────────────────────────────────────────────────────────
@@ -947,6 +1018,10 @@ router.post("/:botId/start", async (req, res): Promise<void> => {
     return;
   }
 
+  // Stamp the ACCOUNT this bot is about to trade. The registration the engine
+  // performs a moment later reads it synchronously, so a switch to another
+  // linked account cannot re-attribute a bot that is already running.
+  await stampActiveAccount(req.sessionId);
   const config: BotConfig = {
     ownerSessionId: req.sessionId,
     botId,

@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "twinhedge" | "accumulator";
+  family: SpecialistFamily | "duallock" | "killshot" | "twinhedge";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -64,8 +64,6 @@ export interface BotDefinition {
    * The UI renders a dedicated console for this bot.
    */
   twinHedge?: boolean;
-  /** Accumulator console: broker-constrained compounding and knockout risk. */
-  accumulator?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -371,85 +369,55 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalPayout: "8.93× / 1.09×",
   },
   {
-    id: "match-nexus",
-    name: "Match Nexus — Quantum Singularity",
-    code: "BOT-MATCH-NEXUS",
+    id: "match-catalyst",
+    name: "Match Catalyst",
+    code: "BOT-MATCH-CATALYST",
     family: "killshot",
     killShotFamily: "matchdiffer",
-    contractLabel: "Matches (Quantum Singularity)",
-    tagline: "6-model singularity · gap-distribution aware · match-tuned shield",
+    contractLabel: "Matches (Precision Decay)",
+    tagline: "7-expert Weibull survival · multi-scale convergence · adaptive shield",
     description:
-      "The first Matches bot built ONLY for Matches — not a generic tail model. It pulls 4 999 deep digits per market, fits a 6-expert ensemble (forgetting Dirichlet, context-tree mixing to order 4, outcome chain, digit-specific renewal hazard, regime HMM, transition row) with Hedge regret bound, calibrates with Platt + Brier skill, and measures its own quantile gate out-of-sample. Entry needs hazard ×1.25, gap at its own p60-p95, percentile ≥60% and geometric overdue <0.32 — not a fixed 4-12 band. Post-loss shield is match-tuned: after a loss gap resets to 0, so it enforces gap≥4, hazard≥1.4 and cool-down 8-18 ticks, plus anti-pattern veto if a digit lost 2/5 recently. Locked mode freezes market but rotates edge to next best digit; switching mode moves to best market when Page-Hinkley fires. Same shared recovery ledger as Match Sniper (debt + markup profit).",
+      "The precision successor to Match Nexus, built from the ground up for timing accuracy. Pulls 4 999 deep digits per market, fits a 7-expert ensemble (forgetting Dirichlet, context-tree mixing to order 5, 3rd-order outcome chain, Weibull survival hazard, 3-state HMM, transition row, spectral cycle detector) with Hedge regret bound. The Weibull survival model replaces the binned hazard map with a smooth, parametric hazard h(t)=(k/λ)(t/λ)^(k-1) fitted to each digit's own gap data via MLE — k>1 means the digit is becoming MORE likely to appear as the gap grows. Multi-Scale Convergence requires the edge to agree at 10, 30, and 100 tick horizons before entry. Anti-Fading detects a declining z-score trend and refuses entry. The post-loss protocol uses ADAPTIVE cooldown calibrated to the digit's own median gap (max(4, ceil(median×0.6))), not a fixed constant. Same shared recovery ledger as every other bot.",
     edge: [
-      "6 EXPERTS WITH REGRET BOUND — forgetting Dirichlet (drifting marginal), context-tree mixing 0-4 KT (best Markov in hindsight), 2-state outcome chain P(win|last outcome), digit-specific Kaplan-Meier hazard h(gap) from THIS digit's own gaps, 2-state HMM regime filter, exact Dirichlet transition row P(digit|last digit). Hedge on log-loss.",
-      "GAP DISTRIBUTION AWARENESS — not fixed 4-12. For each digit it builds its inter-arrival gap CDF, median, p70, p90, p95, current gap percentile and hazard × baseline. Entry needs gap ≥p60 and ≤p95, percentile ≥60%, hazardRelative ≥1.25 and geo-overdue (1-p̂)^gap <0.32.",
-      "PLATT + BRIER SKILL + E-VALUE — fused score calibrated on training half; slope collapses to 0 when no skill, Brier skill vs base printed. Evidence is anytime-valid betting e-value on SHOT sequence (Ville), valid at data-dependent stop.",
-      "MATCH-TUNED POST-LOSS SHIELD, SIMULATED BEFORE TRUSTED — for Matches a loss resets gap to 0, worst entry. Shield enforces gap≥4, hazard≥1.4, cool-down 8/12/18 ticks and is simulated over OOS shots: pairs before→after and cost in shots reported. Anti-pattern: digit losing 2/5 vetoed 25s.",
+      "7 EXPERTS WITH HEDGE REGRET BOUND — forgetting Dirichlet (λ=0.997), context-tree mixing 0-5 KT (best Markov in hindsight), 3rd-order outcome chain P(win|last 3 outcomes), Weibull survival hazard h(t)=(k/λ)(t/λ)^(k-1) fitted via MLE to each digit's gaps, 3-state HMM regime filter (hot/warm/cold), Dirichlet transition row, spectral cycle detector via autocorrelation at lags 1-20.",
+      "WEIBULL SURVIVAL MODEL — replaces binned hazard with smooth parametric form. k>1 = increasing hazard (digit overdue), k<1 = cooling, k≈1 = memoryless. Continuous hazard extrapolates to unseen gaps. Censored-aware via MLE on continuity-corrected data.",
+      "MULTI-SCALE CONVERGENCE — entry requires edge agreement at 3 independent time horizons (10, 30, 100 ticks). An edge at one scale is noise; agreement at all three is signal. Elite requires all 3; Strict requires 2/3.",
+      "ANTI-FADING DETECTION — linear trend of z-score over last 30 readings must be non-negative. A declining z means the edge is evaporating. The bot waits for a fresh signal instead of chasing a fading one.",
+      "ADAPTIVE POST-LOSS PROTOCOL — after a loss, gap resets to 0 (worst entry for matches). Shield enforces: gap ≥ max(4, median_gap/2), hazard ≥ 1.4, cooldown ≥ max(4, ceil(median_gap×0.6)). Cooldown is calibrated to the digit's OWN rhythm.",
+      "PLATT + BRIER SKILL + E-VALUE — fused score calibrated on training half; slope collapses to 0 when no skill. Evidence is anytime-valid betting e-value on SHOT sequence (Ville), valid at data-dependent stop.",
       "EXACT LADDER-RUIN via FMCI — debt(k)=stake·(1+a)^(k-1), a=(1+markup)/(payout-1), k* solves closed-form, absorption P(deeper run) exact via Fu&Koutras, no Monte Carlo.",
-      "LOCKED = EDGE ROTATES, SWITCHING = MARKET ROTATES — locked freezes market but moves to next best digit when current cools (EV margin 0.015). Switching re-measures all 19 markets ×10 digits =190 candidates with BH FDR q=0.10 when PH fires. Never dead-end rescan.",
-      "ENTROPY + STATIONARITY + CONCORDANCE GATES — Shannon entropy >3.275b = white noise refuse, χ² block homogeneity z>3 or drift slope>0.06 refuse, concordance needs 2/4 horizons above BE, Page-Hinkley live health.",
-      "SAME SHARED RECOVERY AS MATCH SNIPER — one account-global ledger, debt-driven stake stake(k)=debt·(1+markup)/(payout-1), markup user-configurable, single-executor arbiter.",
+      "LOCKED = EDGE ROTATES, SWITCHING = MARKET ROTATES — locked freezes market but moves to next best digit when current cools (EV margin 0.015). Switching re-measures all 19 markets ×10 digits with BH FDR q=0.10 when PH fires.",
+      "SAME SHARED RECOVERY AS EVERY OTHER BOT — one account-global ledger, debt-driven stake, markup user-configurable, single-executor arbiter.",
     ],
     accent: "fuchsia",
     icon: "zap",
     hasSides: false,
     hasDigitLock: false,
     sides: [
-      { id: "both", label: "Matches — AI picks best digit", contracts: ["DIGITMATCH"], desc: "AI scores all 10 digits in every market with 6-model singularity and BH FDR" },
+      { id: "both", label: "Matches — AI picks best digit", contracts: ["DIGITMATCH"], desc: "AI scores all 10 digits in every market with 7-expert ensemble and BH FDR" },
     ],
     nominalWinRate: "measured OOS 12-18%",
     nominalPayout: "8.93×",
   },
   {
-    id: "accumulators",
-    name: "Accumulator Edge Navigator",
-    code: "BOT-ACCU",
-    family: "accumulator",
-    contractLabel: "ACCU · compounded growth",
-    tagline: "Survive the range · compound carefully",
-    description:
-      "A dedicated Accumulator console for Deriv ACCU contracts. It measures price-return volatility, a two-state safe/knockout Markov model, block-bootstrap survival, regime heat and the compounded break-even line before it allows an entry. Growth rate, contract duration and take-profit are kept distinct: the broker's dynamic barrier is discovered at runtime, and a knockout is booked as a full-stake loss.",
-    edge: [
-      "Broker-aware ACCU flow: contracts_for → proposal with growth_rate and exchange-side take_profit → live open-contract monitor → pooled-socket sell",
-      "Compounded economics: target ticks use (1 + growth rate)^ticks, so the gate compares conservative survival with 1 / compounded factor rather than a digit-bot payout multiplier",
-      "Dynamic-barrier screening with broker quote preferred and an explicitly labelled fallback estimate when metadata is unavailable",
-      "Block bootstrap preserves short-range dependence; a safe/knockout Markov read catches hazard after a recent shock and a hot-volatility regime pauses entries",
-      "Early close and market switching are risk controls, not profit guarantees; a full-stake knockout, account limits and stale-feed conditions stop the loop",
-      "Accumulator recovery sizes against actual compounded net return and records the actual net profit or full-stake loss into the shared account ledger",
-    ],
-    accent: "orange",
-    icon: "trend",
-    accumulator: true,
-    hasSides: false,
-    hasDigitLock: false,
-    sides: [
-      { id: "both", label: "ACCU growth contract", contracts: ["ACCU"], desc: "The engine selects a broker-supported growth rate and market after survival analysis" },
-    ],
-    nominalWinRate: "survival measured live",
-    nominalPayout: "compounds per tick",
-  },
-  {
     id: "twinhedge",
-    name: "Twin-Lock Hedge Sentinel",
+    name: "Boundary Hedge Sentinel",
     code: "BOT-TWINHEDGE",
     family: "twinhedge",
     contractLabel: "Over 4 + Under 5 · recovery Over 5 + Under 4",
-    tagline: "Two legs, one tick, zero boundary exposure",
+    tagline: "Same-tick hedge · 80% win rate · minimal gates",
     twinHedge: true,
     description:
-      "The paired-hedge bot. Normal rounds fire TWO contracts on the SAME tick with the SAME stake — Over 4 and Under 5 — so one leg wins every round by construction and the round only reaches the ladder if a broker half-tick drops both legs on opposite sides of the 4|5 boundary (a 4-then-5 up-crossing). That both-lose round, and ONLY that round, arms recovery: the mirrored pair Over 5 + Under 4, again both legs on one tick, staked to digest the TOTAL lost amount of the round that fell through (lose $2 across two $1 legs → attack $2). A split round is deliberately ignored — its small payout-vs-stakes tax never triggers a ladder. Every design decision in this bot therefore reduces to one number: P(next exit digit is 4 or 5). The scan measures that hazard per market — three fused estimators on an autocorrelation-corrected sample, worst-case posterior bounds, crossing-rate and clustering tests — and the live gate refuses boundary entries tick by tick: never enter from a 4 or a 5, never fire while the last tick crossed the boundary, never fire while the stream hovers. The recovery pair's own break-even is printed and enforced: at 2.43× per leg the ladder digests debt only while gap-avoidance q̂ clears 82.3%, so a market whose worst-case q̂ sits under that line is refused for recovery work — the honest number behind the promise, not a hope.",
+      "The simplified hedge bot. Normal rounds fire Over 4 + Under 5 on the SAME tick with the SAME stake — on any single digit one leg wins and the other loses, EXCEPT digits 4 and 5 where both lose. 80% win rate on a fair stream. Recovery fires Over 5 + Under 4 when BOTH normal legs lost, sized to digest the total lost amount. The analysis is deliberately minimal: since both trades execute simultaneously, no per-digit prediction is needed. The only gate is the market's 4/5 frequency — if it's above 30%, the boundary is being hovered and the bot waits. Recovery has a patience valve that forces a fire after 5 ticks to prevent stranded debt. Lock or switch after scan.",
     edge: [
-      "SAME-TICK EXECUTION IS THE WHOLE GAME — both legs ride the shared bulk executor: every proposal burst is sent on one socket in one tick, entries are taken only on a FRESH tick arrival (never on a timer), and the loop refuses to fire on stale or stalled feeds, so leg A and leg B settle on the same exit tick by construction, not by luck",
-      "BOUNDARY-DIGIT HAZARD AS THE SINGLE STATE VARIABLE — P(next digit ∈ {4,5}) estimated three ways (Dirichlet marginal, first-order Markov row on the current digit, boundary-side chain) and fused in inverse variance on n_eff = n(1−ρ₁)/(1+ρ₁); the gate reads the 95th-percentile posterior bound, so it trades the worst plausible hazard, not the flattering one",
-      "THE SPLIT ROUND IS SILENTLY IGNORED — exactly the product rule: one win + one loss is the hedge doing its job, it never enters the recovery ledger, and the tax it pays (≈ |payout−2|·stake per round) is booked honestly in P&L, where TP/SL can still see it",
-      "RECOVERY FIRES ON TOTALS, NOT LEGS — a both-lose round records ONE ledger event with the ROUND's total stake (2 × stake), and the recovery stake is the shared debt-driven formula fed the PAIR's net-profit rate (min-leg payout − 1), so the recovery ROUND — whichever of its two legs wins — digests debt + markup; the same one-account ledger and arbiter every other bot shares",
-      "THE 82.3% DIGEST LINE IS THE VETO — a recovery pair at 2.43× per leg breaks even at gap-avoidance q* = 2/2.43 = 82.3%; the scan computes each market's worst-case q̂ and marks recovery on it unworkable below the line — a market that can only win the recovery pair by averaging past 82.3% is telling you the ladder will eat the account",
-      "UP-CROSSINGS ARE THE DISASTER, DOWN-CROSSINGS THE WINDFALL — the side-flip rate and its asymmetry are measured per market; a stream that crosses up through 4|5 more than it crosses down is penalised (that is the microstructure where a half-tick of broker jitter turns a hedge into a double loss), and a tick that JUST crossed the boundary is never entered on",
-      "POST-GAP COOL-DOWN — after any settlement on 4 or 5 the gate stands down for 3 clean ticks, because the digit stream that touched the boundary tends to keep touching it, and the next round's legs would enter it mid-hover",
-      "RECOVERY IS PATIENT BUT NEVER STUCK — the same boundary gates apply, tightened, but debt must be digested: after 12 refused ticks a recovery round fires FORCED and the message says so, instead of letting a perfect entry become a stranded debt",
-      "A BROKER REJECTS ONE LEG? THE ROUND NEVER ARMS RECOVERY — a leg that never traded cannot 'lose', so the round settles on the confirmed leg alone and recovery only ever triggers when both legs actually traded and actually lost; the hedge is never allowed to grow debt out of a socket hiccup",
-      "LOCK OR SWITCH — AFTER THE SCAN, NOT IN THE SETTINGS — the scan ranks the whole digit universe on the boundary statistics; you then choose: LOCK freezes the chosen market for the engagement (hazards only warn), SWITCH lets the engine rotate to the next-best scanned market when the live hazard measurably decays. Contracts NEVER rotate — the pair is the product",
-      "CIRCUIT BREAKERS WITH A MODELLED NUMBER — consecutive recovery failures beyond the max-steps ladder halt the session, and the bootstrap's p95 recovery depth + 2 is armed against the realised loss run; the breaker quotes the scan's own prediction, not a magic constant",
+      "SAME-TICK EXECUTION — both legs fire through the shared bulk executor in one socket burst. On any single exit tick, exactly one leg wins (except digit 4/5 where both lose). The hedge is structural, not predictive.",
+      "80% WIN RATE PER ROUND — digits 0-3 and 6-9 each produce a split win (one leg pays out, the other loses). Only digits 4 and 5 are catastrophic. On a fair stream, 8 out of 10 rounds profit.",
+      "MINIMAL GATES, MAXIMUM SPEED — the only gate is the market's 4/5 frequency (<30% to fire). No crossing analysis, no boundary asymmetry, no stationarity tests. The hedge IS the edge — we just avoid markets hovering on the boundary.",
+      "RECOVERY WITH PATIENCE VALVE — recovery fires Over 5 + Under 4 when both normal legs lost. If the current digit is 4 or 5, the bot waits. After 5 refused ticks, recovery is FORCED — stranded debt is worse than an unfavourable recovery round.",
+      "SPLIT ROUNDS ARE IGNORED — one win + one loss is the hedge doing its job. It never enters the recovery ledger. Only BOTH-LOST rounds arm recovery.",
+      "RECOVERY STAKE DIGESTS TOTAL LOSS — a both-lose round loses 2× stake. The recovery stake is sized via the shared debt-driven formula to digest that total plus markup.",
+      "LOCK OR SWITCH — after the scan, choose LOCK (market frozen) or SWITCH (engine rotates to next best market when 4/5 frequency rises).",
+      "SAME SHARED RECOVERY — one account-global ledger, debt-driven stake, single-executor arbiter.",
     ],
     accent: "lime",
     icon: "layers",
@@ -458,12 +426,12 @@ export const BOT_CATALOG: BotDefinition[] = [
     sides: [
       {
         id: "both",
-        label: "Twin pair (auto-configured)",
+        label: "Auto-configured pair",
         contracts: ["DIGITOVER", "DIGITUNDER"],
         desc: "Normal Over 4 + Under 5 · recovery Over 5 + Under 4 — both legs, one tick, no contract choice",
       },
     ],
-    nominalWinRate: "100% one-leg-wins normal · ≈80%+ recovery pair",
+    nominalWinRate: "≈80% normal · split = profit",
     nominalPayout: "1.95× · 2.43×",
   },
 ];
@@ -486,8 +454,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.accumulator) return "accumulator@1";
-  if (bot.twinHedge) return "twin-hedge@1";
+  if (bot.twinHedge) return "twin-hedge@2";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

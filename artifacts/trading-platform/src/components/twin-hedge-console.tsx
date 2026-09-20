@@ -1,13 +1,17 @@
 /**
- * Twin-Lock Hedge Sentinel console.
+ * Boundary Hedge Sentinel console.
  *
+ * SIMPLIFIED from the old Twin-Lock that had too many gates and never traded.
  * The contract choice that every other console makes is GONE here — by design.
  * The pair is hard-wired (normal Over 4 + Under 5, recovery Over 5 + Under 4,
  * both legs on one tick, recovery armed only on a both-lost round). What the
  * scan earns the user is the only choice that matters: WHICH market, and
- * whether to LOCK it or let the engine SWITCH when the boundary structure
- * decays. The running view is a hedge monitor: hazard read, round-type
- * tallies (both-win / split / both-lost) and the recovery ledger.
+ * whether to LOCK it or let the engine SWITCH when the 4/5 rate rises.
+ *
+ * The running view is a hedge monitor: round-type tallies (both-win / split /
+ * both-lost) and the recovery ledger. The gate is deliberately minimal — the
+ * hedge IS the edge, and the only thing the gate checks is whether the market's
+ * 4/5 frequency is below 30%.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -31,24 +35,13 @@ interface TwinCandidate {
   symbol: string;
   displayName: string;
   score: number;
-  survival: number;
-  ruin: number;
-  meanPnl: number;
-  recoveryDepthP95: number;
-  bothWinRate: number;
-  bothLoseRate: number;
   gapHazard: number;
   gapHazardWorst: number;
   safeRate: number;
   safeLcb: number;
   recoveryBreakEven: number;
   recoveryViable: boolean;
-  recoveryViableWorst?: boolean;
   crossingRate: number;
-  crossingAsymmetry: number;
-  stationarityZ: number;
-  clusterRatio: number;
-  expectedMaxGapRun: number;
   payoutNormal: number;
   payoutRecovery: number;
   samples: number;
@@ -105,11 +98,6 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
-  /**
-   * No global mode toggle — like the Match Nexus console, LOCK and SWITCHING
-   * are the two deploy buttons under the candidate card, and a runner-up row
-   * SELECTS the market the buttons will deploy.
-   */
   const [selectedSym, setSelectedSym] = useState<string | null>(null);
   const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
     scanning: null, scanned: 0, total: 20,
@@ -143,7 +131,6 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
     setScanResult(null);
     setSelectedSym(null);
     setStep(isRunning ? "running" : "config");
-    // Restore the live session state from the API when re-opening the panel.
     fetch("/api/bots/twin/status")
       .then(r => (r.ok ? r.json() : null))
       .then(s => {
@@ -219,7 +206,6 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
           marketMode: mode,
           ...config,
           analysis: c,
-          // The switching engine rotates INSIDE the scanned universe.
           ranked: scanResult?.allScored ?? [c],
         }),
       });
@@ -239,7 +225,7 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
       const res = await fetch("/api/bots/twin/stop", { method: "POST" });
       const data = await res.json();
       onSession(data.status ?? null);
-      toast.success("Twin-Lock session stopped");
+      toast.success("Boundary Hedge session stopped");
     } catch { /* ignore */ } finally { setLoading(false); }
   };
 
@@ -262,7 +248,7 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
             exit={{ opacity: 0, y: 20, scale: 0.97 }}
             transition={{ type: "spring", stiffness: 400, damping: 35 }}
             role="dialog"
-            aria-label="Twin-Lock Hedge Sentinel console"
+            aria-label="Boundary Hedge Sentinel console"
             className={`fixed bottom-20 right-4 z-50 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border ${a.panelBorder} bg-[#080d17] shadow-2xl ${a.cardGlow}`}
           >
             {/* Header */}
@@ -294,10 +280,11 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                   </p>
                   <p className="text-[10px] text-muted-foreground leading-relaxed">
                     <span className="text-white/80">Normal:</span> Over 4 + Under 5, both legs, same stake, same tick.
-                    A split round is ignored. Only a round where <span className="text-white/80">both legs lose</span>{" "}
+                    One leg always wins on any digit except 4 and 5.
+                    A split round (one win + one loss) is ignored. Only a round where <span className="text-white/80">both legs lose</span>{" "}
                     arms <span className="text-white/80">recovery</span>: Over 5 + Under 4, sized against the TOTAL lost amount.
-                    The scan measures the one hazard that matters — digits 4 and 5 — and you then choose the market
-                    and LOCK it or let it SWITCH.
+                    The scan ranks markets by their 4/5 frequency — lower is better.
+                    Choose the market and LOCK it or let it SWITCH.
                   </p>
                 </div>
 
@@ -365,50 +352,47 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                           <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
                             {isBest ? "Best boundary market" : "Selected from scan"}
                           </p>
-                          <span className={`text-[10px] font-mono ${
-                            c.recoveryViable ? "text-green-400"
-                            : c.recoveryViableWorst ? "text-green-400/70"
-                            : "text-amber-300"
-                          }`}>
-                            {c.recoveryViable ? "RECOVERY DIGESTS DEBT"
-                              : c.recoveryViableWorst ? "DIGESTS ON MEASURED RATE"
-                              : "BELOW DIGEST LINE"}
+                          <span className={`text-[10px] font-mono ${c.recoveryViable ? "text-green-400" : "text-amber-300"}`}>
+                            {c.recoveryViable ? "RECOVERY VIABLE" : "BELOW DIGEST LINE"}
                           </span>
                         </div>
                         <p className="text-sm font-bold text-white">{c.displayName}</p>
                         <div className="grid grid-cols-2 gap-1.5">
+                          <Stat label="Gap hazard (point)" value={pct(c.gapHazard)}
+                                tone={c.gapHazard <= 0.23 ? "text-green-400" : "text-amber-300"} />
                           <Stat label="Gap hazard (worst)" value={pct(c.gapHazardWorst)}
                                 tone={c.gapHazardWorst <= 0.23 ? "text-green-400" : "text-amber-300"} />
-                          <Stat label="Avoidance q̂ (worst)" value={pct(c.safeLcb)} />
+                          <Stat label="Safe rate q̂" value={pct(c.safeRate)} />
                           <Stat label="Recovery digest line" value={pct(c.recoveryBreakEven)} tone="text-cyan-300" />
-                          <Stat label="Simulated survival" value={pct(c.survival)}
-                                tone={c.survival >= 0.6 ? "text-green-400" : "text-amber-300"} />
                           <Stat label="Crossing rate" value={pct(c.crossingRate)} />
-                          <Stat label="Loss clustering ξ" value={c.clusterRatio.toFixed(2)} />
+                          <Stat label="Score" value={String(c.score)} tone={c.score >= 50 ? "text-green-400" : "text-amber-300"} />
                         </div>
                         <p className="text-[9px] text-muted-foreground leading-relaxed">{c.reason}</p>
+                        {c.signals.length > 0 && (
+                          <div className="space-y-0.5">
+                            {c.signals.map((s, i) => (
+                              <p key={i} className={`text-[9px] ${s.startsWith("OK") ? "text-green-400/80" : s.startsWith("WARN") || s.startsWith("INFO") ? "text-amber-300/80" : "text-muted-foreground/60"}`}>
+                                {s}
+                              </p>
+                            ))}
+                          </div>
+                        )}
                       </div>
 
-                      {/* Deploy is ALWAYS available — the digest line is a badge, not a
-                          veto. Normal rounds are self-hedged and trade freely on any
-                          measured market; the recovery lane's patience valve keeps the
-                          ladder moving even below the line. */}
                       {!c.recoveryViable && (
                         <p className="text-[10px] text-amber-200/90 leading-relaxed px-1 flex items-start gap-1.5">
                           <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
                           <span>
                             Below the digest line: recovery rounds work harder here, but the normal
-                            pair (Over 4 + Under 5) is self-hedged and trades freely, and the
-                            patience valve keeps recovery moving. Select another market below if
-                            you want the measured digest — the boundary structure moves.
+                            pair (Over 4 + Under 5) is self-hedged and trades freely on any measured market.
+                            Select another market below if you want better recovery viability.
                           </span>
                         </p>
                       )}
                       {borderline && (
                         <p className="text-[10px] text-muted-foreground leading-relaxed px-1">
-                          This market did not clear the scan's full suitability bar.
-                          Deploying it is a deliberate choice — the bot keeps measuring and the
-                          switch button lets it move on when the boundary structure cools.
+                          This market did not clear the scan's suitability bar (4/5 &gt; 30%).
+                          Deploying it is a deliberate choice — the switch button lets it move on when the rate cools.
                         </p>
                       )}
                       <div className="space-y-2">
@@ -439,14 +423,14 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                                   isSel ? `${a.panelBorder} ${a.panelBg} ring-1 ring-inset` : "border border-transparent bg-white/[0.03] hover:bg-white/[0.07]"
                                 }`}>
                           <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
-                            c.recoveryViable ? "bg-green-400" : c.recoveryViableWorst ? "bg-green-400/50" : "bg-amber-400"
+                            c.recoveryViable ? "bg-green-400" : "bg-amber-400"
                           }`} />
                           <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
                           <span className="font-mono text-[10px] text-muted-foreground/70">
-                            q̂ {pct(c.safeLcb)}/{pct(c.recoveryBreakEven)}
+                            4/5 {pct(c.gapHazard)}
                           </span>
-                          <span className={`font-mono font-bold ${c.survival >= 0.6 ? "text-green-400" : "text-amber-400"}`}>
-                            {pct(c.survival)}
+                          <span className={`font-mono font-bold ${c.score >= 50 ? "text-green-400" : "text-amber-400"}`}>
+                            {c.score}
                           </span>
                         </button>
                       );
@@ -470,7 +454,7 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
               <div className="p-4 space-y-3">
                 <div className={`rounded-xl p-3 border ${isRunning ? `${a.panelBg} ${a.panelBorder}` : "bg-secondary/30 border-border"}`}>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Session P&amp;L</span>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Session P&L</span>
                     {isRunning ? (
                       <span className={`flex items-center gap-1 text-[10px] ${a.text}`}>
                         <span className={`w-1.5 h-1.5 rounded-full ${a.dot} animate-pulse`} />
@@ -504,11 +488,11 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                     <div className="flex items-center gap-2">
                       <div className="h-1.5 flex-1 bg-black/40 rounded-full overflow-hidden">
                         <div
-                          className={`h-full transition-all ${session.gate.hazardWorst > 0.23 ? "bg-red-400" : "bg-green-400"}`}
-                          style={{ width: `${Math.min(100, session.gate.hazardWorst * 100 * 2.5)}%` }}
+                          className={`h-full transition-all ${session.gate.hazard > 0.30 ? "bg-red-400" : "bg-green-400"}`}
+                          style={{ width: `${Math.min(100, session.gate.hazard * 100 * 2.5)}%` }}
                         />
                       </div>
-                      <span className="text-[10px] font-mono text-white/80">{pct(session.gate.hazardWorst)}</span>
+                      <span className="text-[10px] font-mono text-white/80">{pct(session.gate.hazard)}</span>
                     </div>
                     <p className="text-[10px] font-mono text-muted-foreground leading-relaxed">{session.gate.reason}</p>
                   </div>
@@ -523,8 +507,10 @@ export function TwinHedgeConsole({ bot, open, onOpenChange, session, onSession }
                     <div className="grid grid-cols-2 gap-1.5">
                       <Stat label="Normal" value={session.lock.normalPair ?? "Over 4 + Under 5"} tone={a.text} />
                       <Stat label="Recovery" value={session.lock.recoveryPair ?? "Over 5 + Under 4"} tone="text-amber-300" />
+                      <Stat label="Gap hazard" value={session.lock.gapHazard ? pct(session.lock.gapHazard) : "—"} tone="text-cyan-300" />
+                      <Stat label="Safe rate" value={session.lock.safeRate ? pct(session.lock.safeRate) : "—"} tone="text-green-300" />
                       <Stat label="Digest line q*" value={session.lock.recoveryBreakEven ? pct(session.lock.recoveryBreakEven) : "—"} tone="text-cyan-300" />
-                      <Stat label="Breaker at" value={`${Math.max(3, Math.round(session.lock.recoveryDepthP95)) + 2} losses`} tone="text-red-300" />
+                      <Stat label="Crossing rate" value={session.lock.crossingRate ? pct(session.lock.crossingRate) : "—"} />
                     </div>
                   </div>
                 )}

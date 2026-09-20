@@ -27,8 +27,7 @@ const API_CONSOLE_IDS = [
   "dual-lock@1",
   "killshot@1",
   "killshot-family@1",
-  "twin-hedge@1",
-  "accumulator@1",
+  "twin-hedge@2",
 ];
 
 describe("web console contract", () => {
@@ -86,7 +85,7 @@ describe("consoleSkew", () => {
       "specialist@1",
       "killshot@1",
       "killshot-family@1",
-      "twin-hedge@1",
+      "twin-hedge@2",
     ];
     const skew = consoleSkew(
       [
@@ -102,7 +101,7 @@ describe("consoleSkew", () => {
       skew.bots.map(entry => entry.name),
       ["Dual-Lock Range Sentinel"],
     );
-    assert.deepEqual(skew.missing, ["accumulator@1", "dual-lock@1"]);
+    assert.deepEqual(skew.missing, ["dual-lock@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {

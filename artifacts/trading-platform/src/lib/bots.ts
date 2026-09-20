@@ -43,10 +43,8 @@ export interface BotCardData {
   oneShot?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
-  /** Twin-Lock Hedge Sentinel: paired same-tick rounds, hard-wired contracts. */
+  /** Boundary Hedge Sentinel: paired same-tick rounds, hard-wired contracts. */
   twinHedge?: boolean;
-  /** Accumulator Edge Navigator: compounded growth with full-stake knockout risk. */
-  accumulator?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -97,6 +95,9 @@ export interface BotSessionStatus {
     recoveryBreakEven?: number;
     gapHazardWorst?: number;
     crossingRate?: number;
+    /** Boundary Hedge: point-estimate gap hazard and safe rate. */
+    gapHazard?: number;
+    safeRate?: number;
   };
   /** Twin-Lock only: round-type tallies — the split is ignored BY DESIGN. */
   bothWinCount?: number;
@@ -154,41 +155,6 @@ export interface BotSessionStatus {
     pairsAfter: number;
     forced: boolean;
     signals: string[];
-  };
-  /** Accumulator-specific live model and contract telemetry. */
-  accumulator?: {
-    symbol: string;
-    displayName: string;
-    growthRate: number;
-    targetTicks: number;
-    durationTicks: number;
-    compoundedFactor: number;
-    barrierPct: number;
-    barrierSource: string;
-    survival: number;
-    survivalLower: number;
-    breakEvenSurvival: number;
-    expectedNetReturn: number;
-    lowerExpectedNetReturn: number;
-    knockoutProbability: number;
-    regime: string;
-    score: number;
-    signals: string[];
-  };
-  accumulatorGate?: {
-    ready: boolean;
-    reason: string;
-    shockRatio: number;
-    recentMove: number;
-  };
-  lastAccumulatorTrade?: {
-    profit: number;
-    ticks: number;
-    closedEarly: boolean;
-    knockedOut: boolean;
-    market: string;
-    growthRate: number;
-    at: number;
   };
   /** Kill-Shot only: what the bot is waiting for right now. */
   watch?: {

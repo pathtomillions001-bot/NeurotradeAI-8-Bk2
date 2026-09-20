@@ -9,7 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { motion } from "framer-motion";
 import { useState, useEffect, useRef } from "react";
 import { toast } from "sonner";
-import { Link, useLocation } from "wouter";
+import { Link } from "wouter";
 import { CheckCircle, ShieldCheck, Unlink, Wifi, LogIn, KeyRound, CheckCircle2, Zap, FlaskConical, RefreshCw, AlertTriangle, Activity, LockKeyhole, TrendingDown } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { adoptTabSessionId, clearTabRiskAck, setTabRiskAck } from "@/lib/tab-session";
@@ -42,6 +42,17 @@ function buildRedirectUri(): string {
   return `${window.location.origin}${base}/connect`;
 }
 
+/**
+ * Where the user lands after a successful connect (PAT token or Deriv OAuth).
+ * A full document reload — instead of the SPA router — so the just-connected
+ * account's data (balance, trades, engines, streams) is fetched fresh from
+ * the server and shows up on the opened page instantly, as if the user had
+ * pressed refresh themselves.
+ */
+function reloadAfterConnect(): void {
+  window.location.assign(import.meta.env.BASE_URL || "/");
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Connect() {
@@ -56,7 +67,6 @@ export default function Connect() {
   const connect = useConnectDerivAccount();
   const disconnect = useDisconnectAccount();
   const queryClient = useQueryClient();
-  const [, setLocation] = useLocation();
   const [token, setToken] = useState("");
   const [showToken, setShowToken] = useState(false);
   const [showManual, setShowManual] = useState(false);
@@ -138,8 +148,9 @@ export default function Connect() {
           toast.success("Signed in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
-          // Redirect to dashboard after short delay so the user sees the success state
-          setTimeout(() => setLocation("/"), 1200);
+          // Open the dashboard with a full reload after a short delay so the
+          // user sees the success state, then the connected data instantly.
+          setTimeout(reloadAfterConnect, 1200);
         })
         .catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : "OAuth login failed — please try again";
@@ -166,7 +177,7 @@ export default function Connect() {
           toast.success("Logged in with Deriv — live trading enabled!");
           setOauthPending(false);
           queryClient.invalidateQueries();
-          setTimeout(() => setLocation("/"), 1200);
+          setTimeout(reloadAfterConnect, 1200);
         },
         onError: (err: unknown) => {
           const msg = err instanceof ApiError
@@ -256,7 +267,7 @@ export default function Connect() {
         toast.success("Account connected — live trading on Deriv");
         setToken("");
         queryClient.invalidateQueries();
-        setTimeout(() => setLocation("/"), 1200);
+        setTimeout(reloadAfterConnect, 1200);
       },
       onError: (err: unknown) => {
         const msg = err instanceof ApiError

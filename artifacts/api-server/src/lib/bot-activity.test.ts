@@ -60,31 +60,9 @@ describe("bot console contract", () => {
     assert.equal(botConsoleId(getBotDefinition("ks-overunder")!), "killshot-family@1");
   });
 
-  it("gives Match Prism its own console", () => {
-    assert.equal(botConsoleId(getBotDefinition("match-prism")!), "prism@1");
-  });
-
-  it("keeps Match Prism in the Matches family and never in Differs", () => {
-    const prism = getBotDefinition("match-prism")!;
-    assert.equal(prism.family, "prism");
-    assert.equal(prism.contractLabel, "Matches only");
-    const contracts = prism.sides.flatMap((s) => s.contracts);
-    assert.deepEqual(contracts, ["DIGITMATCH"]);
-    assert.ok(!contracts.some((c) => c.includes("DIFF")), "Prism must not be able to buy a Differ");
-  });
-
   it("falls back to the specialist console for family bots with no dedicated UI", () => {
     assert.equal(botConsoleId(getBotDefinition("parity")!), "specialist@1");
     assert.equal(botConsoleId(getBotDefinition("match")!), "specialist@1");
-  });
-
-  it("gives Twin-Rail Sentinel its own console and no contract choice", () => {
-    const twin = getBotDefinition("twinrail")!;
-    assert.equal(botConsoleId(twin), "twin-rail@1");
-    assert.equal(twin.family, "twinrail");
-    const contracts = twin.sides.flatMap((s) => s.contracts);
-    assert.deepEqual(contracts, ["DIGITOVER", "DIGITUNDER"]);
-    assert.equal(twin.hasSides, false, "the rails are frozen — the user has no side picker");
   });
 
   it("publishes the exact set of consoles the web bundle must implement", () => {
@@ -92,9 +70,7 @@ describe("bot console contract", () => {
       "dual-lock@1",
       "killshot-family@1",
       "killshot@1",
-      "prism@1",
       "specialist@1",
-      "twin-rail@1",
     ]);
   });
 });

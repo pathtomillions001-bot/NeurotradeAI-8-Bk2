@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "prism" | "twinrail";
+  family: SpecialistFamily | "duallock" | "killshot";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -55,19 +55,6 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
-  /**
-   * Match Prism — the Matches-only compositional-Bayes bot. Proven-bias gate,
-   * Monte-Carlo posterior, tested memorylessness, and a ladder priced before
-   * entry. The UI renders a dedicated console for it.
-   */
-  prism?: boolean;
-  /**
-   * Twin-Rail Sentinel — two FROZEN straddles fired as one atomic burst:
-   * Over 4 + Under 5 normally, Over 5 + Under 4 in recovery. The user chooses
-   * no contract (the rails are constants), so the UI renders a dedicated
-   * console with a scan → lock flow and a live twin-leg monitor.
-   */
-  twinRail?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -163,39 +150,6 @@ export const BOT_CATALOG: BotDefinition[] = [
     digitLockHelp: "Auto picks the most statistically significant hot digit. Lock it to force one digit.",
     sides: [
       { id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "The bot selects the hottest significant digit" },
-    ],
-    nominalWinRate: "≈11%",
-    nominalPayout: "8.93×",
-  },
-  {
-    id: "match-prism",
-    name: "Match Prism",
-    code: "BOT-PRISM",
-    family: "prism",
-    contractLabel: "Matches only",
-    tagline: "Prove the bias, price the ladder, then shoot",
-    description:
-      "Trades Matches and nothing else — Differs is not in this bot at all. Match Prism starts from the uncomfortable truth both existing matches bots skip: at 8.93× the break-even rate is 11.20% against a fair 10%, so on an i.i.d. stream every Matches strategy ever written loses 10.7% a shot. So Prism spends its analysis budget proving whether the market is biased AT ALL before it looks for a digit. It runs three independent proofs of structure — is the digit distribution non-uniform, does the previous digit matter, does being overdue matter — and shrinks every signal it cannot prove to zero. Only then does it price the user's own recovery ladder against the digit's pessimistic rate.",
-    edge: [
-      "PROOF 1 — IS THE MARKET BIASED AT ALL? A compositional Bayes factor: H₀ is the POINT null (p exactly uniform), H₁ is a symmetric Dirichlet whose concentration is integrated over a log-uniform prior out to α=5000 so the bias model can actually collapse onto the null. Both marginal likelihoods are exact and closed-form in log-Γ, so the factor is a real posterior probability of bias, not a p-value. On 4,999 ticks a χ² test calls a 0.2pp deviation significant — 6× smaller than the 1.2pp the payout actually needs — which is precisely the trap both predecessors walk into. Prism decides on the posterior, and on a uniform tape its factor goes BELOW 1 (evidence against bias)",
-      "PROOF 2 — DOES THE PREVIOUS DIGIT MATTER? The 10×10 transition table is compared with the memoryless model by ΔBIC, and the transition row may only join the estimate when it clears the bar — then only through an exact conjugate Dirichlet posterior shrunk toward the marginal by its own evidence. A 10-state chain fitted on 2,500 ticks has ~250 observations per row: used unconditionally (as both predecessors do) it injects noise, not signal",
-      "PROOF 3 — DOES BEING 'OVERDUE' MATTER? The chosen digit's own inter-arrival gaps are tested against the fitted Geometric with a binned χ² AND a pooled early-vs-late hazard comparison. If the geometric fits, dormancy is the gambler's fallacy with a p-value attached and contributes exactly nothing. If it does not, the hazard is admitted — in whichever DIRECTION it moves: a rising hazard means wait for the overdue tick, a falling one means enter fresh, because a clustered digit is most likely right after it has just printed. No fixed 4–12 tick band, ever",
-      "MONTE CARLO OVER THE DIRICHLET POSTERIOR — the three quantities the selector actually needs are functionals a point estimate cannot supply: P(rate > break-even) as an exact tail, the pessimistic 5th-percentile rate, and P(this digit is the hottest). That last one MEASURES the argmax-of-ten selection bias (≈0.1 on a fair tape, ≈1.0 on a real one) instead of paying for it with an arbitrary 1.5σ margin",
-      "THE LADDER IS PRICED BEFORE ENTRY — an exact absorbing-chain value iteration over debt states, run with the SAME stake formula the live engine executes (calculateBotRecoveryStake → limits → whole cents), gives P(the user's own ladder clears the debt before the stop loss). requiredWinRateFor inverts it, so a $5 stop loss on a $1 base stake demands a 23.8% digit to clear 95% of the time — a number no Matches market offers, and the bot says so instead of quietly entering a ladder that cannot be recovered. A $40 stop loss needs 10.5%, which is below break-even, so break-even binds instead",
-      "EVERY NUMBER IS OUT OF SAMPLE — the concentration, the transition test, the calibration and the entry threshold τ are fitted on the FIRST half of each market's 4,999 digits; only what the frozen rule then did on the SECOND half counts. In-sample and out-of-sample accuracy are printed side by side, and the post-loss shield is simulated on the held-out shots so its cost in lost shots is reported rather than promised",
-      "SELECTIVITY IS THE KNOB, THE BAR IS SELF-REFERENTIAL — τ is the top-quantile of Prism's own trailing entry statistic, so the design shot rate holds in any regime, and it is floored at the certainty tier's posterior probability so selectivity can never push the bar below the evidence the tier demands",
-      "REFUSAL IS AN ANSWER, NOT A DEAD END — every market × digit candidate is screened in closed form first, so a 190-candidate scan finishes in seconds, and the console always reports the best market available, the exact gate it failed, and the universe-wide Bayes factor. When no market's digits are distinguishable from uniform, Prism says so in one line and stands down rather than trading a coin flip with a fee",
-      "SAME SHARED RECOVERY AS EVERY OTHER BOT — one account-global ledger, one debt-driven stake formula, one single-executor arbiter. What is unique is that a recovery shot is additionally refused when the digit's rate no longer covers what the LARGER debt now requires, so the bot never adds to a ladder it cannot repay",
-      "MATCHES ONLY, SOVEREIGN — DIGITMATCH is re-asserted against the contract immediately before every buy, so neither a stale card nor a future bug can make this bot buy a Differ",
-    ],
-    accent: "lime",
-    icon: "prism",
-    prism: true,
-    hasSides: false,
-    hasDigitLock: true,
-    digitLockHelp: "Leave it to the AI and Prism scores all ten digits in every market, correcting for the argmax-of-ten selection bias with Monte Carlo over the posterior. Lock a digit to force it — Prism still demands the market be proven biased before it deploys.",
-    sides: [
-      { id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "Matches only — this bot never buys Differs" },
     ],
     nominalWinRate: "≈11%",
     nominalPayout: "8.93×",
@@ -405,34 +359,6 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalWinRate: "≈11% / ≈90%",
     nominalPayout: "8.93× / 1.09×",
   },
-  {
-    id: "twinrail",
-    name: "Twin-Rail Sentinel",
-    code: "BOT-TWINRAIL",
-    family: "twinrail",
-    contractLabel: "Over/Under twin pair (frozen)",
-    tagline: "Two legs · one tick · exactly one winner",
-    description:
-      "Twin-Rail fires TWO contracts at the same instant on the same tick: Over 4 + Under 5 as the normal rail, and Over 5 + Under 4 only while recovering. Over 4 and Under 5 partition the digits, so exactly one leg wins on every normal round and a double loss is impossible. Recovery uses the wider pair, which pays ≈2.43× but loses BOTH legs on digits 4 and 5 — the dead rail — so the bot holds fire until the tape says those digits are rarer than the quotes assume. Nothing about the contracts is configurable: the rails are frozen.",
-    edge: [
-      "SAME-TICK STADDLE — both legs ride one unscheduled burst on the account's pooled socket, so they open and settle on one shared digit. The pair's own outcome pattern proves it (exactly one winner), and every round is classified: synced, dead rail, or split tick",
-      "ONE GATE, NOT NINE — a straddle has no second signal to hunt for: the recovery rail fires only when the LOWER confidence bound of its measured edge clears zero, computed from the conditioned ten-digit distribution against the live payout quotes",
-      "THE DEAD RAIL IS PRICED — the scan reports the break-even dead-rail rate q* = (p − 2)/p implied by the market's own quotes (17.70 % at 2.43×) beside the rate the tape actually prints, and ranks every market on the cycle that clears it",
-      "THE CARRIER'S COST IS PRINTED, NOT HIDDEN — the normal rail returns S·(p − 2) = −0.05 S per round at 1.95×. The console shows that toll per round, per cycle and per hour instead of presenting a one-leg win as a profit",
-      "SHARED RECOVERY, DEBT-DRIVEN — the same ledger, the same single-executor arbiter and the same stake formula as every other bot: one winning recovery leg clears the whole pair debt plus the configured markup",
-      "LOCKED OR SWITCHING, DECIDED AFTER THE SCAN — the market mode is chosen once the measurement is on screen, and the rails never change",
-    ],
-    accent: "lime",
-    icon: "layers",
-    twinRail: true,
-    hasSides: false,
-    hasDigitLock: false,
-    sides: [
-      { id: "both", label: "Frozen twin pair", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Over 4 + Under 5 normal · Over 5 + Under 4 recovery — not user-selectable" },
-    ],
-    nominalWinRate: "50% per leg (one always wins)",
-    nominalPayout: "1.95× / 2.43×",
-  },
 ]
 
 export function getBotDefinition(botId: string): BotDefinition | undefined {
@@ -453,11 +379,9 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.twinRail) return "twin-rail@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";
-  if (bot.prism) return "prism@1";
   return "specialist@1";
 }
 

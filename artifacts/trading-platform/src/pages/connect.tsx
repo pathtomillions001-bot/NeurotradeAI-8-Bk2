@@ -94,7 +94,6 @@ export default function Connect() {
 
     if (code && state) {
       handledRef.current = true;
-      setOauthPending(true);
 
       // Retrieve stored PKCE verifier for this state (client-side fallback).
       // The server keeps its own copy keyed by state, so a missing sessionStorage
@@ -105,6 +104,7 @@ export default function Connect() {
       sessionStorage.removeItem(`pkce_verifier_${state}`);
       sessionStorage.removeItem(`pkce_redirect_${state}`);
 
+      setOauthPending(true);
       window.history.replaceState({}, "", window.location.pathname);
 
       const BASE = import.meta.env.BASE_URL?.replace(/\/$/, "") ?? "";

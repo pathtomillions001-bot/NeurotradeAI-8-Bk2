@@ -16,7 +16,6 @@ import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
 import { KillShotFamilyConsole } from "@/components/killshot-family-console";
 import { TwinHedgeConsole } from "@/components/twin-hedge-console";
-import { AccumulatorConsole } from "@/components/accumulator-console";
 import { WEB_CONSOLE_IDS, type WebConsoleId } from "./console-contract";
 import type { BotCardData, BotSessionStatus } from "./bots";
 
@@ -34,8 +33,7 @@ export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProp
   "dual-lock@1": DualLockConsole,
   "killshot@1": KillShotConsole,
   "killshot-family@1": KillShotFamilyConsole,
-  "twin-hedge@1": TwinHedgeConsole,
-  "accumulator@1": AccumulatorConsole,
+  "twin-hedge@2": TwinHedgeConsole,
 };
 
 /** Console ids this bundle implements (mirrors `WEB_CONSOLE_IDS` exactly). */

@@ -2,7 +2,7 @@
  * Global "what is trading right now" state.
  *
  * The server's `GET /api/bots/live` is the single source of truth for every
- * engine (specialist, Dual-Lock, Twin-Lock, Accumulator, Kill-Shot, Kill-Shot
+ * engine (specialist, Dual-Lock, Twin-Lock, Kill-Shot, Kill-Shot
  * family, Match Catalyst) — the layout's live indicator polls it every few
  * seconds so a bot that starts in the background is visible the moment this
  * tab next polls (and immediately after any refresh). The SSE `bot_update`
@@ -53,8 +53,6 @@ export function stopPathForBot(botId: string): string {
       return "/api/bots/duallock/stop";
     case "twinhedge":
       return "/api/bots/twin/stop";
-    case "accumulators":
-      return "/api/bots/accumulator/stop";
     case "killshot":
       return "/api/bots/killshot/stop";
     case "match-catalyst":

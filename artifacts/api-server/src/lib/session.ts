@@ -23,6 +23,9 @@ export function runWithSession<T>(sessionId: string, fn: () => T): T {
   return sessionContext.run(sessionId, fn);
 }
 
+// Backward-compat alias — older modules import runWithSessionId
+export const runWithSessionId = runWithSession;
+
 /**
  * Anonymous browser session used to isolate Deriv credentials and account data.
  *
@@ -145,6 +148,73 @@ export function setBrowserSessionCookie(res: Response, sessionId: string): void 
 
 export const RISK_ACKNOWLEDGMENT_REQUIRED =
   "Please review and accept the trading risk acknowledgment before connecting a Deriv account.";
+
+/** Signed risk-acknowledgment value for a session (returned to tab sessions). */
+export function riskAckValue(sessionId: string): string {
+  return `v1.${riskSignature(sessionId)}`;
+}
+
+/**
+ * No-op: the tab-session identity linking subsystem was removed.
+ * Kept as an export so existing import sites compile without changes.
+ */
+export async function linkSessionIdentity(_args: {
+  sessionId: string;
+  derivAccountIds?: string[];
+}): Promise<void> {
+  // Intentionally empty — session identity is now derived from account-scoped
+  // session ids (see accountSessionId), not linked through a separate table.
+}
+
+/**
+ * No-op: the tab-session links table was removed.
+ * Kept as an export so existing import sites compile without changes.
+ */
+export async function clearSessionLinksForSession(_sessionId: string): Promise<void> {
+  // Intentionally empty — no external session links to clear.
+}
+
+/**
+ * Create one piece of session-scoped mutable state, addressed through the
+ * ambient browser session (AsyncLocalStorage).
+ *
+ * Returns a Proxy that routes every property read/write to the calling
+ * session's own instance, plus a `replace()` for whole-state resets.
+ */
+export function createSessionScoped<T extends object>(factory: () => T): {
+  readonly state: T;
+  replace(next: T): void;
+} {
+  const statesBySession = new Map<string, T>();
+  const active = (): T => {
+    const key = getBrowserSessionId();
+    let current = statesBySession.get(key);
+    if (!current) {
+      current = factory();
+      statesBySession.set(key, current);
+    }
+    return current;
+  };
+  const state = new Proxy({} as T, {
+    get: (_target, property) => Reflect.get(active(), property),
+    set: (_target, property, value) => Reflect.set(active(), property, value),
+    has: (_target, property) => Reflect.has(active(), property),
+    ownKeys: () => Reflect.ownKeys(active()),
+    getOwnPropertyDescriptor: (_target, property) => ({
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: Reflect.get(active(), property),
+    }),
+    deleteProperty: (_target, property) => Reflect.deleteProperty(active(), property),
+  });
+  const replace = (next: T): void => {
+    const current = active();
+    for (const key of Reflect.ownKeys(current)) Reflect.deleteProperty(current, key);
+    Object.assign(current, next);
+  };
+  return { state, replace };
+}
 
 declare global {
   namespace Express {

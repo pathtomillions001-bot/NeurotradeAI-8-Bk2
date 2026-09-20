@@ -1,12 +1,11 @@
 # Bot console release skew (web ↔ API)
 
-**Incident: 2026-09-19.** On `https://neuro-trade.site/bots` the three newest
+**Incident: 2026-09-19.** On `https://neuro-trade.site/bots` the two newest
 specialist bots rendered *different* controls than the same code in the sandbox:
 
 | Bot | Sandbox (main) | Production |
 | --- | --- | --- |
 | **Match Pulse** (`match-pulse`) | dedicated pulse console | generic specialist console |
-| **Twin-Hedge Edge** (`twin-hedge`) | 4/5 dead-zone console (rebuilt 2026-09-18) | the superseded twin console |
 | **Compounding Range Sentinel** (`accumulator`) | compounding-range console | generic specialist console |
 
 ## Root cause — a split release, not a code bug
@@ -20,7 +19,7 @@ two different watch paths. Production was running two different commits:
 | api | `1d7b39f` (PR #33) | 2026-09-19 13:38 |
 
 The stale bundle predates every console it was asked to draw (Match Pulse and
-the accumulator did not exist yet; Twin-Hedge was still v1), and the Bot Arena's
+the accumulator did not exist yet), and the Bot Arena's
 dispatch chain had no case for the new flags, so it **silently fell through to
 the generic specialist console**. Nothing errored — which is why the difference
 was only visible by eye.
@@ -103,7 +102,7 @@ one.
   `console-registry.test.ts` fails if the API can ask for an id the bundle does
   not ship.
 * Changing an existing console materially: bump its `@N` revision on both sides
-  (`twin-hedge@1 → twin-hedge@2`). That is what makes a stale bundle detectable
+  its `@N` revision on both sides. That is what makes a stale bundle detectable
   when the bot id itself did not change.
 * Backend isolation: every engine keeps its state in `createSessionScoped(...)`
   and takes its execution lock through `lib/engine-arbiter.ts` (one lock per

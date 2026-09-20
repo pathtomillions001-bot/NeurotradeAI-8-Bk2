@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "twinhedge";
+  family: SpecialistFamily | "duallock" | "killshot";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -55,15 +55,6 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
-  /**
-   * The Twin-Lock Hedge Sentinel: two complementary contracts per round
-   * (Over 4 + Under 5 normal, Over 5 + Under 4 recovery), always executed
-   * simultaneously on one tick, recovery armed ONLY on a both-legs-lost
-   * round. Contracts are hard-wired — the user chooses nothing about the
-   * pair, and only LOCK vs SWITCH for the market, after the scan.
-   * The UI renders a dedicated console for this bot.
-   */
-  twinHedge?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -368,72 +359,6 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalWinRate: "≈11% / ≈90%",
     nominalPayout: "8.93× / 1.09×",
   },
-  {
-    id: "match-catalyst",
-    name: "Match Catalyst",
-    code: "BOT-MATCH-CATALYST",
-    family: "killshot",
-    killShotFamily: "matchdiffer",
-    contractLabel: "Matches (Precision Decay)",
-    tagline: "7-expert Weibull survival · multi-scale convergence · adaptive shield",
-    description:
-      "The precision successor to Match Nexus, built from the ground up for timing accuracy. Pulls 4 999 deep digits per market, fits a 7-expert ensemble (forgetting Dirichlet, context-tree mixing to order 5, 3rd-order outcome chain, Weibull survival hazard, 3-state HMM, transition row, spectral cycle detector) with Hedge regret bound. The Weibull survival model replaces the binned hazard map with a smooth, parametric hazard h(t)=(k/λ)(t/λ)^(k-1) fitted to each digit's own gap data via MLE — k>1 means the digit is becoming MORE likely to appear as the gap grows. Multi-Scale Convergence requires the edge to agree at 10, 30, and 100 tick horizons before entry. Anti-Fading detects a declining z-score trend and refuses entry. The post-loss protocol uses ADAPTIVE cooldown calibrated to the digit's own median gap (max(4, ceil(median×0.6))), not a fixed constant. Same shared recovery ledger as every other bot.",
-    edge: [
-      "7 EXPERTS WITH HEDGE REGRET BOUND — forgetting Dirichlet (λ=0.997), context-tree mixing 0-5 KT (best Markov in hindsight), 3rd-order outcome chain P(win|last 3 outcomes), Weibull survival hazard h(t)=(k/λ)(t/λ)^(k-1) fitted via MLE to each digit's gaps, 3-state HMM regime filter (hot/warm/cold), Dirichlet transition row, spectral cycle detector via autocorrelation at lags 1-20.",
-      "WEIBULL SURVIVAL MODEL — replaces binned hazard with smooth parametric form. k>1 = increasing hazard (digit overdue), k<1 = cooling, k≈1 = memoryless. Continuous hazard extrapolates to unseen gaps. Censored-aware via MLE on continuity-corrected data.",
-      "MULTI-SCALE CONVERGENCE — entry requires edge agreement at 3 independent time horizons (10, 30, 100 ticks). An edge at one scale is noise; agreement at all three is signal. Elite requires all 3; Strict requires 2/3.",
-      "ANTI-FADING DETECTION — linear trend of z-score over last 30 readings must be non-negative. A declining z means the edge is evaporating. The bot waits for a fresh signal instead of chasing a fading one.",
-      "ADAPTIVE POST-LOSS PROTOCOL — after a loss, gap resets to 0 (worst entry for matches). Shield enforces: gap ≥ max(4, median_gap/2), hazard ≥ 1.4, cooldown ≥ max(4, ceil(median_gap×0.6)). Cooldown is calibrated to the digit's OWN rhythm.",
-      "PLATT + BRIER SKILL + E-VALUE — fused score calibrated on training half; slope collapses to 0 when no skill. Evidence is anytime-valid betting e-value on SHOT sequence (Ville), valid at data-dependent stop.",
-      "EXACT LADDER-RUIN via FMCI — debt(k)=stake·(1+a)^(k-1), a=(1+markup)/(payout-1), k* solves closed-form, absorption P(deeper run) exact via Fu&Koutras, no Monte Carlo.",
-      "LOCKED = EDGE ROTATES, SWITCHING = MARKET ROTATES — locked freezes market but moves to next best digit when current cools (EV margin 0.015). Switching re-measures all 19 markets ×10 digits with BH FDR q=0.10 when PH fires.",
-      "SAME SHARED RECOVERY AS EVERY OTHER BOT — one account-global ledger, debt-driven stake, markup user-configurable, single-executor arbiter.",
-    ],
-    accent: "fuchsia",
-    icon: "zap",
-    hasSides: false,
-    hasDigitLock: false,
-    sides: [
-      { id: "both", label: "Matches — AI picks best digit", contracts: ["DIGITMATCH"], desc: "AI scores all 10 digits in every market with 7-expert ensemble and BH FDR" },
-    ],
-    nominalWinRate: "measured OOS 12-18%",
-    nominalPayout: "8.93×",
-  },
-  {
-    id: "twinhedge",
-    name: "Boundary Hedge Sentinel",
-    code: "BOT-TWINHEDGE",
-    family: "twinhedge",
-    contractLabel: "Over 4 + Under 5 · recovery Over 5 + Under 4",
-    tagline: "Same-tick hedge · 80% win rate · minimal gates",
-    twinHedge: true,
-    description:
-      "The simplified hedge bot. Normal rounds fire Over 4 + Under 5 on the SAME tick with the SAME stake — on any single digit one leg wins and the other loses, EXCEPT digits 4 and 5 where both lose. 80% win rate on a fair stream. Recovery fires Over 5 + Under 4 when BOTH normal legs lost, sized to digest the total lost amount. The analysis is deliberately minimal: since both trades execute simultaneously, no per-digit prediction is needed. The only gate is the market's 4/5 frequency — if it's above 30%, the boundary is being hovered and the bot waits. Recovery has a patience valve that forces a fire after 5 ticks to prevent stranded debt. Lock or switch after scan.",
-    edge: [
-      "SAME-TICK EXECUTION — both legs fire through the shared bulk executor in one socket burst. On any single exit tick, exactly one leg wins (except digit 4/5 where both lose). The hedge is structural, not predictive.",
-      "80% WIN RATE PER ROUND — digits 0-3 and 6-9 each produce a split win (one leg pays out, the other loses). Only digits 4 and 5 are catastrophic. On a fair stream, 8 out of 10 rounds profit.",
-      "MINIMAL GATES, MAXIMUM SPEED — the only gate is the market's 4/5 frequency (<30% to fire). No crossing analysis, no boundary asymmetry, no stationarity tests. The hedge IS the edge — we just avoid markets hovering on the boundary.",
-      "RECOVERY WITH PATIENCE VALVE — recovery fires Over 5 + Under 4 when both normal legs lost. If the current digit is 4 or 5, the bot waits. After 5 refused ticks, recovery is FORCED — stranded debt is worse than an unfavourable recovery round.",
-      "SPLIT ROUNDS ARE IGNORED — one win + one loss is the hedge doing its job. It never enters the recovery ledger. Only BOTH-LOST rounds arm recovery.",
-      "RECOVERY STAKE DIGESTS TOTAL LOSS — a both-lose round loses 2× stake. The recovery stake is sized via the shared debt-driven formula to digest that total plus markup.",
-      "LOCK OR SWITCH — after the scan, choose LOCK (market frozen) or SWITCH (engine rotates to next best market when 4/5 frequency rises).",
-      "SAME SHARED RECOVERY — one account-global ledger, debt-driven stake, single-executor arbiter.",
-    ],
-    accent: "lime",
-    icon: "layers",
-    hasSides: false,
-    hasDigitLock: false,
-    sides: [
-      {
-        id: "both",
-        label: "Auto-configured pair",
-        contracts: ["DIGITOVER", "DIGITUNDER"],
-        desc: "Normal Over 4 + Under 5 · recovery Over 5 + Under 4 — both legs, one tick, no contract choice",
-      },
-    ],
-    nominalWinRate: "≈80% normal · split = profit",
-    nominalPayout: "1.95× · 2.43×",
-  },
 ];
 
 export function getBotDefinition(botId: string): BotDefinition | undefined {
@@ -454,7 +379,6 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.twinHedge) return "twin-hedge@2";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

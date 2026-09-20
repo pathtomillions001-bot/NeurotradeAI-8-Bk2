@@ -58,8 +58,6 @@ describe("bot console contract", () => {
     assert.equal(botConsoleId(getBotDefinition("duallock")!), "dual-lock@1");
     assert.equal(botConsoleId(getBotDefinition("killshot")!), "killshot@1");
     assert.equal(botConsoleId(getBotDefinition("ks-overunder")!), "killshot-family@1");
-    assert.equal(botConsoleId(getBotDefinition("twinhedge")!), "twin-hedge@1");
-    assert.equal(botConsoleId(getBotDefinition("accumulators")!), "accumulator@1");
   });
 
   it("falls back to the specialist console for family bots with no dedicated UI", () => {
@@ -69,12 +67,10 @@ describe("bot console contract", () => {
 
   it("publishes the exact set of consoles the web bundle must implement", () => {
     assert.deepEqual(botConsoleIds(), [
-      "accumulator@1",
       "dual-lock@1",
       "killshot-family@1",
       "killshot@1",
       "specialist@1",
-      "twin-hedge@1",
     ]);
   });
 });

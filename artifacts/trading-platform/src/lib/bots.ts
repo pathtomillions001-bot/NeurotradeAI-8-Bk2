@@ -43,8 +43,6 @@ export interface BotCardData {
   oneShot?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
-  /** Boundary Hedge Sentinel: paired same-tick rounds, hard-wired contracts. */
-  twinHedge?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -87,37 +85,6 @@ export interface BotSessionStatus {
     expectedMaxLossRun: number;
     recoveryDepthP95: number;
     signals: string[];
-    /** Twin-Lock only: the frozen pairs, labelled. */
-    normalPair?: string;
-    recoveryPair?: string;
-    /** Twin-Lock only: worst-case gap-avoidance and the digest line. */
-    safeLcb?: number;
-    recoveryBreakEven?: number;
-    gapHazardWorst?: number;
-    crossingRate?: number;
-    /** Boundary Hedge: point-estimate gap hazard and safe rate. */
-    gapHazard?: number;
-    safeRate?: number;
-  };
-  /** Twin-Lock only: round-type tallies — the split is ignored BY DESIGN. */
-  bothWinCount?: number;
-  splitCount?: number;
-  bothLoseCount?: number;
-  /** Twin-Lock only: consecutive both-lose rounds (the breaker's input). */
-  bothLoseRun?: number;
-  /** Twin-Lock only: "locked" or "switching" market handling. */
-  marketMode?: "locked" | "switching";
-  /** Twin-Lock only: the gate's live read on the boundary. */
-  gate?: { hazard: number; hazardWorst: number; reason: string };
-  /** Twin-Lock only: the last settled round, per leg. */
-  lastRound?: {
-    mode: "normal" | "recovery";
-    legs: Array<{ contract: string; won: boolean; profit: number }>;
-    net: number;
-    hazard: number;
-    forced: boolean;
-    market: string;
-    at: number;
   };
   /** Kill-Shot only: the market has changed and the user must re-analyse. */
   needsRescan?: boolean;

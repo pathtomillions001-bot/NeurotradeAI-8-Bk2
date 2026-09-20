@@ -43,7 +43,7 @@ const registrations = new Map<string, LiveBotRegistration>();
 /**
  * Called by an engine's startSession (in the starting session's ambient
  * context) to publish its live status. `key` identifies the engine
- * (e.g. "twin-hedge"); re-registering replaces the previous entry.
+ * (e.g. "killshot-family"); re-registering replaces the previous entry.
  */
 export function registerLiveBot(key: string, status: () => LiveBotStatusShape | null): void {
   registrations.set(key, {

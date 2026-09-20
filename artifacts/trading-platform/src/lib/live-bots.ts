@@ -2,8 +2,8 @@
  * Global "what is trading right now" state.
  *
  * The server's `GET /api/bots/live` is the single source of truth for every
- * engine (specialist, Dual-Lock, Twin-Lock, Kill-Shot, Kill-Shot
- * family, Match Catalyst) — the layout's live indicator polls it every few
+ * engine (specialist, Dual-Lock, Kill-Shot, Kill-Shot family) — the layout's
+ * live indicator polls it every few
  * seconds so a bot that starts in the background is visible the moment this
  * tab next polls (and immediately after any refresh). The SSE `bot_update`
  * stream keeps the indicator in step between polls without waiting.
@@ -38,7 +38,7 @@ export interface LiveBotStatus {
 export interface LiveBot {
   botId: string;
   botName: string;
-  /** Console id the API expects (e.g. "twin-hedge@1"). */
+  /** Console id the API expects (e.g. "killshot-family@1"). */
   console: string;
   status: LiveBotStatus;
 }
@@ -51,12 +51,8 @@ export function stopPathForBot(botId: string): string {
   switch (botId) {
     case "duallock":
       return "/api/bots/duallock/stop";
-    case "twinhedge":
-      return "/api/bots/twin/stop";
     case "killshot":
       return "/api/bots/killshot/stop";
-    case "match-catalyst":
-      return "/api/bots/catalyst/stop";
     case "ks-overunder":
     case "ks-parity":
     case "ks-matchdiff":

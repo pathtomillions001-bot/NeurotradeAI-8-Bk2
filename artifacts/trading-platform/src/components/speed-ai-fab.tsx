@@ -21,6 +21,7 @@ import {
   roundRecoveryStakeUp,
 } from "@/lib/payouts";
 import { withTabSession } from "@/lib/tab-session";
+import { OPEN_SPEED_AI_EVENT } from "@/lib/live-bots";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -383,6 +384,14 @@ export function SpeedAIFab() {
     pollRef.current = setInterval(fetchStatus, intervalMs);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [open, fetchStatus]);
+
+  // The global active-engine indicator (top-right chip) opens this panel via
+  // a window event when the NeuroAI session is the engine running.
+  useEffect(() => {
+    const openFromIndicator = () => setOpen(true);
+    window.addEventListener(OPEN_SPEED_AI_EVENT, openFromIndicator);
+    return () => window.removeEventListener(OPEN_SPEED_AI_EVENT, openFromIndicator);
+  }, []);
 
   const pendingStatusRef = useRef<SessionStatus | null>(null);
   const rafRef = useRef<number | null>(null);

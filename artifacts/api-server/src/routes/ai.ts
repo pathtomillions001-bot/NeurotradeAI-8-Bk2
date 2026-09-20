@@ -25,6 +25,7 @@ import {
   tradingOwnerLabel,
 } from "../lib/engine-arbiter";
 import { runWithSessionId } from "../lib/session";
+import { registerLiveBot } from "../lib/live-registry";
 
 const router = Router();
 
@@ -279,6 +280,24 @@ function broadcastEngineSSE(event: string, data: unknown): void {
   broadcastSSE(event, data, ownerSessionId);
 }
 
+/** This account's autonomous engine expressed as a LiveBotStatus. */
+function liveBotStatus() {
+  return {
+    running: engineRunning,
+    botId: "autonomous",
+    botName: "Main Autonomous Engine",
+    currentMarket,
+    tradesExecutedToday,
+    sessionLossCount,
+    stopReasons: [...stopReasons],
+  };
+}
+
+/** Tell the owning account's live indicator the engine state changed. */
+function publishLiveBotUpdate(): void {
+  broadcastEngineSSE("bot_update", liveBotStatus());
+}
+
 function stopEngine(reason: string, cooldownMinutes?: number) {
   const stoppedOwnerSessionId = ownerSessionId;
   engineRunning = false;
@@ -321,6 +340,7 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
       logger.info("Cooldown expired — autonomous engine auto-resuming, session loss count reset");
       broadcastEngineSSE("engine_started", { reason: "cooldown_expired" });
       broadcastEngineSSE("loss_streak_reset", { sessionLossCount: 0 });
+      publishLiveBotUpdate();
       autonomousTimer = setTimeout(() => runWithSessionId(ownerSessionId, runAutonomousLoop), 1000);
     }), cooldownMinutes * 60 * 1000);
     logger.info({ reason, cooldownMinutes, cooldownUntil }, "Engine stopped with cooldown");
@@ -330,6 +350,9 @@ function stopEngine(reason: string, cooldownMinutes?: number) {
   }
   if (stoppedOwnerSessionId) {
     broadcastSSE("engine_stopped", { reason, cooldownUntil: cooldownUntil?.toISOString() ?? null }, stoppedOwnerSessionId);
+    // Tell the live indicator this account's engine is no longer running.
+    // (Cooldown auto-resume will re-publish running=true when it fires.)
+    publishLiveBotUpdate();
   }
 }
 
@@ -1601,6 +1624,10 @@ async function getComputedAgentScores(): Promise<Record<string, number>> {
       engineRunning = true; autonomousMode = "autonomous"; stopReasons = []; nextScanIn = loopIntervalSec;
       exploitSymbol = null; exploitCount = 0;
       groupCursors.fill(0);
+      // Publish to the cross-session live registry so the global live
+      // indicator lists this account's autonomous engine, scoped to it only.
+      registerLiveBot("autonomous", liveBotStatus);
+      publishLiveBotUpdate();
       startLoop(2000);
       logger.info({ loopIntervalSec }, "Autonomous engine started");
     }),
@@ -1610,6 +1637,9 @@ async function getComputedAgentScores(): Promise<Record<string, number>> {
       autonomousMode = "autonomous";
       stopReasons = [];
       nextScanIn = loopIntervalSec;
+      // Publish to the cross-session live registry (server restart resume).
+      registerLiveBot("autonomous", liveBotStatus);
+      publishLiveBotUpdate();
       startLoop(2000);
     }),
     stop: () => runWithSessionId(ownerSessionId, () => {
@@ -1619,6 +1649,7 @@ async function getComputedAgentScores(): Promise<Record<string, number>> {
       if (cooldownResumeTimer) { clearTimeout(cooldownResumeTimer); cooldownResumeTimer = null; }
       cooldownUntil = null;
       releaseTradingOwnership("autonomous");
+      publishLiveBotUpdate();
     }),
     resetDailyCounters: () => runWithSessionId(ownerSessionId, () => {
       tradesExecutedToday  = 0;

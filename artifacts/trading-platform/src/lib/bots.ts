@@ -7,7 +7,7 @@
  * giving each specialist its own hue.
  */
 
-import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Layers } from "lucide-react";
+import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Layers, Gem } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
 
@@ -43,6 +43,8 @@ export interface BotCardData {
   oneShot?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
+  /** Match Prism — Matches-only, gated on proven structure. */
+  prism?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -457,6 +459,7 @@ export const ACCENTS: Record<AccentKey, {
 
 export const BOT_ICON: Record<string, typeof Hash> = {
   hash: Hash,
+  prism: Gem,
   scale: Scale,
   crosshair: Crosshair,
   trend: TrendingUp,

@@ -27,10 +27,6 @@ export const WEB_CONSOLE_IDS = [
   "killshot@1",
   /** Kill-Shot family oracles (Over/Under, Even/Odd, Matches/Differs). */
   "killshot-family@1",
-  /** Match Prism — Matches only, structure-proof gated, priced ladder. */
-  "prism@1",
-  /** Twin-Rail Sentinel — two frozen straddles on one shared tick. */
-  "twin-rail@1",
 ] as const;
 
 export type WebConsoleId = (typeof WEB_CONSOLE_IDS)[number];

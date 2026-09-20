@@ -2123,11 +2123,18 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
 
 // ── Trade Intelligence endpoints ──────────────────────────────────────────────
 
-router.get("/intelligence/summary", async (_req, res): Promise<void> => {
+// Every intelligence read is STRICTLY scoped to the requesting account: the
+// queries below receive req.sessionId, which is derived from the connected
+// Deriv login — this page can therefore only ever show trades this account
+// executed itself, never another connected account's reports. (The dynamic
+// confidence status is equally per-account: it resolves the ambient session
+// through AsyncLocalStorage, bound by the session middleware.)
+
+router.get("/intelligence/summary", async (req, res): Promise<void> => {
   try {
     const [summary, missedSummary, dynamicStatus] = await Promise.all([
-      getIntelligenceSummary(),
-      getMissedOpportunitySummary(),
+      getIntelligenceSummary(req.sessionId),
+      getMissedOpportunitySummary(req.sessionId),
       Promise.resolve(getDynamicConfidenceStatus()),
     ]);
     res.json({ summary, missedSummary, dynamicStatus });
@@ -2136,22 +2143,22 @@ router.get("/intelligence/summary", async (_req, res): Promise<void> => {
   }
 });
 
-router.get("/intelligence/reports", async (_req, res): Promise<void> => {
+router.get("/intelligence/reports", async (req, res): Promise<void> => {
   try {
-    const rawLimit = Number(_req.query["limit"]);
+    const rawLimit = Number(req.query["limit"]);
     const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 50);
-    const reports = await getRecentReports(limit);
+    const reports = await getRecentReports(limit, req.sessionId);
     res.json(reports);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch intelligence reports" });
   }
 });
 
-router.get("/intelligence/missed", async (_req, res): Promise<void> => {
+router.get("/intelligence/missed", async (req, res): Promise<void> => {
   try {
-    const rawLimit = Number(_req.query["limit"]);
+    const rawLimit = Number(req.query["limit"]);
     const limit = Math.min(Number.isFinite(rawLimit) && rawLimit > 0 ? rawLimit : 20, 50);
-    const missed = await getRecentMissed(limit);
+    const missed = await getRecentMissed(limit, req.sessionId);
     res.json(missed);
   } catch (err) {
     res.status(500).json({ error: "Failed to fetch missed opportunities" });

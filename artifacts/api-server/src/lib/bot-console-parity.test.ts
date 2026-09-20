@@ -1,5 +1,5 @@
 /**
- * Cross-artifact console parity + Match Prism wiring guards.
+ * Cross-artifact console parity guards.
  *
  * The web bundle and the API are separate deploys. `GET /api/bots` publishes the
  * console ids the catalogue expects (`botConsoleIds()`), and the web bundle can
@@ -17,10 +17,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { botConsoleIds, getBotDefinition } from "./bot-catalog";
-import { MATCH_PAYOUT } from "./payouts";
-import * as prism from "./match-prism-engine";
-import { PRISM_BREAK_EVEN, PRISM_BOT_ID, PRISM_CONTRACT_TYPE } from "./match-prism-analysis";
+import { botConsoleIds } from "./bot-catalog";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CONTRACT_PATH = resolve(here, "../../../trading-platform/src/lib/console-contract.ts");
@@ -48,46 +45,5 @@ describe("console contract parity across artifacts", () => {
       [],
       `the web bundle cannot render these consoles: ${missing.join(", ")} — add them to WEB_CONSOLE_IDS and CONSOLE_REGISTRY`,
     );
-  });
-});
-
-describe("match prism wiring", () => {
-  it("is a catalogue bot on its own console", () => {
-    const def = getBotDefinition(PRISM_BOT_ID);
-    assert.ok(def, "Match Prism must be in BOT_CATALOG");
-    assert.equal(def.prism, true);
-    assert.equal(def.oneShot, undefined);
-    assert.equal(def.preLocked, undefined);
-    assert.equal(def.killShotFamily, undefined);
-  });
-
-  it("cannot reach a Differs contract from its catalogue entry", () => {
-    const def = getBotDefinition(PRISM_BOT_ID)!;
-    const contracts = def.sides.flatMap((s) => s.contracts);
-    assert.deepEqual(contracts, [PRISM_CONTRACT_TYPE]);
-    for (const c of contracts) {
-      assert.ok(!c.includes("DIFF"), `Match Prism must never be able to buy ${c}`);
-    }
-  });
-
-  it("prices its break-even off the live Match payout, not a copied number", () => {
-    assert.ok(Math.abs(PRISM_BREAK_EVEN - 1 / MATCH_PAYOUT) < 1e-9);
-  });
-
-  it("exposes the route surface routes/bots.ts calls", () => {
-    for (const fn of ["startSession", "stopSession", "getStatus", "scanForPrism", "isRunning", "getOwnerSessionId"] as const) {
-      assert.equal(typeof (prism as Record<string, unknown>)[fn], "function", `prism.${fn} must be exported`);
-    }
-    assert.equal(prism.MATCH_PRISM_BOT_ID, PRISM_BOT_ID);
-  });
-
-  it("reports a stopped, ownerless status before any session exists", () => {
-    if (prism.isRunning()) return;
-    const status = prism.getStatus();
-    assert.equal(status.running, false);
-    assert.equal(status.botId, PRISM_BOT_ID, "the idle status still names the bot so /live can label it");
-    assert.equal(status.sessionId, null);
-    assert.equal(status.tradeCount, 0);
-    assert.equal(status.deployed, undefined, "an idle engine must not advertise a deployed card");
   });
 });

@@ -45,6 +45,8 @@ export interface BotCardData {
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
   /** Match Prism — Matches-only, gated on proven structure. */
   prism?: boolean;
+  /** Twin-Rail Sentinel — frozen Over 4/Under 5 + Over 5/Under 4 twin pairs. */
+  twinRail?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -232,6 +234,70 @@ export interface BotSessionStatus {
     oosShots: number;
     breakEven: number;
     payout: number;
+  };
+  /**
+   * Twin-Rail only: the two frozen rails, the live quotes and the measurement
+   * behind the running session (carrier toll, break-even dead-rail rate, the
+   * context the gate is conditioning on).
+   */
+  rail?: {
+    symbol: string;
+    displayName: string;
+    normal: string;
+    recovery: string;
+    marketMode: string;
+    trigger: string;
+    discipline: string;
+    quotesLive: boolean;
+    normalQuote: { overPayout: number; underPayout: number };
+    recoveryQuote: { overPayout: number; underPayout: number };
+    carrierToll: number;
+    quota: number;
+    deadRate: number;
+    contextualDeadRate: number;
+    context: string;
+    samples: number;
+    verdict: string;
+    score: number;
+    reason: string;
+    signals: string[];
+    forced: boolean;
+  };
+  /** Twin-Rail only: the gate and the next fire window. */
+  twinWatch?: {
+    phase: string;
+    gateOpen: boolean;
+    gateReason: string;
+    cycleLcb: number;
+    cycleMean: number;
+    carrierToll: number;
+    railMean: number;
+    railLcb: number;
+    tickPeriodMs: number;
+    tickAgeMs: number;
+    headroomMs: number;
+    budgetMs: number;
+    waitReason: string;
+    holds: number;
+  };
+  /** Twin-Rail only: same-tick execution integrity, per session. */
+  twinLedger?: {
+    roundCount: number;
+    cycleCount: number;
+    syncedRounds: number;
+    deadRailHits: number;
+    splitRounds: number;
+    nakedRepairs: number;
+    doubleLosses: number;
+    syncRate: number;
+    burstP50Ms: number;
+    burstP95Ms: number;
+    lastBurstMs: number;
+    lastHeadroomMs: number;
+    lastDigit: number | null;
+    lastSync: string | null;
+    legStake: number;
+    pairExposure: number;
   };
   /** Kill-Shot family bots: compact live watch state. */
   familyWatch?: {

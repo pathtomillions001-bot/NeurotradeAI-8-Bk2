@@ -1138,7 +1138,7 @@ router.get("/deriv-journal", async (req, res): Promise<void> => {
   // Stats are computed from the full set above — only the rendered list is capped.
   // This reduces the JSON payload from ~1 MB (5000+ trades) to ~40 KB, which
   // eliminates the main-thread JSON.parse stall that froze the FAB and delayed navigation.
-  res.json({ source: "deriv" as const, trades: mapped.slice(0, 200), todayTrades: journalStats.todayTradesList, stats: journalStats });
+  res.json({ source: "deriv" as const, trades: mapped.slice(0, 100), todayTrades: journalStats.todayTradesList, stats: journalStats });
 });
 
 router.get("/:id", async (req, res): Promise<void> => {

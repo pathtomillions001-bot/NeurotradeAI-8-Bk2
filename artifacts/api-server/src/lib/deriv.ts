@@ -2435,6 +2435,11 @@ class DerivJournalManager extends EventEmitter {
   private listening = false;
   /** True once this manager has hydrated its cache from Postgres. */
   private hydratedFromDb = false;
+  /** Tracks the highest transaction_id we've already cached — used for incremental refresh
+   *  so we only fetch NEW trades instead of re-fetching the entire history every time. */
+  private lastKnownTransactionId = 0;
+  /** Whether we have ever done a full initial paginated fetch (needed before incremental works) */
+  private hasDoneInitialFetch = false;
 
   setCredentials(bearerToken: string, accountId: string) {
     const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
@@ -2451,6 +2456,8 @@ class DerivJournalManager extends EventEmitter {
       this.lastRefreshSentMs = 0;
       this.lastQuickRefreshSentMs = 0;
       this.hydratedFromDb = false;
+      this.lastKnownTransactionId = 0;
+      this.hasDoneInitialFetch = false;
       // Emit empty immediately so the frontend journal shows "loading" state
       this.emit("refreshed", []);
       this.detach();
@@ -2609,6 +2616,17 @@ class DerivJournalManager extends EventEmitter {
       return;
     }
     this.lastRefreshSentMs = now;
+
+    // INCREMENTAL REFRESH: After the initial full fetch, only fetch the 10 most
+    // recent trades and merge them. This avoids re-fetching the entire history
+    // (which drains Deriv's rate limits and causes "rate limit" errors).
+    if (this.hasDoneInitialFetch && this.cachedTransactions.length > 0 && this.lastKnownTransactionId > 0) {
+      logger.debug({ lastId: this.lastKnownTransactionId }, "JournalManager: incremental refresh (limit 10, merge mode)");
+      this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: 10, passthrough: { quick: true, incremental: true } });
+      return;
+    }
+
+    // FULL INITIAL FETCH: paginated fetch of all trades (only on first connect)
     this.isFetchingPages = true;
     this.fetchAccumulator = [];
     this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT });
@@ -2635,7 +2653,9 @@ class DerivJournalManager extends EventEmitter {
   private startRefreshTimer() {
     if (this.refreshTimer) clearInterval(this.refreshTimer);
     // Background safety-net poll — real-time updates come from the subscription.
-    this.refreshTimer = setInterval(() => { this.forceRefresh(); }, 30_000);
+    // After the initial fetch, forceRefresh() automatically uses incremental mode (limit:10)
+    // instead of full paginated chains — this cuts Deriv API calls by ~95%.
+    this.refreshTimer = setInterval(() => { this.forceRefresh(); }, 60_000);
   }
 
   /** Debounced FULL refresh — runs after quick refresh to ensure complete accuracy */
@@ -2699,6 +2719,11 @@ class DerivJournalManager extends EventEmitter {
         if (isQuick) {
           if (batch.length > 0) {
             const batchIds = new Set(batch.map((t: any) => t.transaction_id));
+            // Track the highest transaction_id for incremental refresh
+            for (const t of batch) {
+              const tid = Number(t.transaction_id ?? 0);
+              if (tid > this.lastKnownTransactionId) this.lastKnownTransactionId = tid;
+            }
             const merged = [
               ...batch,
               ...this.cachedTransactions.filter((t: any) => !batchIds.has(t.transaction_id)),
@@ -2715,6 +2740,11 @@ class DerivJournalManager extends EventEmitter {
         // Full paginated refresh
         this.fetchAccumulator.push(...batch);
         this.persistTransactions(this.sessionId, batch);
+        // Track the highest transaction_id for future incremental refreshes
+        for (const t of batch) {
+          const tid = Number(t.transaction_id ?? 0);
+          if (tid > this.lastKnownTransactionId) this.lastKnownTransactionId = tid;
+        }
 
         if (batch.length >= JOURNAL_FETCH_LIMIT) {
           // More pages may exist — space requests out (Deriv throttles
@@ -2732,8 +2762,9 @@ class DerivJournalManager extends EventEmitter {
           this.cachedTransactions = this.fetchAccumulator;
           this.fetchAccumulator = [];
           this.isFetchingPages = false;
+          this.hasDoneInitialFetch = true;
           this.lastFetchMs = Date.now();
-          logger.info({ count: this.cachedTransactions.length }, "JournalManager: full profit table refreshed");
+          logger.info({ count: this.cachedTransactions.length, lastTxId: this.lastKnownTransactionId }, "JournalManager: full profit table refreshed — incremental mode active");
           this.emit("refreshed", this.cachedTransactions);
         }
       }

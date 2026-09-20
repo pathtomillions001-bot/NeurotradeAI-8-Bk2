@@ -16,11 +16,8 @@ import { ConnectDerivAccountBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import {
   accountSessionId,
-  clearSessionLinksForSession,
   hasRiskAcknowledgment,
-  linkSessionIdentity,
   RISK_ACKNOWLEDGMENT_REQUIRED,
-  riskAckValue,
   setBrowserSessionCookie,
   setRiskAcknowledgment,
 } from "../lib/session";
@@ -99,7 +96,7 @@ router.post("/risk-acknowledgment", (req, res): void => {
   // valid for two tabs at once. The value is returned for the tab to store;
   // cookie clients simply ignore it.
   if (!req.isTabSession) setRiskAcknowledgment(res, req.sessionId);
-  res.json({ success: true, sessionId: req.sessionId, riskAck: riskAckValue(req.sessionId) });
+  res.json({ success: true, sessionId: req.sessionId });
 });
 
 router.get("/risk-acknowledgment", (req, res): void => {
@@ -211,24 +208,6 @@ async function resolveAccountSession(
     if (wasRiskAcknowledged) setRiskAcknowledgment(res, target);
   }
   req.sessionId = target;
-
-  // ── Persist the connection across tabs, restarts and devices ──────────────
-  // The connection must survive losing `sessionStorage` (new tab, closed tab,
-  // browser restart, mobile eviction) and third-party-cookie blocking. The
-  // durable client id and the cookie identity are bound to the account session
-  // so ANY later request — from this tab, another tab, or a fresh browser
-  // session — resolves straight back to the connected account. Only an explicit
-  // user disconnect clears these bindings.
-  const cookieSessionId =
-    typeof req.cookies?.["neurotrade_session"] === "string"
-      ? (req.cookies["neurotrade_session"] as string).trim()
-      : null;
-  await linkSessionIdentity({
-    sessionId: target,
-    clientId: req.clientId ?? null,
-    cookieId: cookieSessionId === current ? null : cookieSessionId,
-    tabId: req.isTabSession ? current : null,
-  });
 
   logger.info({ to: target }, "Browser session rotated onto account-scoped session");
   return target;
@@ -366,9 +345,8 @@ router.post("/oauth/callback", async (req, res): Promise<void> => {
     logger.info({ sessionId: req.sessionId, accountCount: derivAccounts.length },
       "OAuth login stored in isolated browser session");
     // sessionId: the tab adopts the rotated account session (it never sees
-    // cookies). riskAck: re-signed for the rotated id — the signature is
-    // bound to the session id, so the pre-rotation value is void after this.
-    res.json({ ...formatAccount(row, preferred.balance), sessionId: accountSession, riskAck: riskAckValue(accountSession) });
+    // cookies).
+    res.json({ ...formatAccount(row, preferred.balance), sessionId: accountSession });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "OAuth callback failed";
     logger.error({ err, sessionId: req.sessionId }, "OAuth callback error");
@@ -429,9 +407,8 @@ router.post("/connect", async (req, res): Promise<void> => {
       logger.info({ sessionId: req.sessionId, accountCount: derivAccounts.length },
         "Token accounts stored in isolated browser session");
       // sessionId: the tab adopts the rotated account session (it never sees
-    // cookies). riskAck: re-signed for the rotated id — the signature is
-    // bound to the session id, so the pre-rotation value is void after this.
-    res.json({ ...formatAccount(row, preferred.balance), sessionId: accountSession, riskAck: riskAckValue(accountSession) });
+    // cookies).
+    res.json({ ...formatAccount(row, preferred.balance), sessionId: accountSession });
       return;
     }
 
@@ -457,7 +434,7 @@ router.post("/connect", async (req, res): Promise<void> => {
         country: info.country ?? null,
       },
     });
-    res.json({ ...formatAccount(row, info.balance), sessionId: accountSession, riskAck: riskAckValue(accountSession) });
+    res.json({ ...formatAccount(row, info.balance), sessionId: accountSession });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Authorization failed";
     logger.error({ err, sessionId: req.sessionId }, "Deriv connect failed");
@@ -577,9 +554,6 @@ router.post("/disconnect", async (req, res): Promise<void> => {
   for (const account of sessionAccounts) {
     closeAccountConnections(account.derivAccountId ?? account.loginId);
   }
-  // This is the ONLY place a connection is ever unbound, and it only ever runs
-  // because the user asked for it.
-  await clearSessionLinksForSession(req.sessionId);
   await db.delete(accountsTable).where(eq(accountsTable.sessionId, req.sessionId));
   // Rotate this browser onto a brand-new anonymous session so a subsequently
   // connected DIFFERENT Deriv login can never inherit or migrate this account's
@@ -596,7 +570,6 @@ router.post("/disconnect", async (req, res): Promise<void> => {
     success: true,
     message: "Your Deriv accounts were disconnected from this browser only",
     sessionId: fresh,
-    ...(wasRiskAcknowledged ? { riskAck: riskAckValue(fresh) } : {}),
   });
 });
 

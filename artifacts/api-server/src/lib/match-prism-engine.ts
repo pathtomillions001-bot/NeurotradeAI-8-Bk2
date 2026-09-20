@@ -20,7 +20,7 @@
  *     buy, so neither a stale card nor a bug can make this bot buy a Differ.
  *   · NEVER SELF-STOP ON A TRANSIENT ERROR — the session ends on take profit,
  *     stop loss, or the user's stop. A flaky socket is a message, not an exit.
- *   · SESSION SCOPE — the whole loop is pinned with `runWithSessionId`, and the
+ *   · SESSION SCOPE — the whole loop is pinned with `runWithSession`, and the
  *     engine publishes itself to the cross-session live registry so a bot started
  *     in one tab is visible from any other.
  *
@@ -55,8 +55,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
-import { registerLiveBot } from "./live-registry";
+import { getBrowserSessionId, runWithSession } from "./session";
 import {
   PRISM_BOT_ID,
   PRISM_BOT_NAME,
@@ -349,8 +348,7 @@ function freshSession(): SessionState {
   };
 }
 
-const { state: session, replace: replaceSession } =
-  createSessionScoped<SessionState>(freshSession);
+let session: SessionState = freshSession();
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -675,7 +673,7 @@ export async function startSession(config: PrismConfig): Promise<{ ok: boolean; 
   // CONTRACT SOVEREIGNTY: Prism buys DIGITMATCH and nothing else, ever.
   if (config.card.hurdle <= 0) return fail("The measured model card is incomplete");
 
-  replaceSession({
+  session = {
     ...freshSession(),
     running: true,
     sessionId: `bot_prism_${Date.now()}`,
@@ -702,7 +700,7 @@ export async function startSession(config: PrismConfig): Promise<{ ok: boolean; 
     message: config.marketMode === "locked"
       ? `Locked on ${config.displayName} · digit ${config.digit} — the digit may rotate, the market will not.`
       : `Deployed on ${config.displayName} · digit ${config.digit} — Prism will move if another market proves better.`,
-  });
+  };
 
   logger.info({
     botId: config.botId,
@@ -716,10 +714,8 @@ export async function startSession(config: PrismConfig): Promise<{ ok: boolean; 
   }, "Match Prism session starting");
   broadcast();
 
-  registerLiveBot("match-prism", () => getStatus());
-
   const loopSessionId = config.ownerSessionId ?? getBrowserSessionId();
-  runWithSessionId(loopSessionId, () =>
+  runWithSession(loopSessionId, () =>
     runLoop(config)
       .catch((err) => {
         logger.error({ err }, "Match Prism runLoop error");

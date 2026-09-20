@@ -26,7 +26,7 @@
  * explicit stop), so a single withdrawal call would be error-prone.
  */
 
-import { getBrowserSessionId, runWithSessionId } from "./session";
+import { getBrowserSessionId, runWithSession } from "./session";
 
 /**
  * The shape every engine status shares. Deliberately WITHOUT an index
@@ -100,7 +100,7 @@ export function listLiveBots(): Array<{
   for (const [key, reg] of [...registrations.entries()]) {
     let status: LiveBotStatusShape | null;
     try {
-      status = runWithSessionId(reg.ownerSessionId, () => reg.status());
+      status = runWithSession(reg.ownerSessionId, () => reg.status());
     } catch {
       status = null;
     }

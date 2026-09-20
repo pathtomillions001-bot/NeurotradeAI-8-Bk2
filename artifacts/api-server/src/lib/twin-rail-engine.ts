@@ -27,7 +27,7 @@
  *     pattern: exactly one winner = synced, both winners = split tick.
  *   · NEVER SELF-STOP ON A TRANSIENT ERROR — the session ends on take profit,
  *     stop loss, or the user's stop. A flaky socket is a message, not an exit.
- *   · SESSION SCOPE — the loop is pinned with `runWithSessionId`, and the engine
+ *   · SESSION SCOPE — the loop is pinned with `runWithSession`, and the engine
  *     publishes itself to the cross-session live registry.
  *
  * The one thing that is uniquely Twin-Rail: it knows that its normal rail is a
@@ -63,8 +63,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { createSessionScoped, getBrowserSessionId, runWithSessionId } from "./session";
-import { registerLiveBot } from "./live-registry";
+import { getBrowserSessionId, runWithSession } from "./session";
 import { resolveRecoveryPayout } from "./recovery-payout";
 import {
   NORMAL_PAIR,
@@ -346,8 +345,7 @@ function freshSession(): SessionState {
   };
 }
 
-const { state: session, replace: replaceSession } =
-  createSessionScoped<SessionState>(freshSession);
+let session: SessionState = freshSession();
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -835,7 +833,7 @@ export async function startSession(config: TwinRailConfig): Promise<{ ok: boolea
     discipline: isRailDiscipline(config.discipline) ? config.discipline : "spec",
   };
 
-  replaceSession({
+  session = {
     ...freshSession(),
     running: true,
     sessionId: `bot_twinrail_${Date.now()}`,
@@ -846,7 +844,7 @@ export async function startSession(config: TwinRailConfig): Promise<{ ok: boolea
     message: locked
       ? `🔒 Locked on ${displayName} — normal rail ${pairLabel(NORMAL_PAIR)}, recovery rail ${pairLabel(RECOVERY_PAIR)}.`
       : `🔀 Deployed on ${displayName} — Twin-Rail may rotate to a better measure.`,
-  });
+  };
   session.watch.rttP95Ms = 400;
 
   logger.info({
@@ -860,10 +858,8 @@ export async function startSession(config: TwinRailConfig): Promise<{ ok: boolea
   }, "Twin-Rail Sentinel session starting");
   broadcast();
 
-  registerLiveBot(TWIN_RAIL_BOT_ID, () => getStatus());
-
   const loopSessionId = deployment.ownerSessionId ?? getBrowserSessionId();
-  runWithSessionId(loopSessionId, () =>
+  runWithSession(loopSessionId, () =>
     runLoop(deployment)
       .catch((err) => {
         logger.error({ err }, "Twin-Rail runLoop error");

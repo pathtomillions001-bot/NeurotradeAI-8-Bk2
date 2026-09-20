@@ -99,6 +99,8 @@ function capTargetProfit(target: number, baseStake: number): number {
 }
 
 const statesBySession = new Map<string, RecoveryState>();
+// Reading status creates an empty state, but must not count as restoring the ledger.
+const initializedSessions = new Set<string>();
 let fallbackSessionId = "legacy";
 
 function activeSessionId(): string {
@@ -116,8 +118,10 @@ function activeState(): RecoveryState {
   return current;
 }
 
-function replaceState(next: RecoveryState): void {
-  statesBySession.set(activeSessionId(), next);
+function replaceState(next: RecoveryState, initialized = true): void {
+  const sessionId = activeSessionId();
+  statesBySession.set(sessionId, next);
+  if (initialized) initializedSessions.add(sessionId);
 }
 
 // Proxy preserves the existing state.field implementation while routing every
@@ -147,7 +151,7 @@ function applyNewDay(): void {
   const prevOriginPayout     = state.originPayoutMultiplier;
   const hadCarryOver         = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
 
-  replaceState(freshState());
+  replaceState(freshState(), initializedSessions.has(activeSessionId()));
 
   // Carry 50% of any unrecovered debt into the new day (capped at 3× base stake).
   // A hard wipe would silently discard real account losses from late-night trades.
@@ -518,6 +522,15 @@ export function seedState(data: RecoveryState): void {
 
 export function serializeState(): string {
   return JSON.stringify(state);
+}
+
+/**
+ * Restore once on executor startup, even if a status read allocated an empty
+ * state first. Never overwrite a warm outcome, explicit reset or journal sync.
+ * This changes no recovery sizing, reducer or daily carry-over policy.
+ */
+export function hydrateStateIfNeeded(json: string): void {
+  if (!initializedSessions.has(activeSessionId())) loadState(json);
 }
 
 export function loadState(json: string): void {

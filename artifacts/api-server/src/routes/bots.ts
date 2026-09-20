@@ -27,6 +27,8 @@ import { listLiveBots } from "../lib/live-registry";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
 import * as prism from "../lib/match-prism-engine";
+import * as twinRail from "../lib/twin-rail-engine";
+import { TWIN_RAIL_BOT_ID, type RecoveryTrigger as TwinRailTrigger } from "../lib/twin-rail-analysis";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -61,7 +63,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   // Family bots own their own routes; the generic specialist path must never be
   // able to start them with a mismatched config.
-  if (bot.prism || bot.killShotFamily || bot.preLocked || bot.oneShot) {
+  if (bot.prism || bot.killShotFamily || bot.preLocked || bot.oneShot || bot.twinRail) {
     return { ok: false, error: "This bot is deployed from its own console, not the generic bot endpoint" };
   }
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
@@ -184,6 +186,7 @@ router.get("/", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
+  const twin = visibleTwinRailStatus(req.sessionId);
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
@@ -198,9 +201,13 @@ router.get("/", (req, res) => {
       if (bot.killShotFamily) {
         return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
       }
+      if (bot.twinRail) {
+        return { ...bot, console: console_, session: twin.running ? twin : null };
+      }
       return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: pickActiveBotId([
+      { botId: TWIN_RAIL_BOT_ID, running: twin.running },
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: fam.botId ?? null, running: fam.running },
@@ -855,9 +862,154 @@ router.post("/prism/stop", (req, res) => {
   res.json({ ok: true, status: visiblePrismStatus(req.sessionId) });
 });
 
+// ── Twin-Rail Sentinel ────────────────────────────────────────────────────────
+//
+// A dedicated console for the same reason Prism has one: the contracts are not
+// user-selectable. Over 4 + Under 5 is the normal rail and Over 5 + Under 4 is
+// the recovery rail, both frozen in the analysis module, and no field of this
+// request body can widen, swap or re-tune them. The user chooses risk, the
+// market mode (after the scan) and how strictly the carrier is treated.
+
+/** Only the owning session sees Twin-Rail's telemetry; everyone else sees a marker. */
+function visibleTwinRailStatus(sessionId: string) {
+  const owner = twinRail.getOwnerSessionId();
+  if (!owner || owner === sessionId) return twinRail.getStatus();
+  return {
+    ...twinRail.getStatus(),
+    running: false,
+    sessionId: null,
+    config: undefined,
+    rail: undefined,
+    twinWatch: undefined,
+    twinLedger: undefined,
+  };
+}
+
+async function twinRailRisk(sessionId: string, balance: number) {
+  let markupPercent = 10;
+  let maxStake = 500;
+  try {
+    const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
+    if (rows.length > 0) {
+      const v = Number((rows[0] as any).botRecoveryMarkup);
+      if (Number.isFinite(v)) markupPercent = v;
+      const m = Number((rows[0] as any).maxTradeStake);
+      if (Number.isFinite(m) && m > 0) maxStake = m;
+    }
+  } catch { /* defaults */ }
+  return {
+    markupPercent,
+    // The cap applies to the PAIR: both legs fire together, so a $1 cap means
+    // $0.50 per leg. This is the one place the twin exposure is priced.
+    maxPairStake: maxStake,
+    balance: balance > 0 ? balance : 10000,
+  };
+}
+
+function parseTwinRailTrigger(raw: unknown): TwinRailTrigger {
+  return raw === "both-legs" ? "both-legs" : "pair-loss";
+}
+
+function parseTwinRailDiscipline(raw: unknown): twinRail.RailDiscipline {
+  return raw === "measured" ? "measured" : "spec";
+}
+
+router.get("/twinrail/status", (req, res) => {
+  res.json(visibleTwinRailStatus(req.sessionId));
+});
+
+router.post("/twinrail/scan", async (req, res): Promise<void> => {
+  const balance = await prismBalance(req.sessionId);
+  const risk = await twinRailRisk(req.sessionId, balance);
+  const stake = Number(req.body?.stake) > 0 ? Number(req.body.stake) : 1;
+  if (stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35 per leg" });
+    return;
+  }
+  try {
+    const result = await twinRail.scanForTwinRail(req.sessionId, { stake });
+    res.json({ ...result, sessionParams: { stake, maxPairStake: risk.maxPairStake, markupPercent: risk.markupPercent } });
+  } catch (err) {
+    logger.error({ err }, "Twin-Rail scan failed");
+    res.status(500).json({ error: "Scan failed" });
+  }
+});
+
+router.post("/twinrail/start", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
+  if (!requested || !isAutomatedMarket(requested)) {
+    res.status(400).json({ error: "Run the analysis first — this bot deploys only onto a market it has measured" });
+    return;
+  }
+  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
+  if (!market || !market.digitEnabled) {
+    res.status(400).json({ error: "Twin-Rail needs a digit-enabled market" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35 per leg" });
+    return;
+  }
+
+  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
+  let lockedSymbol: string | undefined;
+  if (marketMode === "locked") {
+    const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
+      ? body.lockedSymbol
+      : requested;
+    if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
+      res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
+      return;
+    }
+    lockedSymbol = requestedLocked;
+  }
+
+  const existingOwner = twinRail.getOwnerSessionId();
+  if (twinRail.isRunning() && existingOwner && existingOwner !== req.sessionId) {
+    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
+    return;
+  }
+
+  const score = body.score ?? body.analysis ?? undefined;
+  const result = await twinRail.startSession({
+    ownerSessionId: req.sessionId,
+    botId: TWIN_RAIL_BOT_ID,
+    stake: body.stake,
+    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
+    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
+    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+    marketMode,
+    lockedSymbol,
+    symbol: market.symbol,
+    displayName: market.displayName,
+    recoveryTrigger: parseTwinRailTrigger(body.recoveryTrigger),
+    discipline: parseTwinRailDiscipline(body.discipline),
+    score,
+    forced: body.forced === true,
+  });
+  if (!result.ok) {
+    res.status(409).json({ error: result.error });
+    return;
+  }
+  res.json({ ok: true, status: visibleTwinRailStatus(req.sessionId) });
+});
+
+router.post("/twinrail/stop", (req, res) => {
+  const owner = twinRail.getOwnerSessionId();
+  if (twinRail.isRunning() && owner && owner !== req.sessionId) {
+    res.status(409).json({ error: "You cannot stop another browser session's bot." });
+    return;
+  }
+  twinRail.stopSession();
+  res.json({ ok: true, status: visibleTwinRailStatus(req.sessionId) });
+});
+
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
+  const twin = visibleTwinRailStatus(req.sessionId);
+  if (twin.running) { res.json(twin); return; }
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
@@ -979,7 +1131,7 @@ router.post("/:botId/stop", (req, res) => {
     res.status(404).json({ error: "Unknown bot" });
     return;
   }
-  if (botDef.prism || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
+  if (botDef.prism || botDef.killShotFamily || botDef.preLocked || botDef.oneShot || botDef.twinRail) {
     res.status(400).json({ error: "This bot is stopped from its own console" });
     return;
   }

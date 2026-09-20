@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "prism";
+  family: SpecialistFamily | "duallock" | "killshot" | "prism" | "twinrail";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -61,6 +61,13 @@ export interface BotDefinition {
    * entry. The UI renders a dedicated console for it.
    */
   prism?: boolean;
+  /**
+   * Twin-Rail Sentinel — two FROZEN straddles fired as one atomic burst:
+   * Over 4 + Under 5 normally, Over 5 + Under 4 in recovery. The user chooses
+   * no contract (the rails are constants), so the UI renders a dedicated
+   * console with a scan → lock flow and a live twin-leg monitor.
+   */
+  twinRail?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -398,7 +405,35 @@ export const BOT_CATALOG: BotDefinition[] = [
     nominalWinRate: "≈11% / ≈90%",
     nominalPayout: "8.93× / 1.09×",
   },
-];
+  {
+    id: "twinrail",
+    name: "Twin-Rail Sentinel",
+    code: "BOT-TWINRAIL",
+    family: "twinrail",
+    contractLabel: "Over/Under twin pair (frozen)",
+    tagline: "Two legs · one tick · exactly one winner",
+    description:
+      "Twin-Rail fires TWO contracts at the same instant on the same tick: Over 4 + Under 5 as the normal rail, and Over 5 + Under 4 only while recovering. Over 4 and Under 5 partition the digits, so exactly one leg wins on every normal round and a double loss is impossible. Recovery uses the wider pair, which pays ≈2.43× but loses BOTH legs on digits 4 and 5 — the dead rail — so the bot holds fire until the tape says those digits are rarer than the quotes assume. Nothing about the contracts is configurable: the rails are frozen.",
+    edge: [
+      "SAME-TICK STADDLE — both legs ride one unscheduled burst on the account's pooled socket, so they open and settle on one shared digit. The pair's own outcome pattern proves it (exactly one winner), and every round is classified: synced, dead rail, or split tick",
+      "ONE GATE, NOT NINE — a straddle has no second signal to hunt for: the recovery rail fires only when the LOWER confidence bound of its measured edge clears zero, computed from the conditioned ten-digit distribution against the live payout quotes",
+      "THE DEAD RAIL IS PRICED — the scan reports the break-even dead-rail rate q* = (p − 2)/p implied by the market's own quotes (17.70 % at 2.43×) beside the rate the tape actually prints, and ranks every market on the cycle that clears it",
+      "THE CARRIER'S COST IS PRINTED, NOT HIDDEN — the normal rail returns S·(p − 2) = −0.05 S per round at 1.95×. The console shows that toll per round, per cycle and per hour instead of presenting a one-leg win as a profit",
+      "SHARED RECOVERY, DEBT-DRIVEN — the same ledger, the same single-executor arbiter and the same stake formula as every other bot: one winning recovery leg clears the whole pair debt plus the configured markup",
+      "LOCKED OR SWITCHING, DECIDED AFTER THE SCAN — the market mode is chosen once the measurement is on screen, and the rails never change",
+    ],
+    accent: "lime",
+    icon: "layers",
+    twinRail: true,
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Frozen twin pair", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Over 4 + Under 5 normal · Over 5 + Under 4 recovery — not user-selectable" },
+    ],
+    nominalWinRate: "50% per leg (one always wins)",
+    nominalPayout: "1.95× / 2.43×",
+  },
+]
 
 export function getBotDefinition(botId: string): BotDefinition | undefined {
   return BOT_CATALOG.find(b => b.id === botId);
@@ -418,6 +453,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
+  if (bot.twinRail) return "twin-rail@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

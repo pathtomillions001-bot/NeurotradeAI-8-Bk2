@@ -78,6 +78,15 @@ describe("bot console contract", () => {
     assert.equal(botConsoleId(getBotDefinition("match")!), "specialist@1");
   });
 
+  it("gives Twin-Rail Sentinel its own console and no contract choice", () => {
+    const twin = getBotDefinition("twinrail")!;
+    assert.equal(botConsoleId(twin), "twin-rail@1");
+    assert.equal(twin.family, "twinrail");
+    const contracts = twin.sides.flatMap((s) => s.contracts);
+    assert.deepEqual(contracts, ["DIGITOVER", "DIGITUNDER"]);
+    assert.equal(twin.hasSides, false, "the rails are frozen — the user has no side picker");
+  });
+
   it("publishes the exact set of consoles the web bundle must implement", () => {
     assert.deepEqual(botConsoleIds(), [
       "dual-lock@1",
@@ -85,6 +94,7 @@ describe("bot console contract", () => {
       "killshot@1",
       "prism@1",
       "specialist@1",
+      "twin-rail@1",
     ]);
   });
 });

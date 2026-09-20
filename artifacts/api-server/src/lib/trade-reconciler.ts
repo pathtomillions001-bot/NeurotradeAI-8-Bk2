@@ -25,6 +25,7 @@ import { accountsTable, tradesTable } from "@workspace/db";
 import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { fetchDerivProfitTable } from "./deriv";
 import { logger } from "./logger";
+import { isNexusPending } from "./match-nexus-policy";
 
 /** Trades older than this that are still `open` are considered unsettled. */
 const RECONCILE_AFTER_MS = 90_000;
@@ -40,6 +41,7 @@ interface UnsettledRow {
   contractType: string;
   stake: string;
   derivContractId: string | null;
+  agentReasoning: string | null;
   createdAt: Date;
 }
 
@@ -55,13 +57,16 @@ function normalizeContractType(ct: string): string[] {
  * Exact by contract id when we have it; otherwise by symbol + contract family +
  * stake within a few minutes of the recorded entry time.
  */
-function findTransaction(row: UnsettledRow, transactions: any[]): any | null {
+export function findTransaction(row: UnsettledRow, transactions: any[]): any | null {
   if (row.derivContractId) {
     const exact = transactions.find(
       (t) => String(t.contract_id ?? "") === String(row.derivContractId),
     );
-    if (exact) return exact;
+    // A known contract ID must NEVER fall back to a different same-stake trade.
+    return exact ?? null;
   }
+  // An ambiguous Nexus buy stays unresolved until a broker receipt identifies it.
+  if (isNexusPending(row.agentReasoning)) return null;
   const family = normalizeContractType(row.contractType);
   const stake = Number(row.stake);
   const createdSec = Math.floor(row.createdAt.getTime() / 1000);
@@ -95,6 +100,7 @@ export async function reconcileUnsettledTrades(): Promise<number> {
         contractType: tradesTable.contractType,
         stake: tradesTable.stake,
         derivContractId: tradesTable.derivContractId,
+        agentReasoning: tradesTable.agentReasoning,
         createdAt: tradesTable.createdAt,
       })
       .from(tradesTable)

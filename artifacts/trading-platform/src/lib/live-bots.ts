@@ -33,7 +33,13 @@ export interface LiveBotStatus {
   message?: string;
   inRecovery?: boolean;
   recoveryStep?: number;
+  nexus?: { executionMode: "paper" | "live" };
   [key: string]: unknown;
+}
+
+/** Paper performance must never be labelled as a live account result. */
+export function isPaperBot(status: LiveBotStatus): boolean {
+  return status.nexus?.executionMode === "paper";
 }
 
 export interface LiveBot {
@@ -54,6 +60,8 @@ export interface LiveBot {
  */
 export function stopPathForBot(botId: string): string {
   switch (botId) {
+    case "match-nexus":
+      return "/api/bots/match-nexus/stop";
     case "duallock":
       return "/api/bots/duallock/stop";
     case "killshot":

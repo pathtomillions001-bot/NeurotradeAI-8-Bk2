@@ -21,4 +21,10 @@ export interface DerivAccount {
   /** @nullable */
   country?: string | null;
   connectedAt?: string;
+  /** Account-scoped session id after a connect rotation. Per-tab clients adopt it into sessionStorage; cookie clients ignore it.
+   */
+  sessionId?: string;
+  /** Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack.
+   */
+  riskAck?: string;
 }

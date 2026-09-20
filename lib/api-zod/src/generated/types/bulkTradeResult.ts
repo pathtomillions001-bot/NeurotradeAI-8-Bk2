@@ -5,9 +5,12 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { BulkSyncReport } from './bulkSyncReport';
 import type { Trade } from './trade';
 
 export interface BulkTradeResult {
   trades: Trade[];
   count: number;
+  /** Measured synchrony of the batch, derived from Deriv's own contract start/sell times. `null` for paper/demo batches, which never reach the exchange. */
+  sync?: BulkSyncReport | null;
 }

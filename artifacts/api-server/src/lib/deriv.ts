@@ -61,7 +61,14 @@ function sleep(ms: number): Promise<void> {
 }
 
 // ── Deriv API base URLs ───────────────────────────────────────────────────────
-export const DERIV_REST_BASE = "https://api.derivws.com";
+/**
+ * Deriv REST base. Overridable ONLY so the test suite can point the real
+ * handshake path (OTP → WebSocket) at a local fake Deriv server; production
+ * never sets it and always talks to api.derivws.com.
+ */
+export const DERIV_REST_BASE = (
+  process.env.DERIV_REST_BASE ?? "https://api.derivws.com"
+).replace(/\/+$/, "");
 export const DERIV_AUTH_BASE = "https://auth.deriv.com";
 
 /**
@@ -846,6 +853,8 @@ class DerivTickManager extends EventEmitter {
   private digitBuffers = new Map<string, number[]>();
   private latestPrices = new Map<string, number>();
   private lastTickMs = new Map<string, number>();
+  /** Epoch (ms) of the last tick BROKER-SIDE, per symbol — the tick-window clock. */
+  private lastTickEpochMs = new Map<string, number>();
   private digitTape = new DigitTape();
 
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -915,6 +924,28 @@ class DerivTickManager extends EventEmitter {
       }
     }
     return buf.slice(-count);
+  }
+
+  /**
+   * The symbol's current tick window, on the MARKET's clock.
+   *
+   * A tick contract's entry is decided by the tick that is current when the
+   * buy is processed, so two orders processed inside one window are the same
+   * trade as far as the market is concerned: same entry tick, same entry digit,
+   * same exit tick. The window start is the epoch Deriv stamps on the tick
+   * itself (never our receipt time), so a delayed feed cannot shift the
+   * boundary. Returns null when the symbol has not ticked yet.
+   */
+  getTickWindow(
+    symbol: string,
+  ): { periodMs: number; windowStartMs: number; elapsedMs: number } | null {
+    const windowStartMs = this.lastTickEpochMs.get(symbol);
+    if (!windowStartMs || !Number.isFinite(windowStartMs)) return null;
+    return {
+      periodMs: tickSecondsFor(symbol) * 1000,
+      windowStartMs,
+      elapsedMs: Date.now() - windowStartMs,
+    };
   }
 
   /**
@@ -1151,6 +1182,9 @@ class DerivTickManager extends EventEmitter {
     this.tickBuffers.set(symbol, prices);
     this.latestPrices.set(symbol, price);
     this.lastTickMs.set(symbol, Date.now());
+    if (Number.isFinite(epoch) && epoch > 0) {
+      this.lastTickEpochMs.set(symbol, epoch > 1e11 ? epoch : epoch * 1000);
+    }
 
     if (market.digitEnabled) {
       const digit = extractLastDigit(price, market.pipSize);
@@ -1248,6 +1282,8 @@ class DerivTickManager extends EventEmitter {
   private pushSimulatedTick(market: (typeof DERIV_MARKETS)[0], price: number) {
     const factor = Math.pow(10, market.pipSize);
     const rounded = Math.round(price * factor) / factor;
+    const simEpochMs = Math.floor(Date.now() / 1000) * 1000;
+    this.lastTickEpochMs.set(market.symbol, simEpochMs);
     if (market.digitEnabled) this.digitTape.push({
       symbol: market.symbol, price: rounded, digit: extractLastDigit(rounded, market.pipSize),
       epoch: Math.floor(Date.now() / 1000), receivedAt: Date.now(), source: "simulated",
@@ -1575,6 +1611,13 @@ export interface LiveTradeResult {
   buyPrice: number;
   entrySpot: number;
   longcode: string;
+  /**
+   * Deriv's own contract start time, in epoch MILLISECONDS (0 when Deriv did
+   * not report one). Two legs of one batch that share a start time were opened
+   * on the same tick — this is the broker-side proof that a batch really did
+   * enter together, and it is what the bulk route reports back to the user.
+   */
+  startedAtMs?: number;
 }
 
 /** One leg of a bulk batch: either a confirmed contract or the rejection reason. */
@@ -1589,6 +1632,10 @@ export interface ContractResult {
   entrySpot: number;
   /** True when the settlement sweep finished without finding this leg's record. */
   missing?: boolean;
+  /** Deriv's sell_time in epoch ms (0 when not journalled) — the closing tick. */
+  exitedAtMs?: number;
+  /** Deriv's purchase_time in epoch ms (0 when not journalled). */
+  purchasedAtMs?: number;
 }
 
 export interface ContractProposal {
@@ -1798,6 +1845,46 @@ class DerivAccountConnection extends EventEmitter {
     this.bearerToken = token;
   }
 
+  /**
+   * Send a BATCH of messages back-to-back inside one event-loop turn.
+   *
+   * THE BUG THIS FIXES (bulk trades): this connection paces ordinary traffic at
+   * one message per `ACCOUNT_SEND_INTERVAL_MS` (25 ms) — a deliberate guard that
+   * keeps the app under Deriv's per-connection message ceiling. But the bulk
+   * executor's whole contract is "every leg leaves in the SAME millisecond", and
+   * it rode `send()`, which is that same paced queue. So a 10-leg batch was
+   * really emitted at 0/25/50/…/225 ms for the quotes and again at 25 ms per buy,
+   * i.e. the batch straddled tick boundaries exactly as if it had been staggered
+   * on purpose — legs opened on different ticks, different entry digits, and
+   * closed seconds apart. The "one unscheduled burst" comment was only true on
+   * the injected test socket; in production every batch went through the queue.
+   *
+   * A burst writes straight to the socket, in order, without touching the paced
+   * queue — one turn, one millisecond, one tick. It is bounded by construction
+   * (the bulk executor caps a batch at 10 legs × 2 phases), so a burst of ≤ 20
+   * messages stays far below the 100 msg/s per-connection limit the pacing
+   * exists to respect, and the pacing simply resumes afterwards.
+   */
+  burst(messages: Array<Record<string, unknown>>, hooks?: AccountRequestHooks): number {
+    if (!this.isOpen()) return 0;
+    let sent = 0;
+    for (const message of messages) {
+      try {
+        hooks?.beforeSend?.();
+        this.sendNow(message);
+        hooks?.onSent?.();
+        sent++;
+      } catch (err) {
+        logger.warn(
+          { err, accountId: this.accountId, sent, of: messages.length },
+          "AccountConnection: burst aborted mid-batch",
+        );
+        break;
+      }
+    }
+    return sent;
+  }
+
   /** Tail of the token this connection was opened with (identity check only). */
   tokenTail(): string {
     return this.bearerToken.slice(-12);
@@ -1974,6 +2061,12 @@ class DerivAccountConnection extends EventEmitter {
         this.stopPing();
         this.ws = null;
         this.failPending();
+        // A batch riding this socket must learn that the pipe it was using is
+        // gone, so it can re-propose over the reconnected one instead of
+        // waiting out its deadline and reporting a failure for legs that were
+        // never sent. Ordinary request/response callers are unaffected (the
+        // pool reconnects transparently and their promise times out or retries).
+        this.emit("dropped");
         if (!settled) {
           settled = true;
           clearTimeout(openTimeout);
@@ -2292,6 +2385,12 @@ export interface PooledSocket {
   readonly readyState: number;
   readonly isOpen: () => boolean;
   send(payload: Record<string, unknown> | string): void;
+  /**
+   * Submit several messages as ONE atomic burst — same event-loop turn, same
+   * millisecond, no queue pacing. This is the primitive the bulk executor
+   * commits a batch with; see `DerivAccountConnection.burst`.
+   */
+  burst(messages: Array<Record<string, unknown>>): number;
   on(event: "message", cb: (data: { toString(): string }) => void): void;
   on(event: "open", cb: () => void): void;
   // Kept for the bulk executor's batch-fatal error handling. On a pooled
@@ -2299,6 +2398,10 @@ export interface PooledSocket {
   // on a directly-opened test socket these are wired to the real events.
   on(event: "error", cb: (err: Error) => void): void;
   on(event: "close", cb: () => void): void;
+  /** Underlying transport dropped. Subscribe to re-propose in-flight work. */
+  on(event: "dropped", cb: () => void): void;
+  off(event: "message", cb: (data: { toString(): string }) => void): void;
+  off(event: "dropped", cb: () => void): void;
   close(): void;
   terminate(): void;
   readonly connection: DerivAccountConnection;
@@ -2332,12 +2435,30 @@ async function openDirectSocket(url: string): Promise<PooledSocket> {
       else if (opened) { /* closing */ }
       else preOpenQueue.push(text);
     },
-    on(event: "message" | "open" | "error" | "close", cb: any) {
+    on(event: "message" | "open" | "error" | "close" | "dropped", cb: any) {
       if (event === "open" && socket.readyState === WebSocket.OPEN) {
         queueMicrotask(cb);
         return;
       }
-      socket.on(event, cb);
+      // A direct socket has exactly one drop event; the executor listens for
+      // `dropped` (the pooled façade's name for it) so both transports behave
+      // identically.
+      socket.on(event === "dropped" ? "close" : event, cb);
+    },
+    burst(messages) {
+      let sent = 0;
+      for (const message of messages) {
+        try {
+          socket.send(JSON.stringify(message));
+          sent++;
+        } catch {
+          break;
+        }
+      }
+      return sent;
+    },
+    off(event, cb) {
+      socket.off(event === "dropped" ? "close" : event, cb);
     },
     close() {
       try { socket.close(); } catch { /* ignore */ }
@@ -2355,6 +2476,13 @@ export async function getPooledSocket(
 ): Promise<PooledSocket> {
   const connection = getAccountConnection(bearerToken, accountId);
   await connection.ensureConnected();
+  // The message listener handed to the connection is a WRAPPER (Deriv messages
+  // are objects; `ws` callers expect a Buffer-like). Remember it per callback so
+  // `off()` removes the wrapper that was actually registered — otherwise every
+  // finished batch would leave a listener on the shared connection forever,
+  // which both leaks memory and stops the connection ever reaching its idle
+  // teardown (the listener count is part of that decision).
+  const messageWrappers = new WeakMap<object, (msg: any) => void>();
   return {
     get readyState() {
       return connection.isOpen() ? WebSocket.OPEN : WebSocket.CLOSED;
@@ -2364,18 +2492,39 @@ export async function getPooledSocket(
       const msg = typeof payload === "string" ? JSON.parse(payload) : payload;
       void connection.send(msg);
     },
-    on(event: "message" | "open" | "error" | "close", cb: any) {
+    burst(messages) {
+      return connection.burst(messages);
+    },
+    on(event: "message" | "open" | "error" | "close" | "dropped", cb: any) {
       if (event === "message") {
-        connection.on("message", (msg: any) => cb({ toString: () => JSON.stringify(msg) }));
+        const wrapper = (msg: any) => cb({ toString: () => JSON.stringify(msg) });
+        messageWrappers.set(cb, wrapper);
+        connection.on("message", wrapper);
       } else if (event === "open") {
         // The caller registers this AFTER awaiting us, by which time the pooled
         // socket is usually already open — so replay it instead of hanging.
         if (connection.isOpen()) queueMicrotask(cb);
         else connection.on("open", cb);
+      } else if (event === "dropped") {
+        // The pool reconnects transparently, but an in-flight BATCH has to know:
+        // its unconfirmed legs must be re-proposed on the fresh socket rather
+        // than left to time out (the reported "bulk trades did nothing").
+        connection.on("dropped", cb);
       }
       // A pooled connection never errors or closes underneath a single caller:
-      // the pool transparently reconnects, so these events are intentionally
+      // the pool transparently reconnects, so those events are intentionally
       // not forwarded (a batch must not be declared dead by a transient drop).
+    },
+    off(event: "message" | "dropped", cb: any) {
+      if (event === "message") {
+        const wrapper = messageWrappers.get(cb as object);
+        if (wrapper) {
+          connection.off("message", wrapper);
+          messageWrappers.delete(cb as object);
+        }
+        return;
+      }
+      connection.off(event, cb);
     },
     close() {
       /* pooled: never close on behalf of one caller */
@@ -3030,50 +3179,100 @@ export async function executeLiveTrade(
   };
 }
 
-// ── Bulk live trade execution (one OTP WS for the WHOLE batch) ────────────────
+// ── Bulk live trade execution (N legs, ONE tick, ONE logical entry) ───────────
 /**
- * Execute N trades SIMULTANEOUSLY over a single shared OTP WebSocket.
+ * Execute N trades as ONE logical entry: every leg is quoted together, every
+ * leg is COMMITTED in a single burst inside one tick window, and the batch is
+ * settled in one sweep.
  *
- * Why this exists: firing N independent `executeLiveTrade()` calls in parallel
- * issues N OTP handshakes + N WS connections at once, which Deriv's rate
- * limiter throttles (503 CircuitBreakerBusy) — so some orders landed 1–4s
- * after the rest and opened on LATER ticks. A bulk order is one logical entry:
- * one handshake, one socket, all proposals sent back-to-back, all buys fired
- * as soon as each proposal is confirmed. Deriv processes them in order within
- * the same tick window, so every leg opens on the same tick.
+ * WHY THIS WAS REWRITTEN (the "my 5 bulk trades never reached my Deriv account"
+ * report)
  *
- * SAME-TICK DISCIPLINE (why there is no stagger):
- * A 1-tick digit contract opens on the tick that is CURRENT at the moment its
- * buy is processed. Legs opened in different ticks close in different ticks,
- * which is exactly the "some orders delayed" failure this batch exists to
- * prevent — so the batch sends ALL proposals in ONE unscheduled burst (same
- * event-loop tick, same millisecond). Deriv quotes them all off the same
- * underlying tick, and each buy goes out the instant its proposal returns, so
- * the whole batch (the UI caps it at 2–10 legs) lands inside a few
- * milliseconds — far shorter than any tick period.
+ * The previous version claimed to burst all proposals "in the same tick, same
+ * millisecond". That was true only on the socket its tests injected. In
+ * production it rode `getPooledSocket()`, whose `send()` is the account's
+ * SHARED, PACED queue (one message per 25 ms — the guard that keeps the app
+ * under Deriv's per-connection message ceiling). So a 10-leg batch was really
+ * emitted at 0/25/50/…/225 ms, each buy appended behind the quotes still in the
+ * queue, and the whole entry spread across roughly half a second. On a 1–2 s
+ * tick market that straddles tick boundaries: legs entered on DIFFERENT ticks —
+ * different entry digit — and therefore closed on different ticks, seconds
+ * apart. That is precisely the reported symptom, and no amount of retry logic
+ * could fix it because the delay was inserted by our own scheduler.
  *
- * The only delay path left is a THROTTLED leg, which is re-proposed with
- * exponential backoff instead of being marked failed — a momentary throttle
- * delays one leg by a few hundred ms instead of losing it, and the leg's
- * split entry is reported so callers can see it happened.
+ * It also had no defence against the transport dying mid-batch: the batch
+ * simply waited out its 25 s deadline and reported every leg as failed although
+ * nothing had ever been sent.
  *
- * The whole batch shares one 25s deadline; if the socket dies or the deadline
- * passes, the promise rejects and the caller settles whatever it has.
+ * THE CONTRACT THIS IMPLEMENTATION KEEPS
+ *
+ *   1. QUOTE  — all N proposals leave in ONE burst (`ws.burst`, no queue).
+ *   2. BARRIER — the batch waits (bounded) for every leg's quote, so the commit
+ *      is ONE event instead of N round-trips racing each other.
+ *   3. ALIGN  — the commit burst is placed inside a FRESH tick window (see
+ *      `commitDelayMs`). This is the only way to make "same tick" a property of
+ *      the design rather than of luck: an order processed early in a window
+ *      cannot be overtaken by the next tick while its siblings are still in
+ *      flight.
+ *   4. COMMIT — all N buys leave in ONE burst, same millisecond.
+ *   5. VERIFY — every leg carries Deriv's own `start_time` and the burst that
+ *      carried it, so the caller can prove (or disprove) same-tick entry from
+ *      the broker's data instead of assuming it.
+ *
+ * A leg that cannot be quoted in time (throttled, retried, or stranded by a
+ * dropped socket) is re-quoted on the reconnected socket and committed in a
+ * follow-up burst, and is flagged `splitTick` so a caller can never silently
+ * report a split entry as a synchronized one. A leg is only failed on a hard
+ * rejection from Deriv (bad barrier, insufficient balance, invalid contract).
  */
 
-/**
- * Spacing between a batch's proposal sends. 0 = one unscheduled burst —
- * every proposal leaves in the same millisecond so every leg opens on the
- * same tick. (A non-zero value is only a throttle safety valve for batches
- * far larger than the UI allows; the retry path covers the throttle either
- * way.)
- */
-export const BULK_PROPOSAL_STAGGER_MS = 0;
 /** Total quote attempts per leg (initial + retries) before the leg is failed. */
 export const BULK_MAX_ATTEMPTS = 4;
 /** First retry delay per leg; doubles on each subsequent retry (300 → 600 → 1200 ms). */
 export const BULK_RETRY_BASE_MS = 300;
 const BULK_EXECUTION_DEADLINE_MS = 25_000;
+/**
+ * How long the commit waits for the rest of the batch to be quoted before going
+ * without the stragglers. Long enough to absorb a round trip plus a throttled
+ * re-quote, short enough that one slow leg cannot push the batch into a second
+ * tick on the fast markets.
+ */
+export const BULK_COMMIT_GRACE_MS = 450;
+/** Headroom (ms) we want left in a tick window before committing inside it. */
+export const BULK_MIN_WINDOW_HEADROOM_MS = 450;
+/** Land this far past a boundary so the burst is unambiguously in the new window. */
+export const BULK_ALIGN_OFFSET_MS = 120;
+/** A batch is never delayed longer than this for tick alignment. */
+export const BULK_MAX_ALIGN_WAIT_MS = 2_200;
+
+/**
+ * How long to hold the commit burst so that it lands inside a fresh tick window.
+ *
+ * Returns 0 — commit now — when there is no window information, when the feed
+ * has rolled over or stalled (waiting then cannot help), when the current window
+ * still has enough headroom for the burst, or when the next boundary is further
+ * away than `maxWaitMs`. A batch is never parked indefinitely for perfect
+ * alignment. Otherwise it returns the wait until the next boundary plus a small
+ * offset: the moment the whole new window is ahead of the batch.
+ */
+export function commitDelayMs(
+  nowMs: number,
+  window: { periodMs: number; windowStartMs: number } | null | undefined,
+  opts?: { minHeadroomMs?: number; alignOffsetMs?: number; maxWaitMs?: number },
+): number {
+  const minHeadroomMs = opts?.minHeadroomMs ?? BULK_MIN_WINDOW_HEADROOM_MS;
+  const alignOffsetMs = opts?.alignOffsetMs ?? BULK_ALIGN_OFFSET_MS;
+  const maxWaitMs = opts?.maxWaitMs ?? BULK_MAX_ALIGN_WAIT_MS;
+  if (!window || !(window.periodMs > 0) || !Number.isFinite(window.windowStartMs)) return 0;
+  const elapsedMs = nowMs - window.windowStartMs;
+  if (!Number.isFinite(elapsedMs)) return 0;
+  const remainingMs = window.periodMs - elapsedMs;
+  if (remainingMs <= 0) return 0; // window already rolled over — nothing to align to
+  const headroomNeededMs = Math.min(minHeadroomMs, window.periodMs * 0.5);
+  if (remainingMs >= headroomNeededMs) return 0;
+  const waitMs = remainingMs + alignOffsetMs;
+  return waitMs <= maxWaitMs ? Math.ceil(waitMs) : 0;
+}
 
 /** req_id one leg's proposal/buy carries — attempt-suffixed so a stale retry response can never double-buy. */
 export function bulkReqId(
@@ -3136,6 +3335,44 @@ export function isRetryableDerivError(msg: any): boolean {
   );
 }
 
+/** What the executor reports about one leg's synchrony, from Deriv's own data. */
+export interface BulkLegReceipt {
+  index: number;
+  /** Deriv's contract start time in epoch ms — equal across legs means one tick. */
+  startedAtMs: number;
+  /** Local time the buy confirmation arrived (ms epoch). */
+  confirmedAtMs: number;
+  /** Which commit burst carried this leg. 0 = the batch's synchronized burst. */
+  burst: number;
+  /** True when this leg could not ride the batch's first commit burst. */
+  splitTick: boolean;
+}
+
+/** One leg's outcome: the contract (with a synchrony receipt) or why it failed. */
+export type BulkLegDelivery =
+  | { contract: LiveTradeResult; receipt: BulkLegReceipt }
+  | { error: Error; receipt: BulkLegReceipt };
+
+export interface BulkExecutionOptions {
+  /** Test-only: skip the OTP handshake and connect here instead. */
+  otpUrl?: string;
+  /**
+   * The symbol's current tick window (`tickManager.getTickWindow(symbol)`).
+   * Supply it and the commit burst is aligned inside a fresh window; omit it and
+   * the burst still fires atomically, just without boundary alignment.
+   */
+  tickWindow?: { periodMs: number; windowStartMs: number } | null;
+  /** Force alignment off (tests that assert the raw burst). */
+  alignToTick?: boolean;
+}
+
+/** Normalise Deriv's start_time, which may arrive in seconds or milliseconds. */
+function toEpochMs(raw: unknown): number {
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return value > 1e11 ? Math.round(value) : Math.round(value * 1000);
+}
+
 export async function executeBulkLiveTrades(
   bearerToken: string,
   accountId: string,
@@ -3148,11 +3385,8 @@ export async function executeBulkLiveTrades(
     currency: string;
     barrier?: number | string;
   }>,
-  opts?: {
-    /** Test-only: skip the Deriv OTP handshake and connect here instead. */
-    otpUrl?: string;
-  },
-): Promise<BulkLeg[]> {
+  opts?: BulkExecutionOptions,
+): Promise<BulkLegDelivery[]> {
   if (!bearerToken || !accountId) {
     throw new Error(
       "No authenticated session. Please sign in with Deriv (OAuth) to enable live trading.",
@@ -3167,273 +3401,444 @@ export async function executeBulkLiveTrades(
     ? await openDirectSocket(opts.otpUrl)
     : await getPooledSocket(bearerToken, accountId);
 
+  const alignToTick = opts?.alignToTick !== false && !!opts?.tickWindow;
+
   return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error("Bulk trade execution timeout"));
+    type Phase = "idle" | "quoting" | "quoted" | "committing" | "done";
+    interface LegState {
+      phase: Phase;
+      attempts: number;
+      quoteAttempt: number;
+      buyAttempt: number;
+      proposalId: string | null;
+      askPrice: number;
+      /** Earliest time this leg may be re-quoted (backs off failed sends). */
+      nextAttemptAtMs: number;
+      burst: number;
+      splitTick: boolean;
+      confirmedAtMs: number;
+      result: LiveTradeResult | null;
+      failure: Error | null;
+    }
+
+    const legs: LegState[] = params.map(() => ({
+      phase: "idle",
+      attempts: 0,
+      quoteAttempt: 0,
+      buyAttempt: 0,
+      proposalId: null,
+      askPrice: 0,
+      nextAttemptAtMs: 0,
+      burst: 0,
+      splitTick: false,
+      confirmedAtMs: 0,
+      result: null,
+      failure: null,
+    }));
+
+    let finished = false;
+    let started = false;
+    let burstsFired = 0;
+    let firstQuoteAtMs = 0;
+    const timers = new Set<ReturnType<typeof setTimeout>>();
+    let pumpTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const deadline = setTimeout(() => {
+      logger.warn(
+        {
+          count: params.length,
+          confirmed: legs.filter((l) => l.result !== null).length,
+        },
+        "executeBulkLiveTrades: batch deadline reached — settling whatever Deriv confirmed",
+      );
+      finish();
     }, BULK_EXECUTION_DEADLINE_MS);
 
-    const results: (BulkLeg | null)[] = new Array(params.length).fill(null);
-    // Per-leg attempt correlation: only a response matching the leg's CURRENT
-    // attempt may advance it. Without this a retried leg could buy twice — once
-    // for the late original response and once for the retry.
-    const attempts = new Array<number>(params.length).fill(0);
-    const proposalAttempt = new Array<number>(params.length).fill(0);
-    const buyAttempt = new Array<number>(params.length).fill(0);
-    const phase: Array<"idle" | "awaiting-proposal" | "awaiting-buy" | "done"> =
-      new Array(params.length).fill("idle");
-    const timers = new Set<ReturnType<typeof setTimeout>>();
-    let finished = false;
-
-    const later = (ms: number, fn: () => void): void => {
+    const later = (ms: number, fn: () => void): ReturnType<typeof setTimeout> => {
       const t = setTimeout(() => {
         timers.delete(t);
         fn();
       }, ms);
       timers.add(t);
+      return t;
+    };
+
+    const receiptFor = (index: number): BulkLegReceipt => {
+      const leg = legs[index]!;
+      return {
+        index,
+        startedAtMs: leg.result?.startedAtMs ?? 0,
+        confirmedAtMs: leg.confirmedAtMs,
+        burst: leg.burst,
+        splitTick: leg.splitTick,
+      };
     };
 
     const finish = (err?: Error) => {
       if (finished) return;
       finished = true;
-      clearTimeout(timeout);
+      clearTimeout(deadline);
       for (const t of timers) clearTimeout(t);
       timers.clear();
+      pumpTimer = null;
+      ws.off("message", onMessage);
+      ws.off("dropped", onDropped);
       // The pooled socket stays open for the next trade; `ws.close()` is a
       // deliberate no-op there (and for injected test sockets).
       ws.close();
-      if (err) reject(err);
-      // Any leg that never got a confirmation is reported as an error leg so
-      // the caller can settle it as "error" without losing the batch.
-      else
-        resolve(
-          results.map(
-            (r) => r ?? { error: new Error("Bulk trade leg unconfirmed") },
-          ),
-        );
+      if (err) {
+        reject(err);
+        return;
+      }
+      // Legs that never confirmed are reported as errors so the caller settles
+      // them without losing the rest of the batch.
+      resolve(
+        legs.map((leg, index): BulkLegDelivery => {
+          const receipt = receiptFor(index);
+          if (leg.result) return { contract: leg.result, receipt };
+          return {
+            error: leg.failure ?? new Error("Bulk trade leg unconfirmed"),
+            receipt,
+          };
+        }),
+      );
     };
 
     const markSettled = () => {
-      if (results.every((r) => r !== null)) finish();
+      if (legs.every((l) => l.result !== null || l.failure !== null)) finish();
     };
 
     const failLeg = (i: number, err: Error): void => {
-      if (results[i] !== null) return;
-      results[i] = { error: err };
-      phase[i] = "done";
+      const leg = legs[i]!;
+      if (leg.result !== null || leg.failure !== null) return;
+      leg.failure = err;
+      leg.phase = "done";
       markSettled();
     };
 
-    // Retry a leg from a fresh proposal (a failed buy's proposal is spent, so
-    // every retry re-proposes). Bounded attempts + exponential backoff.
+    // ── QUOTE: every leg's proposal leaves in ONE burst ──────────────────────
+    const quoteSleeping = (indexes: number[]) => {
+      if (finished || indexes.length === 0) return;
+      const messages: Record<string, unknown>[] = [];
+      const quoting: number[] = [];
+      let awaitMs = Number.POSITIVE_INFINITY;
+      for (const i of indexes) {
+        const leg = legs[i]!;
+        if (leg.result !== null || leg.failure !== null) continue;
+        if (leg.phase !== "idle") continue;
+        if (leg.attempts >= BULK_MAX_ATTEMPTS) {
+          failLeg(
+            i,
+            new Error("Bulk trade leg could not be quoted — the trading connection was not usable"),
+          );
+          continue;
+        }
+        if (Date.now() < leg.nextAttemptAtMs) {
+          awaitMs = Math.min(awaitMs, leg.nextAttemptAtMs);
+          continue;
+        }
+        const p = params[i]!;
+        leg.attempts += 1;
+        leg.quoteAttempt = leg.attempts;
+        leg.phase = "quoting";
+        const message: Record<string, unknown> = {
+          proposal: 1,
+          amount: p.stake,
+          basis: "stake",
+          contract_type: p.contractType,
+          currency: p.currency,
+          duration: p.duration,
+          duration_unit: p.durationUnit,
+          underlying_symbol: p.symbol,
+          req_id: bulkReqId("proposal", i, leg.attempts),
+        };
+        if (p.barrier !== undefined) message.barrier = String(p.barrier);
+        messages.push(message);
+        quoting.push(i);
+      }
+      if (messages.length === 0) {
+        if (Number.isFinite(awaitMs) && !finished) schedulePump(awaitMs - Date.now());
+        return;
+      }
+      const sent = ws.burst(messages);
+      // A burst that could not drain (socket died mid-write) leaves those legs
+      // un-asked: hand them back to the retry path instead of waiting forever.
+      for (const [n, i] of quoting.entries()) {
+        if (n < sent) continue;
+        const leg = legs[i]!;
+        leg.phase = "idle";
+        leg.attempts = Math.max(0, leg.attempts - 1);
+        leg.nextAttemptAtMs = Date.now() + BULK_RETRY_BASE_MS;
+      }
+      logger.info(
+        { asked: messages.length, sent, of: params.length },
+        "executeBulkLiveTrades: QUOTE burst — every leg quoted in one event-loop turn",
+      );
+    };
+
     const retryLeg = (i: number, err: Error): void => {
-      if (results[i] !== null) return;
-      if (attempts[i] >= BULK_MAX_ATTEMPTS) {
+      const leg = legs[i]!;
+      if (leg.result !== null || leg.failure !== null) return;
+      if (leg.attempts >= BULK_MAX_ATTEMPTS) {
         logger.warn(
-          { i, attempts: attempts[i] },
+          { i, attempts: leg.attempts, err: err.message },
           "executeBulkLiveTrades: leg exhausted retries",
         );
         failLeg(i, err);
         return;
       }
-      phase[i] = "idle";
-      const backoffMs = BULK_RETRY_BASE_MS * 2 ** (attempts[i] - 1);
+      leg.phase = "idle";
+      leg.proposalId = null;
+      const backoffMs = BULK_RETRY_BASE_MS * 2 ** (leg.attempts - 1);
+      leg.nextAttemptAtMs = Date.now() + backoffMs;
       logger.info(
-        { i, backoffMs, attempt: attempts[i] + 1 },
+        { i, backoffMs, attempt: leg.attempts + 1 },
         "executeBulkLiveTrades: retrying leg",
       );
-      later(backoffMs, () => {
-        if (!finished && results[i] === null && phase[i] === "idle") propose(i);
-      });
+      schedulePump(backoffMs);
     };
 
-    const send = (payload: Record<string, unknown>): void => {
-      // A dead socket mid-batch is batch-fatal: pending legs could never confirm.
-      try {
-        ws.send(payload);
-      } catch (e) {
-        finish(
-          e instanceof Error
-            ? e
-            : new Error("Bulk trade WebSocket send failed"),
-        );
+    // ── COMMIT: one burst, inside one tick window ────────────────────────────
+    const commit = (ready: LegState[]) => {
+      if (finished || ready.length === 0) return;
+      const burst = burstsFired;
+      burstsFired += 1;
+      const messages: Record<string, unknown>[] = [];
+      const indexes: number[] = [];
+      for (const [n, leg] of ready.entries()) {
+        const index = legs.indexOf(leg);
+        leg.buyAttempt = leg.quoteAttempt;
+        leg.phase = "committing";
+        leg.burst = burst;
+        leg.splitTick = burst > 0;
+        messages.push({
+          buy: leg.proposalId,
+          price: leg.askPrice,
+          req_id: bulkReqId("buy", index, leg.buyAttempt),
+        });
+        indexes.push(index);
+        void n;
       }
-    };
-
-    // Send a proposal for leg i, matched back by req_id.
-    const propose = (i: number): void => {
-      if (finished || results[i] !== null || ws.readyState !== WebSocket.OPEN)
-        return;
-      const p = params[i]!;
-      attempts[i] += 1;
-      proposalAttempt[i] = attempts[i];
-      phase[i] = "awaiting-proposal";
-      const proposalParams: Record<string, unknown> = {
-        amount: p.stake,
-        basis: "stake",
-        contract_type: p.contractType,
-        currency: p.currency,
-        duration: p.duration,
-        duration_unit: p.durationUnit,
-        underlying_symbol: p.symbol,
-        req_id: bulkReqId("proposal", i, attempts[i]),
-      };
-      if (p.barrier !== undefined) proposalParams.barrier = String(p.barrier);
-      send({ proposal: 1, ...proposalParams });
-    };
-
-    const buy = (i: number, proposalId: string, askPrice: number): void => {
-      if (finished || results[i] !== null || ws.readyState !== WebSocket.OPEN)
-        return;
-      buyAttempt[i] = proposalAttempt[i];
-      phase[i] = "awaiting-buy";
-      // New buy format: { buy: proposalId, price: askPrice }
-      send({
-        buy: proposalId,
-        price: askPrice,
-        req_id: bulkReqId("buy", i, buyAttempt[i]),
-      });
-    };
-
-    ws.on("open", () => {
+      const sent = ws.burst(messages);
       logger.info(
-        { count: params.length },
-        "executeBulkLiveTrades: bursting ALL proposals in the same tick — same-tick entry for every leg",
+        {
+          burst,
+          legs: messages.length,
+          sent,
+          splitTick: burst > 0,
+          alignedToTick: alignToTick && burst === 0,
+        },
+        burst === 0
+          ? "executeBulkLiveTrades: COMMIT burst — the whole batch bought in one event-loop turn"
+          : "executeBulkLiveTrades: follow-up COMMIT burst for legs that missed the first tick",
       );
-      // ONE unscheduled burst: every proposal is sent back-to-back in the
-      // same event-loop tick (same millisecond), so Deriv quotes them all off
-      // the same underlying tick and every leg opens on the same tick. A
-      // per-leg 150 ms stagger used to spread a 4+ leg batch across tick
-      // boundaries — the "delayed orders" failure. Stagger is a no-op at 0;
-      // keep the timer path only as a future safety valve for very large N.
-      if (BULK_PROPOSAL_STAGGER_MS > 0) {
-        for (let i = 0; i < params.length; i++) {
-          later(i * BULK_PROPOSAL_STAGGER_MS, () => {
-            if (!finished && results[i] === null && phase[i] === "idle")
-              propose(i);
-          });
-        }
-      } else {
-        for (let i = 0; i < params.length; i++) propose(i);
+      // Legs the burst could not reach are re-quoted rather than lost.
+      for (const [n, index] of indexes.entries()) {
+        if (n < sent) continue;
+        const leg = legs[index]!;
+        leg.phase = "idle";
+        leg.proposalId = null;
+        leg.nextAttemptAtMs = Date.now() + BULK_RETRY_BASE_MS;
       }
-    });
+      if (sent < messages.length) schedulePump(BULK_RETRY_BASE_MS);
+    };
 
-    ws.on("message", (data) => {
+    const schedulePump = (delayMs: number) => {
+      if (finished) return;
+      if (pumpTimer) clearTimeout(pumpTimer);
+      pumpTimer = later(Math.max(0, delayMs), () => {
+        pumpTimer = null;
+        pump();
+      });
+    };
+
+    /**
+     * The batch's single decision point: re-quote whatever is due, then either
+     * wait (barrier grace / tick alignment) or fire the commit burst.
+     */
+    const pump = () => {
+      if (finished) return;
+      const outstanding = legs.filter((l) => l.result === null && l.failure === null);
+      if (outstanding.length === 0) return;
+
+      const idle = outstanding.filter((l) => l.phase === "idle");
+      if (idle.length > 0) {
+        quoteSleeping(idle.map((l) => legs.indexOf(l)));
+        if (finished) return;
+      }
+
+      const stillQuoting = legs.filter(
+        (l) => l.result === null && l.failure === null && (l.phase === "quoting" || l.phase === "idle"),
+      );
+      const ready = legs.filter(
+        (l) => l.result === null && l.failure === null && l.phase === "quoted",
+      );
+
+      if (ready.length === 0) {
+        // Nothing to commit yet: the quotes/reconnect/retry timers drive the
+        // next pump. Never spin — always leave a floor on the delay.
+        const nextDue = Math.min(
+          ...legs
+            .filter((l) => l.result === null && l.failure === null && l.phase === "idle")
+            .map((l) => l.nextAttemptAtMs || Date.now() + BULK_RETRY_BASE_MS),
+        );
+        schedulePump(
+          Number.isFinite(nextDue) ? Math.max(50, nextDue - Date.now()) : BULK_COMMIT_GRACE_MS,
+        );
+        return;
+      }
+
+      // BARRIER: give the rest of the batch the grace window to join this commit.
+      if (stillQuoting.length > 0 && firstQuoteAtMs > 0) {
+        const waitedMs = Date.now() - firstQuoteAtMs;
+        if (waitedMs < BULK_COMMIT_GRACE_MS) {
+          schedulePump(BULK_COMMIT_GRACE_MS - waitedMs);
+          return;
+        }
+      }
+
+      // ALIGN: only the first burst is worth aligning — a later leg is a second
+      // tick by definition and is flagged as such.
+      if (alignToTick && burstsFired === 0) {
+        const delayMs = commitDelayMs(Date.now(), opts?.tickWindow ?? null);
+        if (delayMs > 0) {
+          logger.info(
+            { delayMs },
+            "executeBulkLiveTrades: holding the commit for a fresh tick window so the whole batch enters on ONE tick",
+          );
+          schedulePump(delayMs);
+          return;
+        }
+      }
+
+      commit(ready);
+    };
+
+    // ── Response routing ─────────────────────────────────────────────────────
+    function handleMessage(msg: any): void {
+      if (msg.error) {
+        const ref = parseBulkLegRef(msg);
+        const err = new Error(msg.error?.message ?? "Bulk trade rejected by Deriv");
+        if (ref && ref.leg >= 0 && ref.leg < params.length) {
+          const leg = legs[ref.leg]!;
+          if (leg.result !== null || leg.failure !== null) return; // late duplicate
+          // Stale responses from a superseded attempt must not touch the leg.
+          const current = ref.phase === "proposal" ? leg.quoteAttempt : leg.buyAttempt;
+          const expected = ref.phase === "proposal" ? "quoting" : "committing";
+          if (ref.attempt !== current || leg.phase !== expected) return;
+          if (isRetryableDerivError(msg)) retryLeg(ref.leg, err);
+          else failLeg(ref.leg, err);
+          return;
+        }
+        if (ref) return; // leg already settled — late duplicate, ignore.
+        // No leg attribution. Retryable/transient socket-level noise must NOT
+        // kill confirmed-or-confirming legs; only hard errors abort the batch.
+        if (isRetryableDerivError(msg)) {
+          logger.warn(
+            { derivError: msg.error },
+            "executeBulkLiveTrades: unattributed transient error — continuing batch",
+          );
+          return;
+        }
+        logger.error(
+          { derivError: msg.error },
+          "executeBulkLiveTrades: Deriv error (batch)",
+        );
+        finish(err);
+        return;
+      }
+
+      if (msg.msg_type === "proposal" && msg.proposal) {
+        const ref = parseBulkLegRef(msg);
+        if (!ref || ref.phase !== "proposal" || ref.leg < 0 || ref.leg >= params.length) return;
+        const leg = legs[ref.leg]!;
+        if (leg.result !== null || leg.failure !== null) return;
+        if (ref.attempt !== leg.quoteAttempt || leg.phase !== "quoting") return;
+        const askPrice = Number(msg.proposal.ask_price ?? params[ref.leg]?.stake ?? 0);
+        const proposalId = String(msg.proposal.id ?? "");
+        if (!proposalId) {
+          // Proposal arrived without an id — re-quote the leg (transient).
+          retryLeg(ref.leg, new Error("Deriv proposal missing id"));
+          return;
+        }
+        leg.proposalId = proposalId;
+        leg.askPrice = askPrice;
+        leg.phase = "quoted";
+        if (firstQuoteAtMs === 0) firstQuoteAtMs = Date.now();
+        pump();
+        return;
+      }
+
+      if (msg.msg_type === "buy" && msg.buy) {
+        const ref = parseBulkLegRef(msg);
+        if (!ref || ref.phase !== "buy" || ref.leg < 0 || ref.leg >= params.length) return;
+        const leg = legs[ref.leg]!;
+        if (leg.result !== null || leg.failure !== null) return;
+        if (ref.attempt !== leg.buyAttempt || leg.phase !== "committing") return;
+        leg.result = {
+          contractId: Number(msg.buy.contract_id),
+          buyPrice: Number(msg.buy.buy_price),
+          // Deriv's own start time is the synchrony proof; `entrySpot` keeps its
+          // historical meaning for existing callers.
+          entrySpot: Number(msg.buy.start_time ?? 0),
+          longcode: msg.buy.longcode ?? "",
+          startedAtMs: toEpochMs(msg.buy.start_time),
+        };
+        leg.confirmedAtMs = Date.now();
+        leg.phase = "done";
+        markSettled();
+      }
+    }
+
+    const onMessage = (data: { toString(): string }) => {
       if (finished) return;
       try {
-        const msg = JSON.parse(data.toString());
-
-        if (msg.error) {
-          const ref = parseBulkLegRef(msg);
-          const err = new Error(
-            msg.error?.message ?? "Bulk trade rejected by Deriv",
-          );
-          if (
-            ref &&
-            ref.leg >= 0 &&
-            ref.leg < params.length &&
-            results[ref.leg] === null
-          ) {
-            // Stale responses from a superseded attempt must not touch the leg.
-            const current =
-              ref.phase === "proposal"
-                ? proposalAttempt[ref.leg]
-                : buyAttempt[ref.leg];
-            const expecting =
-              ref.phase === "proposal" ? "awaiting-proposal" : "awaiting-buy";
-            if (ref.attempt !== current || phase[ref.leg] !== expecting) return;
-            if (isRetryableDerivError(msg)) retryLeg(ref.leg, err);
-            else failLeg(ref.leg, err);
-            return;
-          }
-          if (ref) return; // leg already settled — late duplicate, ignore.
-          // No leg attribution. Retryable/transient socket-level noise must NOT
-          // kill confirmed-or-confirming legs; only hard errors abort the batch.
-          if (isRetryableDerivError(msg)) {
-            logger.warn(
-              { derivError: msg.error },
-              "executeBulkLiveTrades: unattributed transient error — continuing batch",
-            );
-            return;
-          }
-          logger.error(
-            { derivError: msg.error },
-            "executeBulkLiveTrades: Deriv error (batch)",
-          );
-          finish(err);
-          return;
-        }
-
-        if (msg.msg_type === "proposal" && msg.proposal) {
-          const ref = parseBulkLegRef(msg);
-          if (
-            !ref ||
-            ref.phase !== "proposal" ||
-            ref.leg < 0 ||
-            ref.leg >= params.length
-          )
-            return;
-          if (results[ref.leg] !== null) return;
-          if (
-            ref.attempt !== proposalAttempt[ref.leg] ||
-            phase[ref.leg] !== "awaiting-proposal"
-          )
-            return;
-          const askPrice = Number(
-            msg.proposal.ask_price ?? params[ref.leg]?.stake ?? 0,
-          );
-          const proposalId = String(msg.proposal.id ?? "");
-          if (!proposalId) {
-            // Proposal arrived without an id — re-quote the leg (transient).
-            retryLeg(ref.leg, new Error("Deriv proposal missing id"));
-            return;
-          }
-          logger.info(
-            { i: ref.leg, proposalId, askPrice },
-            "executeBulkLiveTrades: proposal confirmed — buying leg",
-          );
-          buy(ref.leg, proposalId, askPrice);
-          return;
-        }
-
-        if (msg.msg_type === "buy" && msg.buy) {
-          const ref = parseBulkLegRef(msg);
-          if (
-            !ref ||
-            ref.phase !== "buy" ||
-            ref.leg < 0 ||
-            ref.leg >= params.length
-          )
-            return;
-          if (results[ref.leg] !== null) return;
-          if (
-            ref.attempt !== buyAttempt[ref.leg] ||
-            phase[ref.leg] !== "awaiting-buy"
-          )
-            return;
-          results[ref.leg] = {
-            contractId: msg.buy.contract_id,
-            buyPrice: Number(msg.buy.buy_price),
-            entrySpot: Number(msg.buy.start_time ?? 0),
-            longcode: msg.buy.longcode ?? "",
-          };
-          phase[ref.leg] = "done";
-          markSettled();
-        }
+        handleMessage(JSON.parse(data.toString()));
       } catch (e) {
         logger.error({ e }, "executeBulkLiveTrades: error parsing message");
       }
-    });
+    };
 
+    const onDropped = () => {
+      if (finished) return;
+      // The transport under the batch died. Unconfirmed legs go back to the
+      // queue and are re-quoted on the reconnected socket, instead of sitting
+      // until the deadline and being reported as trades that never happened.
+      const stranded = legs.filter((l) => l.result === null && l.failure === null);
+      if (stranded.length === 0) return;
+      logger.warn(
+        { stranded: stranded.length, of: params.length },
+        "executeBulkLiveTrades: trading socket dropped mid-batch — re-quoting stranded legs",
+      );
+      for (const leg of stranded) {
+        leg.phase = "idle";
+        leg.proposalId = null;
+        leg.nextAttemptAtMs = Math.max(leg.nextAttemptAtMs, Date.now() + 250);
+      }
+      schedulePump(250);
+    };
+
+    const start = () => {
+      if (finished || started) return;
+      started = true;
+      logger.info(
+        { count: params.length, alignedToTick: alignToTick },
+        "executeBulkLiveTrades: batch starting — quote burst first, then ONE aligned commit burst",
+      );
+      quoteSleeping(params.map((_, i) => i));
+      // If nothing ever answers (wedged socket), keep the batch moving.
+      schedulePump(BULK_COMMIT_GRACE_MS);
+    };
+
+    // Register the listeners BEFORE any send: the pooled socket replays `open`
+    // immediately when it is already connected, so `start()` must be safe to run
+    // on the next microtask with routing already in place.
+    ws.on("message", onMessage);
+    ws.on("dropped", onDropped);
+    ws.on("open", start);
     ws.on("error", (err) =>
-      finish(
-        err instanceof Error ? err : new Error("Bulk trade WebSocket error"),
-      ),
+      finish(err instanceof Error ? err : new Error("Bulk trade WebSocket error")),
     );
-    ws.on("close", () => {
-      // Socket dropped before every leg confirmed. finish() resolves with
-      // error legs for the unconfirmed ones (or rejects on the deadline).
-      if (!finished) finish();
-    });
   });
 }
 
@@ -3458,7 +3863,9 @@ export async function waitForBulkContractResults(
   if (contractIds.length === 0) return [];
 
   const found = new Map<number, ContractResult>();
-  const tableLimit = Math.min(100, contractIds.length + 20);
+  // Ask for strictly more rows than the batch so a busy account (bots trading
+  // on the same wallet) can never push a leg out of the page we read.
+  const tableLimit = Math.min(500, Math.max(50, contractIds.length + 20));
   const deadline = Date.now() + timeoutMs + 10_000;
 
   const collectFromProfitTable = (msg: any): void => {
@@ -3476,6 +3883,10 @@ export async function waitForBulkContractResults(
         exitSpot: 0,
         sellPrice,
         entrySpot: buyPrice,
+        // Deriv's own purchase/sell times: equal across a batch's legs is the
+        // broker-side proof that they opened — and closed — on the same tick.
+        purchasedAtMs: toEpochMs(tx.purchase_time),
+        exitedAtMs: toEpochMs(tx.sell_time),
       });
     }
   };
@@ -3571,7 +3982,7 @@ export async function waitForContractResult(
     try {
       [portfolioMsg, profitMsg] = await Promise.all([
         accountRequest(bearerToken, accountId, { portfolio: 1 }, 12_000),
-        accountRequest(bearerToken, accountId, { profit_table: 1, limit: 10, sort: "DESC" }, 12_000),
+        accountRequest(bearerToken, accountId, { profit_table: 1, limit: 50, sort: "DESC" }, 12_000),
       ]);
     } catch {
       // Transient socket problem — keep polling until the deadline instead of
@@ -3594,6 +4005,8 @@ export async function waitForContractResult(
           exitSpot: 0,
           sellPrice,
           entrySpot: buyPrice,
+          purchasedAtMs: toEpochMs(tx.purchase_time),
+          exitedAtMs: toEpochMs(tx.sell_time),
         };
       }
     }

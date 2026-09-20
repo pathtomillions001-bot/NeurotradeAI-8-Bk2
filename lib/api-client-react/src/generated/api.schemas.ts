@@ -17,12 +17,11 @@ export interface SuccessResponse {
   success: boolean;
   /** @nullable */
   message?: string | null;
-  /**
-   * Fresh anonymous session id after a rotation (e.g. disconnect).
-   * Per-tab clients adopt it into sessionStorage; cookie clients ignore it.
+  /** Fresh anonymous session id after a rotation (e.g. disconnect). Per-tab clients adopt it into sessionStorage; cookie clients ignore it.
    */
   sessionId?: string;
-  /** Signed risk-acknowledgment value for sessionId, for per-tab clients to store and resend as X-Risk-Ack. */
+  /** Signed risk-acknowledgment value for sessionId, for per-tab clients to store and resend as X-Risk-Ack.
+   */
   riskAck?: string;
 }
 
@@ -50,12 +49,11 @@ export interface DerivAccount {
   /** @nullable */
   country?: string | null;
   connectedAt?: string;
-  /**
-   * Account-scoped session id after a connect rotation. Per-tab clients
-   * adopt it into sessionStorage; cookie clients ignore it.
+  /** Account-scoped session id after a connect rotation. Per-tab clients adopt it into sessionStorage; cookie clients ignore it.
    */
   sessionId?: string;
-  /** Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack. */
+  /** Risk acknowledgment re-signed for sessionId, for per-tab clients to store and resend as X-Risk-Ack.
+   */
   riskAck?: string;
 }
 
@@ -307,9 +305,39 @@ export interface BulkTradeInput {
   count: number;
 }
 
+export type BulkSyncReportVerdict = typeof BulkSyncReportVerdict[keyof typeof BulkSyncReportVerdict];
+
+
+export const BulkSyncReportVerdict = {
+  synchronized: 'synchronized',
+  split: 'split',
+  partial: 'partial',
+  failed: 'failed',
+  unverified: 'unverified',
+} as const;
+
+/**
+ * Whether the legs really did open on one tick and close together. A batch is only "synchronized" when every leg Deriv accepted reports the same start time; anything unproven is reported as `unverified` rather than assumed.
+ */
+export interface BulkSyncReport {
+  requested: number;
+  opened: number;
+  confirmed: number;
+  verdict: BulkSyncReportVerdict;
+  sameEntryTick?: boolean | null;
+  sameExitTick?: boolean | null;
+  entryTimesMs: number[];
+  exitTimesMs: number[];
+  localConfirmSpreadMs: number;
+  splitTickLegs: number[];
+  summary: string;
+}
+
 export interface BulkTradeResult {
   trades: Trade[];
   count: number;
+  /** Measured synchrony of the batch, derived from Deriv's own contract start/sell times. `null` for paper/demo batches, which never reach the exchange. */
+  sync?: BulkSyncReport | null;
 }
 
 export interface TradeStats {

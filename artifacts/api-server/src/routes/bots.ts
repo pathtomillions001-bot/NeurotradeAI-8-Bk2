@@ -23,18 +23,10 @@ import {
 } from "../lib/bot-engine";
 import { isAutomatedMarket, AUTOMATED_DERIV_MARKETS } from "../lib/deriv";
 import * as dualLock from "../lib/dual-lock-engine";
-import * as twinHedge from "../lib/twin-hedge-engine";
 import { listLiveBots } from "../lib/live-registry";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
-import * as matchCatalyst from "../lib/match-catalyst-engine";
-import {
-  TWIN_NORMAL_LEGS,
-  TWIN_RECOVERY_LEGS,
-  recoveryBreakEvenGapRate,
-} from "../lib/twin-hedge-analysis";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
-import { type CatalystCertainty } from "../lib/match-catalyst-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
   DUAL_LOCK_RECOVERY_CONTRACTS,
@@ -68,9 +60,6 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
   if (bot.oneShot) return { ok: false, error: `${bot.name} uses the /killshot endpoints` };
-  if (bot.twinHedge) return { ok: false, error: `${bot.name} uses the /twin endpoints` };
-  // match-catalyst uses its own engine, not the generic specialist route
-  if (botId === "match-catalyst") return { ok: false, error: `${bot.name} uses the /catalyst endpoints` };
 
   const sideMode: BotSideMode = body.sideMode === "primary" || body.sideMode === "secondary"
     ? body.sideMode
@@ -187,10 +176,8 @@ function visibleStatus(sessionId: string) {
 router.get("/", (req, res) => {
   const status = visibleStatus(req.sessionId);
   const dual = visibleDualStatus(req.sessionId);
-  const twin = visibleTwinStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
-  const catalyst = visibleCatalystStatus(req.sessionId);
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
@@ -199,28 +186,17 @@ router.get("/", (req, res) => {
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
       }
-      if (bot.id === twinHedge.TWIN_HEDGE_BOT_ID) {
-        return { ...bot, console: console_, session: twin.running ? twin : null };
-      }
       if (bot.id === killshot.KILLSHOT_BOT_ID) {
         return { ...bot, console: console_, session: shot.running ? shot : null };
       }
-      if (bot.id === matchCatalyst.MATCH_CATALYST_BOT_ID) {
-        return { ...bot, console: console_, session: catalyst.running ? catalyst : null };
-      }
       if (bot.killShotFamily) {
-        if (bot.id === "match-catalyst") {
-          return { ...bot, console: console_, session: catalyst.running ? catalyst : null };
-        }
         return { ...bot, console: console_, session: fam.running && fam.botId === bot.id ? fam : null };
       }
       return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: pickActiveBotId([
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
-      { botId: twinHedge.TWIN_HEDGE_BOT_ID, running: twin.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
-      { botId: matchCatalyst.MATCH_CATALYST_BOT_ID, running: catalyst.running },
       { botId: fam.botId ?? null, running: fam.running },
       { botId: status.botId, running: status.running },
     ]),
@@ -381,133 +357,6 @@ router.post("/duallock/stop", (req, res) => {
   res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
 });
 
-// ── Twin-Lock Hedge Sentinel ──────────────────────────────────────────────────
-
-function visibleTwinStatus(sessionId: string) {
-  const status = twinHedge.getStatus();
-  const owner = twinHedge.getOwnerSessionId();
-  if (!owner || owner === sessionId) return status;
-  return { ...status, running: false, sessionId: null, config: undefined, lock: undefined };
-}
-
-/**
- * The pair is HARD-WIRED. This endpoint exists so the console can render and
- * validate exactly what the bot will trade — a client can never widen, narrow
- * or re-point the contracts; there is no contract choice to make.
- */
-router.get("/twin/contracts", (_req, res) => {
-  res.json({
-    normal: TWIN_NORMAL_LEGS,
-    recovery: TWIN_RECOVERY_LEGS,
-    simultaneous: true,
-    perLegPayouts: {
-      over4: 1.95,
-      under5: 1.95,
-      over5: 2.43,
-      under4: 2.43,
-    },
-    recoveryBreakEvenGapRate: recoveryBreakEvenGapRate(2.43),
-    bothLoseArmsRecovery: true,
-    splitIgnored: true,
-  });
-});
-
-router.get("/twin/status", (req, res) => {
-  res.json(visibleTwinStatus(req.sessionId));
-});
-
-async function twinSimParams(sessionId: string, body: any) {
-  let markupPercent = 10;
-  let maxStake = 500;
-  try {
-    const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
-    if (rows.length > 0) {
-      const v = Number((rows[0] as any).botRecoveryMarkup);
-      if (Number.isFinite(v)) markupPercent = v;
-      const m = Number((rows[0] as any).maxTradeStake);
-      if (Number.isFinite(m) && m > 0) maxStake = m;
-    }
-  } catch { /* defaults */ }
-  return {
-    stake: Number(body?.stake) > 0 ? Number(body.stake) : 1,
-    takeProfit: Number(body?.takeProfit) > 0 ? Number(body.takeProfit) : 10,
-    stopLoss: Number(body?.stopLoss) > 0 ? Number(body.stopLoss) : 5,
-    maxRecoverySteps: Math.max(1, Math.min(10, Number(body?.maxRecoverySteps) || 3)),
-    markupPercent,
-    maxStake,
-  };
-}
-
-router.post("/twin/scan", async (req, res): Promise<void> => {
-  try {
-    const params = await twinSimParams(req.sessionId, req.body);
-    const result = await twinHedge.scanTwinMarkets(req.sessionId, params);
-    res.json(result);
-  } catch (err) {
-    logger.error({ err }, "Twin-Lock scan failed");
-    res.status(500).json({ error: "Scan failed" });
-  }
-});
-
-router.post("/twin/start", async (req, res): Promise<void> => {
-  const body = req.body ?? {};
-  const requestedSymbol = typeof body.symbol === "string" ? body.symbol : undefined;
-  const fallback = AUTOMATED_DERIV_MARKETS.find(m => m.digitEnabled);
-  const symbol = requestedSymbol ?? fallback?.symbol;
-  if (!symbol || !isAutomatedMarket(symbol)) {
-    res.status(400).json({ error: "A valid digit-enabled market symbol is required" });
-    return;
-  }
-  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === symbol);
-  if (!market || !market.digitEnabled) {
-    res.status(400).json({ error: "This bot needs a digit-enabled market" });
-    return;
-  }
-  const stake = Number(body.stake);
-  if (!Number.isFinite(stake) || stake < 0.35) {
-    res.status(400).json({ error: "stake must be ≥ 0.35" });
-    return;
-  }
-  const marketMode = body.marketMode === "switching" ? "switching" : "locked";
-  const takeProfit = Number(body.takeProfit) > 0 ? Number(body.takeProfit) : 10;
-  const stopLoss = Number(body.stopLoss) > 0 ? Number(body.stopLoss) : 5;
-  const maxRecoverySteps = Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3));
-
-  const existingOwner = twinHedge.getOwnerSessionId();
-  if (twinHedge.isRunning() && existingOwner && existingOwner !== req.sessionId) {
-    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
-    return;
-  }
-
-  const result = await twinHedge.startSession({
-    ownerSessionId: req.sessionId,
-    symbol: market.symbol,
-    displayName: market.displayName,
-    marketMode,
-    stake,
-    stopLoss,
-    takeProfit,
-    maxRecoverySteps,
-    lockedAnalysis: body.analysis,
-    rankedCandidates: Array.isArray(body.ranked) ? body.ranked : undefined,
-  });
-  if (!result.ok) {
-    res.status(409).json({ error: result.error });
-    return;
-  }
-  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
-});
-
-router.post("/twin/stop", (req, res) => {
-  const owner = twinHedge.getOwnerSessionId();
-  if (twinHedge.isRunning() && owner && owner !== req.sessionId) {
-    res.status(409).json({ error: "You cannot stop another browser session's bot." });
-    return;
-  }
-  twinHedge.stopSession();
-  res.json({ ok: true, status: visibleTwinStatus(req.sessionId) });
-});
-
 // ── Kill-Shot Oracle ──────────────────────────────────────────────────────────
 
 function visibleKillShotStatus(sessionId: string) {
@@ -543,9 +392,6 @@ async function killshotRisk(sessionId: string, body: any) {
 
 function parseCertainty(raw: unknown): Certainty {
   return raw === "elite" || raw === "balanced" ? raw : "strict";
-}
-function parseCatalystCertainty(raw: unknown): CatalystCertainty {
-  return raw === "elite" || raw === "balanced" ? raw as CatalystCertainty : "strict";
 }
 
 router.post("/killshot/scan", async (req, res): Promise<void> => {
@@ -707,24 +553,6 @@ router.get("/family/status", (req, res) => {
 router.post("/family/scan", async (req, res): Promise<void> => {
   const body = req.body ?? {};
   const botId = String(body?.botId ?? "");
-  // Match Catalyst has its own superior engine — intercept here so the generic family engine is not used
-  if (botId === "match-catalyst") {
-    const parsed = parseCatalystSpec(botId, body);
-    if (!parsed.ok) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
-    try {
-      const risk = await killshotRisk(req.sessionId, body);
-      const result = await matchCatalyst.scanForCatalyst(req.sessionId, parsed.spec, risk);
-      res.json(result);
-    } catch (err) {
-      logger.error({ err }, "Match Catalyst scan failed");
-      res.status(500).json({ error: "Scan failed" });
-    }
-    return;
-  }
-
   const parsed = parseFamilySpec(botId, body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
@@ -743,74 +571,6 @@ router.post("/family/scan", async (req, res): Promise<void> => {
 router.post("/family/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
   const botId = String(body.botId ?? "");
-
-  if (botId === "match-catalyst") {
-    const parsed = parseCatalystSpec(botId, body);
-    if (!parsed.ok) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
-    const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
-    const requested = typeof body.symbol === "string" ? body.symbol : undefined;
-    if (!requested || !isAutomatedMarket(requested)) {
-      res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
-      return;
-    }
-    const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
-    if (!market || !market.digitEnabled) {
-      res.status(400).json({ error: "This bot needs a digit-enabled market" });
-      return;
-    }
-    if (typeof body.stake !== "number" || body.stake < 0.35) {
-      res.status(400).json({ error: "stake must be ≥ 0.35" });
-      return;
-    }
-    let lockedSymbol: string | undefined;
-    if (marketMode === "locked") {
-      // The selected scan card is itself the lock. Older web bundles omitted
-      // lockedSymbol on the Locked button, so default to the measured market.
-      const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
-        ? body.lockedSymbol
-        : requested;
-      if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
-        res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
-        return;
-      }
-      lockedSymbol = requestedLocked;
-    }
-    const card = body.card ?? body.analysis?.card;
-    if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
-      res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
-      return;
-    }
-    const existingOwner = matchCatalyst.getOwnerSessionId();
-    if (matchCatalyst.isRunning() && existingOwner && existingOwner !== req.sessionId) {
-      res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
-      return;
-    }
-    const result = await matchCatalyst.startSession({
-      ownerSessionId: req.sessionId,
-      botId: parsed.spec.botId,
-      spec: parsed.spec,
-      stake: body.stake,
-      stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
-      takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
-      maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
-      marketMode,
-      lockedSymbol,
-      symbol: market.symbol,
-      displayName: market.displayName,
-      digit: Number.isInteger(body.digit) ? Number(body.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5),
-      card,
-      lockedAnalysis: body.analysis,
-    });
-    if (!result.ok) {
-      res.status(409).json({ error: result.error });
-      return;
-    }
-    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
-    return;
-  }
 
   const parsed = parseFamilySpec(botId, body);
   if (!parsed.ok) {
@@ -895,146 +655,8 @@ router.post("/family/stop", (req, res) => {
     res.status(409).json({ error: "You cannot stop another browser session's bot." });
     return;
   }
-  const catalystOwner = matchCatalyst.getOwnerSessionId();
-  if (matchCatalyst.isRunning() && catalystOwner && catalystOwner === req.sessionId) {
-    matchCatalyst.stopSession();
-    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
-    return;
-  }
   killshotFamily.stopSession();
   res.json({ ok: true, status: visibleFamilyStatus(req.sessionId) });
-});
-
-// ── Match Catalyst — Quantum Singularity ────────────────────────────────────────
-
-function visibleCatalystStatus(sessionId: string) {
-  const status = matchCatalyst.getStatus();
-  const owner = matchCatalyst.getOwnerSessionId();
-  if (!owner || owner === sessionId) return status;
-  return { ...status, running: false, sessionId: null, config: undefined, deployed: undefined, familyWatch: undefined };
-}
-
-function parseCatalystSpec(botId: string, body: any):
-  { ok: true; spec: matchCatalyst.CatalystDeploySpec } | { ok: false; error: string } {
-  if (botId !== "match-catalyst") return { ok: false, error: "Unknown bot" };
-  const certainty = parseCatalystCertainty(body?.certainty);
-  const hasDigit = body?.digit !== undefined && body?.digit !== null && body?.digit !== "";
-  let digit: number | undefined;
-  if (hasDigit) {
-    const d = Number(body?.digit);
-    if (!Number.isInteger(d) || d < 0 || d > 9) return { ok: false, error: "digit must be 0–9" };
-    digit = d;
-  }
-  return {
-    ok: true,
-    spec: {
-      botId,
-      digit,
-      aiDigit: !hasDigit,
-      certainty,
-    },
-  };
-}
-
-router.get("/catalyst/status", (req, res) => {
-  res.json(visibleCatalystStatus(req.sessionId));
-});
-
-router.post("/catalyst/scan", async (req, res): Promise<void> => {
-  const parsed = parseCatalystSpec(String(req.body?.botId ?? "match-catalyst"), req.body);
-  if (!parsed.ok) {
-    res.status(400).json({ error: parsed.error });
-    return;
-  }
-  try {
-    const risk = await killshotRisk(req.sessionId, req.body);
-    const result = await matchCatalyst.scanForCatalyst(req.sessionId, parsed.spec, risk);
-    res.json(result);
-  } catch (err) {
-    logger.error({ err }, "Match Catalyst scan failed");
-    res.status(500).json({ error: "Scan failed" });
-  }
-});
-
-router.post("/catalyst/start", async (req, res): Promise<void> => {
-  const body = req.body ?? {};
-  const parsed = parseCatalystSpec(String(body.botId ?? "match-catalyst"), body);
-  if (!parsed.ok) {
-    res.status(400).json({ error: parsed.error });
-    return;
-  }
-  const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
-  const requested = typeof body.symbol === "string" ? body.symbol : undefined;
-  if (!requested || !isAutomatedMarket(requested)) {
-    res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
-    return;
-  }
-  const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
-  if (!market || !market.digitEnabled) {
-    res.status(400).json({ error: "This bot needs a digit-enabled market" });
-    return;
-  }
-  if (typeof body.stake !== "number" || body.stake < 0.35) {
-    res.status(400).json({ error: "stake must be ≥ 0.35" });
-    return;
-  }
-  let lockedSymbol: string | undefined;
-  if (marketMode === "locked") {
-    // The selected scan card is itself the lock. Older web bundles omitted
-    // lockedSymbol on the Locked button, so default to the measured market
-    // instead of turning an otherwise valid post-analysis click into a 400.
-    const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
-      ? body.lockedSymbol
-      : requested;
-    if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
-      res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
-      return;
-    }
-    lockedSymbol = requestedLocked;
-  }
-  const card = body.card ?? body.analysis?.card;
-  if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
-    res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
-    return;
-  }
-  const existingOwner = matchCatalyst.getOwnerSessionId();
-  if (matchCatalyst.isRunning() && existingOwner && existingOwner !== req.sessionId) {
-    res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
-    return;
-  }
-  const result = await matchCatalyst.startSession({
-    ownerSessionId: req.sessionId,
-    botId: parsed.spec.botId,
-    spec: parsed.spec,
-    stake: body.stake,
-    stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
-    takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
-    maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
-    marketMode,
-    lockedSymbol,
-    symbol: market.symbol,
-    displayName: market.displayName,
-    digit: Number.isInteger(body.digit)
-      ? Number(body.digit)
-      : (Number.isInteger(body.analysis?.digit) ? Number(body.analysis.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5)),
-    card,
-    lockedAnalysis: body.analysis,
-  });
-  if (!result.ok) {
-    res.status(409).json({ error: result.error });
-    return;
-  }
-  res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
-});
-
-router.post("/catalyst/stop", (req, res) => {
-  const owner = matchCatalyst.getOwnerSessionId();
-  if (matchCatalyst.isRunning() && owner && owner !== req.sessionId) {
-    res.status(409).json({ error: "You cannot stop another browser session's bot." });
-    return;
-  }
-  matchCatalyst.stopSession();
-  res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
 });
 
 // ── Status ────────────────────────────────────────────────────────────────────
@@ -1042,12 +664,8 @@ router.post("/catalyst/stop", (req, res) => {
 router.get("/status", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
-  const twin = visibleTwinStatus(req.sessionId);
-  if (twin.running) { res.json(twin); return; }
   const shot = visibleKillShotStatus(req.sessionId);
   if (shot.running) { res.json(shot); return; }
-  const catalyst = visibleCatalystStatus(req.sessionId);
-  if (catalyst.running) { res.json(catalyst); return; }
   const fam = visibleFamilyStatus(req.sessionId);
   if (fam.running) { res.json(fam); return; }
   res.json(visibleStatus(req.sessionId));
@@ -1096,23 +714,6 @@ router.get("/live", (req, res) => {
 // ── Scan (specialist) ─────────────────────────────────────────────────────────
 
 router.post("/:botId/scan", async (req, res): Promise<void> => {
-  if (req.params["botId"] === "match-catalyst") {
-    const parsed = parseCatalystSpec("match-catalyst", req.body);
-    if (!parsed.ok) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
-    try {
-      const risk = await killshotRisk(req.sessionId, req.body);
-      const result = await matchCatalyst.scanForCatalyst(req.sessionId, parsed.spec, risk);
-      res.json(result);
-    } catch (err) {
-      logger.error({ err }, "Match Catalyst scan failed");
-      res.status(500).json({ error: "Scan failed" });
-    }
-    return;
-  }
-
   const parsed = validateBotBody(req.params["botId"]!, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
@@ -1135,75 +736,6 @@ router.post("/:botId/scan", async (req, res): Promise<void> => {
 
 router.post("/:botId/start", async (req, res): Promise<void> => {
   const botId = req.params["botId"]!;
-  if (botId === "match-catalyst") {
-    const body = req.body ?? {};
-    const parsed = parseCatalystSpec(botId, body);
-    if (!parsed.ok) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
-    const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
-    const requested = typeof body.symbol === "string" ? body.symbol : undefined;
-    if (!requested || !isAutomatedMarket(requested)) {
-      res.status(400).json({ error: "Run the analysis first — this bot deploys onto a market it has measured" });
-      return;
-    }
-    const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === requested);
-    if (!market || !market.digitEnabled) {
-      res.status(400).json({ error: "This bot needs a digit-enabled market" });
-      return;
-    }
-    if (typeof body.stake !== "number" || body.stake < 0.35) {
-      res.status(400).json({ error: "stake must be ≥ 0.35" });
-      return;
-    }
-    let lockedSymbol: string | undefined;
-    if (marketMode === "locked") {
-      // The selected scan card is itself the lock. Older web bundles omitted
-      // lockedSymbol on the Locked button, so default to the measured market.
-      const requestedLocked = typeof body.lockedSymbol === "string" && body.lockedSymbol
-        ? body.lockedSymbol
-        : requested;
-      if (!requestedLocked || !isAutomatedMarket(requestedLocked)) {
-        res.status(400).json({ error: `${requestedLocked ?? "market"} cannot be analysed or traded by this bot` });
-        return;
-      }
-      lockedSymbol = requestedLocked;
-    }
-    const card = body.card ?? body.analysis?.card;
-    if (!card || typeof card.tau !== "number" || !Number.isFinite(card.tau)) {
-      res.status(400).json({ error: "Run the analysis first — the measured model card is required" });
-      return;
-    }
-    const existingOwner = matchCatalyst.getOwnerSessionId();
-    if (matchCatalyst.isRunning() && existingOwner && existingOwner !== req.sessionId) {
-      res.status(409).json({ error: "Another browser session is running this bot. Your Deriv account was not touched." });
-      return;
-    }
-    const result = await matchCatalyst.startSession({
-      ownerSessionId: req.sessionId,
-      botId: parsed.spec.botId,
-      spec: parsed.spec,
-      stake: body.stake,
-      stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
-      takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
-      maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
-      marketMode,
-      lockedSymbol,
-      symbol: market.symbol,
-      displayName: market.displayName,
-      digit: Number.isInteger(body.digit) ? Number(body.digit) : (body.contract?.digit ?? parsed.spec.digit ?? 5),
-      card,
-      lockedAnalysis: body.analysis,
-    });
-    if (!result.ok) {
-      res.status(409).json({ error: result.error });
-      return;
-    }
-    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
-    return;
-  }
-
   const parsed = validateBotBody(botId, req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
@@ -1235,17 +767,10 @@ router.post("/:botId/start", async (req, res): Promise<void> => {
 
 router.post("/:botId/stop", (req, res) => {
   const botId = req.params["botId"]!;
-  if (botId === "match-catalyst") {
-    const owner = matchCatalyst.getOwnerSessionId();
-    if (matchCatalyst.isRunning() && owner && owner !== req.sessionId) {
-      res.status(409).json({ error: "You cannot stop another browser session's specialist bot." });
-      return;
-    }
-    matchCatalyst.stopSession();
-    res.json({ ok: true, status: visibleCatalystStatus(req.sessionId) });
+  if (!getBotDefinition(botId)) {
+    res.status(404).json({ error: "Unknown bot" });
     return;
   }
-
   const owner = getOwnerSessionId();
   const status = getStatus();
   if (status.running && owner && owner !== req.sessionId) {

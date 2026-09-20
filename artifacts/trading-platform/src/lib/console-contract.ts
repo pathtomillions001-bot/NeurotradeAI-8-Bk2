@@ -27,8 +27,6 @@ export const WEB_CONSOLE_IDS = [
   "killshot@1",
   /** Kill-Shot family oracles (Over/Under, Even/Odd, Matches/Differs). */
   "killshot-family@1",
-  /** Boundary Hedge Sentinel — same-tick hedge, 80% win rate, minimal gates. */
-  "twin-hedge@2",
 ] as const;
 
 export type WebConsoleId = (typeof WEB_CONSOLE_IDS)[number];

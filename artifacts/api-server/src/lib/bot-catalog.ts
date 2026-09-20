@@ -28,7 +28,7 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot" | "twinhedge";
+  family: SpecialistFamily | "duallock" | "killshot";
   /** Human name of the contract family this bot is hard-wired to. */
   contractLabel: string;
   tagline: string;
@@ -55,15 +55,6 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
-  /**
-   * The Twin-Lock Hedge Sentinel: two complementary contracts per round
-   * (Over 4 + Under 5 normal, Over 5 + Under 4 recovery), always executed
-   * simultaneously on one tick, recovery armed ONLY on a both-legs-lost
-   * round. Contracts are hard-wired — the user chooses nothing about the
-   * pair, and only LOCK vs SWITCH for the market, after the scan.
-   * The UI renders a dedicated console for this bot.
-   */
-  twinHedge?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -388,7 +379,6 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.twinHedge) return "twin-hedge@2";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

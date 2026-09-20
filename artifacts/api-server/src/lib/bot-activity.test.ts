@@ -60,11 +60,6 @@ describe("bot console contract", () => {
     assert.equal(botConsoleId(getBotDefinition("ks-overunder")!), "killshot-family@1");
   });
 
-  it("does not publish retired bots in the AI Bot catalogue", () => {
-    assert.equal(getBotDefinition("match-catalyst"), undefined);
-    assert.equal(getBotDefinition("twinhedge"), undefined);
-  });
-
   it("falls back to the specialist console for family bots with no dedicated UI", () => {
     assert.equal(botConsoleId(getBotDefinition("parity")!), "specialist@1");
     assert.equal(botConsoleId(getBotDefinition("match")!), "specialist@1");

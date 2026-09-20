@@ -1,5 +1,5 @@
 /**
- * Kill-Shot Family Oracle console (Over/Under · Even/Odd · Matches/Differs + Match Catalyst).
+ * Kill-Shot Family Oracle console (Over/Under · Even/Odd · Matches/Differs).
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -24,8 +24,6 @@ interface Contract { kind: string; digit?: number }
 interface Candidate {
   symbol: string;
   displayName: string;
-  /** Match Catalyst returns the selected digit at the top level. */
-  digit?: number;
   contract?: Contract;
   label: string;
   verdict: "certified" | "qualified" | "watch" | "refused";
@@ -111,9 +109,8 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   });
   const { data: settings } = useGetSettings();
 
-  const isCatalyst = bot?.id === "match-catalyst";
-  const family: Family = isCatalyst ? "matchdiffer" : (bot?.killShotFamily ?? "overunder");
-  const [side, setSide] = useState<string>(isCatalyst ? "match" : "both");
+  const family: Family = bot?.killShotFamily ?? "overunder";
+  const [side, setSide] = useState<string>("both");
   const [digit, setDigit] = useState<number>(5);
   const [overDigit, setOverDigit] = useState<number>(4);
   const [underDigit, setUnderDigit] = useState<number>(6);
@@ -123,10 +120,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   const [config, setConfig] = useState({ stake: 1, takeProfit: 10, stopLoss: 5, maxRecoverySteps: 3 });
   const set = <K extends keyof typeof config>(k: K, v: number) =>
     setConfig(prev => ({ ...prev, [k]: v }));
-
-  useEffect(() => {
-    if (isCatalyst) setSide("match");
-  }, [isCatalyst, open]);
 
   useEffect(() => {
     if (!settings) return;
@@ -186,21 +179,15 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   const a = ACCENTS[bot.accent];
   const Icon = BOT_ICON[bot.icon] ?? Target;
 
-  const sideLabels: Record<string, string> = isCatalyst
-    ? { match: "Matches — Precision Decay" }
-    : family === "overunder"
-      ? { over: "Over only", under: "Under only", both: "Over & Under" }
-      : family === "parity"
-        ? { even: "Even only", odd: "Odd only", both: "Even & Odd" }
-        : { match: "Matches", differ: "Differs", both: "Matches & Differs" };
-  const sideOptions = isCatalyst ? ["match"] : family === "overunder" ? ["over", "under", "both"]
+  const sideLabels: Record<string, string> = family === "overunder"
+    ? { over: "Over only", under: "Under only", both: "Over & Under" }
+    : family === "parity"
+      ? { even: "Even only", odd: "Odd only", both: "Even & Odd" }
+      : { match: "Matches", differ: "Differs", both: "Matches & Differs" };
+  const sideOptions = family === "overunder" ? ["over", "under", "both"]
     : family === "parity" ? ["even", "odd", "both"] : ["match", "differ", "both"];
 
   const contractLabel = () => {
-    if (isCatalyst) {
-      const d = aiDigit ? "AI picks best digit" : `Digit ${digit}`;
-      return `Matches (Quantum) · ${d}`;
-    }
     if (family === "parity") return sideLabels[side]!;
     if (family === "overunder") {
       if (side === "over") return `Over ${overDigit}`;
@@ -212,7 +199,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
   };
 
   const buildBody = () => {
-    const body: Record<string, unknown> = { botId: bot.id, side: isCatalyst ? "match" : side, certainty, ...config };
+    const body: Record<string, unknown> = { botId: bot.id, side, certainty, ...config };
     if (family === "overunder") {
       if (side === "over" || side === "both") body.overDigit = overDigit;
       if (side === "under" || side === "both") body.underDigit = underDigit;
@@ -222,9 +209,9 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
     return body;
   };
 
-  const scanEndpoint = isCatalyst ? "/api/bots/nexus/scan" : "/api/bots/family/scan";
-  const startEndpoint = isCatalyst ? "/api/bots/nexus/start" : "/api/bots/family/start";
-  const stopEndpoint = isCatalyst ? "/api/bots/nexus/stop" : "/api/bots/family/stop";
+  const scanEndpoint = "/api/bots/family/scan";
+  const startEndpoint = "/api/bots/family/start";
+  const stopEndpoint = "/api/bots/family/stop";
 
   const handleScan = async () => {
     setLoading(true);
@@ -258,7 +245,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
           marketMode: mode,
           symbol: c.symbol,
           contract: c.contract,
-          ...(isCatalyst && Number.isInteger(c.digit) ? { digit: c.digit } : {}),
           card: c.card,
           analysis: c,
           ...(mode === "locked" ? { lockedSymbol: c.symbol } : {}),
@@ -412,7 +398,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                         {aiDigit && <span className="text-[8px] text-black font-bold">✓</span>}
                       </span>
                       <span className={aiDigit ? a.text : "text-muted-foreground"}>
-                        {isCatalyst ? "Let Precision Decay pick the best digit (7-expert)" : "Let the AI pick the best digit"}
+                        Let the AI pick the best digit
                       </span>
                     </button>
                     {!aiDigit && (
@@ -431,13 +417,6 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
                       </div>
                     )}
                   </>
-                )}
-
-                {isCatalyst && (
-                  <div className="rounded-lg px-2.5 py-2 border border-fuchsia-500/20 bg-fuchsia-500/5 text-[10px] leading-relaxed text-muted-foreground">
-                    <p className="font-semibold text-fuchsia-300">Precision Decay</p>
-                    <p>6 experts · gap p60-p95 · hazard×1.25 · geo overdue {"<0.32"} · Platt+Brier · e-value · FMCI ladder · match-tuned shield gap≥4 hazard≥1.4</p>
-                  </div>
                 )}
 
                 <div className="space-y-1.5">
@@ -470,7 +449,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
 
                 <Button onClick={handleScan} disabled={loading}
                         className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                  <ScanSearch className="w-4 h-4 mr-2" /> {isCatalyst ? "Weibull scan — 19×10 = 190 candidates" : "Measure every market"}
+                  <ScanSearch className="w-4 h-4 mr-2" /> Measure every market
                 </Button>
               </div>
             )}
@@ -479,7 +458,7 @@ export function KillShotFamilyConsole({ bot, open, onOpenChange, session, onSess
               <div className="p-6 space-y-4 text-center">
                 <Loader2 className={`w-8 h-8 ${a.text} animate-spin mx-auto`} />
                 <div>
-                  <p className="text-sm font-semibold text-white">{isCatalyst ? "7-expert Weibull — 190 candidates" : "Fitting, then measuring out of sample"}</p>
+                  <p className="text-sm font-semibold text-white">Fitting, then measuring out of sample</p>
                   <p className="text-[11px] text-muted-foreground mt-1">
                     {progress.scanning ? `${progress.scanning}…` : "Preparing…"}
                   </p>

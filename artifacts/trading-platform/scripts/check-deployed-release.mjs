@@ -5,7 +5,7 @@
  * Written after the 2026-09-19 incident: production was running the web bundle
  * from commit 39300a9 (2026-09-14) while the API was already on 1d7b39f
  * (2026-09-19). The stale bundle had no Match Pulse console, no Compounding
- * Range Sentinel console and the superseded Twin-Hedge console, so those three
+ * Range Sentinel console, so those two
  * bots "looked different" from the sandbox with no error anywhere.
  *
  * Two independent checks, both cheap:

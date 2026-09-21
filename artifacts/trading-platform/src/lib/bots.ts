@@ -7,7 +7,7 @@
  * giving each specialist its own hue.
  */
 
-import type { NexusTelemetry } from "./match-nexus";
+import type { PrismTelemetry } from "./prism-match";
 
 import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
 
@@ -45,7 +45,7 @@ export interface BotCardData {
   oneShot?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
-  matchNexus?: boolean;
+  prismMatch?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -57,8 +57,10 @@ export interface BotCardData {
 }
 
 export interface BotSessionStatus {
-  /** Dedicated Matches-only runner: probabilities, execution integrity and paper/live mode. */
-  nexus?: NexusTelemetry;
+  /** Prism Match runner: prismatic probabilities, execution integrity and paper/live mode. */
+  prism?: PrismTelemetry;
+  /** Legacy field kept for API compatibility — use `prism` for Prism Match. */
+  nexus?: PrismTelemetry;
   running: boolean;
   botId: string | null;
   botName: string | null;

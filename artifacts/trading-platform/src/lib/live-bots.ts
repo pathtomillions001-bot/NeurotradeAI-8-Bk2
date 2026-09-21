@@ -33,13 +33,15 @@ export interface LiveBotStatus {
   message?: string;
   inRecovery?: boolean;
   recoveryStep?: number;
+  prism?: { executionMode: "paper" | "live" };
+  /** Legacy field for backward compatibility */
   nexus?: { executionMode: "paper" | "live" };
   [key: string]: unknown;
 }
 
 /** Paper performance must never be labelled as a live account result. */
 export function isPaperBot(status: LiveBotStatus): boolean {
-  return status.nexus?.executionMode === "paper";
+  return status.prism?.executionMode === "paper" || status.nexus?.executionMode === "paper";
 }
 
 export interface LiveBot {
@@ -60,8 +62,8 @@ export interface LiveBot {
  */
 export function stopPathForBot(botId: string): string {
   switch (botId) {
-    case "match-nexus":
-      return "/api/bots/match-nexus/stop";
+    case "prism-match":
+      return "/api/bots/prism-match/stop";
     case "duallock":
       return "/api/bots/duallock/stop";
     case "killshot":

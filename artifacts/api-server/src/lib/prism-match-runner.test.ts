@@ -1,19 +1,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { DigitTape } from "./digit-tape";
-import { evaluateNexus } from "./match-nexus-analysis";
+import { evaluatePrism } from "./prism-match-analysis";
 import {
-  advanceNexusMarket,
-  NexusRejected,
-  NexusPaperFeedError,
-  NexusRunner,
-  selectNexusMarket,
-  type NexusMarket,
-  type NexusOutcome,
-  type NexusPurchase,
-  type NexusQuote,
-  type NexusRuntime,
-} from "./match-nexus-runner";
+  advancePrismMarket,
+  PrismRejected,
+  PrismPaperFeedError,
+  PrismRunner,
+  selectPrismMarket,
+  type PrismMarket,
+  type PrismOutcome,
+  type PrismPurchase,
+  type PrismQuote,
+  type PrismRuntime,
+} from "./prism-match-runner";
 import {
   createRecoveryState,
   reduceRecoveryOutcome,
@@ -70,13 +70,13 @@ function harness(mode: "paper" | "live" = "paper") {
     maxRecoverySteps: 3,
     executionMode: mode,
   };
-  const evaluated = evaluateNexus(Array(400).fill(7), {
+  const evaluated = evaluatePrism(Array(400).fill(7), {
     ...config,
     maxStake: 100,
     markupPercent: 10,
   });
   evaluated.policy.threshold = 0.005;
-  const market: NexusMarket = {
+  const market: PrismMarket = {
     ...evaluated,
     symbol,
     displayName: "Volatility 100",
@@ -89,7 +89,7 @@ function harness(mode: "paper" | "live" = "paper") {
   };
   let ledger = createRecoveryState();
   const events: string[] = [],
-    orders: NexusQuote["order"][] = [];
+    orders: PrismQuote["order"][] = [];
   let buys = 0,
     releases = 0,
     commits = 0,
@@ -97,7 +97,7 @@ function harness(mode: "paper" | "live" = "paper") {
     cancelled = 0,
     owned = true;
   const settled = new Set<number>();
-  const runtime: NexusRuntime = {
+  const runtime: PrismRuntime = {
     now: () => clock + 20,
     snapshot: (sym) => tape.snapshot(sym),
     periodMs: () => 2000,
@@ -175,8 +175,8 @@ function harness(mode: "paper" | "live" = "paper") {
       events.push("release");
     },
   };
-  const runner = new NexusRunner(
-    "test-nexus",
+  const runner = new PrismRunner(
+    "test-prism",
     config,
     "locked",
     symbol,
@@ -215,7 +215,7 @@ function harness(mode: "paper" | "live" = "paper") {
   };
 }
 
-describe("Nexus tick-driven execution lifecycle", () => {
+describe("Prism tick-driven execution lifecycle", () => {
   it("deploys without purchasing, executes once per fresh tick and never widens the contract", async () => {
     const h = harness();
     h.runner.start();
@@ -252,7 +252,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
     };
     h.runner.start();
     h.push();
-    await until(() => h.runner.status().nexus.phase === "quoting");
+    await until(() => h.runner.status().prism.phase === "quoting");
     h.runner.stop();
     assert.equal(h.releases, 0);
     gate.resolve();
@@ -286,7 +286,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
   });
   it("keeps ownership and records the outcome when stopped after buy was sent", async () => {
     const h = harness(),
-      settlement = deferred<NexusOutcome>();
+      settlement = deferred<PrismOutcome>();
     h.runtime.settle = () => settlement.promise;
     h.runner.start();
     h.push();
@@ -311,8 +311,8 @@ describe("Nexus tick-driven execution lifecycle", () => {
   });
   it("abandons an otherwise good quote when a repeated-digit tick arrives before buy", async () => {
     const h = harness(),
-      quote = deferred<NexusQuote>();
-    let pendingOrder: NexusQuote["order"] | null = null;
+      quote = deferred<PrismQuote>();
+    let pendingOrder: PrismQuote["order"] | null = null;
     h.runtime.quote = async (order) => {
       pendingOrder = order;
       return quote.promise;
@@ -377,7 +377,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
   });
   it("a settlement timeout never writes a fake loss or retries the buy", async () => {
     const h = harness(),
-      settlement = deferred<NexusOutcome>();
+      settlement = deferred<PrismOutcome>();
     let attempts = 0;
     h.runtime.settle = async () => {
       attempts++;
@@ -400,7 +400,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
   });
   it("an ambiguous buy is never retried and even stop must wait for a confirmed receipt", async () => {
     const h = harness(),
-      receipt = deferred<NexusPurchase | null>();
+      receipt = deferred<PrismPurchase | null>();
     h.runtime.buy = async (_quote, guard, onSent) => {
       guard();
       onSent();
@@ -410,7 +410,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
     h.runtime.findPurchase = () => receipt.promise;
     h.runner.start();
     h.push();
-    await until(() => h.runner.status().nexus.phase === "attention");
+    await until(() => h.runner.status().prism.phase === "attention");
     h.runner.stop();
     h.push();
     h.push();
@@ -433,7 +433,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
       throw new Error("timeout");
     };
     h.runtime.findPurchase = async () => {
-      throw new NexusRejected("late rejection");
+      throw new PrismRejected("late rejection");
     };
     h.runner.start();
     h.push();
@@ -462,7 +462,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
   it("stops an unscorable paper entry after a feed gap without fabricating an outcome", async () => {
     const h = harness();
     h.runtime.settle = async () => {
-      throw new NexusPaperFeedError("paper feed changed");
+      throw new PrismPaperFeedError("paper feed changed");
     };
     h.runner.start();
     h.push();
@@ -479,7 +479,7 @@ describe("Nexus tick-driven execution lifecycle", () => {
     h.runtime.buy = async (_q, guard, onSent) => {
       guard();
       onSent();
-      throw new NexusRejected("Insufficient balance");
+      throw new PrismRejected("Insufficient balance");
     };
     h.runner.start();
     h.push();
@@ -562,21 +562,21 @@ describe("Nexus tick-driven execution lifecycle", () => {
   });
 });
 
-describe("Nexus market identity and execution isolation", () => {
+describe("Prism market identity and execution isolation", () => {
   it("updates on the first unseen tick, not on digit inequality", () => {
     const h = harness();
     const before = h.market.model.samples;
     h.push(7, false);
-    assert.equal(advanceNexusMarket(h.market, h.tape.snapshot("R_100")), 1);
+    assert.equal(advancePrismMarket(h.market, h.tape.snapshot("R_100")), 1);
     assert.equal(h.market.model.samples, before + 1);
-    assert.equal(advanceNexusMarket(h.market, h.tape.snapshot("R_100")), 0);
+    assert.equal(advancePrismMarket(h.market, h.tape.snapshot("R_100")), 0);
   });
   it("invalidates a generation/missing sequence instead of appending discontinuous history", () => {
     const h = harness();
     const snapshot = h.tape.snapshot("R_100")!;
     const broken = { ...snapshot.tick, sequence: snapshot.tick.sequence + 2 };
     assert.equal(
-      advanceNexusMarket(h.market, { tick: broken, ticks: [broken] }),
+      advancePrismMarket(h.market, { tick: broken, ticks: [broken] }),
       0,
     );
     assert.equal(h.market.valid, false);
@@ -594,35 +594,35 @@ describe("Nexus market identity and execution isolation", () => {
       };
     a.decision.ready = true;
     assert.equal(
-      selectNexusMarket([a, b], "locked", a.symbol, a.symbol, 100)?.symbol,
+      selectPrismMarket([a, b], "locked", a.symbol, a.symbol, 100)?.symbol,
       a.symbol,
     );
     assert.equal(
-      selectNexusMarket([a, b], "switching", a.symbol, a.symbol, 1)?.symbol,
+      selectPrismMarket([a, b], "switching", a.symbol, a.symbol, 1)?.symbol,
       a.symbol,
     );
     assert.equal(
-      selectNexusMarket([a, b], "switching", a.symbol, a.symbol, 6)?.symbol,
+      selectPrismMarket([a, b], "switching", a.symbol, a.symbol, 6)?.symbol,
       b.symbol,
     );
     b.decision.utility = a.decision.utility + 0.01;
     assert.equal(
-      selectNexusMarket([a, b], "switching", a.symbol, a.symbol, 100)?.symbol,
+      selectPrismMarket([a, b], "switching", a.symbol, a.symbol, 100)?.symbol,
       a.symbol,
     );
   });
   it("uses a distinct lease so another specialist cannot share its account execution slot", () => {
-    const a = "nexus-account-a",
-      b = "nexus-account-b";
-    assert.equal(acquireTradingOwnership("match-nexus", a), true);
+    const a = "prism-account-a",
+      b = "prism-account-b";
+    assert.equal(acquireTradingOwnership("prism-match", a), true);
     assert.equal(acquireTradingOwnership("bots", a), false);
     assert.equal(acquireTradingOwnership("neuroai", a), false);
     assert.equal(acquireTradingOwnership("autonomous", a), false);
-    assert.equal(acquireTradingOwnership("match-nexus", b), true);
-    releaseTradingOwnership("bots", a); // wrong owner cannot release Nexus
+    assert.equal(acquireTradingOwnership("prism-match", b), true);
+    releaseTradingOwnership("bots", a); // wrong owner cannot release Prism
     assert.equal(acquireTradingOwnership("bots", a), false);
-    releaseTradingOwnership("match-nexus", a);
-    releaseTradingOwnership("match-nexus", b);
+    releaseTradingOwnership("prism-match", a);
+    releaseTradingOwnership("prism-match", b);
     assert.equal(acquireTradingOwnership("bots", a), true);
     releaseTradingOwnership("bots", a);
   });

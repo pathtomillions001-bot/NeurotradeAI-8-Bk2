@@ -4,19 +4,19 @@ import { eq } from "drizzle-orm";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { createServer, type Server } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
-import type { NexusOrder, NexusRuntime } from "./match-nexus-runner";
+import type { PrismOrder, PrismRuntime } from "./prism-match-runner";
 
 let http: Server, wss: WebSocketServer;
-let engine: typeof import("./match-nexus-engine");
+let engine: typeof import("./prism-match-engine");
 let deriv: typeof import("./deriv");
-let runtime: NexusRuntime;
+let runtime: PrismRuntime;
 const requests: Array<Record<string, any>> = [];
 const sockets = new Set<WebSocket>();
 let rejectBuy = false,
   dropBuy = false,
   lateBuyDelay = 0,
   sendForeignReceipt = false;
-const accountId = "NEXUS-FAKE-ACCOUNT";
+const accountId = "PRISM-FAKE-ACCOUNT";
 const config = {
   activity: "balanced" as const,
   stake: 1,
@@ -56,7 +56,7 @@ const order = {
     ready: true,
     reason: "test",
   },
-} as NexusOrder;
+} as PrismOrder;
 
 before(async () => {
   wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -90,7 +90,7 @@ before(async () => {
             JSON.stringify({
               msg_type: "buy",
               req_id: -999,
-              echo_req: { passthrough: { nexus_intent: "unrelated-intent" } },
+              echo_req: { passthrough: { prism_intent: "unrelated-intent" } },
               buy: { contract_id: 9999, buy_price: req.price },
             }),
           );
@@ -134,9 +134,9 @@ before(async () => {
   });
   await new Promise<void>((resolve) => http.listen(0, "127.0.0.1", resolve));
   process.env.DERIV_REST_BASE = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  process.env.DERIV_APP_ID = "local-fake-nexus-test";
+  process.env.DERIV_APP_ID = "local-fake-prism-test";
   // Dynamically imported AFTER fake broker config, so no external broker is contacted.
-  engine = await import("./match-nexus-engine");
+  engine = await import("./prism-match-engine");
   deriv = await import("./deriv");
   await (
     await import("@workspace/db")
@@ -149,7 +149,7 @@ beforeEach(() => {
   dropBuy = false;
   lateBuyDelay = 0;
   sendForeignReceipt = false;
-  runtime = engine.createNexusRuntime(
+  runtime = engine.createPrismRuntime(
     "transport-test",
     config,
     { ...config, maxStake: 100, markupPercent: 10 },
@@ -174,7 +174,7 @@ after(async () => {
   await new Promise<void>((resolve) => http.close(() => resolve()));
 });
 
-describe("Nexus pooled broker transport", () => {
+describe("Prism pooled broker transport", () => {
   it("quotes and buys a single 1-tick DIGITMATCH on the persistent account connection", async () => {
     let checks = 0,
       sends = 0;
@@ -243,7 +243,7 @@ describe("Nexus pooled broker transport", () => {
           },
         ),
       (error) =>
-        error instanceof Error && error.constructor.name === "NexusRejected",
+        error instanceof Error && error.constructor.name === "PrismRejected",
     );
     assert.equal(sent, true);
     assert.equal(requests.filter((r) => r.buy).length, 1);
@@ -279,8 +279,8 @@ describe("Nexus pooled broker transport", () => {
     assert.equal(purchase?.contractId, "87654321");
     assert.equal(sends, 1);
     assert.equal(requests.filter((r) => r.buy).length, 1);
-    const tag = String(requests.find((r) => r.buy)!.passthrough.nexus_intent);
-    assert.match(tag, /^nexus:[0-9a-f-]+$/);
+    const tag = String(requests.find((r) => r.buy)!.passthrough.prism_intent);
+    assert.match(tag, /^prism:[0-9a-f-]+$/);
     assert.equal(
       tag.includes("transport-test"),
       false,
@@ -317,7 +317,7 @@ describe("Nexus pooled broker transport", () => {
         await runtime.findPurchase(intent);
       } catch (error) {
         rejected =
-          error instanceof Error && error.constructor.name === "NexusRejected";
+          error instanceof Error && error.constructor.name === "PrismRejected";
       }
       if (!rejected) await new Promise((resolve) => setTimeout(resolve, 20));
     }

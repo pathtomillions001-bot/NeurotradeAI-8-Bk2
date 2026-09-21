@@ -1,22 +1,22 @@
-/** Tick-driven Nexus lifecycle. Broker/storage/feed are injected for safety tests. */
+/** Tick-driven Prism lifecycle. Broker/storage/feed are injected for safety tests. */
 import { type DigitSnapshot, type DigitTick } from "./digit-tape";
 import {
-  decideNexus,
-  type NexusDecision,
-  type NexusEvaluation,
-  type NexusPrediction,
-} from "./match-nexus-analysis";
+  decidePrism,
+  type PrismDecision,
+  type PrismEvaluation,
+  type PrismPrediction,
+} from "./prism-match-analysis";
 import {
-  assertNexusTick,
-  MATCH_NEXUS_BOT_ID,
-  MATCH_NEXUS_BOT_NAME,
-  nexusStake,
-  type NexusScanInput,
-} from "./match-nexus-policy";
+  assertPrismTick,
+  PRISM_MATCH_BOT_ID,
+  PRISM_MATCH_BOT_NAME,
+  prismStake,
+  type PrismScanInput,
+} from "./prism-match-policy";
 import { type RecoveryState } from "./agents/recovery-engine";
 import { addMoney } from "./recovery-math";
 
-export interface NexusMarket extends NexusEvaluation {
+export interface PrismMarket extends PrismEvaluation {
   symbol: string;
   displayName: string;
   tick: DigitTick;
@@ -26,7 +26,7 @@ export interface NexusMarket extends NexusEvaluation {
   waitedTicks: number;
   refreshedAtSequence: number;
 }
-export interface NexusOrder {
+export interface PrismOrder {
   symbol: string;
   displayName: string;
   contractType: "DIGITMATCH";
@@ -35,37 +35,37 @@ export interface NexusOrder {
   durationUnit: "t";
   stake: number;
   tick: DigitTick;
-  decision: NexusDecision;
+  decision: PrismDecision;
 }
-export interface NexusQuote {
+export interface PrismQuote {
   id: string;
   askPrice: number;
   payout: number;
   receivedAt: number;
-  order: NexusOrder;
+  order: PrismOrder;
 }
-export interface NexusPurchase {
+export interface PrismPurchase {
   contractId: string;
   buyPrice: number;
   startedAtMs?: number;
 }
-export interface NexusOutcome {
+export interface PrismOutcome {
   won: boolean;
   profit: number;
   entryPrice?: number;
   exitPrice?: number;
 }
-export class NexusRejected extends Error {}
+export class PrismRejected extends Error {}
 /** Paper has no external position to drain when the next tick was lost. */
-export class NexusPaperFeedError extends Error {}
-export type NexusPhase =
+export class PrismPaperFeedError extends Error {}
+export type PrismPhase =
   | "watching"
   | "quoting"
   | "buying"
   | "settling"
   | "attention"
   | "stopped";
-export interface NexusRuntime {
+export interface PrismRuntime {
   now(): number;
   snapshot(symbol: string): DigitSnapshot | null;
   periodMs(symbol: string): number;
@@ -74,46 +74,46 @@ export interface NexusRuntime {
   /** Must also verify the originally selected account remains active. */
   risk(): Promise<{ balance: number; maxStake: number; markupPercent: number }>;
   recovery(): RecoveryState;
-  refresh(market: NexusMarket): Promise<NexusMarket | null>;
-  quote(order: NexusOrder, guard: () => void): Promise<NexusQuote>;
-  createIntent(order: NexusOrder): Promise<number>;
-  confirmIntent(intent: number, purchase: NexusPurchase): Promise<void>;
+  refresh(market: PrismMarket): Promise<PrismMarket | null>;
+  quote(order: PrismOrder, guard: () => void): Promise<PrismQuote>;
+  createIntent(order: PrismOrder): Promise<number>;
+  confirmIntent(intent: number, purchase: PrismPurchase): Promise<void>;
   cancelIntent(intent: number, reason: string): Promise<void>;
   buy(
-    quote: NexusQuote,
+    quote: PrismQuote,
     guard: () => void,
     onSent: () => void,
-  ): Promise<NexusPurchase>;
+  ): Promise<PrismPurchase>;
   settle(
-    purchase: NexusPurchase,
-    order: NexusOrder,
+    purchase: PrismPurchase,
+    order: PrismOrder,
     payout: number,
-  ): Promise<NexusOutcome>;
+  ): Promise<PrismOutcome>;
   /** An uncertain send may ONLY be recovered by a confirmed broker receipt. */
-  findPurchase(intent: number): Promise<NexusPurchase | null>;
+  findPurchase(intent: number): Promise<PrismPurchase | null>;
   /** Atomic/idempotent journal + recovery commit. Paper implementation is isolated. */
   commit(
     intent: number,
-    outcome: NexusOutcome,
+    outcome: PrismOutcome,
     stake: number,
     payout: number,
   ): Promise<void>;
   delay(ms: number): Promise<void>;
-  publish(status: NexusStatus): void;
+  publish(status: PrismStatus): void;
   release(): void;
 }
-export interface NexusTelemetry {
-  phase: NexusPhase;
+export interface PrismTelemetry {
+  phase: PrismPhase;
   executionMode: "paper" | "live";
   marketMode: "locked" | "switching";
-  activity: NexusScanInput["activity"];
+  activity: PrismScanInput["activity"];
   source: string;
   symbol: string;
   digit: number | null;
-  prediction: NexusPrediction | null;
-  decision: NexusDecision | null;
-  validation: NexusMarket["validation"] | null;
-  risk: NexusMarket["risk"] | null;
+  prediction: PrismPrediction | null;
+  decision: PrismDecision | null;
+  validation: PrismMarket["validation"] | null;
+  risk: PrismMarket["risk"] | null;
   stopRequested: boolean;
   pendingContractId: string | null;
   ticksObserved: number;
@@ -144,7 +144,7 @@ export interface NexusTelemetry {
     source: string;
   }>;
 }
-export interface NexusStatus {
+export interface PrismStatus {
   running: boolean;
   botId: string;
   botName: string;
@@ -178,7 +178,9 @@ export interface NexusStatus {
     marketMode: string;
     lockedSymbol?: string;
   };
-  nexus: NexusTelemetry;
+  prism: PrismTelemetry;
+  /** @deprecated — legacy alias kept for a smooth cut-over of stale front-ends. */
+  nexus?: PrismTelemetry;
 }
 
 const errorMessage = (err: unknown) =>
@@ -193,8 +195,8 @@ const percentile95 = (xs: number[]) =>
     : null;
 
 /** Same generation/sequence, not digit or price equality, defines a new tick. */
-export function advanceNexusMarket(
-  market: NexusMarket,
+export function advancePrismMarket(
+  market: PrismMarket,
   snapshot: DigitSnapshot | null,
 ): number {
   if (!snapshot) return 0;
@@ -224,7 +226,7 @@ export function advanceNexusMarket(
   }
   if (pending.length) {
     market.prediction = market.model.predict(market.policy.calibration);
-    market.decision = decideNexus(
+    market.decision = decidePrism(
       market.prediction,
       market.policy,
       market.decision.payout,
@@ -235,13 +237,13 @@ export function advanceNexusMarket(
 }
 
 /** Locked means the SYMBOL is immutable; automatic digit selection still adapts. */
-export function selectNexusMarket(
-  markets: NexusMarket[],
+export function selectPrismMarket(
+  markets: PrismMarket[],
   mode: "locked" | "switching",
   lockedSymbol: string,
   currentSymbol: string,
   ticksOnMarket: number,
-): NexusMarket | undefined {
+): PrismMarket | undefined {
   const eligible = markets.filter(
     (m) => m.valid && (mode === "switching" || m.symbol === lockedSymbol),
   );
@@ -268,11 +270,11 @@ export function selectNexusMarket(
  * buy/settlement promise is in flight. Ownership survives ambiguous purchases
  * and is released ONLY when no order can still debit the account.
  */
-export class NexusRunner {
+export class PrismRunner {
   private running = true;
   private stopping = false;
   private busy = false;
-  private phase: NexusPhase = "watching";
+  private phase: PrismPhase = "watching";
   private message = "Watching fresh ticks; no order is sent on deploy";
   private unsubscribe: (() => void) | null = null;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
@@ -296,18 +298,18 @@ export class NexusRunner {
   private lastEntryAligned: boolean | null = null;
   private attempted = new Map<string, string>();
   private refreshing = new Set<string>();
-  private recentTrades: NexusTelemetry["recentTrades"] = [];
+  private recentTrades: PrismTelemetry["recentTrades"] = [];
   private lastPublishedAt = 0;
   private lastPublishedMessage = "";
   private task: Promise<void> = Promise.resolve();
 
   constructor(
     readonly id: string,
-    readonly config: NexusScanInput,
+    readonly config: PrismScanInput,
     readonly marketMode: "locked" | "switching",
     readonly selectedSymbol: string,
-    private markets: NexusMarket[],
-    private runtime: NexusRuntime,
+    private markets: PrismMarket[],
+    private runtime: PrismRuntime,
   ) {
     this.currentSymbol = selectedSymbol;
     this.stake = config.stake;
@@ -334,11 +336,11 @@ export class NexusRunner {
   whenIdle(): Promise<void> {
     return this.task;
   }
-  private current(): NexusMarket | undefined {
+  private current(): PrismMarket | undefined {
     return this.markets.find((m) => m.symbol === this.currentSymbol);
   }
-  private guard(market: NexusMarket, tick: DigitTick): void {
-    assertNexusTick({
+  private guard(market: PrismMarket, tick: DigitTick): void {
+    assertPrismTick({
       analysed: tick,
       current: this.runtime.snapshot(market.symbol)?.tick,
       now: this.runtime.now(),
@@ -352,7 +354,7 @@ export class NexusRunner {
       ),
     });
   }
-  private isFresh(m: NexusMarket): boolean {
+  private isFresh(m: PrismMarket): boolean {
     try {
       this.guard(m, m.tick);
       return m.valid;
@@ -367,7 +369,7 @@ export class NexusRunner {
     const m = this.markets.find((row) => row.symbol === symbol);
     if (!m) return;
     try {
-      const advanced = advanceNexusMarket(m, this.runtime.snapshot(symbol));
+      const advanced = advancePrismMarket(m, this.runtime.snapshot(symbol));
       this.ticksObserved += advanced;
       if (symbol === this.currentSymbol) this.ticksOnMarket += advanced;
       if (
@@ -384,14 +386,14 @@ export class NexusRunner {
       this.publish(true);
     }
   }
-  private refresh(m: NexusMarket): void {
+  private refresh(m: PrismMarket): void {
     if (this.refreshing.size >= 2) return;
     this.refreshing.add(m.symbol);
     void this.runtime
       .refresh(m)
       .then((fresh) => {
         if (!this.running || !fresh) return;
-        advanceNexusMarket(fresh, this.runtime.snapshot(m.symbol));
+        advancePrismMarket(fresh, this.runtime.snapshot(m.symbol));
         const index = this.markets.findIndex((row) => row.symbol === m.symbol);
         if (index >= 0) this.markets[index] = fresh;
       })
@@ -402,7 +404,7 @@ export class NexusRunner {
   }
   private chooseAndExecute(): void {
     const fresh = this.markets.filter((m) => this.isFresh(m));
-    const chosen = selectNexusMarket(
+    const chosen = selectPrismMarket(
       fresh,
       this.marketMode,
       this.selectedSymbol,
@@ -448,17 +450,17 @@ export class NexusRunner {
   }
 
   private async execute(
-    market: NexusMarket,
+    market: PrismMarket,
     tick: DigitTick,
-    decision: NexusDecision,
+    decision: PrismDecision,
   ): Promise<void> {
     let intent: number | null = null;
     let sent = false;
-    let purchase: NexusPurchase | null = null;
+    let purchase: PrismPurchase | null = null;
     let payout = decision.payout;
-    let order: NexusOrder | null = null;
+    let order: PrismOrder | null = null;
     try {
-      let risk: Awaited<ReturnType<NexusRuntime["risk"]>>;
+      let risk: Awaited<ReturnType<PrismRuntime["risk"]>>;
       try {
         risk = await this.runtime.risk();
       } catch (err) {
@@ -468,7 +470,7 @@ export class NexusRunner {
       }
       const debt = this.runtime.recovery().unrecoveredAmount;
       const stakeFor = (multiplier: number) =>
-        nexusStake({
+        prismStake({
           baseStake: this.config.stake,
           debt,
           payout: multiplier,
@@ -573,7 +575,7 @@ export class NexusRunner {
       this.latencies.push(this.buyMs);
       if (this.latencies.length > 100) this.latencies.shift();
     } catch (err) {
-      if (sent && !(err instanceof NexusRejected)) {
+      if (sent && !(err instanceof PrismRejected)) {
         // A timeout is NOT a rejection. There is deliberately no buy retry.
         this.phase = "attention";
         this.message =
@@ -585,7 +587,7 @@ export class NexusRunner {
             if (intent !== null)
               purchase = await this.runtime.findPurchase(intent);
           } catch (lateError) {
-            if (lateError instanceof NexusRejected && intent !== null) {
+            if (lateError instanceof PrismRejected && intent !== null) {
               await this.runtime.cancelIntent(intent, errorMessage(lateError));
               this.skipped++;
               this.message =
@@ -626,7 +628,7 @@ export class NexusRunner {
         await this.runtime.delay(2000);
       }
     }
-    let outcome: NexusOutcome;
+    let outcome: PrismOutcome;
     for (;;) {
       this.phase = "settling";
       this.message = this.stopping
@@ -645,7 +647,7 @@ export class NexusRunner {
       } catch (err) {
         if (
           this.config.executionMode === "paper" &&
-          (this.stopping || err instanceof NexusPaperFeedError)
+          (this.stopping || err instanceof PrismPaperFeedError)
         ) {
           this.pendingContractId = null;
           this.stopping = true;
@@ -736,46 +738,11 @@ export class NexusRunner {
     this.lastPublishedMessage = this.message;
     this.runtime.publish(this.status());
   }
-  status(): NexusStatus {
+  status(): PrismStatus {
     const rec = this.runtime.recovery(),
       m = this.current();
     const age = m ? Math.max(0, this.runtime.now() - m.tick.receivedAt) : null;
-    return {
-      running: this.running,
-      botId: MATCH_NEXUS_BOT_ID,
-      botName: MATCH_NEXUS_BOT_NAME,
-      sessionId: this.id,
-      totalProfit: this.totalProfit,
-      tradeCount: this.trades,
-      winCount: this.wins,
-      lossCount: this.losses,
-      currentStake: this.stake,
-      inRecovery: rec.inRecovery,
-      recoveryStep: rec.recoveryStep,
-      unrecoveredAmount: rec.unrecoveredAmount,
-      recoveryTargetProfit: rec.targetProfit,
-      recoveryRemainingTargetProfit: rec.remainingTargetProfit,
-      consecutiveRecoveryLosses: rec.consecutiveMatchLosses,
-      currentMarket: m?.displayName ?? this.currentSymbol,
-      currentContractType: `Matches ${m?.decision.digit ?? "—"}`,
-      lastResult: this.lastResult,
-      message: this.message,
-      config: {
-        stake: this.config.stake,
-        stopLoss: this.config.stopLoss,
-        takeProfit: this.config.takeProfit,
-        maxRecoverySteps: this.config.maxRecoverySteps,
-        recoveryAutoMode: true,
-        recoveryMultiplier: 1.62,
-        recoveryMethod: "instant",
-        contractTypes: ["DIGITMATCH"],
-        barriers: [],
-        lockedBarrier: this.config.digit,
-        marketMode: this.marketMode,
-        lockedSymbol:
-          this.marketMode === "locked" ? this.selectedSymbol : undefined,
-      },
-      nexus: {
+    const prism: PrismTelemetry = {
         phase: this.phase,
         executionMode: this.config.executionMode,
         marketMode: this.marketMode,
@@ -816,7 +783,44 @@ export class NexusRunner {
           }))
           .sort((a, b) => b.utility - a.utility)
           .slice(0, 6),
+      };
+    return {
+      running: this.running,
+      botId: PRISM_MATCH_BOT_ID,
+      botName: PRISM_MATCH_BOT_NAME,
+      sessionId: this.id,
+      totalProfit: this.totalProfit,
+      tradeCount: this.trades,
+      winCount: this.wins,
+      lossCount: this.losses,
+      currentStake: this.stake,
+      inRecovery: rec.inRecovery,
+      recoveryStep: rec.recoveryStep,
+      unrecoveredAmount: rec.unrecoveredAmount,
+      recoveryTargetProfit: rec.targetProfit,
+      recoveryRemainingTargetProfit: rec.remainingTargetProfit,
+      consecutiveRecoveryLosses: rec.consecutiveMatchLosses,
+      currentMarket: m?.displayName ?? this.currentSymbol,
+      currentContractType: `Matches ${m?.decision.digit ?? "—"}`,
+      lastResult: this.lastResult,
+      message: this.message,
+      config: {
+        stake: this.config.stake,
+        stopLoss: this.config.stopLoss,
+        takeProfit: this.config.takeProfit,
+        maxRecoverySteps: this.config.maxRecoverySteps,
+        recoveryAutoMode: true,
+        recoveryMultiplier: 1.62,
+        recoveryMethod: "instant",
+        contractTypes: ["DIGITMATCH"],
+        barriers: [],
+        lockedBarrier: this.config.digit,
+        marketMode: this.marketMode,
+        lockedSymbol:
+          this.marketMode === "locked" ? this.selectedSymbol : undefined,
       },
+      prism,
+      nexus: prism,
     };
   }
 }

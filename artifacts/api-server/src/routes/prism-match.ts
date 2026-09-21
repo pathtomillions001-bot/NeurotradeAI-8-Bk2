@@ -1,45 +1,45 @@
 import { Router, type Response } from "express";
 import { logger } from "../lib/logger";
-import { parseNexusScan, parseNexusStart } from "../lib/match-nexus-policy";
+import { parsePrismScan, parsePrismStart } from "../lib/prism-match-policy";
 import {
   getStatus,
-  NexusRequestError,
-  scanForNexus,
+  PrismRequestError,
+  scanForPrism,
   startSession,
   stopSession,
-} from "../lib/match-nexus-engine";
+} from "../lib/prism-match-engine";
 
 const router = Router();
 function fail(res: Response, error: unknown): void {
-  if (error instanceof NexusRequestError) {
+  if (error instanceof PrismRequestError) {
     res.status(error.status).json({ error: error.message });
     return;
   }
-  logger.error({ err: error }, "Match Nexus request failed");
+  logger.error({ err: error }, "Match Prism request failed");
   res
     .status(500)
     .json({
       error:
-        "Nexus could not complete this request. No new deployment was authorized; please retry.",
+        "Prism could not complete this request. No new deployment was authorized; please retry.",
     });
 }
 router.get("/status", (_req, res) => {
   res.json(getStatus());
 });
 router.post("/scan", async (req, res): Promise<void> => {
-  const parsed = parseNexusScan(req.body);
+  const parsed = parsePrismScan(req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;
   }
   try {
-    res.json(await scanForNexus(parsed.value));
+    res.json(await scanForPrism(parsed.value));
   } catch (err) {
     fail(res, err);
   }
 });
 router.post("/start", async (req, res): Promise<void> => {
-  const parsed = parseNexusStart(req.body);
+  const parsed = parsePrismStart(req.body);
   if (!parsed.ok) {
     res.status(400).json({ error: parsed.error });
     return;

@@ -1,5 +1,5 @@
 /** Local CPU benchmark only. Synthetic streams are NOT evidence of market profitability. */
-import { evaluateNexus, NexusModel } from "../src/lib/match-nexus-analysis";
+import { evaluatePrism, PrismModel } from "../src/lib/prism-match-analysis";
 
 let seed = 20260920;
 function rng(): number {
@@ -15,19 +15,19 @@ const risk = {
   activity: "balanced" as const,
 };
 // Warm the JIT before reporting latencies.
-evaluateNexus(
+evaluatePrism(
   Array.from({ length: 1000 }, () => Math.floor(rng() * 10)),
   risk,
 );
 const began = performance.now();
 const analyses = Array.from({ length: 19 }, () =>
-  evaluateNexus(
+  evaluatePrism(
     Array.from({ length: 4999 }, () => Math.floor(rng() * 10)),
     risk,
   ),
 );
 const scanMs = performance.now() - began;
-const model = new NexusModel();
+const model = new PrismModel();
 for (let i = 0; i < 2000; i++) model.observe(Math.floor(rng() * 10));
 const timings: number[] = [];
 for (let i = 0; i < 10_000; i++) {

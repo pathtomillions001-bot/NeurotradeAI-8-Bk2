@@ -82,6 +82,8 @@ export interface BotDefinition {
    * /surge endpoints, never the generic specialist route.
    */
   surge?: boolean;
+  /** Over/Under Navigator: four user-selected normal/recovery barriers. */
+  navigator?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -97,6 +99,39 @@ export interface BotDefinition {
 }
 
 export const BOT_CATALOG: BotDefinition[] = [
+  {
+    id: "overunder-navigator",
+    name: "Over/Under Navigator",
+    code: "BOT-NAVIGATOR",
+    family: "barrier",
+    navigator: true,
+    contractLabel: "Custom Over / Under → custom recovery",
+    tagline: "Your digits. A frozen recovery bar. Best shot hunts.",
+    description:
+      "A dedicated Over/Under engine where you choose every barrier: normal Over and Under digits plus separate recovery Over and Under digits. You can reuse the same digit in both legs, arm one side or both, and lock a market or let recovery hunt across digit markets. Four independent statistical lenses are fused with a calibrated log opinion pool, while recovery selection prices loss-pair risk and never hardens after a recovery loss.",
+    edge: [
+      "Separate normal and recovery contracts — Over 1 / Under 8 can recover as Over 6 / Under 3, or the same digit can be used for both",
+      "Order-1/2 digit Markov, band-state Markov, censored hole hazard and decayed suffix memory fused in a calibrated logarithmic opinion pool",
+      "Normal timing uses a soft quantile pacing valve; it is a budget, not a stack of hard vetoes",
+      "Recovery radar scores both selected recovery sides every tick with expected value minus loss-pair risk",
+      "The recovery bar is each contract's static fair probability — the current recovery step can never tighten it",
+      "Switching mode hunts other digit markets when the locked tape has no qualifying recovery setup; locked mode waits on the selected market",
+      "Walk-forward scan reports unseen normal hits, recovery hits, loss pairs and time in debt before deployment",
+    ],
+    accent: "fuchsia",
+    icon: "crosshair",
+    hasSides: true,
+    primaryLabel: "Over",
+    secondaryLabel: "Under",
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Over & Under", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Score both armed sides and let the policy time the best one" },
+      { id: "primary", label: "Over only", contracts: ["DIGITOVER"], desc: "Normal and recovery can still use your selected Over barriers" },
+      { id: "secondary", label: "Under only", contracts: ["DIGITUNDER"], desc: "Normal and recovery can still use your selected Under barriers" },
+    ],
+    nominalWinRate: "measured walk-forward",
+    nominalPayout: "barrier quote",
+  },
   {
     id: "apex",
     name: "Echo Apex",
@@ -537,6 +572,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.bastion) return "bastion@1";
   if (bot.parityForge) return "parity-forge@1";
   if (bot.surge) return "surge@1";
+  if (bot.navigator) return "overunder-navigator@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

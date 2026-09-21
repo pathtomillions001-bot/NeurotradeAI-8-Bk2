@@ -23,6 +23,8 @@ export const WEB_CONSOLE_IDS = [
   "apex@1",
   /** Barrier Bastion — recovery-first Over/Under bands (Over 1 / Under 8 → Over 3 / Under 6). */
   "bastion@1",
+  /** Over/Under Navigator — configurable normal/recovery digit bands. */
+  "overunder-navigator@1",
   /** Parity Forge — Even/Odd parity specialist with recovery-first intelligence. */
   "parity-forge@1",
   /** Vector Surge — Rise/Fall momentum specialist with recovery-first intelligence. */

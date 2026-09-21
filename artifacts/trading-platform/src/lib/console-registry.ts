@@ -11,6 +11,7 @@
  */
 
 import type { ComponentType } from "react";
+import { ApexConsole } from "@/components/apex-console";
 import { BotConsole } from "@/components/bot-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
@@ -28,6 +29,7 @@ export interface BotConsoleProps {
 
 /** Every console this build can render, keyed by its contract id. */
 export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProps>> = {
+  "apex@1": ApexConsole,
   "specialist@1": BotConsole,
   "dual-lock@1": DualLockConsole,
   "killshot@1": KillShotConsole,

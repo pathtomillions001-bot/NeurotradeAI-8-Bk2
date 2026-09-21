@@ -23,6 +23,7 @@ import { WEB_CONSOLE_IDS } from "./console-contract.js";
  * here — in the web build that would render it — rather than in production.
  */
 const API_CONSOLE_IDS = [
+  "apex@1",
   "specialist@1",
   "dual-lock@1",
   "killshot@1",
@@ -79,7 +80,7 @@ describe("consoleSkew", () => {
   });
 
   it("names every bot a stale bundle cannot render", () => {
-    // A bundle one revision behind on the Dual-Lock console.
+    // A bundle one revision behind on the Echo Apex and Dual-Lock consoles.
     const deployedBundleConsoles = [
       "specialist@1",
       "killshot@1",
@@ -87,6 +88,7 @@ describe("consoleSkew", () => {
     ];
     const skew = consoleSkew(
       [
+        { id: "apex", name: "Echo Apex", console: "apex@1" },
         { id: "duallock", name: "Dual-Lock Range Sentinel", console: "dual-lock@1" },
         { id: "killshot", name: "Kill-Shot Oracle", console: "killshot@1" },
       ],
@@ -97,9 +99,9 @@ describe("consoleSkew", () => {
     assert.equal(skew.skewed, true);
     assert.deepEqual(
       skew.bots.map(entry => entry.name),
-      ["Dual-Lock Range Sentinel"],
+      ["Echo Apex", "Dual-Lock Range Sentinel"],
     );
-    assert.deepEqual(skew.missing, ["dual-lock@1"]);
+    assert.deepEqual(skew.missing, ["apex@1", "dual-lock@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {

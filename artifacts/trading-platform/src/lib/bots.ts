@@ -43,6 +43,8 @@ export interface BotCardData {
   oneShot?: boolean;
   /** Kill-Shot Oracle variants that own a whole contract family. */
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
+  /** Echo Apex — the institutional Matches engine. */
+  apex?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -53,7 +55,43 @@ export interface BotCardData {
   session: BotSessionStatus | null;
 }
 
+export interface ApexDeployedStatus {
+  symbol: string;
+  displayName: string;
+  digit: number;
+  verdict: string;
+  confidence: number;
+  edgePerDollar: number;
+  hitRate: number;
+  shots: number;
+  breakEven: number;
+  payout: number;
+  fireRate: number;
+}
+
+export interface ApexWatchStatus {
+  phase: "watching" | "armed" | "firing" | "settling";
+  digit: number;
+  p: number;
+  bar: number;
+  reason: string;
+  switched: boolean;
+  confidence: number;
+  verdict: string;
+  ticksWatched: number;
+  fireRate: number;
+  topDigits: Array<{ digit: number; p: number }>;
+  echoLags: Array<{ lag: number; rate: number }>;
+  heatDigit: number;
+  heatRatio: number;
+  memoryOrder: number;
+}
+
 export interface BotSessionStatus {
+  /** Echo Apex only: the active (possibly rotated) deployment. */
+  apexDeployed?: ApexDeployedStatus;
+  /** Echo Apex only: live watch state. */
+  apexWatch?: ApexWatchStatus;
   running: boolean;
   botId: string | null;
   botName: string | null;

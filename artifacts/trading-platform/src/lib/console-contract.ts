@@ -19,6 +19,8 @@
  */
 
 export const WEB_CONSOLE_IDS = [
+  /** Echo Apex — institutional Matches engine. */
+  "apex@1",
   /** Legacy specialist suite: sides / digit lock / barrier controls. */
   "specialist@1",
   /** Dual-Lock Range Sentinel — scan once, freeze the pair. */

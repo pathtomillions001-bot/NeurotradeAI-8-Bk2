@@ -54,6 +54,8 @@ export interface LiveBot {
  */
 export function stopPathForBot(botId: string): string {
   switch (botId) {
+    case "apex":
+      return "/api/bots/apex/stop";
     case "duallock":
       return "/api/bots/duallock/stop";
     case "killshot":

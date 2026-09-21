@@ -29,9 +29,11 @@ import * as killshotFamily from "../lib/killshot-family-engine";
 import * as apex from "../lib/apex-engine";
 import * as bastion from "../lib/bastion-engine";
 import * as parityForge from "../lib/parity-forge-engine";
+import * as surge from "../lib/surge-engine";
 import apexRouter from "./apex";
 import bastionRouter from "./bastion";
 import parityForgeRouter from "./parity-forge";
+import surgeRouter from "./surge";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -50,6 +52,7 @@ const router = Router();
 router.use("/apex", apexRouter);
 router.use("/bastion", bastionRouter);
 router.use("/parity-forge", parityForgeRouter);
+router.use("/surge", surgeRouter);
 
 interface ParsedBotBody {
   contractTypes: BotContractType[];
@@ -71,7 +74,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   // Family bots own their own routes; the generic specialist path must never be
   // able to start them with a mismatched config.
-  if (bot.apex || bot.bastion || bot.parityForge || bot.killShotFamily || bot.preLocked || bot.oneShot) {
+  if (bot.apex || bot.bastion || bot.parityForge || bot.surge || bot.killShotFamily || bot.preLocked || bot.oneShot) {
     return { ok: false, error: "This bot is deployed from its own console, not the generic bot endpoint" };
   }
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
@@ -197,6 +200,7 @@ router.get("/", (req, res) => {
   const apx = visibleApexStatus(req.sessionId);
   const bst = visibleBastionStatus(req.sessionId);
   const pfg = visibleParityForgeStatus(req.sessionId);
+  const svg = visibleSurgeStatus(req.sessionId);
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
@@ -205,6 +209,7 @@ router.get("/", (req, res) => {
       if (bot.apex) return { ...bot, console: console_, session: apx.running ? apx : null };
       if (bot.bastion) return { ...bot, console: console_, session: bst.running ? bst : null };
       if (bot.parityForge) return { ...bot, console: console_, session: pfg.running ? pfg : null };
+      if (bot.surge) return { ...bot, console: console_, session: svg.running ? svg : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
       }
@@ -223,6 +228,7 @@ router.get("/", (req, res) => {
       { botId: apex.APEX_BOT_ID, running: apx.running },
       { botId: bastion.BASTION_BOT_ID, running: bst.running },
       { botId: parityForge.PARITY_FORGE_BOT_ID, running: pfg.running },
+      { botId: surge.SURGE_BOT_ID, running: svg.running },
       { botId: status.botId, running: status.running },
     ]),
   });
@@ -708,6 +714,13 @@ function visibleParityForgeStatus(sessionId: string) {
   return { ...status, running: false, sessionId: null, config: undefined, parityForgeDeployed: undefined, parityForgeWatch: undefined };
 }
 
+function visibleSurgeStatus(sessionId: string) {
+  const status = surge.getStatus();
+  const owner = surge.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, surgeDeployed: undefined, surgeWatch: undefined };
+}
+
 router.get("/status", (req, res) => {
   const apx = visibleApexStatus(req.sessionId);
   if (apx.running) { res.json(apx); return; }
@@ -715,6 +728,8 @@ router.get("/status", (req, res) => {
   if (bst.running) { res.json(bst); return; }
   const pfg2 = visibleParityForgeStatus(req.sessionId);
   if (pfg2.running) { res.json(pfg2); return; }
+  const svg2 = visibleSurgeStatus(req.sessionId);
+  if (svg2.running) { res.json(svg2); return; }
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
@@ -834,7 +849,7 @@ router.post("/:botId/stop", (req, res) => {
     res.status(404).json({ error: "Unknown bot" });
     return;
   }
-  if (botDef.apex || botDef.parityForge || botDef.bastion || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
+  if (botDef.apex || botDef.parityForge || botDef.surge || botDef.bastion || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
     res.status(400).json({ error: "This bot is stopped from its own console" });
     return;
   }

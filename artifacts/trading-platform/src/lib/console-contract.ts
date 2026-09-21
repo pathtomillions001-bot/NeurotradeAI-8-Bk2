@@ -25,6 +25,8 @@ export const WEB_CONSOLE_IDS = [
   "bastion@1",
   /** Parity Forge — Even/Odd parity specialist with recovery-first intelligence. */
   "parity-forge@1",
+  /** Vector Surge — Rise/Fall momentum specialist with recovery-first intelligence. */
+  "surge@1",
   /** Legacy specialist suite: sides / digit lock / barrier controls. */
   "specialist@1",
   /** Dual-Lock Range Sentinel — scan once, freeze the pair. */

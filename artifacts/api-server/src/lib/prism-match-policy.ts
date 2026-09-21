@@ -1,17 +1,17 @@
 /** Wire validation and execution invariants. Pure and deliberately testable. */
 import { sameDigitTick, type DigitTick } from "./digit-tape";
-import { NEXUS_PROFILES, type NexusActivity } from "./match-nexus-analysis";
+import { PRISM_PROFILES, type PrismActivity } from "./prism-match-analysis";
 import {
   applyRecoveryStakeLimits,
   calculateBotRecoveryStake,
 } from "./recovery-math";
 
-export const MATCH_NEXUS_BOT_ID = "match-nexus";
-export const MATCH_NEXUS_BOT_NAME = "Match Nexus";
-export const NEXUS_PENDING = "[NEXUS_PENDING]";
-export const NEXUS_SCAN_TTL_MS = 180_000;
-export interface NexusScanInput {
-  activity: NexusActivity;
+export const PRISM_MATCH_BOT_ID = "prism-match";
+export const PRISM_MATCH_BOT_NAME = "Prism Match";
+export const PRISM_PENDING = "[PRISM_PENDING]";
+export const PRISM_SCAN_TTL_MS = 180_000;
+export interface PrismScanInput {
+  activity: PrismActivity;
   digit?: number;
   stake: number;
   stopLoss: number;
@@ -19,7 +19,7 @@ export interface NexusScanInput {
   maxRecoverySteps: number;
   executionMode: "paper" | "live";
 }
-export interface NexusStartInput {
+export interface PrismStartInput {
   scanId: string;
   symbol: string;
   marketMode: "locked" | "switching";
@@ -37,7 +37,7 @@ const money = (x: unknown, min: number) =>
   x <= 1_000_000 &&
   Math.abs(x * 100 - Math.round(x * 100)) < 1e-7;
 
-export function parseNexusScan(raw: unknown): ParseResult<NexusScanInput> {
+export function parsePrismScan(raw: unknown): ParseResult<PrismScanInput> {
   if (!object(raw))
     return { ok: false, error: "A configuration object is required" };
   const allowed = [
@@ -53,11 +53,11 @@ export function parseNexusScan(raw: unknown): ParseResult<NexusScanInput> {
     return {
       ok: false,
       error:
-        "Unsupported setting: Nexus trades only 1-tick DIGITMATCH contracts",
+        "Unsupported setting: Prism trades only 1-tick DIGITMATCH contracts",
     };
   if (
     typeof raw.activity !== "string" ||
-    !Object.hasOwn(NEXUS_PROFILES, raw.activity)
+    !Object.hasOwn(PRISM_PROFILES, raw.activity)
   )
     return { ok: false, error: "activity must be active, balanced or patient" };
   if (
@@ -95,10 +95,10 @@ export function parseNexusScan(raw: unknown): ParseResult<NexusScanInput> {
     return { ok: false, error: "maxRecoverySteps must be an integer 1–10" };
   if (raw.executionMode !== "paper" && raw.executionMode !== "live")
     return { ok: false, error: "Choose paper or live execution explicitly" };
-  return { ok: true, value: raw as unknown as NexusScanInput };
+  return { ok: true, value: raw as unknown as PrismScanInput };
 }
 
-export function parseNexusStart(raw: unknown): ParseResult<NexusStartInput> {
+export function parsePrismStart(raw: unknown): ParseResult<PrismStartInput> {
   if (!object(raw))
     return { ok: false, error: "A deployment object is required" };
   if (
@@ -125,11 +125,11 @@ export function parseNexusStart(raw: unknown): ParseResult<NexusStartInput> {
     return { ok: false, error: "Choose locked or switching AFTER the scan" };
   if (raw.confirmLive !== undefined && typeof raw.confirmLive !== "boolean")
     return { ok: false, error: "confirmLive must be boolean" };
-  return { ok: true, value: raw as unknown as NexusStartInput };
+  return { ok: true, value: raw as unknown as PrismStartInput };
 }
 
 /** Do not inherit applyRecoveryStakeLimits' legacy zero-balance-as-infinity rule. */
-export function nexusStake(input: {
+export function prismStake(input: {
   baseStake: number;
   debt: number;
   payout: number;
@@ -182,7 +182,7 @@ export function nexusStake(input: {
 }
 
 /** Checked again by the pooled transport immediately before socket.send(). */
-export function assertNexusTick(input: {
+export function assertPrismTick(input: {
   analysed: DigitTick;
   current: DigitTick | null | undefined;
   now: number;
@@ -220,6 +220,6 @@ export function assertNexusTick(input: {
 }
 
 /** A same-stake trade is NOT evidence of this intent. Reconcile exact IDs only. */
-export function isNexusPending(reason: string | null | undefined): boolean {
-  return !!reason?.includes(NEXUS_PENDING);
+export function isPrismPending(reason: string | null | undefined): boolean {
+  return !!reason?.includes(PRISM_PENDING);
 }

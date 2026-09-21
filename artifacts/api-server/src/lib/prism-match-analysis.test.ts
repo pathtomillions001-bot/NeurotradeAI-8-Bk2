@@ -1,21 +1,21 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
-  correctNexusEvidence,
-  decideNexus,
-  evaluateNexus,
-  fitNexusCalibration,
-  NexusModel,
-  NEXUS_VERSION,
-  simulateNexusRisk,
-  type NexusPolicy,
-} from "./match-nexus-analysis";
+  correctPrismEvidence,
+  decidePrism,
+  evaluatePrism,
+  fitPrismCalibration,
+  PrismModel,
+  PRISM_VERSION,
+  simulatePrismRisk,
+  type PrismPolicy,
+} from "./prism-match-analysis";
 import {
-  assertNexusTick,
-  nexusStake,
-  parseNexusScan,
-  parseNexusStart,
-} from "./match-nexus-policy";
+  assertPrismTick,
+  prismStake,
+  parsePrismScan,
+  parsePrismStart,
+} from "./prism-match-policy";
 import { DigitTape, mergeLiveDigitHistory } from "./digit-tape";
 import {
   calculateBotRecoveryStake,
@@ -37,18 +37,18 @@ const risk = {
   maxStake: 100,
   markupPercent: 10,
 };
-const policy: NexusPolicy = {
-  version: NEXUS_VERSION,
+const policy: PrismPolicy = {
+  version: PRISM_VERSION,
   activity: "balanced",
   calibration: 1,
-  threshold: 0.005,
+  threshold: 0.002,
   fittedTicks: 1000,
 };
 const config = { ...risk, activity: "balanced" as const };
 
-describe("Nexus causal multiclass model", () => {
+describe("Prism causal multiclass model", () => {
   it("starts at a normalized 10% baseline and predict() is read-only", () => {
-    const model = new NexusModel();
+    const model = new PrismModel();
     const first = model.predict();
     assert.equal(first.samples, 0);
     first.probabilities.forEach((p) => assert.ok(Math.abs(p - 0.1) < 1e-12));
@@ -61,18 +61,18 @@ describe("Nexus causal multiclass model", () => {
     );
   });
   it("learns a next-digit Markov process, not the digit already observed", () => {
-    const model = new NexusModel();
+    const model = new PrismModel();
     for (let i = 0; i < 4000; i++) model.observe(i % 10);
     const next = model.predict();
-    assert.equal(decideNexus(next, policy).digit, 0);
+    assert.equal(decidePrism(next, policy).digit, 0);
     model.observe(0);
-    assert.equal(decideNexus(model.predict(), policy).digit, 1);
+    assert.equal(decidePrism(model.predict(), policy).digit, 1);
     assert.ok(model.predict().probabilities[1]! > 0.6);
   });
   it("repeated digits are genuine new evidence and a zero gap is NOT an entry veto", () => {
-    const model = new NexusModel();
+    const model = new PrismModel();
     for (let i = 0; i < 600; i++) model.observe(7);
-    const decision = decideNexus(model.predict(), policy);
+    const decision = decidePrism(model.predict(), policy);
     assert.equal(model.samples, 600);
     assert.equal(model.predict().gaps[7], 0);
     assert.equal(decision.digit, 7);
@@ -80,7 +80,7 @@ describe("Nexus causal multiclass model", () => {
   });
   it("normalizes all ten digits and keeps finite uncertainty after multiple ring rollovers", () => {
     const rng = random(42),
-      model = new NexusModel();
+      model = new PrismModel();
     for (let i = 0; i < 10_000; i++) {
       model.observe(Math.floor(rng() * 10));
       if (i % 211 !== 0) continue;
@@ -98,18 +98,18 @@ describe("Nexus causal multiclass model", () => {
     }
   });
   it("rejects invalid digits instead of joining contexts across missing observations", () => {
-    const model = new NexusModel();
+    const model = new PrismModel();
     for (const digit of [NaN, Infinity, -1, 10, 2.5])
       assert.throws(() => model.observe(digit), /integers/);
     assert.throws(
-      () => evaluateNexus([...Array(500).fill(1), NaN], config),
+      () => evaluatePrism([...Array(500).fill(1), NaN], config),
       /valid/,
     );
   });
   it("is exactly reproducible on identical prefixes", () => {
     const rng = random(8),
-      a = new NexusModel(),
-      b = new NexusModel();
+      a = new PrismModel(),
+      b = new PrismModel();
     for (let i = 0; i < 1000; i++) {
       const digit = Math.floor(rng() * 10);
       a.observe(digit);
@@ -124,11 +124,11 @@ describe("Nexus causal multiclass model", () => {
   });
 });
 
-describe("Nexus walk-forward measurement and non-stacked entries", () => {
+describe("Prism walk-forward measurement and non-stacked entries", () => {
   it("backs off on a seeded IID tape rather than inventing accuracy or enforcing a trade quota", () => {
     const rng = random(900),
       digits = Array.from({ length: 4999 }, () => Math.floor(rng() * 10));
-    const result = evaluateNexus(digits, config);
+    const result = evaluatePrism(digits, config);
     assert.equal(result.policy.calibration, 0);
     assert.equal(result.decision.ready, false);
     assert.equal(result.validation.shots, 0);
@@ -140,12 +140,12 @@ describe("Nexus walk-forward measurement and non-stacked entries", () => {
   it("does not call a collection of fair tapes supported", () => {
     const results = Array.from({ length: 8 }, (_, i) => {
       const rng = random(i * 171 + 42);
-      return evaluateNexus(
+      return evaluatePrism(
         Array.from({ length: 1600 }, () => Math.floor(rng() * 10)),
         config,
       );
     });
-    correctNexusEvidence(results);
+    correctPrismEvidence(results);
     assert.ok(results.every((r) => r.validation.evidence !== "supported"));
   });
   it("finds planted predictive structure without starving entries behind proof/gap gates", () => {
@@ -155,7 +155,7 @@ describe("Nexus walk-forward measurement and non-stacked entries", () => {
       last = rng() < 0.6 ? (last + 1) % 10 : Math.floor(rng() * 10);
       return last;
     });
-    const result = evaluateNexus(digits, config);
+    const result = evaluatePrism(digits, config);
     assert.ok(result.validation.shots > 200);
     assert.ok(result.validation.hitRate! > 0.4);
     assert.ok(result.validation.brierSkill > 0.1);
@@ -167,8 +167,8 @@ describe("Nexus walk-forward measurement and non-stacked entries", () => {
       prefix = Array.from({ length: 2400 }, () =>
         rng() < 0.25 ? 7 : Math.floor(rng() * 10),
       );
-    const a = evaluateNexus([...prefix, ...Array(1600).fill(7)], config);
-    const b = evaluateNexus([...prefix, ...Array(1600).fill(2)], config);
+    const a = evaluatePrism([...prefix, ...Array(1600).fill(7)], config);
+    const b = evaluatePrism([...prefix, ...Array(1600).fill(2)], config);
     assert.deepEqual(
       a.policy,
       b.policy,
@@ -178,42 +178,42 @@ describe("Nexus walk-forward measurement and non-stacked entries", () => {
     assert.equal(a.validation.testTicks, 1600);
   });
   it("keeps a named digit sovereign across normal, recovery and model preference", () => {
-    const model = new NexusModel();
+    const model = new PrismModel();
     for (let i = 0; i < 1000; i++) model.observe(7);
     assert.equal(
-      decideNexus(model.predict(), { ...policy, digit: 2 }).digit,
+      decidePrism(model.predict(), { ...policy, digit: 2 }).digit,
       2,
     );
     assert.equal(
-      decideNexus(model.predict(), { ...policy, digit: 2 }).ready,
+      decidePrism(model.predict(), { ...policy, digit: 2 }).ready,
       false,
     );
   });
   it("activity waiting relaxes only the pacing preference, NEVER the positive-value floor", () => {
-    const model = new NexusModel();
+    const model = new PrismModel();
     for (let i = 0; i < 1000; i++) model.observe(i % 10);
     const pred = model.predict(0);
-    const decision = decideNexus(
+    const decision = decidePrism(
       pred,
       { ...policy, threshold: 5 },
       8.93,
       10_000,
     );
-    assert.equal(decision.threshold, 0.005);
+    assert.equal(decision.threshold, 0.002);
     assert.equal(decision.ready, false);
     assert.ok(decision.expectedValue < 0);
   });
   it("re-prices the exact same probability against actual payout", () => {
-    const model = new NexusModel();
+    const model = new PrismModel();
     for (let i = 0; i < 800; i++) model.observe(7);
     const pred = model.predict(0.1);
-    assert.equal(decideNexus(pred, policy, 8.93).ready, true);
-    assert.equal(decideNexus(pred, policy, 2).ready, false);
-    assert.throws(() => decideNexus(pred, policy, NaN), /payout/);
+    assert.equal(decidePrism(pred, policy, 8.93).ready, true);
+    assert.equal(decidePrism(pred, policy, 2).ready, false);
+    assert.throws(() => decidePrism(pred, policy, NaN), /payout/);
   });
   it("adjusts cross-market evidence without introducing an extra execution gate", () => {
     const rng = random(900),
-      result = evaluateNexus(
+      result = evaluatePrism(
         Array.from({ length: 600 }, () => Math.floor(rng() * 10)),
         config,
       );
@@ -225,7 +225,7 @@ describe("Nexus walk-forward measurement and non-stacked entries", () => {
         evPerStake: 0.1,
       },
     }));
-    correctNexusEvidence(rows);
+    correctPrismEvidence(rows);
     assert.equal(rows[0]!.validation.adjustedEvidenceP, 0.06);
     assert.equal(rows[0]!.validation.evidence, "developing");
   });
@@ -234,11 +234,11 @@ describe("Nexus walk-forward measurement and non-stacked entries", () => {
       ps: [0.55, ...Array(9).fill(0.05)],
       outcome: i % 10,
     }));
-    assert.equal(fitNexusCalibration(rows), 0);
+    assert.equal(fitPrismCalibration(rows), 0);
   });
 });
 
-describe("Nexus recovery and scenario math", () => {
+describe("Prism recovery and scenario math", () => {
   it("uses the existing Matches debt/markup formula including the $0.35 floor", () => {
     for (const debt of [1, 3.45, 12, 41.23]) {
       const args = {
@@ -251,7 +251,7 @@ describe("Nexus recovery and scenario math", () => {
         remainingStop: 500,
       };
       assert.equal(
-        nexusStake(args),
+        prismStake(args),
         applyRecoveryStakeLimits(
           calculateBotRecoveryStake(debt, MATCH_PAYOUT, 10),
           500,
@@ -260,7 +260,7 @@ describe("Nexus recovery and scenario math", () => {
       );
     }
     assert.equal(
-      nexusStake({
+      prismStake({
         baseStake: 1,
         debt: 1,
         payout: MATCH_PAYOUT,
@@ -283,22 +283,22 @@ describe("Nexus recovery and scenario math", () => {
       remainingStop: 5,
     };
     for (const balance of [0, 0.34, -1, NaN, Infinity])
-      assert.throws(() => nexusStake({ ...args, balance }));
-    assert.throws(() => nexusStake({ ...args, remainingStop: 0.349 }));
-    assert.throws(() => nexusStake({ ...args, debt: 0, remainingStop: 0.5 }));
-    assert.equal(nexusStake({ ...args, debt: 50, remainingStop: 0.37 }), 0.37);
+      assert.throws(() => prismStake({ ...args, balance }));
+    assert.throws(() => prismStake({ ...args, remainingStop: 0.349 }));
+    assert.throws(() => prismStake({ ...args, debt: 0, remainingStop: 0.5 }));
+    assert.equal(prismStake({ ...args, debt: 50, remainingStop: 0.37 }), 0.37);
   });
   it("posterior-predictive risk is deterministic, bounded and labelled as a scenario", () => {
     const shots = Array.from({ length: 100 }, (_, i) => Number(i % 8 === 0));
-    const a = simulateNexusRisk(shots, { ...risk, payout: 8.93 }, 7);
-    const b = simulateNexusRisk(shots, { ...risk, payout: 8.93 }, 7);
+    const a = simulatePrismRisk(shots, { ...risk, payout: 8.93 }, 7);
+    const b = simulatePrismRisk(shots, { ...risk, payout: 8.93 }, 7);
     assert.deepEqual(a, b);
     assert.ok(a.stopProbability >= 0 && a.stopProbability <= 1);
     assert.ok(a.targetProbability + a.stopProbability <= 1);
     assert.ok(a.pnl05 <= a.pnl50 && a.pnl50 <= a.pnl95);
     assert.ok(a.pnl05 >= -risk.stopLoss);
     assert.match(a.note, /not a guarantee/);
-    const losses = simulateNexusRisk(
+    const losses = simulatePrismRisk(
       Array(100).fill(0),
       { ...risk, payout: 8.93 },
       7,
@@ -307,7 +307,7 @@ describe("Nexus recovery and scenario math", () => {
   });
 });
 
-describe("Nexus wire and tick authorization", () => {
+describe("Prism wire and tick authorization", () => {
   const input = {
     activity: "balanced",
     stake: 1,
@@ -317,31 +317,31 @@ describe("Nexus wire and tick authorization", () => {
     executionMode: "paper",
   };
   it("validates finite risk, integer digits and explicit paper/live mode", () => {
-    assert.equal(parseNexusScan(input).ok, true);
+    assert.equal(parsePrismScan(input).ok, true);
     for (const value of [NaN, Infinity, -1, 0, 0.349, 1.001])
-      assert.equal(parseNexusScan({ ...input, stake: value }).ok, false);
+      assert.equal(parsePrismScan({ ...input, stake: value }).ok, false);
     for (const value of [-1, 10, 0.5, "7", null])
-      assert.equal(parseNexusScan({ ...input, digit: value }).ok, false);
-    assert.equal(parseNexusScan({ ...input, digit: 0 }).ok, true);
-    assert.equal(parseNexusScan({ ...input, activity: "__proto__" }).ok, false);
+      assert.equal(parsePrismScan({ ...input, digit: value }).ok, false);
+    assert.equal(parsePrismScan({ ...input, digit: 0 }).ok, true);
+    assert.equal(parsePrismScan({ ...input, activity: "__proto__" }).ok, false);
     assert.equal(
-      parseNexusScan({ ...input, executionMode: undefined }).ok,
+      parsePrismScan({ ...input, executionMode: undefined }).ok,
       false,
     );
-    assert.equal(parseNexusScan({ ...input, stake: 11 }).ok, false);
+    assert.equal(parsePrismScan({ ...input, stake: 11 }).ok, false);
   });
   it("rejects contract widening, client model cards and pre-scan market modes", () => {
     assert.equal(
-      parseNexusScan({ ...input, contractType: "DIGITDIFF" }).ok,
+      parsePrismScan({ ...input, contractType: "DIGITDIFF" }).ok,
       false,
     );
-    assert.equal(parseNexusScan({ ...input, marketMode: "locked" }).ok, false);
+    assert.equal(parsePrismScan({ ...input, marketMode: "locked" }).ok, false);
     const start = {
       scanId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
       symbol: "R_100",
       marketMode: "locked",
     };
-    assert.equal(parseNexusStart(start).ok, true);
+    assert.equal(parsePrismStart(start).ok, true);
     for (const key of [
       "card",
       "stake",
@@ -350,9 +350,9 @@ describe("Nexus wire and tick authorization", () => {
       "lockedSymbol",
       "analysis",
     ])
-      assert.equal(parseNexusStart({ ...start, [key]: 1 }).ok, false);
+      assert.equal(parsePrismStart({ ...start, [key]: 1 }).ok, false);
     assert.equal(
-      parseNexusStart({ ...start, marketMode: undefined }).ok,
+      parsePrismStart({ ...start, marketMode: undefined }).ok,
       false,
     );
   });
@@ -372,7 +372,7 @@ describe("Nexus wire and tick authorization", () => {
     push(104);
     assert.equal(tape.snapshot("R_100")!.tick.sequence, 3);
     const tick = tape.snapshot("R_100")!.tick;
-    assertNexusTick({
+    assertPrismTick({
       analysed: tick,
       current: tick,
       now: 104_100,
@@ -384,7 +384,7 @@ describe("Nexus wire and tick authorization", () => {
     push(106);
     assert.throws(
       () =>
-        assertNexusTick({
+        assertPrismTick({
           analysed: tick,
           current: tape.snapshot("R_100")!.tick,
           now: 106_100,
@@ -399,7 +399,7 @@ describe("Nexus wire and tick authorization", () => {
     const fake = tape.snapshot("R_100")!.tick;
     assert.throws(
       () =>
-        assertNexusTick({
+        assertPrismTick({
           analysed: fake,
           current: fake,
           now: 107_100,
@@ -432,18 +432,18 @@ describe("Nexus wire and tick authorization", () => {
       owns: true,
     };
     assert.throws(
-      () => assertNexusTick({ ...input, stopped: true }),
+      () => assertPrismTick({ ...input, stopped: true }),
       /stopped/,
     );
     assert.throws(
-      () => assertNexusTick({ ...input, owns: false }),
+      () => assertPrismTick({ ...input, owns: false }),
       /ownership/,
     );
     assert.throws(
-      () => assertNexusTick({ ...input, now: 100_900 }),
+      () => assertPrismTick({ ...input, now: 100_900 }),
       /headroom/,
     );
-    assert.throws(() => assertNexusTick({ ...input, now: 99_000 }), /headroom/);
+    assert.throws(() => assertPrismTick({ ...input, now: 99_000 }), /headroom/);
   });
   it("merges broker and live histories by epoch without losing repeats or duplicating overlap", () => {
     const tape = new DigitTape(5);

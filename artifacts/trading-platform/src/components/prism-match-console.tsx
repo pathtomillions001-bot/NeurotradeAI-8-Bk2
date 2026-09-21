@@ -34,20 +34,20 @@ import { withTabSession } from "@/lib/tab-session";
 import type { BotConsoleProps } from "@/lib/console-registry";
 import type { BotSessionStatus } from "@/lib/bots";
 import {
-  canDeployNexus,
-  nexusDeployBody,
-  nexusMoney as money,
-  nexusPercent as pct,
-  type NexusActivity,
-  type NexusConfig,
-  type NexusPrediction,
-  type NexusRisk,
-  type NexusScanView,
-  type NexusValidation,
-} from "@/lib/match-nexus";
+  canDeployPrism,
+  prismDeployBody,
+  prismMoney as money,
+  prismPercent as pct,
+  type PrismActivity,
+  type PrismConfig,
+  type PrismPrediction,
+  type PrismRisk,
+  type PrismScanView,
+  type PrismValidation,
+} from "@/lib/prism-match";
 
 type Step = "configure" | "scanning" | "results" | "session";
-const PROFILES: Array<{ id: NexusActivity; label: string; copy: string }> = [
+const PROFILES: Array<{ id: PrismActivity; label: string; copy: string }> = [
   {
     id: "active",
     label: "Active",
@@ -64,7 +64,7 @@ const PROFILES: Array<{ id: NexusActivity; label: string; copy: string }> = [
     copy: "Larger uncertainty discount. More selective.",
   },
 ];
-const BASE = "/api/bots/match-nexus";
+const BASE = "/api/bots/prism-match";
 async function request<T>(
   path: string,
   body?: unknown,
@@ -81,7 +81,7 @@ async function request<T>(
     signal,
   });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? "Nexus request failed");
+  if (!response.ok) throw new Error(data.error ?? "Prism request failed");
   return data as T;
 }
 const ms = (n: number | null | undefined) =>
@@ -135,7 +135,7 @@ function DigitDistribution({
   prediction,
   selected,
 }: {
-  prediction: NexusPrediction | null;
+  prediction: PrismPrediction | null;
   selected: number | null;
 }) {
   const max = Math.max(0.15, ...(prediction?.probabilities ?? []));
@@ -192,7 +192,7 @@ function DigitDistribution({
     </div>
   );
 }
-function Evidence({ validation: v }: { validation: NexusValidation }) {
+function Evidence({ validation: v }: { validation: PrismValidation }) {
   return (
     <div className={`${panel} p-4 space-y-4`}>
       <div className="flex items-center justify-between gap-2">
@@ -246,7 +246,7 @@ function Evidence({ validation: v }: { validation: NexusValidation }) {
     </div>
   );
 }
-function RiskScenario({ risk }: { risk: NexusRisk }) {
+function RiskScenario({ risk }: { risk: PrismRisk }) {
   return (
     <details className={`${panel} group p-4`}>
       <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs text-slate-300">
@@ -274,7 +274,7 @@ function RiskScenario({ risk }: { risk: NexusRisk }) {
   );
 }
 
-export function MatchNexusConsole({
+export function PrismMatchConsole({
   bot,
   open,
   onOpenChange,
@@ -282,7 +282,7 @@ export function MatchNexusConsole({
   onSession,
 }: BotConsoleProps) {
   const [step, setStep] = useState<Step>("configure");
-  const [activity, setActivity] = useState<NexusActivity>("balanced");
+  const [activity, setActivity] = useState<PrismActivity>("balanced");
   const [digit, setDigit] = useState("auto");
   const [executionMode, setExecutionMode] = useState<"paper" | "live">("paper");
   const [fields, setFields] = useState({
@@ -291,7 +291,7 @@ export function MatchNexusConsole({
     takeProfit: "10",
     maxRecoverySteps: "3",
   });
-  const [scan, setScan] = useState<NexusScanView | null>(null);
+  const [scan, setScan] = useState<PrismScanView | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState("");
   const [marketMode, setMarketMode] = useState<"locked" | "switching">(
     "locked",
@@ -326,7 +326,7 @@ export function MatchNexusConsole({
   }, [settings]);
   const applyStatus = useCallback(
     (value: BotSessionStatus | null) => {
-      if (value?.botId !== "match-nexus") return;
+      if (value?.botId !== "prism-match") return;
       setLive(value);
       onSession(value);
       if (value.running) setStep("session");
@@ -334,7 +334,7 @@ export function MatchNexusConsole({
     [onSession],
   );
   useEffect(() => {
-    if (session?.botId === "match-nexus") {
+    if (session?.botId === "prism-match") {
       setLive(session);
       if (session.running) setStep("session");
     }
@@ -367,7 +367,7 @@ export function MatchNexusConsole({
     es.addEventListener("bot_scan_progress", (event: MessageEvent) => {
       try {
         const value = JSON.parse(event.data);
-        if (value.botId === "match-nexus" && !dead)
+        if (value.botId === "prism-match" && !dead)
           setProgress({
             scanned: value.scanned,
             total: value.total,
@@ -386,7 +386,7 @@ export function MatchNexusConsole({
     };
   }, [open, applyStatus]);
 
-  const config = (): NexusConfig => ({
+  const config = (): PrismConfig => ({
     activity,
     executionMode,
     ...(digit === "auto" ? {} : { digit: Number(digit) }),
@@ -410,7 +410,7 @@ export function MatchNexusConsole({
       scanning: "Preparing source-verified history",
     });
     try {
-      const result = await request<NexusScanView>(
+      const result = await request<PrismScanView>(
         "scan",
         config(),
         controller.current.signal,
@@ -440,12 +440,12 @@ export function MatchNexusConsole({
     try {
       const result = await request<{ status: BotSessionStatus }>(
         "start",
-        nexusDeployBody(scan, selectedSymbol, marketMode, confirmLive),
+        prismDeployBody(scan, selectedSymbol, marketMode, confirmLive),
       );
       applyStatus(result.status);
       setStep("session");
       toast.success(
-        `Match Nexus deployed in ${scan.config.executionMode} mode`,
+        `Prism Match deployed in ${scan.config.executionMode} mode`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Deployment failed");
@@ -473,7 +473,7 @@ export function MatchNexusConsole({
     }
   };
   const selected = scan?.markets.find((m) => m.symbol === selectedSymbol);
-  const telemetry = live?.nexus;
+  const telemetry = live?.prism;
   const expired = !!scan && scan.expiresAt <= now;
   const restart = () => {
     setStep("configure");
@@ -512,7 +512,7 @@ export function MatchNexusConsole({
             </div>
             <div>
               <p className="font-mono text-[9px] uppercase tracking-[0.25em] text-lime-300/65">
-                NEXUS / MATCHES LAB
+                PRISM / MATCHES LAB
               </p>
               <DialogTitle className="mt-1 text-xl font-semibold tracking-tight text-slate-50">
                 {bot.name}
@@ -526,7 +526,7 @@ export function MatchNexusConsole({
             </span>
           </div>
           <DialogDescription className="sr-only">
-            Configure and scan Match Nexus, then choose a locked or switching
+            Configure and scan Prism Match, then choose a locked or switching
             market. Trading and recovery are risky; probabilities and historical
             results are not guarantees.
           </DialogDescription>
@@ -617,13 +617,13 @@ export function MatchNexusConsole({
                   </fieldset>
                   <div>
                     <label
-                      htmlFor="nexus-digit"
+                      htmlFor="prism-digit"
                       className="mb-2 block text-xs text-slate-300"
                     >
                       Target digit
                     </label>
                     <select
-                      id="nexus-digit"
+                      id="prism-digit"
                       value={digit}
                       onChange={(e) => setDigit(e.target.value)}
                       className="h-10 w-full rounded-lg border border-white/10 bg-[#101723] px-3 text-xs text-slate-200 outline-none focus:border-lime-300/40"
@@ -696,13 +696,13 @@ export function MatchNexusConsole({
                     ).map(([key, name, min, increment]) => (
                       <div key={key}>
                         <label
-                          htmlFor={`nexus-${key}`}
+                          htmlFor={`prism-${key}`}
                           className="mb-2 block text-[11px] text-slate-400"
                         >
                           {name}
                         </label>
                         <Input
-                          id={`nexus-${key}`}
+                          id={`prism-${key}`}
                           required
                           type="number"
                           min={min}
@@ -784,7 +784,7 @@ export function MatchNexusConsole({
                 <div>
                   <p className={labelClass}>Scan complete</p>
                   <h3 className="mt-1 text-lg text-white">
-                    Choose where Nexus works.
+                    Choose where Prism works.
                   </h3>
                   <p className="mt-1 text-[11px] text-slate-500">
                     {scan.markets.length} measured / {scan.marketsScanned}{" "}
@@ -969,7 +969,7 @@ export function MatchNexusConsole({
                       onClick={() => void handleDeploy()}
                       disabled={
                         loading ||
-                        !canDeployNexus(scan, selected, now, confirmLive)
+                        !canDeployPrism(scan, selected, now, confirmLive)
                       }
                       className="gap-2 bg-lime-300 text-slate-950 hover:bg-lime-200"
                     >
@@ -1019,7 +1019,7 @@ export function MatchNexusConsole({
                   <div>
                     <h3 className="text-lg text-white">
                       {live.running
-                        ? "Nexus is on watch."
+                        ? "Prism is on watch."
                         : "Session complete."}
                     </h3>
                     <p className="mt-1 font-mono text-[10px] text-slate-500">

@@ -23,7 +23,7 @@ import { WEB_CONSOLE_IDS } from "./console-contract.js";
  * here — in the web build that would render it — rather than in production.
  */
 const API_CONSOLE_IDS = [
-  "match-nexus@1",
+  "prism-match@1",
   "specialist@1",
   "dual-lock@1",
   "killshot@1",
@@ -82,7 +82,7 @@ describe("consoleSkew", () => {
   it("names every bot a stale bundle cannot render", () => {
     // A bundle one revision behind on the Dual-Lock console.
     const deployedBundleConsoles = [
-      "match-nexus@1",
+      "prism-match@1",
       "specialist@1",
       "killshot@1",
       "killshot-family@1",

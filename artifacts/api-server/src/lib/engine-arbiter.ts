@@ -31,7 +31,7 @@
 
 import { getBrowserSessionId } from "./session";
 
-export type TradingOwner = "autonomous" | "neuroai" | "bots" | "match-nexus";
+export type TradingOwner = "autonomous" | "neuroai" | "bots" | "prism-match";
 
 const ownersBySession = new Map<string, TradingOwner>();
 
@@ -76,6 +76,6 @@ export function hasTradingOwnership(owner: TradingOwner, sessionId?: string): bo
 export function tradingOwnerLabel(owner: TradingOwner): string {
   if (owner === "autonomous") return "main autonomous engine";
   if (owner === "neuroai") return "NeuroAI FAB session";
-  if (owner === "match-nexus") return "Match Nexus session";
+  if (owner === "prism-match") return "Prism Match session";
   return "specialist AI bot";
 }

@@ -1,7 +1,7 @@
-/** Nexus's small JSON contract; model cards stay server-side. Probabilities are 0–1. */
-export type NexusActivity = "active" | "balanced" | "patient";
-export interface NexusConfig {
-  activity: NexusActivity;
+/** Prism's small JSON contract; model cards stay server-side. Probabilities are 0–1. */
+export type PrismActivity = "active" | "balanced" | "patient";
+export interface PrismConfig {
+  activity: PrismActivity;
   digit?: number;
   stake: number;
   stopLoss: number;
@@ -9,7 +9,7 @@ export interface NexusConfig {
   maxRecoverySteps: number;
   executionMode: "paper" | "live";
 }
-export interface NexusPrediction {
+export interface PrismPrediction {
   probabilities: number[];
   sigma: number[];
   gaps: number[];
@@ -18,7 +18,7 @@ export interface NexusPrediction {
   contextSamples: number;
   experts: Array<{ name: string; weight: number; probabilities: number[] }>;
 }
-export interface NexusDecision {
+export interface PrismDecision {
   digit: number;
   p: number;
   sigma: number;
@@ -31,7 +31,7 @@ export interface NexusDecision {
   ready: boolean;
   reason: string;
 }
-export interface NexusValidation {
+export interface PrismValidation {
   trainTicks: number;
   testTicks: number;
   shots: number;
@@ -50,7 +50,7 @@ export interface NexusValidation {
   adjustedEvidenceP: number;
   evidence: "supported" | "developing" | "unproven";
 }
-export interface NexusRisk {
+export interface PrismRisk {
   paths: number;
   horizon: number;
   sampleShots: number;
@@ -62,36 +62,36 @@ export interface NexusRisk {
   drawdown95: number;
   note: string;
 }
-export interface NexusMarketView {
+export interface PrismMarketView {
   symbol: string;
   displayName: string;
   source: "live" | "simulated";
   historySource: "broker" | "buffer" | "simulated";
   samples: number;
   deployable: boolean;
-  prediction: NexusPrediction;
-  decision: NexusDecision;
-  validation: NexusValidation;
-  risk: NexusRisk;
+  prediction: PrismPrediction;
+  decision: PrismDecision;
+  validation: PrismValidation;
+  risk: PrismRisk;
   analysisMs: number;
   warnings: string[];
   calibration: number;
   payoutSource: "indicative";
 }
-export interface NexusScanView {
+export interface PrismScanView {
   scanId: string;
   version: string;
   createdAt: number;
   expiresAt: number;
-  config: NexusConfig;
+  config: PrismConfig;
   riskSettings: { maxStake: number; markupPercent: number };
   elapsedMs: number;
   marketsScanned: number;
-  markets: NexusMarketView[];
+  markets: PrismMarketView[];
   omitted: Array<{ symbol: string; reason: string }>;
   note: string;
 }
-export interface NexusTelemetry {
+export interface PrismTelemetry {
   phase:
     | "watching"
     | "quoting"
@@ -101,14 +101,14 @@ export interface NexusTelemetry {
     | "stopped";
   executionMode: "paper" | "live";
   marketMode: "locked" | "switching";
-  activity: NexusActivity;
+  activity: PrismActivity;
   source: string;
   symbol: string;
   digit: number | null;
-  prediction: NexusPrediction | null;
-  decision: NexusDecision | null;
-  validation: NexusValidation | null;
-  risk: NexusRisk | null;
+  prediction: PrismPrediction | null;
+  decision: PrismDecision | null;
+  validation: PrismValidation | null;
+  risk: PrismRisk | null;
   stopRequested: boolean;
   pendingContractId: string | null;
   ticksObserved: number;
@@ -140,28 +140,28 @@ export interface NexusTelemetry {
   }>;
 }
 
-export const nexusPercent = (
+export const prismPercent = (
   p: number | null | undefined,
   digits = 1,
 ): string =>
   p === null || p === undefined || !Number.isFinite(p)
     ? "—"
     : `${(p * 100).toFixed(digits)}%`;
-export const nexusMoney = (value: number): string =>
+export const prismMoney = (value: number): string =>
   `${value < 0 ? "−" : ""}$${Math.abs(value).toFixed(2)}`;
 
 /** Keep the post-scan mode choice and server-owned capability explicit. */
-export function nexusDeployBody(
-  scan: Pick<NexusScanView, "scanId">,
+export function prismDeployBody(
+  scan: Pick<PrismScanView, "scanId">,
   symbol: string,
   marketMode: "locked" | "switching",
   confirmLive = false,
 ) {
   return { scanId: scan.scanId, symbol, marketMode, confirmLive };
 }
-export function canDeployNexus(
-  scan: NexusScanView | null,
-  selected: NexusMarketView | undefined,
+export function canDeployPrism(
+  scan: PrismScanView | null,
+  selected: PrismMarketView | undefined,
   now: number,
   confirmLive: boolean,
 ): boolean {

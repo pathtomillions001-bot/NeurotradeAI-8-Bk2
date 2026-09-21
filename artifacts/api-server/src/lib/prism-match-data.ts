@@ -7,13 +7,13 @@ import {
 } from "./deriv";
 import { mergeLiveDigitHistory } from "./digit-tape";
 import {
-  evaluateNexus,
-  NEXUS_HISTORY,
-  NEXUS_MIN_HISTORY,
-  type NexusRiskInput,
-} from "./match-nexus-analysis";
-import type { NexusScanInput } from "./match-nexus-policy";
-import type { NexusMarket } from "./match-nexus-runner";
+  evaluatePrism,
+  PRISM_HISTORY,
+  PRISM_MIN_HISTORY,
+  type PrismRiskInput,
+} from "./prism-match-analysis";
+import type { PrismScanInput } from "./prism-match-policy";
+import type { PrismMarket } from "./prism-match-runner";
 
 interface CachedHistory {
   fetchedAt: number;
@@ -42,7 +42,7 @@ async function brokerHistory(
     const response = await tickManager.request(
       {
         ticks_history: symbol,
-        count: NEXUS_HISTORY,
+        count: PRISM_HISTORY,
         end: "latest",
         style: "ticks",
       },
@@ -91,24 +91,24 @@ async function brokerHistory(
   return task;
 }
 
-export async function loadNexusMarket(
+export async function loadPrismMarket(
   symbol: string,
-  config: NexusScanInput,
-  risk: NexusRiskInput,
-): Promise<NexusMarket | null> {
+  config: PrismScanInput,
+  risk: PrismRiskInput,
+): Promise<PrismMarket | null> {
   const market = AUTOMATED_DERIV_MARKETS.find(
     (m) => m.symbol === symbol && m.digitEnabled,
   );
   if (!market) return null;
-  let snapshot = tickManager.getDigitSnapshot(symbol, NEXUS_HISTORY);
+  let snapshot = tickManager.getDigitSnapshot(symbol, PRISM_HISTORY);
   if (!snapshot) return null;
   let digits = snapshot.ticks.map((t) => t.digit);
-  let historySource: NexusMarket["historySource"] =
+  let historySource: PrismMarket["historySource"] =
     snapshot.tick.source === "live" ? "buffer" : "simulated";
   if (snapshot.tick.source === "live") {
     const generation = snapshot.tick.generation;
     const history = await brokerHistory(symbol, generation, market.pipSize);
-    snapshot = tickManager.getDigitSnapshot(symbol, NEXUS_HISTORY);
+    snapshot = tickManager.getDigitSnapshot(symbol, PRISM_HISTORY);
     if (
       !snapshot ||
       snapshot.tick.source !== "live" ||
@@ -123,17 +123,17 @@ export async function loadNexusMarket(
         snapshot.ticks[0]!.epoch - tickSecondsFor(symbol) * 3
     ) {
       try {
-        digits = mergeLiveDigitHistory(history.rows, snapshot, NEXUS_HISTORY);
+        digits = mergeLiveDigitHistory(history.rows, snapshot, PRISM_HISTORY);
         historySource = "broker";
       } catch {
         /* explicit buffer-only provenance; never patch conflicting data */
       }
     }
   }
-  if (digits.length < NEXUS_MIN_HISTORY) return null;
+  if (digits.length < PRISM_MIN_HISTORY) return null;
   // Yield between markets; there is no CPU-heavy full-history fit on the tick path.
   await new Promise<void>((resolve) => setImmediate(resolve));
-  const evaluated = evaluateNexus(digits, {
+  const evaluated = evaluatePrism(digits, {
     ...risk,
     activity: config.activity,
     digit: config.digit,

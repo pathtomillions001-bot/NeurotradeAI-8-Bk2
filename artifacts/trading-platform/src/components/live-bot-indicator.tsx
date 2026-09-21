@@ -25,7 +25,6 @@ import { useEffect, useRef, useState } from "react";
 import { Bot, X, StopCircle, Zap, Cpu } from "lucide-react";
 import { toast } from "sonner";
 import {
-  isPaperBot,
   stopPathForBot,
   stopBodyForBot,
   openPathForBot,
@@ -84,7 +83,6 @@ export function LiveBotIndicator({ compact = false, live }: { compact?: boolean;
   const bot = running;
   const s = bot.status;
   const masked = s.masked === true;
-  const paper = isPaperBot(s);
   const name = s.botName ?? bot.botName;
   const metric = masked ? null : metricFor(s);
   const openPath = openPathForBot(bot.botId);
@@ -132,7 +130,7 @@ export function LiveBotIndicator({ compact = false, live }: { compact?: boolean;
           <span className="absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60 animate-ping" />
           <span className="relative inline-flex rounded-full h-2 w-2 bg-green-400" />
         </span>
-        <span className="text-[10px] font-semibold text-white/90 truncate max-w-[110px]">{paper ? `${name} · paper` : name}</span>
+        <span className="text-[10px] font-semibold text-white/90 truncate max-w-[110px]">{name}</span>
         {metric && (
           <span className={`text-[10px] font-mono font-bold ${metric.positive ? "text-green-400" : "text-red-400"}`}>
             {metric.text}
@@ -150,7 +148,7 @@ export function LiveBotIndicator({ compact = false, live }: { compact?: boolean;
       </span>
       <div className="min-w-0">
         <p className="text-[8px] uppercase tracking-wider text-muted-foreground flex items-center gap-1 leading-none">
-          <EngineIcon botId={bot.botId} className="w-2.5 h-2.5" /> {paper ? "Paper Engine" : "Live Engine"}
+          <EngineIcon botId={bot.botId} className="w-2.5 h-2.5" /> Live Engine
         </p>
         <p className="text-[11px] font-semibold text-white truncate max-w-[170px] mt-0.5">{name}</p>
       </div>

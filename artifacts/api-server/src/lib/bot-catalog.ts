@@ -55,8 +55,12 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
-  /** Dedicated causal Matches-only engine, not the generic specialist route. */
-  matchNexus?: boolean;
+  /**
+   * Echo Apex: the institutional Matches engine (echo spectrum, Hawkes heat,
+   * suffix memory, log-pool fusion, pacing valve). Deploys from its own
+   * console and its own /apex endpoints, never the generic specialist route.
+   */
+  apex?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -73,31 +77,31 @@ export interface BotDefinition {
 
 export const BOT_CATALOG: BotDefinition[] = [
   {
-    id: "match-nexus",
-    name: "Match Nexus",
-    code: "BOT-NEXUS",
+    id: "apex",
+    name: "Echo Apex",
+    code: "BOT-APEX",
     family: "match",
-    matchNexus: true,
+    apex: true,
     contractLabel: "Matches only",
-    tagline: "One tick ahead. Evidence, not guesswork.",
+    tagline: "Repeat rhythm, measured. No gates, just edge.",
     description:
-      "A dedicated Matches engine that learns all ten digits together. Scan first, then lock your chosen market or allow measured switching. Incremental Markov and frequency models compete on past predictive performance; a single payout-aware rule balances entry quality and activity. Paper-first, with honest held-out results and your existing debt-driven Matches recovery.",
+      "The institutional Matches engine. It listens to each market's repeat rhythm through three independent lenses — a 48-lag echo spectrum, a fitted Hawkes heat process and a decaying suffix memory — fuses them in a logarithmic opinion pool, and fires on a pacing budget instead of a stack of vetoes. Scan first, then lock your market or let it migrate to the best-measured edge. Normal and recovery contracts are always Matches, on the shared debt-driven ledger.",
     edge: [
-      "Six online experts: fair baseline, slow/fast frequency, first/second-order Markov and empirical renewal — absence alone never makes a digit due",
-      "Causal walk-forward validation of the complete digit-selection policy; training-only calibration and cross-market evidence correction",
-      "Active / Balanced / Patient pacing with one positive-value entry rule — no entropy, gap or FDR gate stack",
-      "Tick-driven updates, pooled quotes, send-time freshness checks and one outstanding order; a timeout never triggers a duplicate purchase",
-      "Seeded posterior-predictive recovery stress test, uncertainty bands and measured latency — estimates, never guaranteed accuracy",
-      "Locked or switching selected AFTER the scan; normal and recovery contracts are always DIGITMATCH",
+      "48-lag echo spectrum with per-lag sample sizes — digits are tilted by their own characteristic repeat rhythm, up AND down",
+      "Hawkes self-excitation fit per market by maximum likelihood — reads which digit is hot RIGHT NOW and how fast heat decays here",
+      "Decayed longest-match suffix memory (orders 1–5): what followed this exact context every time it printed before",
+      "Logarithmic opinion pool with skill-weighted lenses + temperature calibration — agreement across lenses is what makes a shot safe",
+      "Pacing valve, zero vetoes: the bar holds the budgeted fire rate (Brisk/Steady/Patient) instead of filtering trades through gate stacks",
+      "Honest held-out measurement — every parameter fits on the first 60% of history and the verdict replays the exact live policy on the final 40%",
     ],
     accent: "lime",
-    icon: "zap",
+    icon: "activity",
     hasSides: false,
     hasDigitLock: true,
-    digitLockHelp: "Let the causal model compare all ten digits, or name a digit. Market locking is a separate choice after analysis.",
+    digitLockHelp: "Let the AI pick the hottest digit per market, or lock one digit and let the valve time it.",
     sides: [{ id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "One digit, one tick — Matches in normal and recovery mode" }],
-    nominalWinRate: "10% fair baseline",
-    nominalPayout: "≈8.93×",
+    nominalWinRate: "measured held-out",
+    nominalPayout: "8.93×",
   },
   {
     id: "parity",
@@ -408,7 +412,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.matchNexus) return "match-nexus@1";
+  if (bot.apex) return "apex@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

@@ -45,6 +45,8 @@ export interface BotCardData {
   killShotFamily?: "overunder" | "parity" | "matchdiffer";
   /** Echo Apex — the institutional Matches engine. */
   apex?: boolean;
+  /** Barrier Bastion: recovery-first Over/Under bands (own console + routes). */
+  bastion?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -87,11 +89,50 @@ export interface ApexWatchStatus {
   memoryOrder: number;
 }
 
+export interface BastionDeployedStatus {
+  symbol: string;
+  displayName: string;
+  verdict: string;
+  confidence: number;
+  paperEdgePerDollar: number;
+  normalHitRate: number;
+  normalShots: number;
+  recoveryHitRate: number;
+  recoveryShots: number;
+  recoveryLossPairs: number;
+  breakEvenNormal: number;
+  breakEvenRecovery: number;
+}
+
+export interface BastionWatchStatus {
+  phase: "watching" | "armed" | "firing" | "settling" | "hunting";
+  mode: "normal" | "recovery";
+  sideLabel: string;
+  altLabel: string;
+  p: number;
+  altP: number;
+  bar: number;
+  ready: boolean;
+  pairRisk: number;
+  qLL: number;
+  lenses: [number, number, number, number];
+  recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
+  reason: string;
+  switched: boolean;
+  ticksWatched: number;
+  confidence: number;
+  verdict: string;
+}
+
 export interface BotSessionStatus {
   /** Echo Apex only: the active (possibly rotated) deployment. */
   apexDeployed?: ApexDeployedStatus;
   /** Echo Apex only: live watch state. */
   apexWatch?: ApexWatchStatus;
+  /** Barrier Bastion only: the measured card it deployed. */
+  bastionDeployed?: BastionDeployedStatus;
+  /** Barrier Bastion only: live band/recovery watch state. */
+  bastionWatch?: BastionWatchStatus;
   running: boolean;
   botId: string | null;
   botName: string | null;

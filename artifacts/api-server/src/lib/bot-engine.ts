@@ -38,6 +38,7 @@ import { friendlyErrorMessage } from "./friendly-error";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { registerBotEngine, runningOtherEngines } from "./engine-registry";
 import { resolveRecoveryPayout } from "./recovery-payout";
 import * as recoveryEngine from "./agents/recovery-engine";
 import {
@@ -277,10 +278,22 @@ export function stopSession() {
   logger.info({ botId: session.config?.botId }, "Specialist bot session stopped");
 }
 
+registerBotEngine("specialist", () => ({ running: session.running, name: "Specialist AI bot" }));
+
 export async function startSession(config: BotConfig): Promise<{ ok: boolean; error?: string }> {
   if (session.running) {
     return { ok: false, error: "A specialist bot session is already active — stop it first" };
   }
+
+  // ── One executing bot engine at a time (protects the single ledger) ──
+  const otherEngines = runningOtherEngines("specialist");
+  if (otherEngines.length > 0) {
+    return {
+      ok: false,
+      error: `${otherEngines[0].name} is already trading on this account. Stop it first — one engine at a time owns the shared recovery ledger.`,
+    };
+  }
+
 
   // ── Single-executor guard (shared with the FAB and the autonomous engine) ──
   if (!acquireTradingOwnership("bots")) {

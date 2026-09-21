@@ -46,6 +46,7 @@ import { friendlyErrorMessage } from "./friendly-error";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { registerBotEngine, runningOtherEngines } from "./engine-registry";
 import { resolveRecoveryPayout } from "./recovery-payout";
 import * as recoveryEngine from "./agents/recovery-engine";
 import {
@@ -408,6 +409,8 @@ export function getOwnerSessionId(): string | null {
   return session.config?.ownerSessionId ?? null;
 }
 
+registerBotEngine("killshot-family", () => ({ running: session.running, name: "Kill-Shot family bot" }));
+
 export function isRunning(): boolean {
   return session.running;
 }
@@ -547,6 +550,16 @@ export async function scanForFamily(
 
 export async function startSession(config: FamilyConfig): Promise<{ ok: boolean; error?: string }> {
   if (session.running) return { ok: false, error: "A Kill-Shot family bot is already active — stop it first" };
+
+  // ── One executing bot engine at a time (protects the single ledger) ──
+  const otherEngines = runningOtherEngines("killshot-family");
+  if (otherEngines.length > 0) {
+    return {
+      ok: false,
+      error: `${otherEngines[0].name} is already trading on this account. Stop it first — one engine at a time owns the shared recovery ledger.`,
+    };
+  }
+
 
   if (!acquireTradingOwnership("bots")) {
     const owner = currentTradingOwner();

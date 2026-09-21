@@ -1,12 +1,18 @@
 /**
- * Echo Apex console — the institutional Matches engine.
+ * Barrier Bastion console — the recovery-first Over/Under engine.
  *
  * Flow mirrors the other dedicated consoles (config → scan → lock/switch →
- * live), but every panel is tailored to this bot: ONE fixed pace mode (the
- * most permissive trade budget — no modes to chase), echo-lag / heat / memory
- * diagnostics instead of generic scores, and a live watch that shows the
- * pacing valve's bar against the fused probability in real time. Zero hard
- * gates: the pacing budget is the ONLY selectivity.
+ * live), but every panel is specific to this bot:
+ *
+ *  - the BAND RULER: the 0–9 digit line with the four frozen bands drawn on it
+ *    (Over 1 / Under 8 outer normal bands, Over 3 / Under 6 inner recovery
+ *    bands, and the {4,5} double-win overlap where BOTH recovery sides win);
+ *  - the RECOVERY RADAR: both recovery sides scored every tick with fused
+ *    probability, pair-risk and utility — the bot fires the better one;
+ *  - the NO-RATCHET badge: the recovery bar is printed as a frozen constant so
+ *    the user can SEE it never hardens after a loss.
+ *
+ * There is no pace selector: one mode, one budget, no gates to chase.
  */
 
 import { useState, useEffect, useCallback } from "react";
@@ -14,7 +20,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, RefreshCw, ChevronLeft, X, Lock,
-  Shuffle, ShieldCheck,
+  Shuffle, ShieldCheck, LockKeyhole,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -25,42 +31,44 @@ import { withTabSession } from "@/lib/tab-session";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
 type Verdict = "prime" | "viable" | "thin";
+type SideMode = "both" | "over" | "under";
 
 interface Candidate {
   symbol: string;
   displayName: string;
-  digit: number;
   verdict: Verdict;
   confidence: number;
-  edgePerDollar: number;
-  hitRate: number;
-  hitRateLower: number;
-  shots: number;
-  fireRate: number;
-  breakEven: number;
-  payout: number;
+  paperEdgePerDollar: number;
+  normalHitRate: number;
+  normalShots: number;
+  normalHits: number;
+  recoveryHitRate: number;
+  recoveryShots: number;
+  recoveryHits: number;
+  recoveryLossPairs: number;
+  recoveryLosses: number;
+  avgTicksInRecovery: number;
+  fireRatePer100: number;
+  breakEvenNormal: number;
+  breakEvenRecovery: number;
   params: any;
   diag: {
-    echoLags: Array<{ lag: number; rate: number; z: number }>;
-    heatDigit: number;
-    heatRatio: number;
-    memoryOrder: number;
-    memorySamples: number;
-    weights: [number, number, number];
+    weights: [number, number, number, number];
     tau: number;
-    fireRate: number;
-    brierSkill: number;
+    normalInitBar: number;
     historyUsed: number;
+    qLL: { over3: number; under6: number };
+    fireRatePer100: number;
   };
   thinData: boolean;
 }
+
 interface ScanResult {
   suitable: boolean;
   best: Candidate | null;
   bestAvailable: Candidate | null;
   allScored: Candidate[];
   reason: string;
-  pace: string;
   marketsScanned: number;
   historyDepth: number;
 }
@@ -71,8 +79,11 @@ const VERDICT_TONE: Record<Verdict, string> = {
   thin: "text-amber-300 bg-amber-500/10 border-amber-500/30",
 };
 
-/** The bot's ONE mode — shown as a fact, never as a choice. */
-const PACE_HINT = "Fast · ~6 shots / 100 ticks";
+const SIDE_MODES: Array<{ id: SideMode; label: string; hint: string }> = [
+  { id: "both", label: "Over 1 & Under 8", hint: "AI picks the leaning side" },
+  { id: "over", label: "Over 1 only", hint: "normal band: 2–9" },
+  { id: "under", label: "Under 8 only", hint: "normal band: 0–7" },
+];
 
 function NumInput({ label: lbl, value, onChange, min, step = 1, suffix, accent }: {
   label: string; value: number; onChange: (v: number) => void;
@@ -103,9 +114,56 @@ function Stat({ label: lbl, value, tone }: { label: string; value: string; tone?
   );
 }
 
-const ALL_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+/**
+ * THE signature visual: the 0–9 digit line with the frozen bands on it.
+ * Outer row = normal bands (Over 1 / Under 8). Inner row = recovery bands
+ * (Over 3 / Under 6) with the {4,5} double-win overlap hatched.
+ */
+function BandRuler({ live, accent }: {
+  live?: { over1?: number; under8?: number; over3?: number; under6?: number };
+  accent: AccentKey;
+}) {
+  const a = ACCENTS[accent];
+  const strong = (v?: number) => (v !== undefined && v >= 0.6 ? "ring-1 ring-green-400/80" : "");
+  return (
+    <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-2.5 space-y-1.5`}>
+      <div className="flex items-center justify-between">
+        <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">Band map · 0–9</p>
+        <p className="text-[8px] text-muted-foreground/60 font-mono">■ win · {"{4,5}"} double-win</p>
+      </div>
+      <div className="grid grid-cols-10 gap-[3px]">
+        {Array.from({ length: 10 }, (_, d) => {
+          const isOver1 = d >= 2;
+          const isUnder8 = d <= 7;
+          const isOver3 = d >= 4;
+          const isUnder6 = d <= 5;
+          const overlap = isOver3 && isUnder6;
+          return (
+            <div key={d} className="space-y-[3px]">
+              <div className={`h-3.5 rounded-[3px] ${isOver1 ? "bg-sky-400/70" : "bg-black/40"} ${strong(live?.over1)}`}
+                   title={`Over 1 ${isOver1 ? "wins" : "loses"} on ${d}`} />
+              <div className={`h-3.5 rounded-[3px] ${isUnder8 ? "bg-indigo-400/70" : "bg-black/40"} ${strong(live?.under8)}`}
+                   title={`Under 8 ${isUnder8 ? "wins" : "loses"} on ${d}`} />
+              <div className={`h-3.5 rounded-[3px] ${isOver3 ? (overlap ? "bg-emerald-400/90" : "bg-emerald-400/50") : "bg-black/40"} ${strong(live?.over3)}`}
+                   title={`Over 3 ${isOver3 ? "wins" : "loses"} on ${d}`} />
+              <div className={`h-3.5 rounded-[3px] ${isUnder6 ? (overlap ? "bg-emerald-400/90" : "bg-teal-400/50") : "bg-black/40"} ${strong(live?.under6)}`}
+                   title={`Under 6 ${isUnder6 ? "wins" : "loses"} on ${d}`} />
+              <p className="text-[9px] font-mono text-center text-muted-foreground/80">{d}</p>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-x-3 gap-y-0.5 pt-0.5 text-[8px] text-muted-foreground/70">
+        <span><span className="inline-block w-2 h-2 rounded-[2px] bg-sky-400/70 mr-1" />Over 1</span>
+        <span><span className="inline-block w-2 h-2 rounded-[2px] bg-indigo-400/70 mr-1" />Under 8</span>
+        <span><span className="inline-block w-2 h-2 rounded-[2px] bg-emerald-400/50 mr-1" />Over 3</span>
+        <span><span className="inline-block w-2 h-2 rounded-[2px] bg-teal-400/50 mr-1" />Under 6</span>
+      </div>
+    </div>
+  );
+}
 
-export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
+export function BastionConsole({ bot, open, onOpenChange, session, onSession }: {
   bot: BotCardData | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -120,8 +178,7 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
   });
   const { data: settings } = useGetSettings();
 
-  const [aiDigit, setAiDigit] = useState(true);
-  const [digit, setDigit] = useState<number>(7);
+  const [sideMode, setSideMode] = useState<SideMode>("both");
   const [marketMode, setMarketMode] = useState<"locked" | "switching">("locked");
   const [config, setConfig] = useState({ stake: 1, takeProfit: 10, stopLoss: 5, maxRecoverySteps: 3 });
   const set = <K extends keyof typeof config>(k: K, v: number) =>
@@ -185,16 +242,14 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
   const a = ACCENTS[bot.accent];
   const Icon = BOT_ICON[bot.icon] ?? ScanSearch;
 
-  const buildBody = () => {
-    // No pace is sent: Echo Apex runs its single Fast mode server-side.
-    const body: Record<string, unknown> = { ...config };
-    if (!aiDigit) body.digit = digit;
-    return body;
-  };
+  const buildBody = () => ({
+    sideMode,
+    ...config,
+  });
 
-  const scanEndpoint = "/api/bots/apex/scan";
-  const startEndpoint = "/api/bots/apex/start";
-  const stopEndpoint = "/api/bots/apex/stop";
+  const scanEndpoint = "/api/bots/bastion/scan";
+  const startEndpoint = "/api/bots/bastion/start";
+  const stopEndpoint = "/api/bots/bastion/stop";
 
   const handleScan = async () => {
     setLoading(true);
@@ -239,8 +294,8 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
       setStep("running");
       toast.success(
         mode === "locked"
-          ? `🔒 Locked on ${c.displayName} — digit rotates, market won't`
-          : `🔁 Deployed on ${c.displayName} — migrates to better edges`,
+          ? `🔒 Locked on ${c.displayName} — recovery holds this market`
+          : `🔁 Deployed on ${c.displayName} — recovery hunts all markets`,
       );
     } catch {
       toast.error("Could not start the bot");
@@ -260,44 +315,53 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
   const profit = session?.totalProfit ?? 0;
   const winRate = session && session.tradeCount > 0
     ? Math.round((session.winCount / session.tradeCount) * 100) : 0;
-  const watch = session?.apexWatch;
-  const apexDeployed = session?.apexDeployed;
+  const watch = session?.bastionWatch;
+  const bastionDeployed = session?.bastionDeployed;
+  const inRecovery = session?.inRecovery === true;
 
   const CandidateCard = ({ c }: { c: Candidate }) => (
     <div className={`rounded-xl border ${VERDICT_TONE[c.verdict]} p-3 space-y-2`}>
       <div className="flex items-center justify-between">
-        <p className="text-[11px] font-bold text-white">
-          {c.displayName} · <span className="text-white/80">Matches {c.digit}</span>
-        </p>
+        <p className="text-[11px] font-bold text-white">{c.displayName}</p>
         <span className="text-[10px] font-mono font-bold uppercase">{c.verdict}</span>
       </div>
-      <p className="text-[10px] text-muted-foreground leading-relaxed">
-        Measured <span className="font-mono text-white/80">{(c.hitRate * 100).toFixed(0)}%</span> over{" "}
-        <span className="font-mono text-white/80">{c.shots}</span> unseen shots (break-even{" "}
-        <span className="font-mono text-white/80">{(c.breakEven * 100).toFixed(1)}%</span>) — expectancy{" "}
-        <span className={`font-mono font-bold ${c.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
-          {c.edgePerDollar >= 0 ? "+" : ""}{(c.edgePerDollar * 100).toFixed(1)}%
-        </span>{" "}
-        per $1 · {(c.fireRate * 100).toFixed(1)} shots/100 ticks · confidence {c.confidence}/100
-      </p>
-      <div className="grid grid-cols-3 gap-1.5">
-        <Stat label="Echo lags" value={c.diag.echoLags.slice(0, 3).map(l => `${l.lag}@${(l.rate * 100).toFixed(0)}%`).join(" ") || "—"} />
-        <Stat label="Heat" value={`${c.diag.heatDigit} ×${c.diag.heatRatio.toFixed(1)}`} />
-        <Stat label="Memory" value={c.diag.memoryOrder > 0 ? `ord ${c.diag.memoryOrder} · ${Math.round(c.diag.memorySamples)}n` : "fair"} />
+      <div className="grid grid-cols-2 gap-1.5">
+        <Stat label="Recovery hits" value={`${(c.recoveryHitRate * 100).toFixed(0)}% / ${c.recoveryShots} shots`}
+              tone={c.recoveryHitRate >= 0.6 ? "text-green-400" : "text-amber-300"} />
+        <Stat label="Loss pairs" value={`${c.recoveryLossPairs} of ${c.recoveryLosses}`}
+              tone={c.recoveryLossPairs === 0 ? "text-green-400" : "text-amber-300"} />
+        <Stat label="Normal hits" value={`${(c.normalHitRate * 100).toFixed(0)}% / ${c.normalShots}`} />
+        <Stat label="Avg ticks in debt" value={c.avgTicksInRecovery > 0 ? c.avgTicksInRecovery.toFixed(1) : "—"} />
       </div>
+      <p className="text-[10px] text-muted-foreground leading-relaxed">
+        Paper expectancy{" "}
+        <span className={`font-mono font-bold ${c.paperEdgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
+          {c.paperEdgePerDollar >= 0 ? "+" : ""}{(c.paperEdgePerDollar * 100).toFixed(1)}%
+        </span>{" "}
+        per $1 · bars {(c.breakEvenNormal * 100).toFixed(1)}% / {(c.breakEvenRecovery * 100).toFixed(1)}% break-even ·{" "}
+        confidence {c.confidence}/100
+      </p>
       <div className="flex items-center gap-1.5">
         <span className="text-[8px] uppercase tracking-wider text-muted-foreground/60">lens mix</span>
         <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-black/40 flex">
-          <div className="bg-lime-400" style={{ width: `${c.diag.weights[0] * 100}%` }} title="echo" />
-          <div className="bg-orange-400" style={{ width: `${c.diag.weights[1] * 100}%` }} title="hawkes" />
-          <div className="bg-sky-400" style={{ width: `${c.diag.weights[2] * 100}%` }} title="suffix" />
+          <div className="bg-sky-400" style={{ width: `${c.diag.weights[0] * 100}%` }} title="digit markov" />
+          <div className="bg-emerald-400" style={{ width: `${c.diag.weights[1] * 100}%` }} title="band markov" />
+          <div className="bg-amber-400" style={{ width: `${c.diag.weights[2] * 100}%` }} title="hole hazard" />
+          <div className="bg-fuchsia-400" style={{ width: `${c.diag.weights[3] * 100}%` }} title="suffix" />
         </div>
         <span className="text-[8px] font-mono text-muted-foreground/70">
-          {(c.diag.weights[0] * 100).toFixed(0)}/{(c.diag.weights[1] * 100).toFixed(0)}/{(c.diag.weights[2] * 100).toFixed(0)}
+          {c.diag.weights.map(w => (w * 100).toFixed(0)).join("/")}
         </span>
       </div>
     </div>
   );
+
+  const liveBands = watch ? {
+    over1: watch.sideLabel === "Over 1" ? watch.p : undefined,
+    under8: watch.sideLabel === "Under 8" ? watch.p : undefined,
+    over3: watch.recoveryRadar.find(r => r.label === "Over 3")?.p,
+    under6: watch.recoveryRadar.find(r => r.label === "Under 6")?.p,
+  } : undefined;
 
   return (
     <AnimatePresence>
@@ -337,47 +401,34 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
 
             {step === "config" && (
               <div className="p-4 space-y-4">
-                <div className={`rounded-lg px-2.5 py-2 border ${a.panelBorder} ${a.panelBg}`}>
-                  <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60">Single mode — nothing to configure</p>
-                  <p className={`text-sm font-bold ${a.text}`}>Fast trade budget · {PACE_HINT}</p>
-                  <p className="text-[10px] text-muted-foreground mt-1 leading-relaxed">
-                    One mode, most trades. Zero hard gates — the pacing valve is the only
-                    selectivity, and nothing tightens after a loss.
+                <BandRuler accent={bot.accent} />
+
+                <div className="space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                    Normal band side · recovery always picks the best of Over 3 / Under 6
                   </p>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {SIDE_MODES.map(s => (
+                      <button key={s.id} onClick={() => setSideMode(s.id)}
+                        className={`px-2 py-2 rounded-lg text-center transition-colors ${
+                          sideMode === s.id ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
+                            : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
+                        <span className="block text-[11px] font-semibold">{s.label}</span>
+                        <span className="block text-[8px] text-muted-foreground/70">{s.hint}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
-                <button onClick={() => setAiDigit(v => !v)}
-                  className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11px] text-left transition-colors ${
-                    aiDigit ? `${a.activeBg} border ${a.activeBorder}` : "bg-white/[0.03] border border-white/5"}`}>
-                  <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${
-                    aiDigit ? `${a.dot} border-transparent` : "border-white/20"}`}>
-                    {aiDigit && <span className="text-[8px] text-black font-bold">✓</span>}
-                  </span>
-                  <span className={aiDigit ? a.text : "text-muted-foreground"}>
-                    Let the AI pick the hottest digit per market
-                  </span>
-                </button>
-                {!aiDigit && (
-                  <div className="space-y-1.5">
-                    <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">Locked digit</p>
-                    <div className="grid grid-cols-5 gap-1">
-                      {ALL_DIGITS.map(d => (
-                        <button key={d} onClick={() => setDigit(d)}
-                          className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
-                            digit === d ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
-                              : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"}`}>
-                          {d}
-                        </button>
-                      ))}
-                    </div>
+                <div className={`rounded-lg px-2.5 py-2 border ${a.panelBorder} ${a.panelBg} flex items-start gap-2`}>
+                  <LockKeyhole className={`w-3.5 h-3.5 mt-0.5 flex-shrink-0 ${a.text}`} />
+                  <div>
+                    <p className={`text-[11px] font-bold ${a.text}`}>One mode · bars frozen for life</p>
+                    <p className="text-[10px] text-muted-foreground mt-0.5 leading-relaxed">
+                      Normal: Over 1 / Under 8 at 1.23×. Recovery: Over 3 / Under 6 at 1.63×,
+                      fired on the first tilt — the recovery bar NEVER hardens after a loss.
+                    </p>
                   </div>
-                )}
-
-                <div className={`rounded-lg px-2.5 py-2 border ${a.panelBorder} ${a.panelBg}`}>
-                  <p className="text-[9px] uppercase tracking-wider text-muted-foreground/60">Selected</p>
-                  <p className={`text-sm font-bold ${a.text}`}>
-                    Matches {aiDigit ? "(AI picks)" : digit} · Fast single mode
-                  </p>
                 </div>
 
                 <div className="space-y-2">
@@ -390,7 +441,7 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
 
                 <Button onClick={handleScan} disabled={loading}
                         className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                  <ScanSearch className="w-4 h-4 mr-2" /> Scan repeat rhythm
+                  <ScanSearch className="w-4 h-4 mr-2" /> Scan band + recovery quality
                 </Button>
               </div>
             )}
@@ -399,7 +450,7 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
               <div className="p-6 space-y-4 text-center">
                 <Loader2 className={`w-8 h-8 ${a.text} animate-spin mx-auto`} />
                 <div>
-                  <p className="text-sm font-semibold text-white">Fitting rhythm, then replaying unseen ticks</p>
+                  <p className="text-sm font-semibold text-white">Replaying normal + recovery on unseen ticks</p>
                   <p className="text-[11px] text-muted-foreground mt-1">
                     {progress.scanning ? `${progress.scanning}…` : "Preparing…"}
                   </p>
@@ -416,36 +467,19 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
 
             {step === "scan-result" && scanResult && (
               <div className="p-4 space-y-3">
-                {scanResult.best && scanResult.suitable ? (
+                {(scanResult.best ?? scanResult.bestAvailable) ? (
                   <>
-                    <CandidateCard c={scanResult.best} />
+                    <CandidateCard c={(scanResult.best ?? scanResult.bestAvailable)!} />
+                    <BandRuler accent={bot.accent} />
+                    <p className="text-[10px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
                     <div className="space-y-2">
-                      <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
+                      <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "locked")} disabled={loading}
                               className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                        <Lock className="w-4 h-4 mr-2" /> Trade Locked on {scanResult.best.displayName}
+                        <Lock className="w-4 h-4 mr-2" /> Trade Locked on {(scanResult.best ?? scanResult.bestAvailable)!.displayName}
                       </Button>
-                      <Button onClick={() => handleStart(scanResult.best!, "switching")} disabled={loading}
+                      <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "switching")} disabled={loading}
                               variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
-                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Trade with Smart Market Switching
-                      </Button>
-                    </div>
-                  </>
-                ) : scanResult.bestAvailable ? (
-                  <>
-                    <CandidateCard c={scanResult.bestAvailable} />
-                    <p className="text-[10px] text-muted-foreground leading-relaxed">
-                      {scanResult.reason} Starting it is a deliberate choice — the bot keeps
-                      re-measuring and the pacing valve releases shots at its budgeted rate.
-                      No hard gate ever rejects them.
-                    </p>
-                    <div className="space-y-2">
-                      <Button onClick={() => handleStart(scanResult.bestAvailable!, "locked")} disabled={loading}
-                              className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                        <Lock className="w-4 h-4 mr-2" /> Lock {scanResult.bestAvailable.displayName} anyway
-                      </Button>
-                      <Button onClick={() => handleStart(scanResult.bestAvailable!, "switching")} disabled={loading}
-                              variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
-                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Start with Smart Market Switching
+                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching — recovery hunts all markets
                       </Button>
                     </div>
                   </>
@@ -464,9 +498,10 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
                         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
                           c.verdict === "prime" ? "bg-green-400"
                             : c.verdict === "viable" ? "bg-sky-400" : "bg-amber-400"}`} />
-                        <span className="font-medium flex-1 truncate text-white/80">{c.displayName} · M{c.digit}</span>
-                        <span className={`font-mono font-bold ${c.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
-                          {c.edgePerDollar >= 0 ? "+" : ""}{(c.edgePerDollar * 100).toFixed(1)}%
+                        <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
+                        <span className="font-mono text-muted-foreground/70">rec {(c.recoveryHitRate * 100).toFixed(0)}%</span>
+                        <span className={`font-mono font-bold ${c.paperEdgePerDollar >= 0 ? "text-green-400" : "text-red-400"}`}>
+                          {c.paperEdgePerDollar >= 0 ? "+" : ""}{(c.paperEdgePerDollar * 100).toFixed(1)}%
                         </span>
                       </div>
                     ))}
@@ -479,19 +514,21 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
                 </Button>
                 <button onClick={() => setStep("config")}
                         className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1 flex items-center justify-center gap-1">
-                  <ChevronLeft className="w-3 h-3" /> Change digit or risk
+                  <ChevronLeft className="w-3 h-3" /> Change side or risk
                 </button>
               </div>
             )}
 
             {step === "running" && (
               <div className="p-4 space-y-3">
-                <div className={`rounded-xl p-3 border ${isRunning ? `${a.panelBg} ${a.panelBorder}` : "bg-secondary/30 border-border"}`}>
+                <div className={`rounded-xl p-3 border ${isRunning ? (inRecovery ? "bg-amber-500/[0.07] border-amber-500/30" : `${a.panelBg} ${a.panelBorder}`) : "bg-secondary/30 border-border"}`}>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">Session P&amp;L</span>
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                      {inRecovery ? `RECOVERY R${session?.recoveryStep ?? 1}` : "NORMAL BANDS"}
+                    </span>
                     {isRunning ? (
-                      <span className={`flex items-center gap-1 text-[10px] ${a.text}`}>
-                        <span className={`w-1.5 h-1.5 rounded-full ${a.dot} animate-pulse`} />
+                      <span className={`flex items-center gap-1 text-[10px] ${inRecovery ? "text-amber-300" : a.text}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${inRecovery ? "bg-amber-400" : a.dot} animate-pulse`} />
                         {marketMode === "locked" ? "LOCKED" : "SWITCHING"}
                       </span>
                     ) : <span className="text-[10px] text-muted-foreground">STOPPED</span>}
@@ -507,55 +544,79 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
                   </div>
                 </div>
 
-                {apexDeployed && (
+                {bastionDeployed && (
                   <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
                     <div className="flex items-center justify-between">
                       <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
                         {marketMode === "locked" ? "Locked market" : "Active market"}
                       </p>
-                      {watch?.switched && (
-                        <span className="text-[9px] font-mono text-amber-300">↻ rotated</span>
-                      )}
+                      {watch?.switched && <span className="text-[9px] font-mono text-amber-300">↻ migrated</span>}
                     </div>
-                    <p className="text-xs font-bold text-white">{apexDeployed.displayName} · Matches {apexDeployed.digit}</p>
+                    <p className="text-xs font-bold text-white">{bastionDeployed.displayName}</p>
                     <div className="grid grid-cols-2 gap-1.5">
-                      <Stat label="Verdict" value={apexDeployed.verdict.toUpperCase()}
-                            tone={apexDeployed.verdict === "thin" ? "text-amber-300" : "text-green-400"} />
-                      <Stat label="Measured" value={`${(apexDeployed.hitRate * 100).toFixed(0)}% / ${apexDeployed.shots} shots`} />
-                      <Stat label="Expectancy / $1"
-                            value={`${apexDeployed.edgePerDollar >= 0 ? "+" : ""}${(apexDeployed.edgePerDollar * 100).toFixed(1)}%`}
-                            tone={apexDeployed.edgePerDollar >= 0 ? "text-green-400" : "text-red-400"} />
-                      <Stat label="Fire rate" value={`${(apexDeployed.fireRate * 100).toFixed(1)}/100`} />
+                      <Stat label="Recovery hits" value={`${(bastionDeployed.recoveryHitRate * 100).toFixed(0)}% / ${bastionDeployed.recoveryShots}`}
+                            tone={bastionDeployed.recoveryHitRate >= 0.6 ? "text-green-400" : "text-amber-300"} />
+                      <Stat label="Loss pairs" value={`${bastionDeployed.recoveryLossPairs}`} />
+                      <Stat label="Normal hits" value={`${(bastionDeployed.normalHitRate * 100).toFixed(0)}% / ${bastionDeployed.normalShots}`} />
+                      <Stat label="Paper EV / $1"
+                            value={`${bastionDeployed.paperEdgePerDollar >= 0 ? "+" : ""}${(bastionDeployed.paperEdgePerDollar * 100).toFixed(1)}%`}
+                            tone={bastionDeployed.paperEdgePerDollar >= 0 ? "text-green-400" : "text-red-400"} />
                     </div>
                   </div>
                 )}
 
                 {isRunning && watch && (
-                  <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
-                    <div className="flex items-center justify-between">
-                      <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
-                        {watch.phase === "firing" ? "Firing" : watch.phase === "armed" ? "Armed" : watch.phase === "settling" ? "Settling" : "Watching"}
-                      </p>
-                      <span className="text-[9px] font-mono text-muted-foreground/70">
-                        {(watch.p * 100).toFixed(1)}% vs {(watch.bar * 100).toFixed(1)}% bar
-                      </span>
+                  <>
+                    <BandRuler live={liveBands} accent={bot.accent} />
+
+                    <div className={`rounded-xl border ${inRecovery ? "border-amber-500/30 bg-amber-500/[0.06]" : `${a.panelBorder} ${a.panelBg}`} p-3 space-y-2`}>
+                      <div className="flex items-center justify-between">
+                        <p className={`text-[10px] uppercase tracking-widest font-semibold ${inRecovery ? "text-amber-300" : a.text}`}>
+                          {watch.mode === "recovery" ? "Recovery shot" : "Normal shot"} · {watch.sideLabel}
+                        </p>
+                        <span className="text-[9px] font-mono text-muted-foreground/70">
+                          {(watch.p * 100).toFixed(1)}% vs bar {(watch.bar * 100).toFixed(0)}%
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">{watch.reason || "Waiting…"}</p>
+                      <div className="h-2 rounded-full bg-black/40 overflow-hidden">
+                        <div className={`h-full ${watch.ready ? "bg-green-400" : inRecovery ? "bg-amber-400" : a.dot} transition-all duration-500`}
+                             style={{ width: `${Math.max(3, Math.min(100, watch.bar > 0 ? (watch.p / Math.max(watch.bar, 0.01)) * 80 : 0))}%` }} />
+                      </div>
+
+                      {/* RECOVERY RADAR — both sides scored, every tick */}
+                      {watch.recoveryRadar.length > 0 && (
+                        <div className="space-y-1 pt-1 border-t border-white/5">
+                          <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70">Recovery radar</p>
+                          {watch.recoveryRadar.map(r => (
+                            <div key={r.label} className="flex items-center gap-2 text-[10px]">
+                              <span className={`w-1.5 h-1.5 rounded-full ${r.ready ? "bg-green-400" : "bg-white/20"}`} />
+                              <span className="flex-1 text-white/80 font-medium">{r.label}</span>
+                              <span className="font-mono text-muted-foreground">{(r.p * 100).toFixed(1)}%</span>
+                              <span className={`font-mono ${r.utility >= 0 ? "text-green-400" : "text-red-400"}`}>
+                                u {r.utility.toFixed(2)}
+                              </span>
+                            </div>
+                          ))}
+                          <div className="flex items-center justify-between pt-1">
+                            <span className="text-[9px] text-muted-foreground/70">
+                              pair-risk {(watch.pairRisk * 100).toFixed(0)}% · qLL {(watch.qLL * 100).toFixed(0)}%
+                            </span>
+                            {/* THE no-ratchet badge: the bar as a frozen constant */}
+                            <span className="text-[8px] font-mono px-1.5 py-0.5 rounded bg-black/40 text-muted-foreground/80 flex items-center gap-1">
+                              <LockKeyhole className="w-2.5 h-2.5" /> bar frozen · no ratchet
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-4 gap-1 pt-1 border-t border-white/5">
+                        {(["digit Mkv", "band Mkv", "hole hz", "suffix"] as const).map((lbl, i) => (
+                          <Stat key={lbl} label={lbl} value={`${((watch.lenses[i] ?? 0) * 100).toFixed(0)}%`} />
+                        ))}
+                      </div>
                     </div>
-                    <p className="text-[11px] text-muted-foreground leading-relaxed">{watch.reason || "Waiting…"}</p>
-                    <div className="h-2 rounded-full bg-black/40 overflow-hidden">
-                      <div className={`h-full ${watch.p >= watch.bar ? "bg-green-400" : a.dot} transition-all duration-500`}
-                           style={{ width: `${Math.max(3, Math.min(100, watch.bar > 0 ? (watch.p / watch.bar) * 100 : 0))}%` }} />
-                    </div>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <Stat label="Top digits" value={watch.topDigits.map(t => `${t.digit}:${(t.p * 100).toFixed(0)}%`).join(" ") || "—"} />
-                      <Stat label="Echo" value={watch.echoLags.map(l => `${l.lag}@${(l.rate * 100).toFixed(0)}%`).join(" ") || "—"} />
-                      <Stat label="Heat" value={`${watch.heatDigit} ×${watch.heatRatio.toFixed(1)}`} />
-                    </div>
-                    <div className="grid grid-cols-3 gap-1.5">
-                      <Stat label="Memory" value={watch.memoryOrder > 0 ? `ord ${watch.memoryOrder}` : "fair"} />
-                      <Stat label="Ticks watched" value={String(watch.ticksWatched)} />
-                      <Stat label="Confidence" value={`${watch.confidence}/100`} />
-                    </div>
-                  </div>
+                  </>
                 )}
 
                 {session?.message && (
@@ -563,8 +624,9 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
                     session.message.startsWith("✅") ? "bg-green-500/10 border-green-500/20 text-green-400" :
                     session.message.startsWith("🛑") ? "bg-red-500/10 border-red-500/20 text-red-400" :
                     session.message.startsWith("❌") ? "bg-red-500/10 border-red-500/20 text-red-300" :
-                    session.message.startsWith("🔁") ? "bg-sky-500/10 border-sky-500/25 text-sky-300" :
+                    session.message.startsWith("🔁") || session.message.startsWith("🔎") ? "bg-sky-500/10 border-sky-500/25 text-sky-300" :
                     session.message.startsWith("🎯") ? "bg-amber-500/10 border-amber-500/25 text-amber-300" :
+                    session.message.startsWith("🛡") ? "bg-amber-500/10 border-amber-500/25 text-amber-300" :
                     "bg-secondary/30 border-border text-muted-foreground"
                   }`}>
                     {session.message}
@@ -582,8 +644,8 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
                       </span>
                     </div>
                     <p className="text-[10px] text-muted-foreground leading-relaxed">
-                      Shared recovery ledger, same debt-driven Matches stake as every other bot —
-                      same trade budget in debt, nothing hardens after a loss.
+                      Shared debt-driven ledger. Best Over 3 / Under 6 shot fires on the first tilt —
+                      the bar is frozen at the fair rate no matter how deep the run goes.
                     </p>
                   </div>
                 )}
@@ -613,4 +675,4 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
   );
 }
 
-export default ApexConsole;
+export default BastionConsole;

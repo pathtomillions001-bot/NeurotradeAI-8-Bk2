@@ -210,31 +210,54 @@ describe("PacingValve", () => {
 });
 
 describe("apex pipeline on fair streams", () => {
-  it("grades fair data THIN — lucky hits without mass are not edge", () => {
+  it("never claims proven edge on fair data (no PRIME, edge centered on zero)", () => {
+    // Zero vetoes means the valve genuinely trades fair data at its budgeted
+    // rate — held-out noise can even label a stream VIABLE (point-positive over
+    // 12+ shots). What must NEVER happen is PRIME: the 95% lower bound clearing
+    // break-even is the only "edge exists" claim, and fair data cannot make it.
+    let edgeSum = 0;
     for (const seed of [41, 43, 1, 2, 3]) {
       const digits = fairStream(2600, seed);
       const read = scoreMarket(digits, "steady");
-      assert.equal(read.verdict, "thin", `seed=${seed} shots=${read.shots} hitRate=${read.hitRate}`);
+      assert.notEqual(read.verdict, "prime", `seed=${seed} shots=${read.shots} hitRate=${read.hitRate}`);
+      edgeSum += read.edgePerDollar;
     }
+    assert.ok(edgeSum / 5 < 0.05, `mean measured edge on fair data=${edgeSum / 5}`);
   });
 
-  it("stands down on fair data (every fired shot would be -EV)", () => {
+  it("fires at its budgeted rate even on fair data — the valve paces, it never starves", () => {
+    // The old build clamped the bar at break-even and ANDed a `p ≥ break-even`
+    // reject onto `ready` — on calibrated scores that starved the bot of EVERY
+    // trade. Discipline now lives in the budget (selectivity is a budget), so a
+    // fair stream must still see shots released near target.
     const digits = fairStream(2600, 43);
     const read = scoreMarket(digits, "steady");
-    // The break-even floor binds: the valve stays armed at the right bar,
-    // but nearly every score sits below break-even, so almost nothing fires.
-    // Standing down on a -EV stream is discipline, not over-filtering —
-    // the scan honestly reports THIN and the user deploys elsewhere.
-    assert.ok(read.fireRate < 0.025, `fireRate=${read.fireRate}`);
-    assert.ok(read.params.initBar >= APEX_BREAKEVEN, `bar=${read.params.initBar}`);
+    const target = APEX_PACE_TARGET.steady;
+    assert.ok(Math.abs(read.fireRate - target) < 0.4 * target, `fireRate=${read.fireRate} target=${target}`);
+    assert.ok(read.shots >= 12, `shots=${read.shots}`);
+    assert.ok(read.params.initBar > 0 && read.params.initBar < 1, `bar=${read.params.initBar}`);
   });
 
   it("does not hallucinate persistence (edge in train, fair in test)", () => {
     // First 60% carries echo; the held-out 40% is fair. The honest split
-    // must report what the TEST half measured: nothing.
+    // must report what the TEST half measured: no proven edge, and no echo of
+    // the train half's planted advantage.
     const digits = [...echoStream(1700, 0.3, 67), ...fairStream(1300, 68)];
     const read = scoreMarket(digits, "steady");
-    assert.equal(read.verdict, "thin", `shots=${read.shots} edge=${read.edgePerDollar}`);
+    assert.notEqual(read.verdict, "prime", `shots=${read.shots} edge=${read.edgePerDollar}`);
+    assert.ok(read.edgePerDollar < 0.08, `held-out edge inherited the train half? edge=${read.edgePerDollar}`);
+  });
+
+  it("has NO hard reject: below-break-even shots fire whenever the valve opens", () => {
+    // Digit-LOCKED mode is the sharpest probe: fused[locked] hovers near the
+    // 10% fair rate — below the 11.2% break-even — so the old `p ≥ break-even`
+    // gate rejected literally every shot. Zero vetoes means those shots must
+    // still fire at the budgeted rate.
+    const digits = fairStream(3000, 29);
+    const fit = fitApexParams(digits, "steady", { lockedDigit: 7 });
+    const { metrics } = replayPolicy(digits.slice(1800), fit.params, { warmup: 300 });
+    assert.ok(metrics.shots >= 8, `shots=${metrics.shots}`);
+    assert.ok(metrics.avgP < APEX_BREAKEVEN + 0.005, `avgP=${metrics.avgP} — a break-even reject is back?`);
   });
 });
 
@@ -261,7 +284,7 @@ describe("apex pipeline on planted-edge streams", () => {
     assert.ok(Math.abs(w[0] + w[1] + w[2] - 1) < 1e-9);
     assert.ok(w.every(v => v > 0.03), `dead lens: ${w}`);
     assert.ok(fit.params.tau >= 0.6 && fit.params.tau <= 2.6, `tau=${fit.params.tau}`);
-    assert.ok(fit.params.initBar >= APEX_BREAKEVEN, `bar=${fit.params.initBar}`);
+    assert.ok(fit.params.initBar > 0 && fit.params.initBar < 1, `bar=${fit.params.initBar}`);
   });
 });
 

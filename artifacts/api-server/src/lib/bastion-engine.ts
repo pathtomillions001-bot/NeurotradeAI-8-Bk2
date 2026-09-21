@@ -1,33 +1,36 @@
 /**
- * Echo Apex — session engine (the 11th AI bot, Matches only).
+ * Barrier Bastion — session engine (the 12th AI bot).
  *
- * Institutional-grade repeat-rhythm trader. The brain lives in
- * `./apex-analysis` (echo spectrum, Hawkes heat, suffix memory, log-pool
- * fusion, pacing valve, honest held-out walk-forward). This module is the
- * session shell and deliberately reuses the same proven infrastructure as the
- * other bots with zero behaviour changes:
+ * Normal: Over 1 / Under 8 (the outer 80% bands). Recovery: Over 3 / Under 6
+ * (the inner 60% bands). The brain lives in `./bastion-analysis` (four-lens
+ * log-pool fusion, loss-pair-aware side utility, static recovery bar). This
+ * module is the session shell and deliberately reuses the same proven
+ * infrastructure as the other dedicated bots with zero behaviour changes:
  *
  * - digits + execution: `tickManager` / `getDeepDigits` / `executeLiveTrade` /
- *   `waitForContractResult` from `./deriv` (1-tick DIGITMATCH contracts)
+ *   `waitForContractResult` from `./deriv` (1-tick DIGITOVER/DIGITUNDER)
  * - the ONE shared debt-driven recovery ledger (`./agents/recovery-engine`,
  *   sized by `getBotRecoveryStake` — the identical formula every bot uses)
  * - the ONE single-executor arbiter (`./engine-arbiter`, owner `"bots"`)
- * - live payouts from `./recovery-payout`
+ * - live payouts from `./recovery-payout` (barrier-specific quotes)
  * - one owner-scoped SSE broadcast (`./sse`)
  *
- * Deploy flow (scan-first, like every dedicated bot):
- *   1. `scanForApex` measures all 19 automated digit markets and returns a
- *      ranked parameter card per market (verdict PRIME / VIABLE / THIN).
- *   2. the user picks LOCKED (this market, digit follows the fused argmax)
- *      or SWITCHING (migrate to whichever market measures best).
- *   3. `startSession` pins the measured card — no scan, no deploy.
+ * RECOVERY-FIRST LOOP (the whole point of this bot):
+ *   - a normal loss drops straight into recovery mode;
+ *   - recovery evaluates BOTH sides every tick and fires the BEST shot the
+ *     moment its fused win probability clears the STATIC fair-rate bar —
+ *     there is NO post-loss tightening, NO cool-down ladder, NO gate that
+ *     hardens as debt grows (see bastion-analysis: the bar is a frozen const
+ *     and `decideRecovery` cannot even receive a loss run);
+ *   - if no side shows tilt the bot waits — and in SWITCHING mode it HUNTS
+ *     across every digit market and migrates to the first/best market with a
+ *     bar-clearing recovery shot. LOCKED mode stays and waits on its market.
  *
- * Live policy == simulated policy: the scan replayed `ApexPolicy.decide`
- * tick-by-tick on held-out data, and this loop calls that SAME method on each
- * genuinely new tick, exactly once per tick (the pacing valve adapts on every
- * call, so double-calling would mis-pace it). Anything that would make live
- * diverge from the scan (stale feed, starving history) is handled by waiting,
- * never by trading through it.
+ * Deploy flow (scan-first): `scanForBastion` measures all digit markets with
+ * an honest walk-forward of the exact live policy (including the recovery
+ * episode metrics — recovery hit rate and loss pairs) and returns ranked
+ * cards. The user picks LOCKED or SWITCHING and deploys; verdicts are labels,
+ * never gates.
  */
 
 import {
@@ -55,81 +58,90 @@ import {
   tradingOwnerLabel,
 } from "./engine-arbiter";
 import { runWithSession } from "./session";
+import { registerLiveBot, unregisterLiveBot } from "./live-registry";
 import {
-  APEX_BREAKEVEN,
-  APEX_MATCH_PAYOUT,
-  APEX_ONLY_PACE,
-  ApexPolicy,
-  scoreMarket,
-  type ApexDecision,
-  type ApexDiag,
-  type ApexPace,
-  type ApexParams,
-  type ApexVerdict,
-} from "./apex-analysis";
+  BASTION_NORMAL_CONTRACTS,
+  BASTION_RECOVERY_BAR,
+  BASTION_RECOVERY_CONTRACTS,
+  BastionPolicy,
+  scoreBastionMarket,
+  type BastionContract,
+  type BastionDecision,
+  type BastionParams,
+  type BastionReplayMetrics,
+  type BastionSideMode,
+  type BastionVerdict,
+} from "./bastion-analysis";
 
-export const APEX_BOT_ID = "apex";
-export const APEX_BOT_NAME = "Echo Apex";
-const APEX_CONTRACT_TYPE = "DIGITMATCH";
+export const BASTION_BOT_ID = "bastion";
+export const BASTION_BOT_NAME = "Barrier Bastion";
+const BASTION_DURATION = 1;
+const BASTION_DURATION_UNIT = "t";
 
 /** Digits re-read from the feed every scan/refit pass. */
 const SCAN_DIGITS = 4500;
+/** Warm digits for a cross-market recovery hunt (fast + sufficient). */
+const HUNT_DIGITS = 2500;
 /** Re-measure cadence — live never trusts a stale fit for long. */
-const REFIT_LOCKED_MS = 20_000;
+const REFIT_LOCKED_MS = 25_000;
 const REFIT_SWITCHING_MS = 45_000;
-/** Switching only migrates for a MEANINGFULLY better edge (anti-flip). */
-const SWITCH_MARGIN = 0.01;
-/** Rolling live health window (ticks). */
-const HEALTH_WINDOW = 30;
+/** Switching migrates only for a MEANINGFULLY better edge (anti-flip). */
+const SWITCH_MARGIN = 0.015;
+/** In recovery (switching mode) hunt a better market this often. */
+const RECOVERY_HUNT_MS = 3_000;
 /** Minimum digits before the live policy is allowed to exist. */
-const MIN_LIVE_DIGITS = 120;
+const MIN_LIVE_DIGITS = 150;
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export interface ApexDeploySpec {
-  /**
-   * LEGACY field, ignored. Echo Apex runs ONE pace mode (`APEX_ONLY_PACE` —
-   * the most permissive budget) so the user never has to chase pace settings.
-   * Older consoles may still send it; it is accepted and discarded.
-   */
-  pace?: ApexPace;
-  /** User-locked digit, when the AI is not picking. */
-  digit?: number;
-  aiDigit: boolean;
+export interface BastionDeploySpec {
+  sideMode: BastionSideMode;
 }
 
-export interface ApexCandidate {
+export interface BastionCandidate {
   symbol: string;
   displayName: string;
-  digit: number;
-  verdict: ApexVerdict;
+  verdict: BastionVerdict;
   confidence: number;
-  edgePerDollar: number;
-  hitRate: number;
-  hitRateLower: number;
-  shots: number;
-  fireRate: number;
-  breakEven: number;
-  payout: number;
-  params: ApexParams;
-  diag: ApexDiag;
+  paperEdgePerDollar: number;
+  normalHitRate: number;
+  normalShots: number;
+  normalHits: number;
+  recoveryHitRate: number;
+  recoveryShots: number;
+  recoveryHits: number;
+  recoveryLossPairs: number;
+  recoveryLosses: number;
+  avgTicksInRecovery: number;
+  fireRatePer100: number;
+  breakEvenNormal: number;
+  breakEvenRecovery: number;
+  params: BastionParams;
+  diag: {
+    weights: [number, number, number, number];
+    tau: number;
+    normalInitBar: number;
+    historyUsed: number;
+    qLL: { over3: number; under6: number };
+    fireRatePer100: number;
+  };
   thinData: boolean;
+  metrics: BastionReplayMetrics;
 }
 
-export interface ApexScanResult {
+export interface BastionScanResult {
   suitable: boolean;
-  best: ApexCandidate | null;
-  bestAvailable: ApexCandidate | null;
-  allScored: ApexCandidate[];
+  best: BastionCandidate | null;
+  bestAvailable: BastionCandidate | null;
+  allScored: BastionCandidate[];
   reason: string;
-  pace: ApexPace;
   marketsScanned: number;
   historyDepth: number;
 }
 
-export interface ApexConfig {
+export interface BastionConfig {
   ownerSessionId?: string;
-  spec: ApexDeploySpec;
+  spec: BastionDeploySpec;
   stake: number;
   stopLoss: number;
   takeProfit: number;
@@ -138,43 +150,47 @@ export interface ApexConfig {
   lockedSymbol?: string;
   symbol: string;
   displayName: string;
-  params: ApexParams;
-  lockedAnalysis?: ApexCandidate;
+  params: BastionParams;
+  lockedAnalysis?: BastionCandidate;
 }
 
-export interface ApexDeployed {
+export interface BastionDeployed {
   symbol: string;
   displayName: string;
-  digit: number;
   verdict: string;
   confidence: number;
-  edgePerDollar: number;
-  hitRate: number;
-  shots: number;
-  breakEven: number;
-  payout: number;
-  fireRate: number;
+  paperEdgePerDollar: number;
+  normalHitRate: number;
+  normalShots: number;
+  recoveryHitRate: number;
+  recoveryShots: number;
+  recoveryLossPairs: number;
+  breakEvenNormal: number;
+  breakEvenRecovery: number;
 }
 
-export interface ApexWatch {
-  phase: "watching" | "armed" | "firing" | "settling";
-  digit: number;
+export interface BastionWatch {
+  phase: "watching" | "armed" | "firing" | "settling" | "hunting";
+  mode: "normal" | "recovery";
+  sideLabel: string;
+  altLabel: string;
   p: number;
+  altP: number;
   bar: number;
+  ready: boolean;
+  pairRisk: number;
+  qLL: number;
+  lenses: [number, number, number, number];
+  /** Always-on recovery radar: the best recovery shot right now. */
+  recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
   reason: string;
   switched: boolean;
+  ticksWatched: number;
   confidence: number;
   verdict: string;
-  ticksWatched: number;
-  fireRate: number;
-  topDigits: Array<{ digit: number; p: number }>;
-  echoLags: Array<{ lag: number; rate: number }>;
-  heatDigit: number;
-  heatRatio: number;
-  memoryOrder: number;
 }
 
-export interface ApexStatus {
+export interface BastionStatus {
   running: boolean;
   botId: string | null;
   botName: string | null;
@@ -188,14 +204,13 @@ export interface ApexStatus {
   recoveryStep: number;
   unrecoveredAmount: number;
   deepestLossRun: number;
+  currentLossRun: number;
   currentMarket?: string;
   currentContractType?: string;
   lastResult?: "won" | "lost";
   message?: string;
   config?: {
-    pace: ApexPace;
-    digit?: number;
-    aiDigit: boolean;
+    sideMode: BastionSideMode;
     stake: number;
     stopLoss: number;
     takeProfit: number;
@@ -203,8 +218,8 @@ export interface ApexStatus {
     marketMode: "locked" | "switching";
     lockedSymbol?: string;
   };
-  apexDeployed?: ApexDeployed;
-  apexWatch?: ApexWatch;
+  bastionDeployed?: BastionDeployed;
+  bastionWatch?: BastionWatch;
 }
 
 // ── Session state ───────────────────────────────────────────────────────────
@@ -212,7 +227,7 @@ export interface ApexStatus {
 interface SessionState {
   running: boolean;
   sessionId: string | null;
-  config: ApexConfig | null;
+  config: BastionConfig | null;
   totalProfit: number;
   tradeCount: number;
   winCount: number;
@@ -225,29 +240,31 @@ interface SessionState {
   lastResult?: "won" | "lost";
   message?: string;
   stopRequested: boolean;
-  watch: ApexWatch;
+  watch: BastionWatch;
   activeSymbol?: string;
   activeName?: string;
-  activeRead?: ApexCandidate | null;
+  activeRead?: BastionCandidate | null;
 }
 
-function freshWatch(): ApexWatch {
+function freshWatch(): BastionWatch {
   return {
     phase: "watching",
-    digit: 0,
+    mode: "normal",
+    sideLabel: "—",
+    altLabel: "—",
     p: 0,
-    bar: 0,
+    altP: 0,
+    bar: BASTION_RECOVERY_BAR,
+    ready: false,
+    pairRisk: 0,
+    qLL: 0,
+    lenses: [0, 0, 0, 0],
+    recoveryRadar: [],
     reason: "",
     switched: false,
+    ticksWatched: 0,
     confidence: 0,
     verdict: "—",
-    ticksWatched: 0,
-    fireRate: 0,
-    topDigits: [],
-    echoLags: [],
-    heatDigit: 0,
-    heatRatio: 1,
-    memoryOrder: 0,
   };
 }
 
@@ -270,7 +287,9 @@ function freshSession(): SessionState {
 
 let session: SessionState = freshSession();
 
-function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
+function sleep(ms: number) {
+  return new Promise(r => setTimeout(r, ms));
+}
 
 function broadcast() {
   const ownerSessionId = session.config?.ownerSessionId;
@@ -284,38 +303,39 @@ export function getOwnerSessionId(): string | null {
   return session.config?.ownerSessionId ?? null;
 }
 
-registerBotEngine("apex", () => ({ running: session.running, name: "Echo Apex" }));
+registerBotEngine("bastion", () => ({ running: session.running, name: "Barrier Bastion" }));
 
 export function isRunning(): boolean {
   return session.running;
 }
 
-function deployed(read: ApexCandidate | null | undefined): ApexDeployed | undefined {
+function deployed(read: BastionCandidate | null | undefined): BastionDeployed | undefined {
   if (!read) return undefined;
   const num = (v: unknown, fallback = 0): number =>
-    (typeof v === "number" && Number.isFinite(v) ? v : fallback);
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
   return {
     symbol: read.symbol,
     displayName: read.displayName,
-    digit: read.digit,
     verdict: read.verdict,
     confidence: num(read.confidence),
-    edgePerDollar: num(read.edgePerDollar),
-    hitRate: num(read.hitRate),
-    shots: num(read.shots),
-    breakEven: num(read.breakEven, APEX_BREAKEVEN),
-    payout: num(read.payout, APEX_MATCH_PAYOUT),
-    fireRate: num(read.fireRate),
+    paperEdgePerDollar: num(read.paperEdgePerDollar),
+    normalHitRate: num(read.normalHitRate),
+    normalShots: num(read.normalShots),
+    recoveryHitRate: num(read.recoveryHitRate),
+    recoveryShots: num(read.recoveryShots),
+    recoveryLossPairs: num(read.recoveryLossPairs),
+    breakEvenNormal: num(read.breakEvenNormal, 1 / 1.23),
+    breakEvenRecovery: num(read.breakEvenRecovery, 1 / 1.63),
   };
 }
 
-export function getStatus(): ApexStatus {
+export function getStatus(): BastionStatus {
   const rec = recoveryEngine.getState();
   const cfg = session.config;
   return {
     running: session.running,
-    botId: cfg ? APEX_BOT_ID : null,
-    botName: cfg ? APEX_BOT_NAME : null,
+    botId: cfg ? BASTION_BOT_ID : null,
+    botName: cfg ? BASTION_BOT_NAME : null,
     sessionId: session.sessionId,
     totalProfit: Math.round(session.totalProfit * 100) / 100,
     tradeCount: session.tradeCount,
@@ -326,15 +346,14 @@ export function getStatus(): ApexStatus {
     recoveryStep: rec.recoveryStep,
     unrecoveredAmount: Math.round(rec.unrecoveredAmount * 100) / 100,
     deepestLossRun: session.deepestLossRun,
+    currentLossRun: session.currentLossRun,
     currentMarket: session.currentMarket,
     currentContractType: session.currentContractType,
     lastResult: session.lastResult,
     message: session.message,
     config: cfg
       ? {
-          pace: APEX_ONLY_PACE,
-          ...(cfg.spec.digit !== undefined ? { digit: cfg.spec.digit } : {}),
-          aiDigit: cfg.spec.aiDigit,
+          sideMode: cfg.spec.sideMode,
           stake: cfg.stake,
           stopLoss: cfg.stopLoss,
           takeProfit: cfg.takeProfit,
@@ -343,8 +362,8 @@ export function getStatus(): ApexStatus {
           ...(cfg.lockedSymbol ? { lockedSymbol: cfg.lockedSymbol } : {}),
         }
       : undefined,
-    apexDeployed: session.running ? deployed(session.activeRead) : undefined,
-    apexWatch: session.running ? session.watch : undefined,
+    bastionDeployed: session.running ? deployed(session.activeRead) : undefined,
+    bastionWatch: session.running ? session.watch : undefined,
   };
 }
 
@@ -353,26 +372,53 @@ export function stopSession() {
   session.running = false;
   session.message = "Session stopped by user";
   releaseTradingOwnership("bots");
+  unregisterLiveBot(BASTION_BOT_ID);
   broadcast();
-  logger.info({ botId: APEX_BOT_ID }, "Echo Apex session stopped");
+  logger.info({ botId: BASTION_BOT_ID }, "Barrier Bastion session stopped");
 }
 
 // ── Pre-deploy scan ─────────────────────────────────────────────────────────
 
-const VERDICT_RANK: Record<ApexVerdict, number> = { prime: 0, viable: 1, thin: 2 };
+const VERDICT_RANK: Record<BastionVerdict, number> = { prime: 0, viable: 1, thin: 2 };
 
-export async function scanForApex(
+function toCandidate(symbol: string, displayName: string, read: ReturnType<typeof scoreBastionMarket>): BastionCandidate {
+  const m = read.metrics;
+  return {
+    symbol,
+    displayName,
+    verdict: read.verdict,
+    confidence: read.confidence,
+    paperEdgePerDollar: read.paperEdgePerDollar,
+    normalHitRate: m.normalHitRate,
+    normalShots: m.normalShots,
+    normalHits: m.normalHits,
+    recoveryHitRate: m.recoveryHitRate,
+    recoveryShots: m.recoveryShots,
+    recoveryHits: m.recoveryHits,
+    recoveryLossPairs: m.recoveryLossPairs,
+    recoveryLosses: m.recoveryLosses,
+    avgTicksInRecovery: m.avgTicksInRecovery,
+    fireRatePer100: m.fireRatePer100,
+    breakEvenNormal: read.breakEvenNormal,
+    breakEvenRecovery: read.breakEvenRecovery,
+    params: read.params,
+    diag: read.diag,
+    thinData: read.thinData,
+    metrics: m,
+  };
+}
+
+export async function scanForBastion(
   ownerSessionId: string | undefined,
-  spec: ApexDeploySpec,
-): Promise<ApexScanResult> {
+): Promise<BastionScanResult> {
   const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
-  const all: ApexCandidate[] = [];
+  const all: BastionCandidate[] = [];
   let deepest = 0;
 
   for (let i = 0; i < markets.length; i++) {
     const market = markets[i]!;
     broadcastSSE("bot_scan_progress", {
-      botId: APEX_BOT_ID,
+      botId: BASTION_BOT_ID,
       scanning: market.displayName,
       symbol: market.symbol,
       scanned: i,
@@ -386,36 +432,19 @@ export async function scanForApex(
       digits = tickManager.getDigits(market.symbol, SCAN_DIGITS);
     }
     deepest = Math.max(deepest, digits.length);
-
-    const read = scoreMarket(digits, APEX_ONLY_PACE, {
-      ...(spec.digit !== undefined ? { lockedDigit: spec.digit } : {}),
-    });
-    all.push({
-      symbol: market.symbol,
-      displayName: market.displayName,
-      digit: read.digit,
-      verdict: read.verdict,
-      confidence: read.confidence,
-      edgePerDollar: read.edgePerDollar,
-      hitRate: read.hitRate,
-      hitRateLower: read.hitRateLower,
-      shots: read.shots,
-      fireRate: read.fireRate,
-      breakEven: read.breakEven,
-      payout: read.payout,
-      params: read.params,
-      diag: read.diag,
-      thinData: read.thinData,
-    });
+    all.push(toCandidate(market.symbol, market.displayName, scoreBastionMarket(digits)));
     await sleep(5);
   }
 
   const ranked = all.sort(
-    (a, b) => VERDICT_RANK[a.verdict] - VERDICT_RANK[b.verdict] || b.edgePerDollar - a.edgePerDollar,
+    (a, b) =>
+      VERDICT_RANK[a.verdict] - VERDICT_RANK[b.verdict] ||
+      b.paperEdgePerDollar - a.paperEdgePerDollar ||
+      b.recoveryHitRate - a.recoveryHitRate,
   );
 
   broadcastSSE("bot_scan_progress", {
-    botId: APEX_BOT_ID,
+    botId: BASTION_BOT_ID,
     scanning: null,
     symbol: null,
     scanned: markets.length,
@@ -425,16 +454,16 @@ export async function scanForApex(
   const best = ranked[0];
   if (!best || best.thinData) {
     return {
-      suitable: false, best: null, bestAvailable: null, allScored: [], pace: APEX_ONLY_PACE,
-      marketsScanned: markets.length, historyDepth: deepest,
+      suitable: false, best: null, bestAvailable: null, allScored: [],
       reason: "Not enough history yet — the digit feed is still warming up. Wait a moment and re-scan.",
+      marketsScanned: markets.length, historyDepth: deepest,
     };
   }
 
   const suitable = best.verdict !== "thin";
   const reason = suitable
-    ? `${best.displayName} · Matches ${best.digit} — measured ${(best.hitRate * 100).toFixed(0)}% over ${best.shots} unseen shots (break-even ${(best.breakEven * 100).toFixed(1)}%).`
-    : `No rhythm cleared the bar — best was ${best.displayName} (${best.verdict.toUpperCase()}, ${best.confidence}/100, ${(best.hitRate * 100).toFixed(0)}% over ${best.shots} unseen shots).`;
+    ? `${best.displayName} — measured ${(best.recoveryHitRate * 100).toFixed(0)}% recovery hits over ${best.recoveryShots} recovery shots (${best.recoveryLossPairs} loss pair${best.recoveryLossPairs === 1 ? "" : "s"}), ${(best.normalHitRate * 100).toFixed(0)}% normal over ${best.normalShots} shots.`
+    : `${best.displayName} is the best available (${best.verdict.toUpperCase()}) — measured ${(best.recoveryHitRate * 100).toFixed(0)}% recovery over ${best.recoveryShots} shots. Starting it is a deliberate choice; the bars never harden after losses.`;
 
   return {
     suitable,
@@ -442,7 +471,6 @@ export async function scanForApex(
     bestAvailable: best,
     allScored: ranked.filter(c => !c.thinData).slice(0, 12),
     reason,
-    pace: APEX_ONLY_PACE,
     marketsScanned: markets.length,
     historyDepth: deepest,
   };
@@ -450,11 +478,11 @@ export async function scanForApex(
 
 // ── Session start ───────────────────────────────────────────────────────────
 
-export async function startSession(config: ApexConfig): Promise<{ ok: boolean; error?: string }> {
-  if (session.running) return { ok: false, error: "Echo Apex is already active — stop it first" };
+export async function startSession(config: BastionConfig): Promise<{ ok: boolean; error?: string }> {
+  if (session.running) return { ok: false, error: "Barrier Bastion is already active — stop it first" };
 
   // ── One executing bot engine at a time (protects the single ledger) ──
-  const otherEngines = runningOtherEngines("apex");
+  const otherEngines = runningOtherEngines("bastion");
   if (otherEngines.length > 0) {
     return {
       ok: false,
@@ -480,8 +508,8 @@ export async function startSession(config: ApexConfig): Promise<{ ok: boolean; e
   if (config.marketMode === "locked" && config.lockedSymbol !== config.symbol) {
     return fail("Locked mode pins the market you scanned — refusing a mismatched lock");
   }
-  if (!config.params || !Number.isFinite(config.params.initBar) || !Number.isFinite(config.params.tau)) {
-    return fail("Run the scan first — this bot only deploys a rhythm it has measured");
+  if (!config.params || !Number.isFinite(config.params.tau) || !Array.isArray(config.params.weights)) {
+    return fail("Run the scan first — this bot only deploys a measurement it has made");
   }
 
   const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === config.symbol);
@@ -490,17 +518,16 @@ export async function startSession(config: ApexConfig): Promise<{ ok: boolean; e
   session = {
     ...freshSession(),
     running: true,
-    sessionId: `bot_apex_${Date.now()}`,
+    sessionId: `bot_bastion_${Date.now()}`,
     config,
     currentStake: config.stake,
     currentMarket: config.displayName,
-    currentContractType: APEX_CONTRACT_TYPE,
     activeSymbol: config.symbol,
     activeName: config.displayName,
     activeRead: config.lockedAnalysis ?? null,
     message: config.marketMode === "locked"
-      ? `Locked on ${config.displayName} — the digit follows the fused rhythm.`
-      : `Deployed on ${config.displayName} — will migrate when another market measures better.`,
+      ? `Locked on ${config.displayName} — Over 1 / Under 8 out, Over 3 / Under 6 in debt.`
+      : `Deployed on ${config.displayName} — recovery may migrate to better markets.`,
   };
   if (session.activeRead) {
     session.watch.confidence = session.activeRead.confidence;
@@ -508,17 +535,19 @@ export async function startSession(config: ApexConfig): Promise<{ ok: boolean; e
   }
 
   logger.info({
-    botId: APEX_BOT_ID,
-    pace: APEX_ONLY_PACE, // single mode
-    digit: config.spec.digit,
+    botId: BASTION_BOT_ID,
+    sideMode: config.spec.sideMode,
     marketMode: config.marketMode,
     symbol: config.symbol,
-  }, "Echo Apex session starting");
+  }, "Barrier Bastion session starting");
+  // Publish to the cross-session live registry so the layout's live indicator
+  // can see (and open/stop) this engine from any page after a refresh.
+  registerLiveBot(BASTION_BOT_ID, () => getStatus());
   broadcast();
 
   runWithSession(config.ownerSessionId ?? "legacy", () =>
     runLoop(config).catch(err => {
-      logger.error({ err }, "Echo Apex runLoop error");
+      logger.error({ err }, "Barrier Bastion runLoop error");
       session.running = false;
       session.message = `⚠️ ${friendlyErrorMessage(err)}`;
       broadcast();
@@ -530,22 +559,29 @@ export async function startSession(config: ApexConfig): Promise<{ ok: boolean; e
 
 // ── Execution loop ──────────────────────────────────────────────────────────
 
-/** Short, human one-liner for the console from a live decision. */
-function waitReason(entry: ApexDecision, ticksWatched: number): string {
-  if (ticksWatched < 30) return `warming the live lenses — ${ticksWatched}/30 ticks`;
-  // Zero vetoes: the ONLY reason to wait is the pacing valve being between
-  // budgeted shots. Never "below break-even" — that hard reject is gone.
-  return `pacing valve between shots (edge ${entry.p.toFixed(3)} vs bar ${entry.bar.toFixed(3)})`;
+function radarOf(policy: BastionPolicy, digits: number[], idx: number) {
+  return BASTION_RECOVERY_CONTRACTS.map(c => {
+    const r = policy.readSide(digits, idx, c);
+    return { label: c.label, p: r.p, utility: r.utility, ready: r.p >= BASTION_RECOVERY_BAR };
+  }).sort((a, b) => b.utility - a.utility);
 }
 
-function topDigitsOf(fused: number[], k = 3): Array<{ digit: number; p: number }> {
-  return fused
-    .map((p, digit) => ({ digit, p }))
-    .sort((a, b) => b.p - a.p)
-    .slice(0, k);
+function applyDecisionToWatch(dec: BastionDecision, radar: BastionWatch["recoveryRadar"]) {
+  session.watch.mode = dec.mode;
+  session.watch.sideLabel = dec.side?.label ?? "—";
+  session.watch.altLabel = dec.alt?.contract.label ?? "—";
+  session.watch.p = dec.read?.p ?? 0;
+  session.watch.altP = dec.alt?.p ?? 0;
+  session.watch.bar = dec.bar;
+  session.watch.ready = dec.ready;
+  session.watch.pairRisk = dec.read?.pairRisk ?? 0;
+  session.watch.qLL = dec.read?.qLL ?? 0;
+  session.watch.lenses = dec.read?.lenses ?? [0, 0, 0, 0];
+  session.watch.recoveryRadar = radar;
+  session.watch.reason = dec.reason;
 }
 
-async function runLoop(config: ApexConfig) {
+async function runLoop(config: BastionConfig) {
   const ownerSessionId = config.ownerSessionId;
   if (!ownerSessionId) {
     session.running = false;
@@ -582,77 +618,45 @@ async function runLoop(config: ApexConfig) {
   const LOCKED = config.marketMode === "locked";
   const REANALYZE_MS = LOCKED ? REFIT_LOCKED_MS : REFIT_SWITCHING_MS;
 
-  // Mutable deployment — the market may migrate (switching); the digit is the
-  // fused argmax each tick, exactly as the scan replayed it.
   let activeSymbol = config.symbol;
   let activeName = config.displayName;
-  let activeEdge = config.lockedAnalysis?.edgePerDollar ?? 0;
 
-  let policy: ApexPolicy | null = null;
+  let policy: BastionPolicy | null = null;
   let lastDigitCount = 0;
   /** Absolute index the lenses have been fed through (end-append verified). */
   let fedLen = 0;
   let fedTail = "";
-  let lastEntry: ApexDecision | null = null;
-  let decidedTicks = 0;
+  let lastEntry: BastionDecision | null = null;
+  let lastRadar: BastionWatch["recoveryRadar"] = [];
   let lastReanalyzeAt = 0;
-  let lossRun = 0;
+  let lastHuntAt = 0;
   let consecutiveErrors = 0;
-  const healthRing: number[] = [];
 
-  async function readDigits(symbol: string): Promise<number[]> {
+  async function readDigits(symbol: string, count = SCAN_DIGITS): Promise<number[]> {
     try {
-      return await getDeepDigits(symbol, SCAN_DIGITS);
+      return await getDeepDigits(symbol, count);
     } catch {
-      return tickManager.getDigits(symbol, SCAN_DIGITS);
+      return tickManager.getDigits(symbol, count);
     }
   }
 
-  /** Re-measure the ACTIVE market, rebuild the live policy on the fresh fit. */
-  async function refitActive(): Promise<ApexCandidate | null> {
+  /** Re-measure the ACTIVE market; the adapted normal valve survives refits. */
+  async function refitActive(): Promise<BastionCandidate | null> {
     const digits = await readDigits(activeSymbol);
     if (digits.length < MIN_LIVE_DIGITS) return null;
-    // ONE pass: honest walk-forward fit, then the live policy IS the fitted
-    // card. What the scan measured is what now trades. The adapted pacing bar
-    // SURVIVES the re-fit — resetting it to the fit seed every 20–45s (the old
-    // behaviour) restarted the valve's cold transient forever and starved the
-    // bot of trades.
-    const read = scoreMarket(digits, APEX_ONLY_PACE, {
-      ...(SPEC.digit !== undefined ? { lockedDigit: SPEC.digit } : {}),
-    });
-    const candidate: ApexCandidate = {
-      symbol: activeSymbol,
-      displayName: activeName,
-      digit: read.digit,
-      verdict: read.verdict,
-      confidence: read.confidence,
-      edgePerDollar: read.edgePerDollar,
-      hitRate: read.hitRate,
-      hitRateLower: read.hitRateLower,
-      shots: read.shots,
-      fireRate: read.fireRate,
-      breakEven: read.breakEven,
-      payout: read.payout,
-      params: read.params,
-      diag: read.diag,
-      thinData: read.thinData,
-    };
-    const prevBar = policy?.bar;
-    policy = new ApexPolicy({
-      ...candidate.params,
-      pace: APEX_ONLY_PACE,
-      ...(prevBar !== undefined ? { initBar: prevBar } : {}),
-    });
+    const read = scoreBastionMarket(digits);
+    const candidate = toCandidate(activeSymbol, activeName, read);
+    const prevBar = policy?.normalBar;
+    policy = new BastionPolicy(
+      prevBar !== undefined
+        ? { ...read.params, normalInitBar: prevBar }
+        : read.params,
+    );
     for (let i = 0; i < digits.length; i++) policy.update(digits, i);
     lastDigitCount = digits.length;
     fedLen = digits.length;
     fedTail = digits.slice(-3).join(",");
     lastEntry = null;
-    // Health is measured SINCE the last re-fit — clearing the ring stops the
-    // "cold run forces a fresh measurement" trigger from re-fitting every loop
-    // pass once trades start flowing.
-    healthRing.length = 0;
-    activeEdge = candidate.edgePerDollar;
 
     session.activeSymbol = activeSymbol;
     session.activeName = activeName;
@@ -663,35 +667,26 @@ async function runLoop(config: ApexConfig) {
     return candidate;
   }
 
-  /** Switching only: re-measure EVERY market, migrate past the margin. */
+  /** Switching only: re-measure every market; migrate past the margin. */
   async function maybeMigrate(): Promise<{ migrated: boolean }> {
     if (LOCKED) {
       await refitActive();
       return { migrated: false };
     }
     const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
-    let best: ApexCandidate | null = null;
+    let best: BastionCandidate | null = null;
     let incumbentEdge = Number.NEGATIVE_INFINITY;
     for (const m of markets) {
       const digits = await readDigits(m.symbol);
       if (digits.length < MIN_LIVE_DIGITS) continue;
-      const read = scoreMarket(digits, APEX_ONLY_PACE, {
-        ...(SPEC.digit !== undefined ? { lockedDigit: SPEC.digit } : {}),
-      });
-      const c: ApexCandidate = {
-        symbol: m.symbol, displayName: m.displayName, digit: read.digit,
-        verdict: read.verdict, confidence: read.confidence, edgePerDollar: read.edgePerDollar,
-        hitRate: read.hitRate, hitRateLower: read.hitRateLower, shots: read.shots,
-        fireRate: read.fireRate, breakEven: read.breakEven, payout: read.payout,
-        params: read.params, diag: read.diag, thinData: read.thinData,
-      };
-      if (m.symbol === activeSymbol) incumbentEdge = c.edgePerDollar;
+      const c = toCandidate(m.symbol, m.displayName, scoreBastionMarket(digits));
+      if (m.symbol === activeSymbol) incumbentEdge = c.paperEdgePerDollar;
       if (!best || VERDICT_RANK[c.verdict] < VERDICT_RANK[best.verdict]
-          || (c.verdict === best.verdict && c.edgePerDollar > best.edgePerDollar)) best = c;
+          || (c.verdict === best.verdict && c.paperEdgePerDollar > best.paperEdgePerDollar)) best = c;
     }
     if (best && best.symbol !== activeSymbol
         && best.verdict !== "thin"
-        && best.edgePerDollar - incumbentEdge > SWITCH_MARGIN) {
+        && best.paperEdgePerDollar - incumbentEdge > SWITCH_MARGIN) {
       activeSymbol = best.symbol;
       activeName = best.displayName;
       await refitActive();
@@ -699,6 +694,33 @@ async function runLoop(config: ApexConfig) {
     }
     await refitActive();
     return { migrated: false };
+  }
+
+  /**
+   * RECOVERY HUNT (switching mode): find the best bar-clearing recovery shot
+   * ACROSS markets right now. The active market reads the live policy; every
+   * other market gets a transient warmed on its own tape. The shot that exists
+   * somewhere is the shot this bot takes.
+   */
+  async function huntRecoveryShot(): Promise<{ symbol: string; name: string; dec: BastionDecision } | null> {
+    const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
+    let best: { symbol: string; name: string; dec: BastionDecision } | null = null;
+    for (const m of markets) {
+      const digits = await readDigits(m.symbol, HUNT_DIGITS);
+      if (digits.length < MIN_LIVE_DIGITS) continue;
+      let scan: BastionPolicy;
+      if (policy && m.symbol === activeSymbol) {
+        scan = policy;
+      } else {
+        scan = new BastionPolicy(config.params);
+        for (let i = 0; i < digits.length; i++) scan.update(digits, i);
+      }
+      const dec = scan.decideRecovery(digits, digits.length - 1);
+      if (dec.ready && dec.side && dec.read && (!best || (dec.read.utility > best.dec.read!.utility))) {
+        best = { symbol: m.symbol, name: m.displayName, dec };
+      }
+    }
+    return best;
   }
 
   while (session.running && !session.stopRequested) {
@@ -722,15 +744,6 @@ async function runLoop(config: ApexConfig) {
 
       const inRecovery = recoveryEngine.isInRecovery();
 
-      // ── Rolling live health: a cold run forces a fresh measurement ──
-      if (healthRing.length >= HEALTH_WINDOW && session.tradeCount > 0) {
-        const hits = healthRing.reduce((a, b) => a + b, 0);
-        const n = healthRing.length;
-        const center = (hits + 2) / (n + 4);
-        const lower = center - 2 * Math.sqrt(center * (1 - center) / (n + 4));
-        if (lower < APEX_BREAKEVEN) lastReanalyzeAt = 0;
-      }
-
       // ── PERIODIC RE-MEASURE ──
       const needsReanalyze = policy === null || Date.now() - lastReanalyzeAt >= REANALYZE_MS;
       if (needsReanalyze) {
@@ -740,9 +753,7 @@ async function runLoop(config: ApexConfig) {
         if (!policy) {
           session.watch.phase = "watching";
           session.watch.reason = "collecting history for the live policy";
-          session.message = LOCKED
-            ? `Holding on ${activeName} — collecting history for the live policy`
-            : `Scanning markets — collecting history for the live policy`;
+          session.message = `Holding on ${activeName} — collecting history for the live policy`;
           broadcast();
           await sleep(1500);
           continue;
@@ -753,7 +764,7 @@ async function runLoop(config: ApexConfig) {
         }
       }
 
-      // ── Feed + score ONLY genuinely new ticks, exactly once each ──
+      // ── Feed ONLY genuinely new ticks, exactly once each ──
       const digits = await readDigits(activeSymbol);
       if (digits.length !== lastDigitCount) {
         const delta = Math.max(0, digits.length - lastDigitCount);
@@ -774,13 +785,7 @@ async function runLoop(config: ApexConfig) {
         continue;
       }
 
-      // Verify the array still end-appends onto what the lenses were fed
-      // (a WS backfill can grow the FRONT and shift absolute indices).
-      // Capture to a const: `policy` is reassigned inside refit closures, so
-      // the mutable binding carries stale narrowing here. The cast restores
-      // the DECLARED type (no lie — it is the same runtime value) and const
-      // narrowing below is then bulletproof.
-      const live = policy as ApexPolicy | null;
+      const live = policy as BastionPolicy | null;
       let newTicks = 0;
       if (live && tailIdx >= 0) {
         const junction = fedLen > 0 ? digits.slice(Math.max(0, fedLen - 3), fedLen).join(",") : "";
@@ -790,20 +795,21 @@ async function runLoop(config: ApexConfig) {
           fedLen = digits.length;
           fedTail = digits.slice(-3).join(",");
         } else if (digits.length >= fedLen && digits.slice(-3).join(",") !== fedTail) {
-          // Front-shifted or gapped: feed just the newest tick once rather
-          // than double-feeding history into the Hawkes state. The next refit
-          // (≤45s) re-warms the lenses fully anyway.
           live.update(digits, tailIdx);
           newTicks = 1;
           fedLen = digits.length;
           fedTail = digits.slice(-3).join(",");
         }
       }
+
       if (live && newTicks > 0) {
-        // ONE valve observation per tick — exactly as the scan replayed it.
-        const entry = live.decide(digits, tailIdx, { recovery: inRecovery });
-        lastEntry = entry;
-        decidedTicks++;
+        // ONE decision per tick. Recovery and normal have separate selectors;
+        // neither of them can see the loss run (see bastion-analysis).
+        const dec = inRecovery
+          ? live.decideRecovery(digits, tailIdx)
+          : live.decideNormal(digits, tailIdx, SPEC.sideMode);
+        lastEntry = dec;
+        lastRadar = radarOf(live, digits, tailIdx);
       }
 
       const entry = lastEntry;
@@ -817,47 +823,65 @@ async function runLoop(config: ApexConfig) {
       }
 
       session.watch.phase = "armed";
-      session.watch.digit = entry.digit;
-      session.watch.p = entry.p;
-      session.watch.bar = entry.bar;
-      session.watch.echoLags = live.echoLags(3).map((l: { lag: number; rate: number }) => ({ lag: l.lag, rate: l.rate }));
-      session.watch.heatDigit = entry.heatDigit;
-      session.watch.heatRatio = entry.heatRatio;
-      session.watch.memoryOrder = entry.memoryOrder;
-      session.watch.topDigits = topDigitsOf(entry.fused);
-      session.watch.fireRate = decidedTicks > 0 ? session.tradeCount / decidedTicks : 0;
+      applyDecisionToWatch(entry, lastRadar);
 
       if (!entry.ready) {
+        // Recovery has ONE wait reason: no tilt anywhere armed. In switching
+        // mode that triggers the cross-market HUNT instead of a passive wait.
+        if (inRecovery && !LOCKED && Date.now() - lastHuntAt >= RECOVERY_HUNT_MS) {
+          lastHuntAt = Date.now();
+          session.watch.phase = "hunting";
+          session.watch.reason = "hunting all markets for a bar-clearing recovery shot…";
+          session.message = `🔎 Recovery hunt — scanning all markets for a clean Over 3 / Under 6 shot`;
+          broadcast();
+          const hunt = await huntRecoveryShot();
+          if (hunt && hunt.symbol !== activeSymbol) {
+            activeSymbol = hunt.symbol;
+            activeName = hunt.name;
+            session.watch.switched = true;
+            await refitActive();
+            session.message = `🔁 Recovery shot found on ${activeName} — firing ${hunt.dec.side!.label}`;
+            broadcast();
+            await sleep(300);
+            continue; // next pass fires with the migrated, fitted policy
+          }
+          if (hunt) {
+            // Same market had it after all (or hunt confirmed local) — loop will fire.
+            session.watch.reason = hunt.dec.reason;
+            await sleep(300);
+            continue;
+          }
+        }
         session.watch.phase = "watching";
-        session.watch.reason = waitReason(entry, session.watch.ticksWatched);
+        session.watch.reason = entry.reason;
         session.message = inRecovery
-          ? `🎯 Recovery armed — ${session.watch.reason}`
-          : `👁 Matches ${entry.digit} on ${activeName} — ${session.watch.reason}`;
+          ? `🛡 Recovery armed — ${entry.reason}`
+          : `👁 ${entry.side?.label ?? "Bands"} on ${activeName} — ${entry.reason}`;
         broadcast();
         await sleep(900);
         continue;
       }
 
-      // ── DIGITMATCH sovereignty — re-asserted immediately before every buy ──
-      const fireDigit = entry.digit;
-      if (!isAutomatedMarket(activeSymbol) || fireDigit < 0 || fireDigit > 9
-          || (SPEC.digit !== undefined && fireDigit !== SPEC.digit)) {
+      // ── SOVEREIGNTY — re-asserted immediately before every buy ──
+      const fireContract: BastionContract = entry.side!;
+      const expectSet = inRecovery ? BASTION_RECOVERY_CONTRACTS : BASTION_NORMAL_CONTRACTS;
+      if (!isAutomatedMarket(activeSymbol) || !expectSet.some(c => c.id === fireContract.id)) {
         session.running = false;
         session.message = "⚠️ Sovereignty check failed — session halted before firing";
-        logger.error({ activeSymbol, fireDigit, spec: SPEC }, "Echo Apex sovereignty violation");
+        logger.error({ activeSymbol, fireContract, inRecovery }, "Barrier Bastion sovereignty violation");
         broadcast();
         return;
       }
 
       const payoutQuote = await resolveRecoveryPayout({
         symbol: activeSymbol,
-        contractType: APEX_CONTRACT_TYPE,
-        barrier: fireDigit,
-        duration: 1,
-        durationUnit: "t",
+        contractType: fireContract.contractType,
+        barrier: fireContract.barrier,
+        duration: BASTION_DURATION,
+        durationUnit: BASTION_DURATION_UNIT,
         currency,
       });
-      const payout = payoutQuote.payoutMultiplier || APEX_MATCH_PAYOUT;
+      const payout = payoutQuote.payoutMultiplier || fireContract.payout;
 
       if (inRecovery) {
         try {
@@ -877,35 +901,35 @@ async function runLoop(config: ApexConfig) {
 
       const sharedStep = recoveryEngine.getState().recoveryStep;
       session.watch.phase = "firing";
-      session.watch.reason = `firing Matches ${fireDigit} on ${activeName}`;
+      session.watch.reason = `firing ${fireContract.label} on ${activeName}`;
       session.currentStake = stake;
       session.currentMarket = activeName;
-      session.currentContractType = APEX_CONTRACT_TYPE;
+      session.currentContractType = fireContract.contractType;
       session.message = inRecovery
-        ? `🎯 [Recovery R${sharedStep}] Matches ${fireDigit} on ${activeName} · $${stake.toFixed(2)}`
-        : `🎯 Matches ${fireDigit} on ${activeName} · $${stake.toFixed(2)}`;
+        ? `🎯 [Recovery R${sharedStep}] ${fireContract.label} on ${activeName} · $${stake.toFixed(2)}`
+        : `🎯 ${fireContract.label} on ${activeName} · $${stake.toFixed(2)}`;
       broadcast();
 
-      const reason = `[Echo Apex${inRecovery ? " RECOVERY" : ""}] Matches ${fireDigit} on ${activeName} · ` +
-        `measured ${(activeEdge * 100).toFixed(1)}% edge/$1 · ` +
-        `P(${(entry.p * 100).toFixed(1)}%) vs bar(${(entry.bar * 100).toFixed(1)}%) · ` +
-        `single mode · memory ord-${entry.memoryOrder} · heat ${entry.heatDigit}×${entry.heatRatio}`;
+      const reason = `[Barrier Bastion${inRecovery ? " RECOVERY" : ""}] ${fireContract.label} on ${activeName} · ` +
+        `P(${(entry.read!.p * 100).toFixed(1)}%) vs bar(${(entry.bar * 100).toFixed(1)}%) · ` +
+        `pair-risk ${(entry.read!.pairRisk * 100).toFixed(0)}% · qLL ${(entry.read!.qLL * 100).toFixed(0)}% · ` +
+        `no-ratchet bar`;
 
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
         symbol: activeSymbol,
         displayName: activeName,
-        contractType: APEX_CONTRACT_TYPE,
-        barrier: fireDigit,
+        contractType: fireContract.contractType,
+        barrier: fireContract.barrier,
         stake: String(Math.round(stake * 100) / 100),
         direction: "hold",
         status: "open",
-        aiConfidence: String(Math.round(entry.p * 100)),
+        aiConfidence: String(Math.round(entry.read!.p * 100)),
         aiRiskScore: "15",
         isAutonomous: true,
         agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${reason}`,
-        duration: 1,
-        durationUnit: "t",
+        duration: BASTION_DURATION,
+        durationUnit: BASTION_DURATION_UNIT,
       }).returning();
 
       let won: boolean;
@@ -917,13 +941,13 @@ async function runLoop(config: ApexConfig) {
         try {
           const liveResult = await executeLiveTrade(token!, {
             symbol: activeSymbol,
-            contractType: APEX_CONTRACT_TYPE,
+            contractType: fireContract.contractType,
             stake: Math.round(stake * 100) / 100,
-            duration: 1,
-            durationUnit: "t",
+            duration: BASTION_DURATION,
+            durationUnit: BASTION_DURATION_UNIT,
             currency,
             accountId: accounts[0].derivAccountId ?? accounts[0].loginId,
-            barrier: fireDigit,
+            barrier: fireContract.barrier,
           } as any);
           const result = await waitForContractResult(
             token!, accounts[0].derivAccountId ?? accounts[0].loginId,
@@ -934,7 +958,7 @@ async function runLoop(config: ApexConfig) {
           entryPrice = Number(result.entrySpot) || liveResult.buyPrice;
           exitPrice = Number(result.exitSpot) || entryPrice;
         } catch (err) {
-          logger.warn({ err }, "Echo Apex live execution error — returning to the watch");
+          logger.warn({ err }, "Barrier Bastion live execution error — returning to the watch");
           try {
             await db.update(tradesTable).set({
               status: "error", profit: "0", payout: "0", closedAt: new Date(),
@@ -957,8 +981,7 @@ async function runLoop(config: ApexConfig) {
           if (d !== undefined && d !== before) { digit = d; break; }
           digit = d;
         }
-        const d = digit ?? 0;
-        won = d === fireDigit;
+        won = fireContract.wins[digit ?? 0] === true;
         profit = won ? stake * (payout - 1) : -stake;
       }
 
@@ -968,18 +991,14 @@ async function runLoop(config: ApexConfig) {
         session.winCount++;
         session.lastResult = "won";
         session.currentLossRun = 0;
-        lossRun = 0;
       } else {
         session.lossCount++;
         session.lastResult = "lost";
         session.currentLossRun++;
         session.deepestLossRun = Math.max(session.deepestLossRun, session.currentLossRun);
-        lossRun++;
       }
-      healthRing.push(won ? 1 : 0);
-      if (healthRing.length > HEALTH_WINDOW * 2) healthRing.shift();
 
-      recoveryEngine.recordOutcome(won, profit, stake, config.maxRecoverySteps, APEX_CONTRACT_TYPE, payout);
+      recoveryEngine.recordOutcome(won, profit, stake, config.maxRecoverySteps, fireContract.contractType, payout);
 
       try {
         await db.update(tradesTable).set({
@@ -991,7 +1010,7 @@ async function runLoop(config: ApexConfig) {
           closedAt: new Date(),
         }).where(eq(tradesTable.id, journaled.id));
       } catch (dbErr) {
-        logger.warn({ dbErr }, "Echo Apex: failed to settle the journaled trade");
+        logger.warn({ dbErr }, "Barrier Bastion: failed to settle the journaled trade");
       }
 
       if (!isLive && Number.isFinite(availableBalance)) {
@@ -1015,10 +1034,11 @@ async function runLoop(config: ApexConfig) {
         confidence: session.activeRead?.confidence ?? 0,
         verdict: session.activeRead?.verdict ?? "—",
       };
+      lastEntry = null;
       lastReanalyzeAt = 0; // fresh measurement before the next shot
       session.message = won
-        ? `✅ +$${profit.toFixed(2)} · ${session.winCount}/${session.tradeCount} · next shot re-measured`
-        : `❌ −$${Math.abs(profit).toFixed(2)} · ${session.currentLossRun} in a row · budget unchanged, next shot re-measured`;
+        ? `✅ +$${profit.toFixed(2)} · ${session.winCount}/${session.tradeCount}${inRecovery ? " · debt cleared back to bands" : " · next shot re-measured"}`
+        : `❌ −$${Math.abs(profit).toFixed(2)} · ${session.currentLossRun} in a row · bars unchanged, recovery fires the best shot`;
       broadcast();
 
       if (session.totalProfit >= config.takeProfit) {
@@ -1034,11 +1054,12 @@ async function runLoop(config: ApexConfig) {
         return;
       }
 
-      await sleep(won ? 2500 : 4000);
+      // Recovery re-arms IMMEDIATELY (no cool-down) — only a feed pause.
+      await sleep(won ? (inRecovery ? 400 : 2500) : 1500);
       consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++;
-      logger.error({ err, consecutiveErrors }, "Echo Apex stability catch — keeping the session alive");
+      logger.error({ err, consecutiveErrors }, "Barrier Bastion stability catch — keeping the session alive");
       session.message = `Engine stabilizing… retry ${consecutiveErrors} — the session will keep running`;
       broadcast();
       await sleep(Math.min(15000, 600 * consecutiveErrors));

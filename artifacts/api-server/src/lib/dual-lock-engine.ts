@@ -45,6 +45,7 @@ import { friendlyErrorMessage } from "./friendly-error";
 import { db, accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq } from "drizzle-orm";
 import { logger } from "./logger";
+import { registerBotEngine, runningOtherEngines } from "./engine-registry";
 import { resolveRecoveryPayout } from "./recovery-payout";
 import * as recoveryEngine from "./agents/recovery-engine";
 import {
@@ -255,6 +256,8 @@ export function getOwnerSessionId(): string | null {
   return session.config?.ownerSessionId ?? null;
 }
 
+registerBotEngine("duallock", () => ({ running: session.running, name: "Dual-Lock Range Sentinel" }));
+
 export function isRunning(): boolean {
   return session.running;
 }
@@ -402,6 +405,16 @@ export async function scanForLock(
 
 export async function startSession(config: DualLockConfig): Promise<{ ok: boolean; error?: string }> {
   if (session.running) return { ok: false, error: "A Dual-Lock session is already active — stop it first" };
+
+  // ── One executing bot engine at a time (protects the single ledger) ──
+  const otherEngines = runningOtherEngines("duallock");
+  if (otherEngines.length > 0) {
+    return {
+      ok: false,
+      error: `${otherEngines[0].name} is already trading on this account. Stop it first — one engine at a time owns the shared recovery ledger.`,
+    };
+  }
+
 
   if (!acquireTradingOwnership("bots")) {
     const owner = currentTradingOwner();

@@ -56,6 +56,7 @@ describe("bot console contract", () => {
 
   it("uses the dedicated console for the pre-locked and one-shot bots", () => {
     assert.equal(botConsoleId(getBotDefinition("apex")!), "apex@1");
+    assert.equal(botConsoleId(getBotDefinition("bastion")!), "bastion@1");
     assert.equal(botConsoleId(getBotDefinition("duallock")!), "dual-lock@1");
     assert.equal(botConsoleId(getBotDefinition("killshot")!), "killshot@1");
     assert.equal(botConsoleId(getBotDefinition("ks-overunder")!), "killshot-family@1");
@@ -69,6 +70,7 @@ describe("bot console contract", () => {
   it("publishes the exact set of consoles the web bundle must implement", () => {
     assert.deepEqual(botConsoleIds(), [
       "apex@1",
+      "bastion@1",
       "dual-lock@1",
       "killshot-family@1",
       "killshot@1",

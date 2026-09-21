@@ -1,6 +1,6 @@
 # Prism Match — Matches-only, prismatic tick-driven execution
 
-Prism Match (`prism-match`, console `prism-match@1`) is an institutional-grade, Matches-only specialist that replaces Match Nexus. **Normal and recovery orders are always one-tick `DIGITMATCH`.** It keeps Matches recovery but never widens into Differs.
+Prism Match (`prism-match`, console `prism-match@1`) is an institutional-grade, Matches-only specialist bot. **Normal and recovery orders are always one-tick `DIGITMATCH`.** It keeps Matches recovery but never widens into Differs.
 
 This is an evidence-driven tool, not a promise. On uniformly distributed digits a named digit matches 10% of the time; at an indicative 8.93× total return the expected return is −10.7% per dollar staked. Statistics, probability models and timing cannot create an edge in an IID stream.
 

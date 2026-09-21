@@ -254,7 +254,7 @@ export function OverUnderNavigatorConsole({
   const [normalSide, setNormalSide] = useState<Side>("both");
   const [recoverySide, setRecoverySide] = useState<Side>("both");
   const [selectedSymbol, setSelectedSymbol] = useState("");
-  const panelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const [risk, setRisk] = useState({
     stake: 1,
     takeProfit: 10,
@@ -266,8 +266,8 @@ export function OverUnderNavigatorConsole({
   const Icon = bot ? (BOT_ICON[bot.icon] ?? Crosshair) : Crosshair;
 
   useEffect(() => {
-    panelRef.current?.scrollTo({ top: 0 });
-  }, [step, selectedSymbol]);
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [open, step, selectedSymbol]);
   useEffect(() => {
     if (sameDigits) {
       setRecoveryOver(normalOver);
@@ -425,16 +425,16 @@ export function OverUnderNavigatorConsole({
   const deployed = session?.navigatorDeployed;
   const profit = session?.totalProfit ?? 0;
 
-  const Header = () => (
+  const header = (
     <div className="flex items-center justify-between gap-3">
-      <div className="flex items-center gap-2">
+      <div className="flex min-w-0 items-center gap-2">
         <div
-          className={`flex h-9 w-9 items-center justify-center rounded-lg ${a.iconBg} ${a.iconBorder}`}
+          className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${a.iconBg} ${a.iconBorder}`}
         >
           <Icon className={`h-4 w-4 ${a.text}`} />
         </div>
-        <div>
-          <h2 className="text-xs font-bold text-white">{bot.name}</h2>
+        <div className="min-w-0">
+          <h2 className="text-sm font-bold text-white">{bot.name}</h2>
           <p className="text-[10px] text-muted-foreground">
             Custom barriers · recovery-first execution
           </p>
@@ -443,7 +443,7 @@ export function OverUnderNavigatorConsole({
       <button
         aria-label="Close console"
         onClick={() => onOpenChange(false)}
-        className="rounded-md p-1.5 text-muted-foreground hover:bg-white/10"
+        className="shrink-0 rounded-md p-1.5 text-muted-foreground hover:bg-white/10"
       >
         <X className="h-4 w-4" />
       </button>
@@ -916,13 +916,20 @@ export function OverUnderNavigatorConsole({
             initial={{ opacity: 0, y: 12 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 12 }}
-            ref={panelRef}
             role="dialog"
             aria-label={`${bot.name} console`}
-            className="fixed bottom-20 right-4 z-50 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-2xl border border-fuchsia-400/20 bg-[#080b18]/[.98] shadow-2xl shadow-fuchsia-950/30 backdrop-blur-xl"
+            className="fixed bottom-20 right-4 z-50 flex flex-col w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] supports-[height:100dvh]:max-h-[calc(100dvh-6rem)] overflow-hidden rounded-2xl border border-fuchsia-400/20 bg-[#080b18]/[.98] shadow-2xl shadow-fuchsia-950/30 backdrop-blur-xl"
           >
-            <div className="space-y-3 p-3">
-              <Header />
+            <div className="shrink-0 border-b border-white/10 p-3">
+              {header}
+            </div>
+            <div
+              ref={scrollRef}
+              role="region"
+              aria-label="Over/Under Navigator controls"
+              tabIndex={0}
+              className="bot-console-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain space-y-3 p-3 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-fuchsia-400/50"
+            >
               {step === "config" && configPanel}
               {step === "scanning" && scanningPanel}
               {step === "result" && resultPanel}

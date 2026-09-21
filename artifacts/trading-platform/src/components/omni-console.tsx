@@ -159,7 +159,7 @@ export function OmniConsole({
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const request = useRef<AbortController | null>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
   const edited = useRef(false);
   const initialized = useRef(false);
   const { data: settings } = useGetSettings();
@@ -344,8 +344,8 @@ export function OmniConsole({
           ? "results"
           : "config";
   useEffect(() => {
-    panelRef.current?.scrollTo({ top: 0 });
-  }, [screen]);
+    scrollRef.current?.scrollTo({ top: 0 });
+  }, [open, screen]);
   const startDisabled =
     busy !== null ||
     expired ||
@@ -355,11 +355,8 @@ export function OmniConsole({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        ref={panelRef}
-        className="left-auto top-auto bottom-20 right-4 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-6rem)] translate-x-0 translate-y-0 overflow-y-auto border-indigo-400/20 bg-[#0a101f] p-0 gap-0 text-slate-100 rounded-2xl sm:rounded-2xl data-[state=open]:slide-in-from-left-0 data-[state=open]:slide-in-from-top-0 data-[state=closed]:slide-out-to-left-0 data-[state=closed]:slide-out-to-top-0"
-      >
-        <DialogHeader className="p-3 border-b border-white/10 text-left">
+      <DialogContent className="flex flex-col transition-none left-auto top-auto bottom-20 right-4 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] supports-[height:100dvh]:max-h-[calc(100dvh-6rem)] translate-x-0 translate-y-0 overflow-hidden border-indigo-400/20 bg-[#0a101f] p-0 gap-0 text-slate-100 rounded-2xl sm:rounded-2xl data-[state=open]:slide-in-from-left-0 data-[state=open]:slide-in-from-top-0 data-[state=closed]:slide-out-to-left-0 data-[state=closed]:slide-out-to-top-0">
+        <DialogHeader className="shrink-0 p-3 border-b border-white/10 text-left">
           <div className="flex items-center gap-2.5 pr-6">
             <div className="p-2 rounded-lg bg-indigo-500/15 border border-indigo-400/25">
               <Radar className="w-4 h-4 text-indigo-300" />
@@ -368,7 +365,9 @@ export function OmniConsole({
               <p className="text-[9px] tracking-widest text-indigo-300 uppercase">
                 Multi-contract intelligence
               </p>
-              <DialogTitle className="mt-1 text-sm">{bot.name}</DialogTitle>
+              <DialogTitle className="mt-1 text-sm font-bold">
+                {bot.name}
+              </DialogTitle>
             </div>
           </div>
           <DialogDescription className="pt-1 text-left text-[10px] leading-relaxed text-slate-400">
@@ -376,7 +375,13 @@ export function OmniConsole({
             recovery.
           </DialogDescription>
         </DialogHeader>
-        <div className="p-3 space-y-3">
+        <div
+          ref={scrollRef}
+          role="region"
+          aria-label="Omni Sentinel controls"
+          tabIndex={0}
+          className="bot-console-scroll min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 space-y-3 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-indigo-400/50"
+        >
           {error && (
             <div
               role="alert"

@@ -1,276 +1,104 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+/**
+ * Prism Match console (Matches only).
+ *
+ * Designed to match the elegant, compact specialist console design language
+ * (KillShot, Dual-Lock, Specialist) — simple, focused, with relevant details:
+ * 1. Config: Pacing, target digit (AI or specific 0-9), session boundaries (stake, TP, SL, recovery).
+ * 2. Scanning: Fast multi-market scan with animated progress.
+ * 3. Scan Results: Best market recommendation, top candidates ranking, and choice between
+ *    Locked (pin market symbol) or Switching (smart dynamic market rotation).
+ * 4. Running Session: Live session P&L, recovery step & debt, active market/digit,
+ *    current signal edge, win/loss stats, execution timing, and clean Stop control.
+ */
+
+import { useState, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import { toast } from "sonner";
 import {
-  Activity,
-  ArrowRight,
-  BarChart3,
-  Check,
-  ChevronDown,
-  CircleHelp,
-  Clock3,
-  FlaskConical,
-  Gauge,
   Loader2,
-  Lock,
-  Radio,
+  StopCircle,
   ScanSearch,
-  ShieldCheck,
+  RefreshCw,
+  ChevronLeft,
+  X,
+  Lock,
   Shuffle,
-  Square,
+  ShieldCheck,
   Target,
   Zap,
 } from "lucide-react";
-import { toast } from "sonner";
-import { useGetSettings } from "@workspace/api-client-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
+import { useGetSettings } from "@workspace/api-client-react";
+import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
+import { ACCENTS, BOT_ICON } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
-import type { BotConsoleProps } from "@/lib/console-registry";
-import type { BotSessionStatus } from "@/lib/bots";
 import {
   canDeployPrism,
   prismDeployBody,
-  prismMoney as money,
   prismPercent as pct,
+  prismMoney as money,
   type PrismActivity,
   type PrismConfig,
-  type PrismPrediction,
-  type PrismRisk,
+  type PrismMarketView,
   type PrismScanView,
-  type PrismValidation,
+  type PrismTelemetry,
 } from "@/lib/prism-match";
 
-type Step = "configure" | "scanning" | "results" | "session";
-const PROFILES: Array<{ id: PrismActivity; label: string; copy: string }> = [
-  {
-    id: "active",
-    label: "Active",
-    copy: "Lighter uncertainty discount. More opportunities.",
-  },
-  {
-    id: "balanced",
-    label: "Balanced",
-    copy: "Entry quality and responsiveness, together.",
-  },
-  {
-    id: "patient",
-    label: "Patient",
-    copy: "Larger uncertainty discount. More selective.",
-  },
-];
-const BASE = "/api/bots/prism-match";
-async function request<T>(
-  path: string,
-  body?: unknown,
-  signal?: AbortSignal,
-): Promise<T> {
-  const response = await fetch(`${BASE}/${path}`, {
-    ...(body !== undefined
-      ? {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }
-      : {}),
-    signal,
-  });
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error ?? "Prism request failed");
-  return data as T;
-}
-const ms = (n: number | null | undefined) =>
-  n === null || n === undefined
-    ? "—"
-    : `${n < 10 ? n.toFixed(2) : n.toFixed(0)} ms`;
-const panel = "rounded-xl border border-white/[0.08] bg-white/[0.025]";
-const labelClass =
-  "text-[10px] font-mono uppercase tracking-[0.16em] text-slate-500";
+type Step = "config" | "scanning" | "scan-result" | "running";
 
-function Metric({
-  label,
+const BASE = "/api/bots/prism-match";
+
+const PACING_PROFILES: Array<{ id: PrismActivity; label: string; desc: string }> = [
+  { id: "active", label: "Active", desc: "42% entry fraction · faster action" },
+  { id: "balanced", label: "Balanced", desc: "26% entry fraction · balanced edge" },
+  { id: "patient", label: "Patient", desc: "14% entry fraction · high selectivity" },
+];
+
+const ALL_DIGITS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+function NumInput({
+  label: lbl,
   value,
-  note,
-  bright = false,
+  onChange,
+  min,
+  step = 1,
+  suffix,
+  accent,
 }: {
   label: string;
-  value: string;
-  note?: string;
-  bright?: boolean;
+  value: number;
+  onChange: (v: number) => void;
+  min?: number;
+  step?: number;
+  suffix?: string;
+  accent: AccentKey;
 }) {
+  const a = ACCENTS[accent];
   return (
-    <div className="min-w-0">
-      <p className={labelClass}>{label}</p>
-      <p
-        className={`mt-1 font-mono text-lg font-semibold tracking-tight ${bright ? "text-lime-300" : "text-slate-100"}`}
-      >
-        {value}
-      </p>
-      {note && (
-        <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
-          {note}
-        </p>
-      )}
-    </div>
-  );
-}
-function SourceBadge({ source }: { source: string }) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[9px] font-mono uppercase tracking-wider ${source === "live" ? "border-emerald-400/20 bg-emerald-400/5 text-emerald-300" : "border-amber-400/20 bg-amber-400/5 text-amber-300"}`}
-    >
-      <span
-        className={`size-1.5 rounded-full ${source === "live" ? "bg-emerald-400" : "bg-amber-400"}`}
-      />
-      {source === "live" ? "Live tape" : "Simulated tape"}
-    </span>
-  );
-}
-function DigitDistribution({
-  prediction,
-  selected,
-}: {
-  prediction: PrismPrediction | null;
-  selected: number | null;
-}) {
-  const max = Math.max(0.15, ...(prediction?.probabilities ?? []));
-  return (
-    <div className={`${panel} p-4`}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className={labelClass}>Next-tick digit distribution</p>
-        <span className="text-[10px] text-slate-500">
-          Estimates, not outcomes
-        </span>
-      </div>
-      <div
-        className="mt-5 grid grid-cols-10 gap-1.5 sm:gap-2"
-        aria-label="Estimated probability for each next digit"
-      >
-        {Array.from({ length: 10 }, (_, digit) => {
-          const p = prediction?.probabilities[digit] ?? 0.1;
-          return (
-            <div
-              key={digit}
-              className="flex min-w-0 flex-col items-center gap-2"
-              title={`Digit ${digit}: ${pct(p)}; observed gap ${prediction?.gaps[digit] ?? 0} ticks`}
-            >
-              <span
-                className={`text-[8px] font-mono sm:text-[10px] ${digit === selected ? "text-lime-300" : "text-slate-500"}`}
-              >
-                {pct(p, 0)}
-              </span>
-              <div className="relative flex h-20 w-full items-end overflow-hidden rounded-t bg-white/[0.025]">
-                <div
-                  className={`w-full rounded-t transition-[height] duration-200 ${digit === selected ? "bg-gradient-to-t from-lime-500/50 to-lime-300" : "bg-slate-600/40"}`}
-                  style={{ height: `${Math.max(3, (p / max) * 100)}%` }}
-                />
-                <div
-                  className="pointer-events-none absolute w-full border-t border-dashed border-white/20"
-                  style={{ bottom: `${(0.1 / max) * 100}%` }}
-                />
-              </div>
-              <span
-                className={`flex size-6 items-center justify-center rounded-md font-mono text-xs ${digit === selected ? "bg-lime-300 text-slate-950 font-bold" : "text-slate-500"}`}
-              >
-                {digit}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-      <div className="mt-4 flex flex-wrap justify-between gap-2 text-[10px] text-slate-500">
-        <span>Dashed line: 10% fair baseline</span>
-        <span>
-          {prediction?.samples.toLocaleString() ?? "—"} observed digits
-        </span>
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-xs text-muted-foreground flex-1">{lbl}</span>
+      <div className="flex items-center gap-1">
+        <Input
+          type="number"
+          value={value}
+          min={min}
+          step={step}
+          onChange={(e) => onChange(Number(e.target.value))}
+          className={`w-20 h-7 text-right font-mono text-xs bg-black/30 border-white/10 focus-visible:ring-0 ${a.focusBorder}`}
+        />
+        {suffix && <span className="text-[10px] text-muted-foreground w-6">{suffix}</span>}
       </div>
     </div>
   );
 }
-function Evidence({ validation: v }: { validation: PrismValidation }) {
+
+function Stat({ label: lbl, value, tone }: { label: string; value: string; tone?: string }) {
   return (
-    <div className={`${panel} p-4 space-y-4`}>
-      <div className="flex items-center justify-between gap-2">
-        <p className={labelClass}>Held-out policy check</p>
-        <span
-          className={`rounded px-2 py-1 text-[9px] font-mono uppercase ${v.evidence === "supported" ? "bg-emerald-400/10 text-emerald-300" : v.evidence === "developing" ? "bg-sky-400/10 text-sky-300" : "bg-white/5 text-slate-400"}`}
-        >
-          {v.evidence}
-        </span>
-      </div>
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-        <Metric
-          label="Hit rate"
-          value={pct(v.hitRate)}
-          note={`${v.wins} matches / ${v.shots} entries`}
-        />
-        <Metric
-          label="95% interval"
-          value={v.shots ? `${pct(v.lower95, 0)}–${pct(v.upper95, 0)}` : "—"}
-          note="Wilson sampling interval"
-        />
-        <Metric
-          label="Net / $1 staked"
-          value={v.evPerStake === null ? "—" : money(v.evPerStake)}
-          note="Historical, indicative payout"
-        />
-      </div>
-      <div className="grid grid-cols-2 gap-x-4 gap-y-2 border-t border-white/5 pt-3 text-[10px] text-slate-500">
-        <span>Train → held-out ticks</span>
-        <span className="text-right font-mono text-slate-300">
-          {v.trainTicks.toLocaleString()} → {v.testTicks.toLocaleString()}
-        </span>
-        <span>Entry frequency</span>
-        <span className="text-right font-mono text-slate-300">
-          {pct(v.fireRate)} of held-out ticks
-        </span>
-        <span>Brier skill vs fair baseline</span>
-        <span className="text-right font-mono text-slate-300">
-          {pct(v.brierSkill, 2)}
-        </span>
-        <span>Longest held-out loss run</span>
-        <span className="text-right font-mono text-slate-300">
-          {v.longestLossRun} entries
-        </span>
-      </div>
-      <p className="text-[10px] leading-relaxed text-slate-500">
-        Digit selection was replayed before each outcome. The evidence label
-        adjusts for scanning multiple markets; it is not a guarantee or a
-        separate trade gate.
-      </p>
+    <div className="bg-black/25 rounded-lg px-2 py-1.5">
+      <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">{lbl}</p>
+      <p className={`text-[11px] font-mono font-bold ${tone ?? "text-white/90"}`}>{value}</p>
     </div>
-  );
-}
-function RiskScenario({ risk }: { risk: PrismRisk }) {
-  return (
-    <details className={`${panel} group p-4`}>
-      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-xs text-slate-300">
-        <span className="flex items-center gap-2">
-          <ShieldCheck className="size-4 text-lime-300/70" />
-          Recovery stress test
-        </span>
-        <ChevronDown className="size-4 transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3">
-        <Metric label="Stop reached" value={pct(risk.stopProbability)} />
-        <Metric label="Target reached" value={pct(risk.targetProbability)} />
-        <Metric label="Median P&L" value={money(risk.pnl50)} />
-      </div>
-      <p className="mt-3 text-[10px] leading-relaxed text-slate-500">
-        {risk.paths} seeded paths · up to {risk.horizon} entries ·{" "}
-        {risk.sampleShots} historical entry outcomes. 5th–95th percentile P&L:{" "}
-        {money(risk.pnl05)} to {money(risk.pnl95)}. 95th-percentile drawdown:{" "}
-        {money(risk.drawdown95)}.
-      </p>
-      <p className="mt-2 text-[10px] leading-relaxed text-amber-200/60">
-        {risk.note}
-      </p>
-    </details>
   );
 }
 
@@ -280,966 +108,734 @@ export function PrismMatchConsole({
   onOpenChange,
   session,
   onSession,
-}: BotConsoleProps) {
-  const [step, setStep] = useState<Step>("configure");
-  const [activity, setActivity] = useState<PrismActivity>("balanced");
-  const [digit, setDigit] = useState("auto");
-  const [executionMode, setExecutionMode] = useState<"paper" | "live">("paper");
-  const [fields, setFields] = useState({
-    stake: "1",
-    stopLoss: "10",
-    takeProfit: "10",
-    maxRecoverySteps: "3",
-  });
-  const [scan, setScan] = useState<PrismScanView | null>(null);
-  const [selectedSymbol, setSelectedSymbol] = useState("");
-  const [marketMode, setMarketMode] = useState<"locked" | "switching">(
-    "locked",
-  );
-  const [confirmLive, setConfirmLive] = useState(false);
+}: {
+  bot: BotCardData | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  session: BotSessionStatus | null;
+  onSession: (status: BotSessionStatus | null) => void;
+}) {
+  const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [progress, setProgress] = useState({
+  const [scanResult, setScanResult] = useState<PrismScanView | null>(null);
+  const [selectedSymbol, setSelectedSymbol] = useState<string>("");
+  const [marketMode, setMarketMode] = useState<"locked" | "switching">("locked");
+  const [activity, setActivity] = useState<PrismActivity>("balanced");
+  const [aiDigit, setAiDigit] = useState(true);
+  const [digit, setDigit] = useState<number>(7);
+  const [executionMode, setExecutionMode] = useState<"paper" | "live">("paper");
+  const [confirmLive, setConfirmLive] = useState(false);
+  const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
+    scanning: null,
     scanned: 0,
-    total: 0,
-    scanning: "Preparing source-verified history",
+    total: 19,
   });
-  const [live, setLive] = useState<BotSessionStatus | null>(null);
-  const [now, setNow] = useState(Date.now());
-  const controller = useRef<AbortController | null>(null);
-  const requestGeneration = useRef(0);
-  const scroller = useRef<HTMLDivElement | null>(null);
-  useEffect(() => {
-    if (scroller.current) scroller.current.scrollTop = 0;
-  }, [step]);
-  const defaultsApplied = useRef(false);
+
   const { data: settings } = useGetSettings();
 
+  const [config, setConfig] = useState({
+    stake: 1,
+    takeProfit: 10,
+    stopLoss: 5,
+    maxRecoverySteps: 3,
+  });
+
+  const setParam = <K extends keyof typeof config>(k: K, v: number) =>
+    setConfig((prev) => ({ ...prev, [k]: v }));
+
   useEffect(() => {
-    if (!settings || defaultsApplied.current) return;
-    defaultsApplied.current = true;
-    setFields((prev) => ({
+    if (!settings) return;
+    const s = settings as any;
+    setConfig((prev) => ({
       ...prev,
-      stake: String(settings.riskAmountValue ?? 1),
-      maxRecoverySteps: String(settings.maxRecoverySteps ?? 3),
+      stake: s.riskAmountValue ?? prev.stake,
+      maxRecoverySteps: s.maxRecoverySteps ?? prev.maxRecoverySteps,
     }));
   }, [settings]);
-  const applyStatus = useCallback(
-    (value: BotSessionStatus | null) => {
-      if (value?.botId !== "prism-match") return;
-      setLive(value);
-      onSession(value);
-      if (value.running) setStep("session");
-    },
-    [onSession],
-  );
+
+  const isRunning = session?.running === true && session?.botId === (bot?.id ?? "prism-match");
+
   useEffect(() => {
-    if (session?.botId === "prism-match") {
-      setLive(session);
-      if (session.running) setStep("session");
+    if (isRunning) {
+      setStep("running");
+      const m = (session?.config as any)?.marketMode;
+      if (m === "locked" || m === "switching") setMarketMode(m);
     }
-  }, [session]);
+  }, [isRunning]);
 
   useEffect(() => {
     if (!open) return;
+    setScanResult(null);
+    setStep(isRunning ? "running" : "config");
+  }, [open]);
+
+  const applyStatus = useCallback((d: BotSessionStatus) => onSession(d), [onSession]);
+
+  useEffect(() => {
+    if (!open) return;
+    let es: EventSource;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     let dead = false;
-    setError("");
-    const refresh = () => {
-      void request<BotSessionStatus | null>("status")
-        .then((value) => {
-          if (!dead) applyStatus(value);
-        })
-        .catch(() => {});
-    };
-    refresh();
-    const interval = setInterval(() => {
-      setNow(Date.now());
-      refresh();
-    }, 2000);
-    const es = new EventSource(withTabSession("/api/ai/events"));
-    es.addEventListener("bot_update", (event: MessageEvent) => {
-      try {
-        if (!dead) applyStatus(JSON.parse(event.data));
-      } catch {
-        /* malformed event */
-      }
-    });
-    es.addEventListener("bot_scan_progress", (event: MessageEvent) => {
-      try {
-        const value = JSON.parse(event.data);
-        if (value.botId === "prism-match" && !dead)
-          setProgress({
-            scanned: value.scanned,
-            total: value.total,
-            scanning: value.scanning ?? "Finalizing results",
-          });
-      } catch {
-        /* malformed event */
-      }
-    });
+    function connect() {
+      if (dead) return;
+      es = new EventSource(withTabSession("/api/ai/events"));
+      es.addEventListener("bot_update", (e: MessageEvent) => {
+        try {
+          const d = JSON.parse(e.data);
+          if (d.botId === "prism-match") applyStatus(d as BotSessionStatus);
+        } catch {
+          /* ignore */
+        }
+      });
+      es.addEventListener("prism_scan_progress", (e: MessageEvent) => {
+        try {
+          const p = JSON.parse(e.data);
+          setProgress({ scanning: p.scanning, scanned: p.scanned, total: p.total });
+        } catch {
+          /* ignore */
+        }
+      });
+      es.onerror = () => {
+        es.close();
+        if (!dead) timer = setTimeout(connect, 2000);
+      };
+    }
+    connect();
     return () => {
       dead = true;
-      clearInterval(interval);
-      es.close();
-      controller.current?.abort();
-      requestGeneration.current++;
+      if (timer) clearTimeout(timer);
+      es?.close();
     };
   }, [open, applyStatus]);
 
-  const config = (): PrismConfig => ({
+  if (!bot) return null;
+  const a = ACCENTS[bot.accent ?? "fuchsia"];
+  const Icon = BOT_ICON[bot.icon] ?? Zap;
+
+  const buildScanInput = (): PrismConfig => ({
     activity,
+    digit: aiDigit ? undefined : digit,
+    stake: config.stake,
+    stopLoss: config.stopLoss,
+    takeProfit: config.takeProfit,
+    maxRecoverySteps: config.maxRecoverySteps,
     executionMode,
-    ...(digit === "auto" ? {} : { digit: Number(digit) }),
-    stake: Number(fields.stake),
-    stopLoss: Number(fields.stopLoss),
-    takeProfit: Number(fields.takeProfit),
-    maxRecoverySteps: Number(fields.maxRecoverySteps),
   });
+
   const handleScan = async () => {
-    const generation = ++requestGeneration.current;
-    controller.current?.abort();
-    controller.current = new AbortController();
-    setError("");
     setLoading(true);
     setStep("scanning");
-    setScan(null);
-    setConfirmLive(false);
-    setProgress({
-      scanned: 0,
-      total: 0,
-      scanning: "Preparing source-verified history",
-    });
+    setScanResult(null);
+    setProgress({ scanning: "Inspecting deep digit ticks…", scanned: 0, total: 19 });
     try {
-      const result = await request<PrismScanView>(
-        "scan",
-        config(),
-        controller.current.signal,
-      );
-      if (generation !== requestGeneration.current) return;
-      setScan(result);
-      setSelectedSymbol(
-        result.markets.find((m) => m.deployable)?.symbol ??
-          result.markets[0]?.symbol ??
-          "",
-      );
-      setNow(Date.now());
-      setMarketMode("locked");
-      setStep("results");
-    } catch (err) {
-      if (generation !== requestGeneration.current) return;
-      setError(err instanceof Error ? err.message : "Scan failed");
-      setStep("configure");
-    } finally {
-      if (generation === requestGeneration.current) setLoading(false);
-    }
-  };
-  const handleDeploy = async () => {
-    if (!scan) return;
-    setLoading(true);
-    setError("");
-    try {
-      const result = await request<{ status: BotSessionStatus }>(
-        "start",
-        prismDeployBody(scan, selectedSymbol, marketMode, confirmLive),
-      );
-      applyStatus(result.status);
-      setStep("session");
-      toast.success(
-        `Prism Match deployed in ${scan.config.executionMode} mode`,
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Deployment failed");
+      const res = await fetch(`${BASE}/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(buildScanInput()),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Scan failed");
+        setStep("config");
+        return;
+      }
+      const scanView = data as PrismScanView;
+      setScanResult(scanView);
+      if (scanView.markets.length > 0) {
+        setSelectedSymbol(scanView.markets[0]!.symbol);
+      }
+      setStep("scan-result");
+    } catch {
+      toast.error("Could not reach Prism analysis engine");
+      setStep("config");
     } finally {
       setLoading(false);
     }
   };
+
+  const handleStart = async (symbol: string, mode: "locked" | "switching") => {
+    if (!scanResult) return;
+    const chosenMarket = scanResult.markets.find((m) => m.symbol === symbol);
+    if (!chosenMarket) return;
+
+    if (scanResult.config.executionMode === "live" && !confirmLive) {
+      toast.error("Please confirm live real-money risk");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const deployPayload = prismDeployBody(
+        scanResult,
+        symbol,
+        mode,
+        scanResult.config.executionMode === "live" && confirmLive,
+      );
+      const res = await fetch(`${BASE}/start`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(deployPayload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Failed to start Prism Match");
+        return;
+      }
+      onSession(data.status);
+      setMarketMode(mode);
+      setStep("running");
+      toast.success(
+        mode === "locked"
+          ? `🔒 Locked on ${chosenMarket.displayName} (Matches)`
+          : `🔁 Deployed on ${chosenMarket.displayName} (Matches · Auto-Switching)`,
+      );
+    } catch {
+      toast.error("Could not start Prism Match");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleStop = async () => {
     setLoading(true);
-    setError("");
     try {
-      const result = await request<{ status: BotSessionStatus | null }>(
-        "stop",
-        {},
-      );
-      applyStatus(result.status);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Could not stop; retry immediately",
-      );
+      const res = await fetch(`${BASE}/stop`, { method: "POST" });
+      const data = await res.json();
+      onSession(data.status ?? null);
+      toast.success("Prism Match session stopped");
+    } catch {
+      /* ignore */
     } finally {
       setLoading(false);
     }
   };
-  const selected = scan?.markets.find((m) => m.symbol === selectedSymbol);
-  const telemetry = live?.prism;
-  const expired = !!scan && scan.expiresAt <= now;
-  const restart = () => {
-    setStep("configure");
-    setScan(null);
-    setLoading(false);
-    setError("");
-    setConfirmLive(false);
-  };
-  const stage =
-    step === "configure"
-      ? 0
-      : step === "scanning"
-        ? 1
-        : step === "results"
-          ? 2
-          : 3;
+
+  const profit = session?.totalProfit ?? 0;
+  const winRate =
+    session && session.tradeCount > 0
+      ? Math.round((session.winCount / session.tradeCount) * 100)
+      : 0;
+  const telemetry = session?.prism;
+  const selectedMarket = scanResult?.markets.find((m) => m.symbol === selectedSymbol);
 
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(value) => {
-        if (!value && step === "scanning") {
-          requestGeneration.current++;
-          controller.current?.abort();
-          setLoading(false);
-          setStep("configure");
-        }
-        onOpenChange(value);
-      }}
-    >
-      <DialogContent className="w-[calc(100%_-_1.5rem)] max-w-[1080px] gap-0 overflow-hidden border-white/10 bg-[#090e17] p-0 text-slate-200 sm:rounded-2xl">
-        <DialogHeader className="border-b border-white/[0.07] bg-gradient-to-r from-lime-300/[0.07] to-transparent px-5 py-5 pr-12 sm:px-7">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex size-10 items-center justify-center rounded-xl border border-lime-300/20 bg-lime-300/10">
-              <Zap className="size-5 text-lime-300" />
-            </div>
-            <div>
-              <p className="font-mono text-[9px] uppercase tracking-[0.25em] text-lime-300/65">
-                PRISM / MATCHES LAB
-              </p>
-              <DialogTitle className="mt-1 text-xl font-semibold tracking-tight text-slate-50">
-                {bot.name}
-                <span className="ml-2 text-sm font-normal text-slate-500">
-                  One tick ahead.
-                </span>
-              </DialogTitle>
-            </div>
-            <span className="ml-auto hidden rounded-full border border-white/10 px-2.5 py-1 text-[9px] font-mono text-slate-400 sm:block">
-              DIGITMATCH ONLY · 1 TICK
-            </span>
-          </div>
-          <DialogDescription className="sr-only">
-            Configure and scan Prism Match, then choose a locked or switching
-            market. Trading and recovery are risky; probabilities and historical
-            results are not guarantees.
-          </DialogDescription>
-        </DialogHeader>
-        <div
-          ref={scroller}
-          className="max-h-[76vh] overflow-y-auto overscroll-contain px-5 py-5 sm:px-7"
-        >
-          <div className="mb-6 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-white/5 pb-4">
-            {["Configure", "Analyze", "Choose & deploy", "Session"].map(
-              (name, index) => (
-                <div
-                  key={name}
-                  className={`flex items-center gap-2 text-[10px] font-mono ${index === stage ? "text-lime-300" : "text-slate-600"}`}
-                >
-                  <span
-                    className={`flex size-5 items-center justify-center rounded-full border ${index === stage ? "border-lime-300/40 bg-lime-300/10" : "border-white/10"}`}
-                  >
-                    {index < stage ? <Check className="size-3" /> : index + 1}
-                  </span>
-                  {name}
-                </div>
-              ),
-            )}
-            <span className="ml-auto flex items-center gap-1.5 text-[10px] text-slate-500">
-              <ShieldCheck className="size-3" />
-              One executor · one ledger
-            </span>
-          </div>
-          {error && (
+    <AnimatePresence>
+      {open && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-40"
+            onClick={() => onOpenChange(false)}
+          />
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.97 }}
+            transition={{ type: "spring", stiffness: 400, damping: 35 }}
+            role="dialog"
+            aria-label={`${bot.name} console`}
+            className={`fixed bottom-20 right-4 z-50 w-88 max-w-[calc(100vw-2rem)] max-h-[calc(100vh-6rem)] overflow-y-auto rounded-2xl border ${a.panelBorder} bg-[#080d17] shadow-2xl ${a.cardGlow}`}
+          >
+            {/* Header */}
             <div
-              role="alert"
-              className="mb-5 rounded-lg border border-rose-400/25 bg-rose-400/5 p-3 text-xs leading-relaxed text-rose-200"
+              className={`flex items-center justify-between gap-2 p-4 border-b border-white/5 bg-gradient-to-r ${a.headerGrad}`}
             >
-              {error}
-            </div>
-          )}
-
-          {step === "configure" && (
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                void handleScan();
-              }}
-              className="space-y-6"
-            >
-              <div className="grid gap-6 md:grid-cols-[1.15fr_1fr]">
-                <div className="space-y-5">
-                  <div>
-                    <p className={labelClass}>01 / Entry behavior</p>
-                    <h3 className="mt-2 text-lg font-medium text-white">
-                      Precision without the gate stack.
-                    </h3>
-                    <p className="mt-2 text-xs leading-relaxed text-slate-400">
-                      Six models compete on what they predicted before the next
-                      tick arrived. One payout-aware rule makes the entry
-                      decision. No “due digit” shortcut.
-                    </p>
-                  </div>
-                  <fieldset>
-                    <legend className="mb-2 text-xs text-slate-300">
-                      Activity preference
-                    </legend>
-                    <div className="grid grid-cols-3 gap-2">
-                      {PROFILES.map((profile) => (
-                        <button
-                          type="button"
-                          key={profile.id}
-                          aria-pressed={activity === profile.id}
-                          onClick={() => setActivity(profile.id)}
-                          className={`rounded-xl border p-3 text-left transition-colors ${activity === profile.id ? "border-lime-300/40 bg-lime-300/[0.07]" : "border-white/[0.08] hover:bg-white/5"}`}
-                        >
-                          <p
-                            className={`text-xs font-medium ${activity === profile.id ? "text-lime-300" : "text-slate-300"}`}
-                          >
-                            {profile.label}
-                          </p>
-                          <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                            {profile.copy}
-                          </p>
-                        </button>
-                      ))}
-                    </div>
-                    <p className="mt-2 text-[10px] text-slate-500">
-                      Pacing preference, not a trade quota. Waiting never forces
-                      a negative-value entry.
-                    </p>
-                  </fieldset>
-                  <div>
-                    <label
-                      htmlFor="prism-digit"
-                      className="mb-2 block text-xs text-slate-300"
-                    >
-                      Target digit
-                    </label>
-                    <select
-                      id="prism-digit"
-                      value={digit}
-                      onChange={(e) => setDigit(e.target.value)}
-                      className="h-10 w-full rounded-lg border border-white/10 bg-[#101723] px-3 text-xs text-slate-200 outline-none focus:border-lime-300/40"
-                    >
-                      <option value="auto">
-                        AI selects · compare all 10 digits
-                      </option>
-                      {Array.from({ length: 10 }, (_, d) => (
-                        <option key={d} value={d}>
-                          Lock digit {d} · Matches only
-                        </option>
-                      ))}
-                    </select>
-                    <p className="mt-2 text-[10px] text-slate-500">
-                      You choose the market and locked/switching behavior after
-                      the scan.
-                    </p>
-                  </div>
-                  <div className={`${panel} p-4`}>
-                    <p className="flex items-center gap-2 text-xs text-slate-300">
-                      <BarChart3 className="size-4 text-lime-300/70" />
-                      Built to show its work
-                    </p>
-                    <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                      Next-digit probability, held-out hits, uncertainty, actual
-                      quote checks and timing. On a fair stream a Matches digit
-                      has a 10% chance—not 90% accuracy. No model or recovery
-                      system guarantees profits.
-                    </p>
-                  </div>
-                </div>
-                <div className={`${panel} p-5 space-y-5`}>
-                  <p className={labelClass}>02 / Risk & execution</p>
-                  <fieldset>
-                    <legend className="mb-2 text-xs text-slate-300">
-                      Execution mode
-                    </legend>
-                    <div className="grid grid-cols-2 gap-2">
-                      {(["paper", "live"] as const).map((mode) => (
-                        <button
-                          type="button"
-                          key={mode}
-                          onClick={() => setExecutionMode(mode)}
-                          aria-pressed={executionMode === mode}
-                          className={`flex items-center justify-center gap-2 rounded-lg border px-3 py-2.5 text-xs ${executionMode === mode ? (mode === "paper" ? "border-lime-300/40 bg-lime-300/10 text-lime-300" : "border-amber-300/40 bg-amber-300/10 text-amber-300") : "border-white/10 text-slate-500"}`}
-                        >
-                          {mode === "paper" ? (
-                            <FlaskConical className="size-3.5" />
-                          ) : (
-                            <Radio className="size-3.5" />
-                          )}
-                          {mode === "paper" ? "Paper first" : "Deriv account"}
-                        </button>
-                      ))}
-                    </div>
-                    <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                      {executionMode === "paper"
-                        ? "A separate $10,000 paper bankroll. Settles on the next observed tick; never changes real balance or recovery debt."
-                        : "Uses your active Deriv account (demo or real). Requires live data and a second confirmation after the scan."}
-                    </p>
-                  </fieldset>
-                  <div className="grid grid-cols-2 gap-4">
-                    {(
-                      [
-                        ["stake", "Base stake", "0.35", "0.01"],
-                        ["stopLoss", "Stop-loss budget", "0.35", "0.01"],
-                        ["takeProfit", "Take-profit target", "0.01", "0.01"],
-                        ["maxRecoverySteps", "Recovery step cap", "1", "1"],
-                      ] as const
-                    ).map(([key, name, min, increment]) => (
-                      <div key={key}>
-                        <label
-                          htmlFor={`prism-${key}`}
-                          className="mb-2 block text-[11px] text-slate-400"
-                        >
-                          {name}
-                        </label>
-                        <Input
-                          id={`prism-${key}`}
-                          required
-                          type="number"
-                          min={min}
-                          max={key === "maxRecoverySteps" ? "10" : "1000000"}
-                          step={increment}
-                          value={fields[key]}
-                          onChange={(event) =>
-                            setFields((prev) => ({
-                              ...prev,
-                              [key]: event.target.value,
-                            }))
-                          }
-                          className="h-10 border-white/10 bg-black/20 font-mono text-sm focus-visible:ring-lime-300/30"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                  <div className="border-t border-white/5 pt-4">
-                    <p className="text-xs text-slate-300">
-                      Your Matches recovery. Unchanged.
-                    </p>
-                    <p className="mt-2 text-[10px] leading-relaxed text-slate-500">
-                      Debt × (1 + your bot markup) ÷ (payout − 1), with the
-                      $0.35 floor and stake/balance limits. The next loss cannot
-                      spend beyond the remaining stop budget. The step cap
-                      retains the shared ledger’s step-label behavior; it is not
-                      a maximum number of recovery attempts.
-                    </p>
-                  </div>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center justify-between gap-4 border-t border-white/5 pt-5">
-                <p className="max-w-md text-[10px] leading-relaxed text-slate-500">
-                  Up to 4,999 source-verified digits per market. History
-                  requests overlap; all ten digits share one analysis pass.
-                </p>
-                <Button
-                  type="submit"
-                  disabled={loading}
-                  className="gap-2 bg-lime-300 px-6 text-slate-950 hover:bg-lime-200"
-                >
-                  <ScanSearch className="size-4" />
-                  Scan markets
-                  <ArrowRight className="size-4" />
-                </Button>
-              </div>
-            </form>
-          )}
-
-          {step === "scanning" && (
-            <div className="py-16 text-center" role="status" aria-live="polite">
-              <div className="mx-auto flex size-16 items-center justify-center rounded-2xl border border-lime-300/20 bg-lime-300/5">
-                <ScanSearch className="size-7 animate-pulse text-lime-300" />
-              </div>
-              <h3 className="mt-6 text-xl text-white">Reading the evidence.</h3>
-              <p className="mt-3 text-sm text-slate-400">{progress.scanning}</p>
-              <div className="mx-auto mt-6 h-1.5 max-w-sm overflow-hidden rounded-full bg-white/5">
+              <div className="flex items-center gap-2.5 min-w-0">
                 <div
-                  className="h-full bg-lime-300 transition-[width] duration-300"
-                  style={{
-                    width: `${progress.total ? (progress.scanned / progress.total) * 100 : 5}%`,
-                  }}
-                />
-              </div>
-              <p className="mt-3 font-mono text-[10px] text-slate-500">
-                {progress.scanned} / {progress.total || "—"} markets · training
-                → causal held-out replay → recovery stress test
-              </p>
-              <p className="mx-auto mt-7 max-w-sm text-[11px] leading-relaxed text-slate-500">
-                No trades are placed during analysis. Live and simulated
-                histories are kept separate.
-              </p>
-            </div>
-          )}
-
-          {step === "results" && scan && (
-            <div className="space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className={labelClass}>Scan complete</p>
-                  <h3 className="mt-1 text-lg text-white">
-                    Choose where Prism works.
-                  </h3>
-                  <p className="mt-1 text-[11px] text-slate-500">
-                    {scan.markets.length} measured / {scan.marketsScanned}{" "}
-                    markets · {(scan.elapsedMs / 1000).toFixed(2)} s ·{" "}
-                    {expired
-                      ? "Scan expired"
-                      : `Deploy within ${Math.max(0, Math.ceil((scan.expiresAt - now) / 1000))} s`}
-                  </p>
-                </div>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={restart}
-                  disabled={loading}
-                  className="border-white/10 bg-transparent text-xs"
+                  className={`w-9 h-9 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}
                 >
-                  Edit & rescan
-                </Button>
-              </div>
-              {!scan.markets.length && (
-                <div className={`${panel} p-8 text-center`}>
-                  <Clock3 className="mx-auto size-7 text-slate-500" />
-                  <p className="mt-4 text-sm">The feed is still warming up.</p>
-                  <p className="mt-2 text-xs text-slate-500">
-                    No market has enough validated history yet. No accuracy
-                    figures have been invented. Wait for the feed, then scan
-                    again.
+                  <Icon className={`w-4.5 h-4.5 ${a.text}`} />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    {bot.name}
+                    <span
+                      className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text} font-normal`}
+                    >
+                      {bot.code}
+                    </span>
+                  </h3>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 truncate">
+                    {bot.tagline}
                   </p>
                 </div>
-              )}
-              {!!scan.markets.length && (
-                <div className="grid gap-5 lg:grid-cols-[260px_1fr]">
-                  <div className={`${panel} overflow-hidden`}>
-                    <p
-                      className={`${labelClass} border-b border-white/5 px-4 py-3`}
+              </div>
+              <button
+                onClick={() => onOpenChange(false)}
+                aria-label="Close console"
+                className="text-muted-foreground hover:text-white p-1 flex-shrink-0"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* STEP 1: CONFIG */}
+            {step === "config" && (
+              <div className="p-4 space-y-4">
+                {/* Mode Selector: Paper vs Live */}
+                <div className="space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                    Execution Mode
+                  </p>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <button
+                      onClick={() => setExecutionMode("paper")}
+                      className={`px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        executionMode === "paper"
+                          ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
+                          : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
+                      }`}
                     >
-                      Ranked by current entry value
-                    </p>
-                    <div className="max-h-[445px] overflow-y-auto">
-                      {scan.markets.map((market, index) => (
-                        <button
-                          key={market.symbol}
-                          type="button"
-                          onClick={() => setSelectedSymbol(market.symbol)}
-                          aria-pressed={market.symbol === selectedSymbol}
-                          className={`w-full border-b border-white/5 px-4 py-3.5 text-left transition-colors ${market.symbol === selectedSymbol ? "border-l-2 border-l-lime-300 bg-lime-300/[0.055]" : "border-l-2 border-l-transparent hover:bg-white/[0.03]"}`}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-[11px] font-medium text-slate-200">
-                              <span className="mr-2 font-mono text-slate-600">
-                                {String(index + 1).padStart(2, "0")}
-                              </span>
-                              {market.displayName}
-                            </span>
-                            <span className="font-mono text-xs text-lime-300">
-                              {market.decision.digit}
-                            </span>
-                          </div>
-                          <div className="mt-2 flex items-center justify-between gap-2">
-                            <SourceBadge source={market.source} />
-                            <span className="font-mono text-[10px] text-slate-400">
-                              {pct(market.decision.p)} est.
-                            </span>
-                          </div>
-                        </button>
-                      ))}
-                    </div>
+                      🧪 Paper (Test)
+                    </button>
+                    <button
+                      onClick={() => setExecutionMode("live")}
+                      className={`px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
+                        executionMode === "live"
+                          ? "bg-red-500/15 border border-red-500/40 text-red-300"
+                          : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
+                      }`}
+                    >
+                      ⚡ Live Account
+                    </button>
                   </div>
-                  {selected && (
-                    <div className="space-y-4">
-                      <div className="flex flex-wrap items-center gap-4 rounded-xl border border-lime-300/15 bg-lime-300/[0.03] p-4">
-                        <div className="flex size-14 shrink-0 items-center justify-center rounded-xl border border-lime-300/20 bg-lime-300/10 font-mono text-3xl text-lime-300">
-                          {selected.decision.digit}
-                        </div>
-                        <div className="flex-1">
-                          <p className="text-sm font-medium text-white">
-                            Matches {selected.decision.digit} ·{" "}
-                            {selected.displayName}
-                          </p>
-                          <p className="mt-1 max-w-lg text-[11px] leading-relaxed text-slate-500">
-                            {selected.decision.reason}
-                          </p>
-                        </div>
-                        <div className="min-w-[95px]">
-                          <Metric
-                            label="Est. next tick"
-                            value={pct(selected.decision.p)}
-                            bright
-                            note={`Break-even ${pct(selected.decision.breakEven)}`}
-                          />
-                        </div>
+                </div>
+
+                {/* Target Digit (Matches only) */}
+                <div className="space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                    Target Digit (1-Tick Matches)
+                  </p>
+                  <button
+                    onClick={() => setAiDigit((v) => !v)}
+                    className={`w-full flex items-center gap-2 px-2.5 py-2 rounded-lg text-[11px] text-left transition-colors ${
+                      aiDigit
+                        ? `${a.activeBg} border ${a.activeBorder}`
+                        : "bg-white/[0.03] border border-white/5"
+                    }`}
+                  >
+                    <span
+                      className={`w-3.5 h-3.5 rounded border flex items-center justify-center flex-shrink-0 ${
+                        aiDigit ? `${a.dot} border-transparent` : "border-white/20"
+                      }`}
+                    >
+                      {aiDigit && <span className="text-[8px] text-black font-bold">✓</span>}
+                    </span>
+                    <span className={aiDigit ? a.text : "text-muted-foreground"}>
+                      AI selects best match digit dynamically (7-model ensemble)
+                    </span>
+                  </button>
+                  {!aiDigit && (
+                    <div className="space-y-1 pt-1">
+                      <p className="text-[9px] uppercase tracking-wider text-muted-foreground/70">
+                        Lock Fixed Digit
+                      </p>
+                      <div className="grid grid-cols-5 gap-1">
+                        {ALL_DIGITS.map((d) => (
+                          <button
+                            key={d}
+                            onClick={() => setDigit(d)}
+                            className={`h-8 rounded-lg text-xs font-mono font-bold transition-colors ${
+                              digit === d
+                                ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
+                                : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
+                            }`}
+                          >
+                            {d}
+                          </button>
+                        ))}
                       </div>
-                      <DigitDistribution
-                        prediction={selected.prediction}
-                        selected={selected.decision.digit}
-                      />
-                      <Evidence validation={selected.validation} />
-                      <RiskScenario risk={selected.risk} />
                     </div>
                   )}
                 </div>
-              )}
-              {selected && (
-                <section
-                  className="rounded-xl border border-lime-300/20 bg-lime-300/[0.035] p-5"
-                  aria-label="Post-scan market mode"
-                >
-                  <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-                    <h4 className="text-sm font-medium text-white">
-                      Now choose your market mode.
-                    </h4>
-                    <span className="font-mono text-[10px] text-slate-500">
-                      {scan.config.executionMode.toUpperCase()} ·{" "}
-                      {money(scan.config.stake)} base ·{" "}
-                      {money(scan.config.stopLoss)} stop
-                    </span>
-                  </div>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {(["locked", "switching"] as const).map((mode) => (
+
+                {/* Pacing Profiles */}
+                <div className="space-y-1.5">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                    Pacing Profile
+                  </p>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {PACING_PROFILES.map((p) => (
                       <button
-                        type="button"
-                        key={mode}
-                        aria-pressed={marketMode === mode}
-                        onClick={() => setMarketMode(mode)}
-                        className={`flex items-start gap-3 rounded-xl border p-4 text-left ${marketMode === mode ? "border-lime-300/40 bg-lime-300/[0.065]" : "border-white/10 bg-black/10"}`}
+                        key={p.id}
+                        onClick={() => setActivity(p.id)}
+                        className={`px-2 py-2 rounded-lg text-center transition-colors ${
+                          activity === p.id
+                            ? `${a.activeBg} border ${a.activeBorder} ${a.text}`
+                            : "bg-white/[0.03] border border-white/5 text-muted-foreground hover:bg-white/[0.07]"
+                        }`}
                       >
-                        {mode === "locked" ? (
-                          <Lock className="mt-0.5 size-4 shrink-0 text-lime-300" />
-                        ) : (
-                          <Shuffle className="mt-0.5 size-4 shrink-0 text-lime-300" />
-                        )}
-                        <div>
-                          <p className="text-xs font-medium text-slate-200">
-                            {mode === "locked"
-                              ? `Lock ${selected.displayName}`
-                              : "Allow market switching"}
-                          </p>
-                          <p className="mt-1.5 text-[10px] leading-relaxed text-slate-500">
-                            {mode === "locked"
-                              ? "The symbol never changes. Automatic digit selection can still adapt inside this market."
-                              : "Start here, then compare the scanned market pool on fresh ticks. Hysteresis limits unnecessary switching."}
-                          </p>
-                        </div>
+                        <span className="block text-[11px] font-semibold">{p.label}</span>
+                        <span className="block text-[8px] text-muted-foreground/70">
+                          {p.id === "active" ? "42%" : p.id === "balanced" ? "26%" : "14%"}
+                        </span>
                       </button>
                     ))}
                   </div>
-                  {scan.config.executionMode === "live" && (
-                    <label className="mt-4 flex items-start gap-3 rounded-lg border border-amber-300/20 bg-amber-300/5 p-3 text-[11px] leading-relaxed text-amber-200">
+                </div>
+
+                {/* Session Risk & Recovery */}
+                <div className="space-y-2">
+                  <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
+                    Session Boundaries
+                  </p>
+                  <NumInput
+                    label="Base Stake"
+                    value={config.stake}
+                    onChange={(v) => setParam("stake", v)}
+                    min={0.35}
+                    step={0.5}
+                    suffix="USD"
+                    accent={bot.accent ?? "fuchsia"}
+                  />
+                  <NumInput
+                    label="Take Profit"
+                    value={config.takeProfit}
+                    onChange={(v) => setParam("takeProfit", v)}
+                    min={1}
+                    step={1}
+                    suffix="USD"
+                    accent={bot.accent ?? "fuchsia"}
+                  />
+                  <NumInput
+                    label="Stop Loss"
+                    value={config.stopLoss}
+                    onChange={(v) => setParam("stopLoss", v)}
+                    min={1}
+                    step={1}
+                    suffix="USD"
+                    accent={bot.accent ?? "fuchsia"}
+                  />
+                  <NumInput
+                    label="Max Recovery Steps"
+                    value={config.maxRecoverySteps}
+                    onChange={(v) => setParam("maxRecoverySteps", v)}
+                    min={1}
+                    step={1}
+                    accent={bot.accent ?? "fuchsia"}
+                  />
+                </div>
+
+                {/* Live Risk Confirmation */}
+                {executionMode === "live" && (
+                  <div className="p-2.5 rounded-lg border border-red-500/30 bg-red-500/10 space-y-1.5">
+                    <label className="flex items-start gap-2 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={confirmLive}
                         onChange={(e) => setConfirmLive(e.target.checked)}
-                        className="mt-0.5 accent-lime-300"
+                        className="mt-0.5 rounded border-red-500/40 text-red-500"
                       />
-                      <span>
-                        I authorize trading on my active Deriv account. Matches
-                        usually loses most individual entries; recovery
-                        increases exposure and does not guarantee repayment.
+                      <span className="text-[11px] text-red-200 leading-tight">
+                        I confirm this session trades with <strong>real live account funds</strong> on Deriv.
                       </span>
                     </label>
-                  )}
-                  {!selected.deployable && (
-                    <p role="alert" className="mt-3 text-xs text-amber-300">
-                      This is simulated history. It cannot authorize live
-                      trading. Rescan with a live feed, or choose paper mode.
-                    </p>
-                  )}
-                  {expired && (
-                    <p role="alert" className="mt-3 text-xs text-amber-300">
-                      The scan has expired. Rescan before deploying; stale
-                      client cards cannot authorize trades.
-                    </p>
-                  )}
-                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-                    <p className="max-w-lg text-[10px] leading-relaxed text-slate-500">
-                      Deploy means watch for a fresh qualifying tick, not buy
-                      immediately. Recovery markup:{" "}
-                      {scan.riskSettings.markupPercent}%. Maximum stake:{" "}
-                      {money(scan.riskSettings.maxStake)}.
-                    </p>
-                    <Button
-                      onClick={() => void handleDeploy()}
-                      disabled={
-                        loading ||
-                        !canDeployPrism(scan, selected, now, confirmLive)
-                      }
-                      className="gap-2 bg-lime-300 text-slate-950 hover:bg-lime-200"
-                    >
-                      {loading ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        <Zap className="size-4" />
-                      )}
-                      Deploy {scan.config.executionMode} · {marketMode}
-                    </Button>
                   </div>
-                </section>
-              )}
-              {selected && (
-                <details className={`${panel} p-4`}>
-                  <summary className="cursor-pointer text-xs text-slate-400">
-                    Data quality & limitations
-                  </summary>
-                  <ul className="mt-3 list-disc space-y-2 pl-4 text-[11px] leading-relaxed text-slate-500">
-                    {selected.warnings.map((warning) => (
-                      <li key={warning}>{warning}</li>
-                    ))}
-                    <li>{scan.note}</li>
-                    <li>
-                      History: {selected.historySource}; calibration retention:{" "}
-                      {pct(selected.calibration)}; per-market analysis:{" "}
-                      {ms(selected.analysisMs)}.
-                    </li>
-                    {scan.omitted.map((item) => (
-                      <li key={item.symbol}>
-                        {item.symbol}: {item.reason}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-            </div>
-          )}
-
-          {step === "session" && live && telemetry && (
-            <div className="space-y-5">
-              <div className="flex flex-wrap items-center justify-between gap-4">
-                <div className="flex items-center gap-3">
-                  <span
-                    className={`size-2 rounded-full ${live.running ? "animate-pulse bg-lime-300" : "bg-slate-500"}`}
-                  />
-                  <div>
-                    <h3 className="text-lg text-white">
-                      {live.running
-                        ? "Prism is on watch."
-                        : "Session complete."}
-                    </h3>
-                    <p className="mt-1 font-mono text-[10px] text-slate-500">
-                      {telemetry.executionMode.toUpperCase()} ·{" "}
-                      {telemetry.marketMode.toUpperCase()} ·{" "}
-                      {telemetry.activity.toUpperCase()} ·{" "}
-                      {telemetry.phase.toUpperCase()}
-                    </p>
-                  </div>
-                </div>
-                {live.running ? (
-                  <Button
-                    onClick={() => void handleStop()}
-                    disabled={loading || telemetry.stopRequested}
-                    variant="outline"
-                    className="gap-2 border-rose-400/30 bg-rose-400/5 text-rose-300 hover:bg-rose-400/10"
-                  >
-                    <Square className="size-3" />
-                    {telemetry.stopRequested
-                      ? "Draining position…"
-                      : "Stop session"}
-                  </Button>
-                ) : (
-                  <Button
-                    onClick={restart}
-                    className="bg-lime-300 text-slate-950 hover:bg-lime-200"
-                  >
-                    New scan
-                  </Button>
                 )}
+
+                <Button
+                  onClick={handleScan}
+                  disabled={loading}
+                  className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
+                >
+                  <ScanSearch className="w-4 h-4 mr-2" /> Scan 19 Markets
+                </Button>
               </div>
-              <div
-                role="status"
-                aria-live="polite"
-                className={`flex items-start gap-3 rounded-xl border p-4 ${telemetry.phase === "attention" ? "border-amber-300/30 bg-amber-300/5 text-amber-200" : "border-white/10 bg-white/[0.02] text-slate-400"}`}
-              >
-                <Activity className="mt-0.5 size-4 shrink-0" />
+            )}
+
+            {/* STEP 2: SCANNING */}
+            {step === "scanning" && (
+              <div className="p-6 space-y-4 text-center">
+                <Loader2 className={`w-8 h-8 ${a.text} animate-spin mx-auto`} />
                 <div>
-                  <p className="text-xs leading-relaxed">{live.message}</p>
-                  {telemetry.pendingContractId && (
-                    <p className="mt-1.5 font-mono text-[10px] text-slate-500">
-                      Pending contract {telemetry.pendingContractId}
-                    </p>
-                  )}
-                </div>
-              </div>
-              <div
-                className={`${panel} grid grid-cols-2 gap-5 p-5 sm:grid-cols-4`}
-              >
-                <Metric
-                  label={
-                    telemetry.executionMode === "paper"
-                      ? "Paper net P&L"
-                      : "Session net P&L"
-                  }
-                  value={money(live.totalProfit)}
-                  bright={live.totalProfit >= 0}
-                />
-                <Metric
-                  label="Settled matches"
-                  value={`${live.winCount} / ${live.tradeCount}`}
-                  note={
-                    live.tradeCount
-                      ? `${pct(live.winCount / live.tradeCount)} observed hit rate`
-                      : "No settled trades yet"
-                  }
-                />
-                <Metric
-                  label="Current stake"
-                  value={money(live.currentStake)}
-                  note={
-                    live.inRecovery
-                      ? `Recovery step ${live.recoveryStep}`
-                      : "Base stake"
-                  }
-                />
-                <Metric
-                  label="Unrecovered debt"
-                  value={money(live.unrecoveredAmount)}
-                  note={
-                    telemetry.executionMode === "paper"
-                      ? "Isolated paper ledger"
-                      : "Account recovery ledger"
-                  }
-                />
-              </div>
-              <div className="grid gap-5 lg:grid-cols-[1.25fr_1fr]">
-                <div className="space-y-4">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="flex items-center gap-2 text-sm text-white">
-                      {telemetry.marketMode === "locked" ? (
-                        <Lock className="size-3.5 text-lime-300" />
-                      ) : (
-                        <Shuffle className="size-3.5 text-lime-300" />
-                      )}
-                      {live.currentMarket}
-                    </p>
-                    <SourceBadge source={telemetry.source} />
-                  </div>
-                  <DigitDistribution
-                    prediction={telemetry.prediction}
-                    selected={telemetry.digit}
-                  />
-                  <p className="text-[10px] leading-relaxed text-slate-500">
-                    Indicative next-tick view, not the frozen order currently
-                    settling. Live entries are checked again against the actual
-                    broker quote.
+                  <p className="text-sm font-semibold text-white">
+                    Measuring 19 markets out-of-sample
                   </p>
-                  <div className={`${panel} grid grid-cols-3 gap-3 p-4`}>
-                    <Metric
-                      label="Match estimate"
-                      value={pct(telemetry.decision?.p)}
-                      bright
-                    />
-                    <Metric
-                      label="Break-even"
-                      value={pct(telemetry.decision?.breakEven)}
-                    />
-                    <Metric
-                      label="Entry value"
-                      value={pct(telemetry.decision?.utility)}
-                      note="After uncertainty discount"
-                    />
-                  </div>
-                  {telemetry.validation && (
-                    <Evidence validation={telemetry.validation} />
-                  )}
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    {progress.scanning || "Analyzing deep digit patterns…"}
+                  </p>
                 </div>
-                <div className="space-y-4">
-                  <div className={`${panel} p-4`}>
-                    <p className="mb-4 flex items-center gap-2 text-xs text-slate-300">
-                      <Gauge className="size-4 text-lime-300/70" />
-                      Execution telemetry
-                    </p>
-                    <div className="grid grid-cols-2 gap-4">
-                      <Metric
-                        label="Tick analysis"
-                        value={ms(telemetry.analysisMs)}
+                <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+                  <div
+                    className={`h-full ${a.solidBtn} transition-all`}
+                    style={{
+                      width: `${(progress.scanned / Math.max(1, progress.total)) * 100}%`,
+                    }}
+                  />
+                </div>
+                <p className="text-[10px] font-mono text-muted-foreground/70">
+                  {progress.scanned}/{progress.total} markets measured
+                </p>
+              </div>
+            )}
+
+            {/* STEP 3: SCAN RESULTS & DEPLOY CHOICE */}
+            {step === "scan-result" && scanResult && (
+              <div className="p-4 space-y-3">
+                {selectedMarket ? (
+                  <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white">
+                        {selectedMarket.displayName}
+                      </span>
+                      <span className={`text-[10px] font-mono font-bold ${a.text}`}>
+                        Matches Digit {selectedMarket.decision.digit}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <Stat
+                        label="Prob P(Win)"
+                        value={pct(selectedMarket.decision.p)}
+                        tone={a.text}
                       />
-                      <Metric label="Quote RTT" value={ms(telemetry.quoteMs)} />
-                      <Metric label="Buy RTT" value={ms(telemetry.buyMs)} />
-                      <Metric
-                        label="Signal → send"
-                        value={ms(telemetry.signalToSendMs)}
+                      <Stat
+                        label="Utility Edge"
+                        value={`${selectedMarket.decision.utility >= 0 ? "+" : ""}${(selectedMarket.decision.utility * 100).toFixed(1)}%`}
+                        tone={selectedMarket.decision.utility >= 0 ? "text-green-400" : "text-amber-400"}
                       />
-                      <Metric
-                        label="Buy p95"
-                        value={ms(telemetry.executionP95Ms)}
+                      <Stat
+                        label="Break-Even"
+                        value={pct(selectedMarket.decision.breakEven)}
                       />
-                      <Metric
-                        label="Tick headroom"
-                        value={ms(telemetry.headroomMs)}
+                      <Stat
+                        label="Held-Out Hit Rate"
+                        value={pct(selectedMarket.validation.hitRate)}
                       />
                     </div>
-                    <p className="mt-4 border-t border-white/5 pt-3 text-[10px] leading-relaxed text-slate-500">
-                      {telemetry.ticksObserved.toLocaleString()} ticks observed
-                      · {telemetry.switches} market switches ·{" "}
-                      {telemetry.entriesSkipped} aborted entries.{" "}
-                      {telemetry.executionMode === "paper"
-                        ? "Paper timings are local; no broker order was sent."
-                        : `Broker entry alignment: ${telemetry.lastEntryAligned === null ? "not verified yet" : telemetry.lastEntryAligned ? "same tick window" : "crossed a tick window"}. Network latency cannot be eliminated.`}
+
+                    <p className="text-[10px] text-muted-foreground leading-relaxed pt-1">
+                      {selectedMarket.decision.reason}
                     </p>
                   </div>
-                  <div className={`${panel} p-4`}>
-                    <p className={labelClass}>
-                      Model weights · earned on past predictions
+                ) : (
+                  <div className="rounded-xl bg-amber-500/5 border border-amber-500/25 p-3 space-y-1 text-center">
+                    <p className="text-xs font-semibold text-amber-300">No qualified market</p>
+                    <p className="text-[11px] text-muted-foreground">
+                      {scanResult.note || "Markets currently exhibit near-uniform noise."}
                     </p>
-                    <div className="mt-4 space-y-3">
-                      {telemetry.prediction?.experts.map((expert) => (
-                        <div key={expert.name}>
-                          <div className="mb-1.5 flex justify-between text-[10px]">
-                            <span className="text-slate-400">
-                              {expert.name}
-                            </span>
-                            <span className="font-mono text-slate-300">
-                              {pct(expert.weight, 0)}
-                            </span>
-                          </div>
-                          <div className="h-1 overflow-hidden rounded-full bg-white/5">
-                            <div
-                              className="h-full rounded-full bg-lime-300/60"
-                              style={{ width: `${expert.weight * 100}%` }}
-                            />
-                          </div>
-                        </div>
+                  </div>
+                )}
+
+                {/* Candidate Selector if multiple */}
+                {scanResult.markets.length > 1 && (
+                  <div className="space-y-1 pt-1 border-t border-white/5">
+                    <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">
+                      Top Ranked Markets
+                    </p>
+                    <div className="space-y-1 max-h-36 overflow-y-auto">
+                      {scanResult.markets.slice(0, 5).map((m) => (
+                        <button
+                          key={m.symbol}
+                          onClick={() => setSelectedSymbol(m.symbol)}
+                          className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs transition-colors ${
+                            selectedSymbol === m.symbol
+                              ? `${a.activeBg} border ${a.activeBorder}`
+                              : "bg-white/[0.03] text-muted-foreground hover:bg-white/[0.06]"
+                          }`}
+                        >
+                          <span className="font-medium text-white/90 truncate">
+                            {m.displayName} (Matches {m.decision.digit})
+                          </span>
+                          <span
+                            className={`font-mono text-[11px] font-bold ${
+                              m.decision.utility >= 0 ? "text-green-400" : "text-amber-400"
+                            }`}
+                          >
+                            {pct(m.decision.p)}
+                          </span>
+                        </button>
                       ))}
                     </div>
                   </div>
-                  {telemetry.risk && <RiskScenario risk={telemetry.risk} />}
-                </div>
+                )}
+
+                {/* Deployment Choice: Locked vs. Switching */}
+                {selectedMarket && (
+                  <div className="space-y-2 pt-2 border-t border-white/5">
+                    <Button
+                      onClick={() => handleStart(selectedSymbol, "locked")}
+                      disabled={loading || !canDeployPrism(scanResult, selectedMarket, Date.now(), confirmLive)}
+                      className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
+                    >
+                      <Lock className="w-4 h-4 mr-2" /> Lock {selectedMarket.displayName}
+                    </Button>
+                    <Button
+                      onClick={() => handleStart(selectedSymbol, "switching")}
+                      disabled={loading || !canDeployPrism(scanResult, selectedMarket, Date.now(), confirmLive)}
+                      variant="outline"
+                      className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}
+                    >
+                      <Shuffle className="w-3.5 h-3.5 mr-2" /> Start with Smart Market Switching
+                    </Button>
+                  </div>
+                )}
+
+                <Button
+                  onClick={handleScan}
+                  disabled={loading}
+                  variant="outline"
+                  className={`w-full h-8 ${a.outlineBtn} text-[11px] font-semibold mt-1`}
+                >
+                  <RefreshCw className="w-3 h-3 mr-1.5" /> Re-scan
+                </Button>
+
+                <button
+                  onClick={() => setStep("config")}
+                  className="w-full text-[11px] text-muted-foreground hover:text-white text-center py-1 flex items-center justify-center gap-1"
+                >
+                  <ChevronLeft className="w-3 h-3" /> Change configuration
+                </button>
               </div>
-              {telemetry.recentTrades.length > 0 && (
-                <div className={`${panel} p-4`}>
-                  <p className={labelClass}>Recent settled entries</p>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {telemetry.recentTrades.map((trade, i) => (
-                      <div
-                        key={`${trade.at}-${i}`}
-                        title={`${trade.symbol} · Matches ${trade.digit}`}
-                        className={`rounded-lg border px-3 py-2 font-mono text-[10px] ${trade.won ? "border-lime-300/20 bg-lime-300/5 text-lime-300" : "border-rose-300/15 bg-rose-300/5 text-rose-300"}`}
-                      >
-                        <span className="mr-2 opacity-60">M{trade.digit}</span>
-                        {money(trade.profit)}
-                      </div>
-                    ))}
+            )}
+
+            {/* STEP 4: RUNNING SESSION */}
+            {step === "running" && (
+              <div className="p-4 space-y-3">
+                {/* Session P&L */}
+                <div
+                  className={`rounded-xl p-3 border ${
+                    isRunning ? `${a.panelBg} ${a.panelBorder}` : "bg-secondary/30 border-border"
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                      Session P&amp;L ({telemetry?.executionMode?.toUpperCase() || "PAPER"})
+                    </span>
+                    {isRunning ? (
+                      <span className={`flex items-center gap-1 text-[10px] font-semibold ${a.text}`}>
+                        <span className={`w-1.5 h-1.5 rounded-full ${a.dot} animate-pulse`} />
+                        {marketMode === "locked" ? "LOCKED" : "SWITCHING"}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] text-muted-foreground">STOPPED</span>
+                    )}
+                  </div>
+                  <div
+                    className={`text-2xl font-bold font-mono ${
+                      profit >= 0 ? "text-green-400" : "text-red-400"
+                    }`}
+                  >
+                    {money(profit)}
+                  </div>
+                  <div className="flex gap-3 mt-2 text-[11px] flex-wrap">
+                    <span className="text-green-400">{session?.winCount ?? 0}W</span>
+                    <span className="text-red-400">{session?.lossCount ?? 0}L</span>
+                    <span className="text-muted-foreground">{winRate}% WR</span>
+                    <span className="text-muted-foreground">{session?.tradeCount ?? 0} trades</span>
                   </div>
                 </div>
-              )}
-              <p className="flex items-start gap-2 text-[10px] leading-relaxed text-slate-500">
-                <CircleHelp className="mt-0.5 size-3 shrink-0" />
-                Closing this panel does not stop the bot. Stop cancels unsent
-                entries; an already-sent order must settle before ownership is
-                released. Probability estimates are not guarantees.{" "}
-                {telemetry.executionMode === "paper" &&
-                  "All results in this session are paper results."}
-              </p>
-            </div>
-          )}
-        </div>
-      </DialogContent>
-    </Dialog>
+
+                {/* Active Market & Digit */}
+                <div className={`rounded-xl border ${a.panelBorder} ${a.panelBg} p-3 space-y-2`}>
+                  <div className="flex items-center justify-between">
+                    <p className={`text-[10px] uppercase tracking-widest font-semibold ${a.text}`}>
+                      {marketMode === "locked" ? "Locked Market" : "Active Market"}
+                    </p>
+                    <span className="text-[9px] font-mono text-muted-foreground">
+                      {telemetry?.phase?.toUpperCase() || "WATCHING"}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-bold text-white">
+                      {session?.currentMarket || "Loading market…"}
+                    </p>
+                    <span className={`text-xs font-mono font-bold ${a.text}`}>
+                      {session?.currentContractType || "Matches"}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5">
+                    <Stat
+                      label="Target Digit"
+                      value={telemetry?.digit !== null && telemetry?.digit !== undefined ? String(telemetry.digit) : "—"}
+                      tone={a.text}
+                    />
+                    <Stat
+                      label="Prob P(Win)"
+                      value={pct(telemetry?.decision?.p)}
+                    />
+                    <Stat
+                      label="Current Stake"
+                      value={session?.currentStake ? `$${session.currentStake.toFixed(2)}` : "—"}
+                    />
+                    <Stat
+                      label="Latency P95"
+                      value={telemetry?.executionP95Ms ? `${Math.round(telemetry.executionP95Ms)}ms` : "—"}
+                    />
+                  </div>
+                </div>
+
+                {/* Recovery Status */}
+                {session?.inRecovery && (
+                  <div className="rounded-lg px-3 py-2 border text-xs bg-amber-500/[0.08] border-amber-500/30 space-y-1">
+                    <div className="flex items-center justify-between">
+                      <span className="font-semibold text-amber-300 flex items-center gap-1.5">
+                        <ShieldCheck className="w-3.5 h-3.5 text-amber-400" /> Matches Recovery (Step {session.recoveryStep})
+                      </span>
+                      <span className="font-mono text-[10px] text-amber-400">
+                        ${(session.unrecoveredAmount ?? 0).toFixed(2)} debt
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground leading-relaxed">
+                      Sizing 1-tick Matches against exact quote payout.
+                    </p>
+                  </div>
+                )}
+
+                {/* Status Message */}
+                {session?.message && (
+                  <div
+                    className={`text-xs px-3 py-2 rounded-lg border font-mono ${
+                      session.message.includes("won") || session.message.includes("match")
+                        ? "bg-green-500/10 border-green-500/20 text-green-400"
+                        : session.message.includes("stop") || session.message.includes("Loss")
+                        ? "bg-red-500/10 border-red-500/20 text-red-400"
+                        : "bg-secondary/30 border-border text-muted-foreground"
+                    }`}
+                  >
+                    {session.message}
+                  </div>
+                )}
+
+                {/* Session Actions */}
+                <div className="flex gap-2">
+                  {isRunning ? (
+                    <Button
+                      onClick={handleStop}
+                      disabled={loading}
+                      variant="destructive"
+                      className="flex-1 h-9 text-xs"
+                    >
+                      <StopCircle className="w-3.5 h-3.5 mr-1.5" /> Stop Session
+                    </Button>
+                  ) : (
+                    <>
+                      <Button
+                        onClick={() => setStep("config")}
+                        variant="outline"
+                        className="flex-1 h-9 text-xs border-white/10"
+                      >
+                        New Session
+                      </Button>
+                      <Button
+                        onClick={handleScan}
+                        disabled={loading}
+                        className={`flex-1 h-9 text-xs ${a.solidBtn} text-white font-bold`}
+                      >
+                        <ScanSearch className="w-3.5 h-3.5 mr-1.5" /> Re-scan
+                      </Button>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
   );
 }
+
+export default PrismMatchConsole;

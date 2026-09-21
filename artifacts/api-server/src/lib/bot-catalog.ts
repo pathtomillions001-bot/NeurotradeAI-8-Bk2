@@ -55,8 +55,8 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
-  /** Dedicated causal Matches-only engine, not the generic specialist route. */
-  matchNexus?: boolean;
+  /** Dedicated causal Matches-only engine — Prism Match, not the generic specialist route. */
+  prismMatch?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -73,28 +73,29 @@ export interface BotDefinition {
 
 export const BOT_CATALOG: BotDefinition[] = [
   {
-    id: "match-nexus",
-    name: "Match Nexus",
-    code: "BOT-NEXUS",
+    id: "prism-match",
+    name: "Prism Match",
+    code: "BOT-PRISM",
     family: "match",
-    matchNexus: true,
+    prismMatch: true,
     contractLabel: "Matches only",
-    tagline: "One tick ahead. Evidence, not guesswork.",
+    tagline: "Refracted edge — one tick, ten digits, no mystique.",
     description:
-      "A dedicated Matches engine that learns all ten digits together. Scan first, then lock your chosen market or allow measured switching. Incremental Markov and frequency models compete on past predictive performance; a single payout-aware rule balances entry quality and activity. Paper-first, with honest held-out results and your existing debt-driven Matches recovery.",
+      "Institutional-grade Matches refraction: seven online experts (CTW order-3, Markov-1/2, renewal, HMM regime and forgetting Dirichlets) compete only on what they predicted *before* the next tick, fused by Hedge with a regret bound. A single soft utility rule — (p − λ·σ) × payout − 1 — sets entry, relaxed linearly while you wait but never below +0.2% so negative-EV is impossible. Scan → choose locked or switching *after* analysis → watch for a fresh qualifying tick. Same debt-driven Matches recovery you trust, honest held-out telemetry, and tick-perfect execution.",
     edge: [
-      "Six online experts: fair baseline, slow/fast frequency, first/second-order Markov and empirical renewal — absence alone never makes a digit due",
-      "Causal walk-forward validation of the complete digit-selection policy; training-only calibration and cross-market evidence correction",
-      "Active / Balanced / Patient pacing with one positive-value entry rule — no entropy, gap or FDR gate stack",
-      "Tick-driven updates, pooled quotes, send-time freshness checks and one outstanding order; a timeout never triggers a duplicate purchase",
-      "Seeded posterior-predictive recovery stress test, uncertainty bands and measured latency — estimates, never guaranteed accuracy",
-      "Locked or switching selected AFTER the scan; normal and recovery contracts are always DIGITMATCH",
+      "Seven prismatic experts: fair baseline, slow/fast forgetting Dirichlet, Markov-1, Markov-2, CTW order-3 via Krichevsky-Trofimov, empirical renewal hazard + 2-state HMM regime filter — absence alone never makes a digit 'due'",
+      "Context-tree mixing to order-3 competes with the best fixed-order Markov in hindsight; slow (0.999) remembers regime, fast (0.975) reacts within ticks — yet repeated digits still advance the sequence",
+      "One soft, payout-aware entry rule with Adaptive pacing: Active 42% / Balanced 26% / Patient 14% target fractions + 0.04/0.18/0.40 uncertainty weights; waiting relaxes the bar over patienceTicks (7/11/18) but never below +0.002 — no entropy/gap/FDR gate stack, no over-filtering",
+      "Causal walk-forward exactly mirrored live: 60% trains calibration + threshold on *past* predictions only, remainder replays predict→select→reveal→update; Wilson intervals, Brier/log-loss skill, calibration error and loss-run depth reported; cross-market Bonferroni corrects only the evidence label",
+      "640-path seeded Monte-Carlo stress test on a posterior two-state win/loss chain (fair 10% prior) with your exact stakes/TP/SL/recovery ladder — median, 5th/95th P&L and 95th drawdown shown pre-risk, clearly labelled as scenario not guarantee",
+      "Tick-driven O(1) incremental updates (≈0.006 ms median), pooled quotes, send-time freshness recheck (≥250 ms headroom, adaptive to p95), one outstanding order; ambiguous buys never auto-re-bought, correlation tag persisted before send",
+      "Locked or switching selected AFTER scan — lock pins symbol (digit still adaptive), switching starts at your pick and compares the scan pool with 6-tick dwell + 0.03 hysteresis; both use the same durable, account-scoped Matches recovery ledger",
     ],
-    accent: "lime",
+    accent: "fuchsia",
     icon: "zap",
     hasSides: false,
     hasDigitLock: true,
-    digitLockHelp: "Let the causal model compare all ten digits, or name a digit. Market locking is a separate choice after analysis.",
+    digitLockHelp: "Let Prism compare all ten digits, or pin one. Market lock vs. switching is a *separate* choice after the scan.",
     sides: [{ id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "One digit, one tick — Matches in normal and recovery mode" }],
     nominalWinRate: "10% fair baseline",
     nominalPayout: "≈8.93×",
@@ -408,7 +409,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.matchNexus) return "match-nexus@1";
+  if (bot.prismMatch) return "prism-match@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

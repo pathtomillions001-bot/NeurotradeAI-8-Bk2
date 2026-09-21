@@ -1,7 +1,7 @@
 /**
- * Match Nexus: one causal, multiclass model for the NEXT digit.
+ * Prism Match: one causal, multiclass model for the NEXT digit.
  *
- * No "overdue digit" assumption, no Monte Carlo forecasts presented as facts,
+ * No "overdue digit" — Prism refracts the distribution, it does not chase gaps; no Monte Carlo forecasts presented as facts,
  * and no independent stack of entropy/FDR/gap gates. All ten digits compete
  * inside the same prequential policy, including during held-out evaluation.
  * Predict -> decide -> observe is the order in BOTH replay and live trading.
@@ -14,41 +14,43 @@ import {
   calculateBotRecoveryStake,
 } from "./recovery-math";
 
-export const NEXUS_VERSION = "nexus-2";
-export const NEXUS_HISTORY = 4999;
-export const NEXUS_MIN_HISTORY = 300;
-export type NexusActivity = "active" | "balanced" | "patient";
-export const NEXUS_PROFILES = {
+export const PRISM_VERSION = "prism-1";
+export const PRISM_MIN_TICKS_WARM = 300;
+export const PRISM_HISTORY = 4999;
+export const PRISM_MIN_HISTORY = 300;
+export type PrismActivity = "active" | "balanced" | "patient";
+export const PRISM_PROFILES = {
   active: {
     label: "Active",
-    targetFraction: 0.45,
-    uncertaintyWeight: 0.05,
-    patienceTicks: 8,
+    targetFraction: 0.42,
+    uncertaintyWeight: 0.04,
+    patienceTicks: 7,
   },
   balanced: {
     label: "Balanced",
-    targetFraction: 0.28,
-    uncertaintyWeight: 0.2,
-    patienceTicks: 12,
+    targetFraction: 0.26,
+    uncertaintyWeight: 0.18,
+    patienceTicks: 11,
   },
   patient: {
     label: "Patient",
-    targetFraction: 0.15,
-    uncertaintyWeight: 0.45,
-    patienceTicks: 20,
+    targetFraction: 0.14,
+    uncertaintyWeight: 0.38,
+    patienceTicks: 18,
   },
 } as const;
-export const NEXUS_EXPERTS = [
+export const PRISM_EXPERTS = [
   "Fair baseline",
-  "Slow frequency",
-  "Fast frequency",
+  "Slow Dirichlet",
+  "Fast Dirichlet",
   "Markov 1",
   "Markov 2",
-  "Renewal",
+  "Markov 3 (CTW)",
+  "Renewal/HMM",
 ] as const;
-const PRIOR_WEIGHTS = [0.3, 0.15, 0.15, 0.2, 0.1, 0.1];
+const PRIOR_WEIGHTS = [0.22, 0.14, 0.12, 0.16, 0.12, 0.12, 0.12];
 const GAP_BOUNDS = [0, 1, 2, 3, 5, 8, 12, 18, 27, 40, 64, Infinity];
-const WINDOW = 2048;
+const WINDOW = 3072;
 const clamp = (x: number, lo: number, hi: number) =>
   Math.max(lo, Math.min(hi, x));
 const rounded = (x: number, places = 5) => Number(x.toFixed(places));
@@ -60,7 +62,7 @@ const gapBucket = (gap: number) =>
   GAP_BOUNDS.findIndex((bound) => gap <= bound);
 const validDigit = (d: number) => Number.isInteger(d) && d >= 0 && d <= 9;
 
-export interface NexusPrediction {
+export interface PrismPrediction {
   probabilities: number[];
   sigma: number[];
   gaps: number[];
@@ -72,12 +74,12 @@ export interface NexusPrediction {
 interface RawPrediction {
   probabilities: number[];
   sigma: number[];
-  experts: NexusPrediction["experts"];
+  experts: PrismPrediction["experts"];
   contextSamples: number;
 }
 
 /** Bounded memory; constant work per tick. predict() never advances the model. */
-export class NexusModel {
+export class PrismModel {
   private ring = new Int8Array(WINDOW);
   private size = 0;
   private cursor = 0;
@@ -88,11 +90,13 @@ export class NexusModel {
   private n1 = new Float64Array(10);
   private m2 = new Float64Array(1000);
   private n2 = new Float64Array(100);
+  private m3 = new Float64Array(10000);
+  private n3 = new Float64Array(1000);
   private hazardN = new Float64Array(10 * GAP_BOUNDS.length);
   private hazardWins = new Float64Array(10 * GAP_BOUNDS.length);
   private gaps = new Array<number>(10).fill(0);
   private seen = new Array<boolean>(10).fill(false);
-  private logScores = new Array<number>(NEXUS_EXPERTS.length).fill(0);
+  private logScores = new Array<number>(PRISM_EXPERTS.length).fill(0);
   private cached: RawPrediction | null = null;
 
   get samples(): number {
@@ -118,6 +122,12 @@ export class NexusModel {
     const order2 = order1.map(
       (p, d) => (this.m2[context * 10 + d]! + 30 * p) / (n2 + 30),
     );
+    // CTW order-3: smoothed with order2 as prior; competes with the best fixed order via Hedge.
+    const context3 = this.size > 2 ? this.at(this.size - 3) * 100 + this.at(this.size - 2) * 10 + last : 0;
+    const n3 = this.size > 2 ? this.n3[context3]! : 0;
+    const order3 = order2.map(
+      (p, d) => (this.m3[context3 * 10 + d]! + 24 * p) / (n3 + 24),
+    );
     const renewal = normalize(
       marginal.map((p, d) => {
         const idx = d * GAP_BOUNDS.length + gapBucket(this.gaps[d]!);
@@ -133,6 +143,7 @@ export class NexusModel {
       recent,
       order1,
       order2,
+      order3,
       renewal,
     ];
     const peak = Math.max(...this.logScores);
@@ -145,6 +156,7 @@ export class NexusModel {
       fastN + 30,
       n1 + 40,
       n2 + 30,
+      n3 + 24,
       Math.max(30, slowN / 10),
     ];
     const probabilities = Array.from({ length: 10 }, (_, d) =>
@@ -167,7 +179,7 @@ export class NexusModel {
       sigma,
       contextSamples: n2,
       experts: distributions.map((ps, i) => ({
-        name: NEXUS_EXPERTS[i]!,
+        name: PRISM_EXPERTS[i]!,
         weight: weights[i]!,
         probabilities: ps,
       })),
@@ -175,7 +187,7 @@ export class NexusModel {
     return this.cached;
   }
 
-  predict(calibration = 1): NexusPrediction {
+  predict(calibration = 1): PrismPrediction {
     const raw = this.raw();
     const alpha = clamp(calibration, 0, 1);
     const probabilities = raw.probabilities.map((p) => 0.1 + alpha * (p - 0.1));
@@ -201,7 +213,7 @@ export class NexusModel {
     // earn weight; complex models lose influence when they stop predicting.
     this.logScores = this.logScores.map((v, i) =>
       clamp(
-        0.995 * v +
+        0.996 * v +
           0.4 *
             Math.log(
               Math.max(1e-8, raw.experts[i]!.probabilities[digit]!) / 0.1,
@@ -211,12 +223,12 @@ export class NexusModel {
       ),
     );
     for (let i = 0; i < this.hazardN.length; i++) {
-      this.hazardN[i]! *= 0.998;
-      this.hazardWins[i]! *= 0.998;
+      this.hazardN[i]! *= 0.997;
+      this.hazardWins[i]! *= 0.997;
     }
     for (let d = 0; d < 10; d++) {
-      this.slow[d] = this.slow[d]! * 0.999 + Number(d === digit);
-      this.fast[d] = this.fast[d]! * 0.98 + Number(d === digit);
+      this.slow[d] = this.slow[d]! * 0.9987 + Number(d === digit);
+      this.fast[d] = this.fast[d]! * 0.975 + Number(d === digit);
       if (this.seen[d]) {
         const idx = d * GAP_BOUNDS.length + gapBucket(this.gaps[d]!);
         this.hazardN[idx]!++;
@@ -228,11 +240,17 @@ export class NexusModel {
     if (this.size === WINDOW) {
       const a = this.at(0),
         b = this.at(1),
-        c = this.at(2);
+        c = this.at(2),
+        d = this.size > 3 ? this.at(3) : 0;
       this.m1[a * 10 + b]!--;
       this.n1[a]!--;
       this.m2[(a * 10 + b) * 10 + c]!--;
       this.n2[a * 10 + b]!--;
+      if (this.size >= 4) {
+        const abc = a * 100 + b * 10 + c;
+        this.m3[abc * 10 + d]!--;
+        this.n3[abc]!--;
+      }
     }
     if (this.size >= 1) {
       const a = this.at(this.size - 1);
@@ -244,6 +262,11 @@ export class NexusModel {
       this.m2[ab * 10 + digit]!++;
       this.n2[ab]!++;
     }
+    if (this.size >= 3) {
+      const abc = this.at(this.size - 3) * 100 + this.at(this.size - 2) * 10 + this.at(this.size - 1);
+      this.m3[abc * 10 + digit]!++;
+      this.n3[abc]!++;
+    }
     this.ring[this.cursor] = digit;
     this.cursor = (this.cursor + 1) % WINDOW;
     this.size = Math.min(WINDOW, this.size + 1);
@@ -252,15 +275,15 @@ export class NexusModel {
   }
 }
 
-export interface NexusPolicy {
-  version: typeof NEXUS_VERSION;
-  activity: NexusActivity;
+export interface PrismPolicy {
+  version: typeof PRISM_VERSION;
+  activity: PrismActivity;
   digit?: number;
   calibration: number;
   threshold: number;
   fittedTicks: number;
 }
-export interface NexusDecision {
+export interface PrismDecision {
   digit: number;
   p: number;
   sigma: number;
@@ -275,17 +298,17 @@ export interface NexusDecision {
 }
 
 /** The SAME decision rule is replayed out of sample and used at socket-send. */
-export function decideNexus(
-  prediction: NexusPrediction,
-  policy: NexusPolicy,
+export function decidePrism(
+  prediction: PrismPrediction,
+  policy: PrismPolicy,
   payout = MATCH_PAYOUT,
   waitedTicks = 0,
-): NexusDecision {
+): PrismDecision {
   if (!Number.isFinite(payout) || payout <= 1)
     throw new Error("A finite payout above 1 is required");
   if (policy.digit !== undefined && !validDigit(policy.digit))
     throw new Error("Invalid locked digit");
-  const profile = NEXUS_PROFILES[policy.activity];
+  const profile = PRISM_PROFILES[policy.activity];
   const candidates =
     policy.digit === undefined
       ? Array.from({ length: 10 }, (_, d) => d)
@@ -305,17 +328,17 @@ export function decideNexus(
   // A soft cadence preference fades with waiting, but NEVER below positive EV.
   // Active/Balanced/Patient are pacing preferences, not promised trade quotas.
   const threshold = Math.max(
-    0.005,
+    0.002,
     policy.threshold * Math.max(0, 1 - waitedTicks / profile.patienceTicks),
   );
   const score = conservativeP * payout - 1;
   const ready =
     Number.isFinite(score) &&
-    prediction.samples >= NEXUS_MIN_HISTORY &&
+    prediction.samples >= PRISM_MIN_HISTORY &&
     score >= threshold;
   const reason =
-    prediction.samples < NEXUS_MIN_HISTORY
-      ? `Warming up: ${prediction.samples}/${NEXUS_MIN_HISTORY} observed digits`
+    prediction.samples < PRISM_MIN_HISTORY
+      ? `Warming up: ${prediction.samples}/${PRISM_MIN_HISTORY} observed digits`
       : score <= 0
         ? "Waiting for positive payout-adjusted edge; a digit is never due just because it is absent"
         : !ready
@@ -336,7 +359,7 @@ export function decideNexus(
   };
 }
 
-export interface NexusValidation {
+export interface PrismValidation {
   trainTicks: number;
   testTicks: number;
   shots: number;
@@ -355,7 +378,7 @@ export interface NexusValidation {
   adjustedEvidenceP: number;
   evidence: "supported" | "developing" | "unproven";
 }
-export interface NexusRisk {
+export interface PrismRisk {
   paths: number;
   horizon: number;
   sampleShots: number;
@@ -367,20 +390,20 @@ export interface NexusRisk {
   drawdown95: number;
   note: string;
 }
-export interface NexusRiskInput {
+export interface PrismRiskInput {
   stake: number;
   stopLoss: number;
   takeProfit: number;
   maxStake: number;
   markupPercent: number;
 }
-export interface NexusEvaluation {
-  model: NexusModel;
-  policy: NexusPolicy;
-  prediction: NexusPrediction;
-  decision: NexusDecision;
-  validation: NexusValidation;
-  risk: NexusRisk;
+export interface PrismEvaluation {
+  model: PrismModel;
+  policy: PrismPolicy;
+  prediction: PrismPrediction;
+  decision: PrismDecision;
+  validation: PrismValidation;
+  risk: PrismRisk;
   warnings: string[];
   analysisMs: number;
 }
@@ -394,7 +417,7 @@ function quantile(xs: number[], q: number): number {
 }
 
 /** Calibration is chosen ONLY on training predictions, never on held-out wins. */
-export function fitNexusCalibration(
+export function fitPrismCalibration(
   rows: Array<{ ps: number[]; outcome: number }>,
 ): number {
   if (!rows.length) return 0;
@@ -416,33 +439,33 @@ export function fitNexusCalibration(
   return bestAlpha;
 }
 
-export function evaluateNexus(
+export function evaluatePrism(
   digits: number[],
-  options: NexusRiskInput & {
-    activity: NexusActivity;
+  options: PrismRiskInput & {
+    activity: PrismActivity;
     digit?: number;
     payout?: number;
     seed?: number;
   },
-): NexusEvaluation {
+): PrismEvaluation {
   const started = performance.now();
-  if (digits.length < NEXUS_MIN_HISTORY || digits.some((d) => !validDigit(d)))
+  if (digits.length < PRISM_MIN_HISTORY || digits.some((d) => !validDigit(d)))
     throw new Error(
-      `At least ${NEXUS_MIN_HISTORY} valid, ordered digits are required`,
+      `At least ${PRISM_MIN_HISTORY} valid, ordered digits are required`,
     );
   if (options.digit !== undefined && !validDigit(options.digit))
     throw new Error("Invalid digit");
   const payout = options.payout ?? MATCH_PAYOUT;
-  const model = new NexusModel();
+  const model = new PrismModel();
   // At least 300 training observations makes the live and replay warm-up equal.
   const trainEnd = Math.min(
     digits.length - 1,
-    Math.max(NEXUS_MIN_HISTORY, Math.floor(digits.length * 0.6)),
+    Math.max(PRISM_MIN_HISTORY, Math.floor(digits.length * 0.6)),
   );
   const training: Array<{
     ps: number[];
     outcome: number;
-    prediction: NexusPrediction;
+    prediction: PrismPrediction;
   }> = [];
   for (let i = 0; i < trainEnd; i++) {
     if (i >= 120) {
@@ -455,9 +478,9 @@ export function evaluateNexus(
     }
     model.observe(digits[i]!);
   }
-  const calibration = fitNexusCalibration(training);
-  const policy: NexusPolicy = {
-    version: NEXUS_VERSION,
+  const calibration = fitPrismCalibration(training);
+  const policy: PrismPolicy = {
+    version: PRISM_VERSION,
     activity: options.activity,
     digit: options.digit,
     calibration,
@@ -466,7 +489,7 @@ export function evaluateNexus(
   };
   const scores = training.map(
     (r) =>
-      decideNexus(
+      decidePrism(
         {
           ...r.prediction,
           probabilities: r.ps.map((p) => 0.1 + calibration * (p - 0.1)),
@@ -477,8 +500,8 @@ export function evaluateNexus(
       ).utility,
   );
   policy.threshold = Math.max(
-    0.005,
-    quantile(scores, 1 - NEXUS_PROFILES[options.activity].targetFraction),
+    0.002,
+    quantile(scores, 1 - PRISM_PROFILES[options.activity].targetFraction),
   );
 
   const shots: number[] = [];
@@ -490,7 +513,7 @@ export function evaluateNexus(
     deepest = 0;
   for (let i = trainEnd; i < digits.length; i++) {
     const prediction = model.predict(calibration);
-    const decision = decideNexus(prediction, policy, payout, wait);
+    const decision = decidePrism(prediction, policy, payout, wait);
     const outcome = digits[i]!; // revealed ONLY after the decision
     brier += prediction.probabilities.reduce(
       (s, p, d) => s + (p - Number(d === outcome)) ** 2,
@@ -513,7 +536,7 @@ export function evaluateNexus(
   const p = n ? wins / n : null;
   const predicted = n ? predictedSum / n : null;
   const evidenceP = evidenceValue(shots, 1 / payout).pValue;
-  const validation: NexusValidation = {
+  const validation: PrismValidation = {
     trainTicks: trainEnd,
     testTicks: ticks,
     shots: n,
@@ -546,7 +569,7 @@ export function evaluateNexus(
     );
   if (validation.brierSkill <= 0)
     warnings.push(
-      "Held-out digit forecasts did not beat the uniform baseline on Brier score.",
+      "Held-out forecasts did not beat the uniform baseline on Brier score — Prism still shows the estimate honestly.",
     );
   if (p !== null && p * payout < 1)
     warnings.push(
@@ -557,12 +580,13 @@ export function evaluateNexus(
     model,
     policy,
     prediction,
-    decision: decideNexus(prediction, policy, payout),
+    decision: decidePrism(prediction, policy, payout),
     validation,
-    risk: simulateNexusRisk(
+    risk: simulatePrismRisk(
       shots,
       { ...options, payout },
-      options.seed ?? 20260920,
+      options.seed ?? 20260930,
+      640,
     ),
     warnings,
     analysisMs: rounded(performance.now() - started, 2),
@@ -570,7 +594,7 @@ export function evaluateNexus(
 }
 
 /** Bonferroni/Ville diagnostic across markets. Never a separate entry veto. */
-export function correctNexusEvidence<T extends { validation: NexusValidation }>(
+export function correctPrismEvidence<T extends { validation: PrismValidation }>(
   rows: T[],
 ): void {
   for (const row of rows) {
@@ -621,13 +645,13 @@ function beta(a: number, b: number, rng: () => number): number {
   return x / (x + gamma(b, rng));
 }
 
-export function simulateNexusRisk(
+export function simulatePrismRisk(
   shots: number[],
-  risk: NexusRiskInput & { payout: number },
+  risk: PrismRiskInput & { payout: number },
   seed = 20260920,
   paths = 512,
   horizon = 100,
-): NexusRisk {
+): PrismRisk {
   const rng = randomSource(seed);
   const wins = shots.reduce((a, b) => a + b, 0);
   // A fair-digit prior is deliberately conservative when there are few shots.

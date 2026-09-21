@@ -12,7 +12,7 @@
     "build:web": "pnpm --filter @workspace/trading-platform build",
     "start:api": "pnpm --filter @workspace/api-server start",
     "start:web": "pnpm --filter @workspace/trading-platform start",
-    "test:nexus": "pnpm --filter @workspace/api-server run test:nexus && pnpm --filter @workspace/trading-platform run test:nexus"
+    "test:prism": "pnpm --filter @workspace/api-server run test:prism && pnpm --filter @workspace/trading-platform run test:prism"
   },
   "private": true,
   "devDependencies": {

@@ -13,13 +13,13 @@ import {
 } from "@workspace/db";
 import { browserSession, runWithSessionId } from "./session";
 import * as recovery from "./agents/recovery-engine";
-import { createNexusRuntime, paperOutcome } from "./match-nexus-engine";
-import { NEXUS_PENDING, NEXUS_SCAN_TTL_MS } from "./match-nexus-policy";
+import { createPrismRuntime, paperOutcome } from "./prism-match-engine";
+import { PRISM_PENDING, PRISM_SCAN_TTL_MS } from "./prism-match-policy";
 import { AUTOMATED_DERIV_MARKETS, tickManager } from "./deriv";
 import { DigitTape } from "./digit-tape";
-import { type NexusOrder } from "./match-nexus-runner";
+import { type PrismOrder } from "./prism-match-runner";
 import { addSSEClient, removeSSEClient } from "./sse";
-import nexusRouter from "../routes/match-nexus";
+import prismRouter from "../routes/prism-match";
 import botsRouter from "../routes/bots";
 import { findTransaction } from "./trade-reconciler";
 
@@ -69,7 +69,7 @@ async function api(path: string, body?: unknown, session = A) {
 }
 async function waitFor(check: (status: any) => boolean, session = A) {
   for (let i = 0; i < 80; i++) {
-    const { data } = await api("/nexus/status", undefined, session);
+    const { data } = await api("/prism/status", undefined, session);
     if (check(data)) return data;
     await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
@@ -91,33 +91,33 @@ before(async () => {
   }
   const app = express();
   app.use(express.json(), cookieParser(), browserSession);
-  app.use("/nexus", nexusRouter);
+  app.use("/prism", prismRouter);
   app.use("/bots", botsRouter);
   server = app.listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => server.once("listening", resolve));
   base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
 });
 after(async () => {
-  await api("/nexus/stop", {}, A);
-  await api("/nexus/stop", {}, B);
+  await api("/prism/stop", {}, A);
+  await api("/prism/stop", {}, B);
   server.closeAllConnections();
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 
-describe("Nexus real routes + account-scoped scan capability", () => {
+describe("Prism real routes + account-scoped scan capability", () => {
   it("publishes its dedicated catalogue console and forbids client cards/other contracts", async () => {
     const catalogue = await api("/bots");
-    const bot = catalogue.data.bots.find((b: any) => b.id === "match-nexus");
-    assert.equal(bot.console, "match-nexus@1");
+    const bot = catalogue.data.bots.find((b: any) => b.id === "prism-match");
+    assert.equal(bot.console, "prism-match@1");
     assert.deepEqual(bot.sides[0].contracts, ["DIGITMATCH"]);
     assert.equal(
-      (await api("/nexus/scan", { ...config, contractType: "DIGITDIFF" }))
+      (await api("/prism/scan", { ...config, contractType: "DIGITDIFF" }))
         .status,
       400,
     );
     assert.equal(
       (
-        await api("/nexus/start", {
+        await api("/prism/start", {
           card: { tau: -100 },
           symbol: "R_100",
           marketMode: "locked",
@@ -127,7 +127,7 @@ describe("Nexus real routes + account-scoped scan capability", () => {
     );
     assert.equal(
       (
-        await api("/nexus/start", {
+        await api("/prism/start", {
           scanId: A,
           symbol: "R_100",
           marketMode: "locked",
@@ -137,7 +137,7 @@ describe("Nexus real routes + account-scoped scan capability", () => {
     );
     assert.equal(
       (
-        await api("/bots/match-nexus/start", {
+        await api("/bots/prism-match/start", {
           ...config,
           contractType: "CALL",
         })
@@ -153,7 +153,7 @@ describe("Nexus real routes + account-scoped scan capability", () => {
     addSSEClient(a, A);
     addSSEClient(b, B);
     try {
-      const result = await api("/nexus/scan", config);
+      const result = await api("/prism/scan", config);
       assert.equal(result.status, 200);
       assert.ok(result.data.markets.length > 0);
       assert.equal(result.data.markets[0].source, "simulated");
@@ -165,7 +165,7 @@ describe("Nexus real routes + account-scoped scan capability", () => {
       assert.ok(mine.length > 0);
       assert.equal(foreign.length, 0);
       const wrongOwner = await api(
-        "/nexus/start",
+        "/prism/start",
         {
           scanId: result.data.scanId,
           symbol: result.data.markets[0].symbol,
@@ -174,14 +174,14 @@ describe("Nexus real routes + account-scoped scan capability", () => {
         B,
       );
       assert.equal(wrongOwner.status, 409);
-      const changed = await api("/nexus/start", {
+      const changed = await api("/prism/start", {
         scanId: result.data.scanId,
         symbol: result.data.markets[0].symbol,
         marketMode: "locked",
         stake: 500,
       });
       assert.equal(changed.status, 400);
-      const unscanned = await api("/nexus/start", {
+      const unscanned = await api("/prism/start", {
         scanId: result.data.scanId,
         symbol: "UNSCANNED",
         marketMode: "locked",
@@ -193,11 +193,11 @@ describe("Nexus real routes + account-scoped scan capability", () => {
     }
   });
   it("expires deployment capabilities without trusting the browser's timestamps", async () => {
-    const scan = (await api("/nexus/scan", config)).data;
+    const scan = (await api("/prism/scan", config)).data;
     const original = Date.now;
-    Date.now = () => scan.createdAt + NEXUS_SCAN_TTL_MS + 1;
+    Date.now = () => scan.createdAt + PRISM_SCAN_TTL_MS + 1;
     try {
-      const result = await api("/nexus/start", {
+      const result = await api("/prism/start", {
         scanId: scan.scanId,
         symbol: scan.markets[0].symbol,
         marketMode: "locked",
@@ -210,10 +210,10 @@ describe("Nexus real routes + account-scoped scan capability", () => {
   });
   it("blocks simulated-data live deployment even with explicit confirmation", async () => {
     const scan = (
-      await api("/nexus/scan", { ...config, executionMode: "live" })
+      await api("/prism/scan", { ...config, executionMode: "live" })
     ).data;
     assert.ok(scan.markets.every((m: any) => !m.deployable));
-    const result = await api("/nexus/start", {
+    const result = await api("/prism/start", {
       scanId: scan.scanId,
       symbol: scan.markets[0].symbol,
       marketMode: "switching",
@@ -230,9 +230,9 @@ describe("Nexus real routes + account-scoped scan capability", () => {
         unrecoveredAmount: 5,
       }),
     );
-    const scan = (await api("/nexus/scan", config)).data;
+    const scan = (await api("/prism/scan", config)).data;
     const symbol = scan.markets[0].symbol;
-    const started = await api("/nexus/start", {
+    const started = await api("/prism/start", {
       scanId: scan.scanId,
       symbol,
       marketMode: "locked",
@@ -244,16 +244,16 @@ describe("Nexus real routes + account-scoped scan capability", () => {
       false,
       "paper has its own ledger",
     );
-    assert.equal((await api("/bots/status")).data.botId, "match-nexus");
-    assert.equal((await api("/bots")).data.activeBotId, "match-nexus");
+    assert.equal((await api("/bots/status")).data.botId, "prism-match");
+    assert.equal((await api("/bots")).data.activeBotId, "prism-match");
     assert.equal(
       (await api("/bots/live")).data.bots[0].console,
-      "match-nexus@1",
+      "prism-match@1",
     );
     assert.equal((await api("/bots/live", undefined, B)).data.bots.length, 0);
     assert.equal(
       (
-        await api("/nexus/start", {
+        await api("/prism/start", {
           scanId: scan.scanId,
           symbol,
           marketMode: "locked",
@@ -261,14 +261,14 @@ describe("Nexus real routes + account-scoped scan capability", () => {
       ).status,
       409,
     );
-    await api("/nexus/stop", {}, B);
+    await api("/prism/stop", {}, B);
     assert.equal(
-      (await api("/nexus/status")).data.running,
+      (await api("/prism/status")).data.running,
       true,
       "another account's stop is harmless",
     );
     tick(symbol, 7); // same digit, new sequence: authorize one PAPER entry
-    await waitFor((s) => s?.nexus.phase === "settling");
+    await waitFor((s) => s?.prism.phase === "settling");
     tick(symbol, 7); // same digit again: this is the settlement tick, not a timeout
     const settled = await waitFor((s) => s?.tradeCount === 1);
     assert.equal(settled.winCount, 1);
@@ -286,13 +286,13 @@ describe("Nexus real routes + account-scoped scan capability", () => {
       0,
       "paper entries do not pollute the real account journal",
     );
-    const stopped = await api("/nexus/stop", {});
+    const stopped = await api("/prism/stop", {});
     assert.equal(stopped.data.status.running, false);
     assert.equal((await api("/bots/live")).data.bots.length, 0);
   });
 });
 
-describe("Nexus durable journal + SAME Matches recovery reducer", () => {
+describe("Prism durable journal + SAME Matches recovery reducer", () => {
   const C = "cccccccc-2222-3333-4444-555555555555";
   it("hydrates cold persisted debt after a status read, but preserves warm debt and an explicit reset", async () => {
     const session = "dddddddd-2222-3333-4444-555555555555";
@@ -310,7 +310,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
       .insert(accountsTable)
       .values({
         sessionId: session,
-        loginId: "NEXUS-HYDRATION-ONLY",
+        loginId: "PRISM-HYDRATION-ONLY",
         token: "fake-unused-token",
         isActive: true,
       });
@@ -333,10 +333,10 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
       });
     async function deploy() {
       const scan = (
-        await api("/nexus/scan", { ...config, executionMode: "live" }, session)
+        await api("/prism/scan", { ...config, executionMode: "live" }, session)
       ).data;
       const result = await api(
-        "/nexus/start",
+        "/prism/start",
         {
           scanId: scan.scanId,
           symbol: "R_100",
@@ -347,7 +347,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
       );
       assert.equal(result.status, 200, JSON.stringify(result.data));
       assert.equal(result.data.status.tradeCount, 0);
-      await api("/nexus/stop", {}, session);
+      await api("/prism/stop", {}, session);
       return result.data.status;
     }
     try {
@@ -367,7 +367,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
         "an explicit reset is authoritative even though it is empty",
       );
     } finally {
-      await api("/nexus/stop", {}, session);
+      await api("/prism/stop", {}, session);
     }
   });
   it("honours an explicit zero maximum stake instead of silently restoring a large default", async () => {
@@ -375,8 +375,8 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
     await db
       .insert(settingsTable)
       .values({ sessionId: session, maxTradeStake: "0" });
-    assert.equal((await api("/nexus/scan", config, session)).status, 400);
-    const runtime = createNexusRuntime(session, config, risk, null);
+    assert.equal((await api("/prism/scan", config, session)).status, 400);
+    const runtime = createPrismRuntime(session, config, risk, null);
     assert.equal((await runtime.risk()).maxStake, 0);
   });
   it("atomically settles debt once, even if a journal reconciler already populated won/lost", async () => {
@@ -385,7 +385,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
       .values({ sessionId: C })
       .onConflictDoNothing();
     runWithSessionId(C, () => recovery.resetAll());
-    const runtime = createNexusRuntime(
+    const runtime = createPrismRuntime(
       C,
       { ...config, executionMode: "live" },
       risk,
@@ -404,7 +404,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
         status: "lost",
         profit: "-1",
         derivContractId: "1234",
-        agentReasoning: `${NEXUS_PENDING} [Match Nexus]`,
+        agentReasoning: `${PRISM_PENDING} [Prism Match]`,
       })
       .returning();
     await runtime.commit(row!.id, { won: false, profit: -1 }, 1, 8.93);
@@ -422,7 +422,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
       .from(settingsTable)
       .where(eq(settingsTable.sessionId, C));
     assert.equal(stored!.status, "lost");
-    assert.match(stored!.agentReasoning!, /NEXUS_SETTLED/);
+    assert.match(stored!.agentReasoning!, /PRISM_SETTLED/);
     assert.equal(JSON.parse(setting!.recoveryStateJson!).unrecoveredAmount, 1);
     assert.equal(stored!.derivContractId, "1234");
     const [win] = await db
@@ -437,7 +437,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
         direction: "hold",
         status: "open",
         derivContractId: "1235",
-        agentReasoning: `${NEXUS_PENDING} [Match Nexus]`,
+        agentReasoning: `${PRISM_PENDING} [Prism Match]`,
       })
       .returning();
     await runtime.commit(win!.id, { won: true, profit: 2.78 }, 0.35, 8.93);
@@ -451,7 +451,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
     );
   });
   it("never settles an unknown contract or a different account's journal row", async () => {
-    const runtime = createNexusRuntime(
+    const runtime = createPrismRuntime(
       C,
       { ...config, executionMode: "live" },
       risk,
@@ -468,14 +468,14 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
         stake: "1",
         direction: "hold",
         status: "open",
-        agentReasoning: `${NEXUS_PENDING} [Match Nexus]`,
+        agentReasoning: `${PRISM_PENDING} [Prism Match]`,
       })
       .returning();
     await assert.rejects(
       () => runtime.commit(row!.id, { won: false, profit: -1 }, 1, 8.93),
       /contract ID/,
     );
-    const outsider = createNexusRuntime(
+    const outsider = createPrismRuntime(
       B,
       { ...config, executionMode: "live" },
       risk,
@@ -507,7 +507,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
       barrier: 7,
       stake: 1,
       tick: first,
-    } as NexusOrder;
+    } as PrismOrder;
     assert.equal(paperOutcome(order, 8.93, stream.snapshot("R_100")), null);
     stream.push({
       symbol: "R_100",
@@ -538,7 +538,7 @@ describe("Nexus durable journal + SAME Matches recovery reducer", () => {
   });
 });
 
-describe("Nexus reconciliation identity guard", () => {
+describe("Prism reconciliation identity guard", () => {
   const row = {
     id: 1,
     sessionId: A,
@@ -547,7 +547,7 @@ describe("Nexus reconciliation identity guard", () => {
     stake: "1",
     derivContractId: "42",
     createdAt: new Date(),
-    agentReasoning: NEXUS_PENDING,
+    agentReasoning: PRISM_PENDING,
   };
   const transaction = {
     contract_id: 43,
@@ -556,7 +556,7 @@ describe("Nexus reconciliation identity guard", () => {
     buy_price: 1,
     purchase_time: Math.floor(row.createdAt.getTime() / 1000),
   };
-  it("only accepts a known exact contract ID and never fuzzy-matches an uncertain Nexus send", () => {
+  it("only accepts a known exact contract ID and never fuzzy-matches an uncertain Prism send", () => {
     assert.equal(findTransaction(row, [transaction]), null);
     assert.equal(
       findTransaction({ ...row, derivContractId: null }, [transaction]),

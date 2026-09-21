@@ -26,8 +26,8 @@ import * as dualLock from "../lib/dual-lock-engine";
 import { listLiveBots } from "../lib/live-registry";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
-import * as matchNexus from "../lib/match-nexus-engine";
-import matchNexusRouter from "./match-nexus";
+import * as prismMatch from "../lib/prism-match-engine";
+import prismMatchRouter from "./prism-match";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -42,8 +42,8 @@ import { logger } from "../lib/logger";
 
 const router = Router();
 
-// Registered before /:botId/* so a generic route cannot widen Nexus contracts.
-router.use("/match-nexus", matchNexusRouter);
+// Registered before /:botId/* so a generic route cannot widen Prism contracts.
+router.use("/prism-match", prismMatchRouter);
 
 interface ParsedBotBody {
   contractTypes: BotContractType[];
@@ -65,7 +65,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   // Family bots own their own routes; the generic specialist path must never be
   // able to start them with a mismatched config.
-  if (bot.matchNexus || bot.killShotFamily || bot.preLocked || bot.oneShot) {
+  if (bot.prismMatch || bot.killShotFamily || bot.preLocked || bot.oneShot) {
     return { ok: false, error: "This bot is deployed from its own console, not the generic bot endpoint" };
   }
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
@@ -188,13 +188,13 @@ router.get("/", (req, res) => {
   const dual = visibleDualStatus(req.sessionId);
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
-  const nexus = matchNexus.getStatus();
+  const prism = prismMatch.getStatus();
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
     bots: BOT_CATALOG.map(bot => {
       const console_ = botConsoleId(bot);
-      if (bot.matchNexus) return { ...bot, console: console_, session: nexus?.running ? nexus : null };
+      if (bot.prismMatch) return { ...bot, console: console_, session: prism?.running ? prism : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
       }
@@ -207,7 +207,7 @@ router.get("/", (req, res) => {
       return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: pickActiveBotId([
-      { botId: matchNexus.MATCH_NEXUS_BOT_ID, running: matchNexus.isRunning() },
+      { botId: prismMatch.PRISM_MATCH_BOT_ID, running: prismMatch.isRunning() },
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: fam.botId ?? null, running: fam.running },
@@ -676,8 +676,8 @@ router.post("/family/stop", (req, res) => {
 // ── Status ────────────────────────────────────────────────────────────────────
 
 router.get("/status", (req, res) => {
-  const nexus = matchNexus.getStatus();
-  if (nexus?.running) { res.json(nexus); return; }
+  const prism = prismMatch.getStatus();
+  if (prism?.running) { res.json(prism); return; }
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
@@ -797,7 +797,7 @@ router.post("/:botId/stop", (req, res) => {
     res.status(404).json({ error: "Unknown bot" });
     return;
   }
-  if (botDef.matchNexus || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
+  if (botDef.prismMatch || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
     res.status(400).json({ error: "This bot is stopped from its own console" });
     return;
   }

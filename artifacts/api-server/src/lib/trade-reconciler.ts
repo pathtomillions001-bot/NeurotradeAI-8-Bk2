@@ -25,7 +25,7 @@ import { accountsTable, tradesTable } from "@workspace/db";
 import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { fetchDerivProfitTable } from "./deriv";
 import { logger } from "./logger";
-import { isNexusPending } from "./match-nexus-policy";
+import { isPrismPending } from "./prism-match-policy";
 
 /** Trades older than this that are still `open` are considered unsettled. */
 const RECONCILE_AFTER_MS = 90_000;
@@ -65,8 +65,8 @@ export function findTransaction(row: UnsettledRow, transactions: any[]): any | n
     // A known contract ID must NEVER fall back to a different same-stake trade.
     return exact ?? null;
   }
-  // An ambiguous Nexus buy stays unresolved until a broker receipt identifies it.
-  if (isNexusPending(row.agentReasoning)) return null;
+  // An ambiguous Prism buy stays unresolved until a broker receipt identifies it.
+  if (isPrismPending(row.agentReasoning)) return null;
   const family = normalizeContractType(row.contractType);
   const stake = Number(row.stake);
   const createdSec = Math.floor(row.createdAt.getTime() / 1000);

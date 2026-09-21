@@ -173,7 +173,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
   const Icon = BOT_ICON[bot.icon] ?? Sparkles;
   const s = bot.session;
   const profit = s?.totalProfit ?? 0;
-  const paper = s?.nexus?.executionMode === "paper";
+  const paper = s?.prism?.executionMode === "paper";
 
   return (
     <motion.div

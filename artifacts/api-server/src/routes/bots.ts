@@ -57,6 +57,9 @@ router.use("/surge", surgeRouter);
 interface ParsedBotBody {
   contractTypes: BotContractType[];
   barriers: number[];
+  recoveryContractTypes?: BotContractType[];
+  recoveryBarriers?: number[];
+  staticRecoveryTiming?: boolean;
   lockedBarrier?: number;
   stake: number;
   stopLoss: number;
@@ -105,6 +108,34 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
     barriers.push(Math.trunc(underBarrier));
   }
 
+  // Barrier arrays are positional [over, under], even when only one side is armed.
+  // This preserves a selected Under barrier instead of accidentally reading it as Over.
+  if (contractTypes.some(ct => ct === "DIGITOVER" || ct === "DIGITUNDER")) {
+    barriers.splice(0, barriers.length,
+      Number.isFinite(overBarrier) ? Math.trunc(overBarrier) : 1,
+      Number.isFinite(underBarrier) ? Math.trunc(underBarrier) : 8,
+    );
+  }
+
+  let recoveryContractTypes: BotContractType[] | undefined;
+  let recoveryBarriers: number[] | undefined;
+  if (botId === "barrier-pulse") {
+    const recoveryMode: BotSideMode = body.recoverySideMode === "primary" || body.recoverySideMode === "secondary" ? body.recoverySideMode : "both";
+    recoveryContractTypes = recoveryMode === "primary" ? ["DIGITOVER"] : recoveryMode === "secondary" ? ["DIGITUNDER"] : ["DIGITOVER", "DIGITUNDER"];
+    const ro = Number(body.recoveryOverBarrier);
+    const ru = Number(body.recoveryUnderBarrier);
+    recoveryBarriers = [];
+    if (recoveryContractTypes.includes("DIGITOVER")) {
+      if (!Number.isInteger(ro) || ro < 0 || ro > 8) return { ok: false, error: "recoveryOverBarrier must be an integer 0–8" };
+      recoveryBarriers.push(ro);
+    }
+    if (recoveryContractTypes.includes("DIGITUNDER")) {
+      if (!Number.isInteger(ru) || ru < 1 || ru > 9) return { ok: false, error: "recoveryUnderBarrier must be an integer 1–9" };
+      recoveryBarriers.push(ru);
+    }
+    recoveryBarriers = [Number.isInteger(ro) ? ro : 1, Number.isInteger(ru) ? ru : 8];
+  }
+
   let lockedBarrier: number | undefined;
   if (bot.hasDigitLock) {
     if (body.lockedBarrier !== undefined && body.lockedBarrier !== null && body.lockedBarrier !== "") {
@@ -142,6 +173,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
     data: {
       contractTypes,
       barriers,
+      ...(recoveryContractTypes ? { recoveryContractTypes, recoveryBarriers, staticRecoveryTiming: true } : {}),
       lockedBarrier,
       stake:             body.stake,
       stopLoss:          body.stopLoss,

@@ -35,6 +35,9 @@ interface BotConfigState {
   sideMode: SideMode;
   overBarrier: number;
   underBarrier: number;
+  recoverySideMode: SideMode;
+  recoveryOverBarrier: number;
+  recoveryUnderBarrier: number;
   lockedBarrier: number | null;
   stake: number;
   stopLoss: number;
@@ -173,6 +176,9 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
     sideMode: "both",
     overBarrier: 1,
     underBarrier: 8,
+    recoverySideMode: "both",
+    recoveryOverBarrier: 6,
+    recoveryUnderBarrier: 3,
     lockedBarrier: null,
     stake: 1,
     stopLoss: 5,
@@ -278,6 +284,12 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
       sideMode:           config.sideMode,
       overBarrier:        config.overBarrier,
       underBarrier:       config.underBarrier,
+      ...(bot?.id === "barrier-pulse" ? {
+        recoverySideMode: config.recoverySideMode,
+        recoveryOverBarrier: config.recoveryOverBarrier,
+        recoveryUnderBarrier: config.recoveryUnderBarrier,
+        staticRecoveryTiming: true,
+      } : {}),
       lockedBarrier:      config.lockedBarrier,
       stake:              config.stake,
       stopLoss:           config.stopLoss,
@@ -485,6 +497,40 @@ export function BotConsole({ bot, open, onOpenChange, session, onSession }: {
                       </div>
                     )}
                   </div>
+                </div>
+              )}
+
+              {bot?.id === "barrier-pulse" && (
+                <div className={`space-y-2 rounded-xl border ${accent.panelBorder} ${accent.panelBg} p-3`}>
+                  <div>
+                    <p className={`text-[10px] font-semibold uppercase tracking-wider ${accent.text}`}>Recovery rails</p>
+                    <p className="text-[9px] text-muted-foreground/70">Independent from normal. The quality bar is static after every loss.</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-1">
+                    {(["both", "primary", "secondary"] as SideMode[]).map(mode => (
+                      <button key={mode} type="button" onClick={() => set("recoverySideMode", mode)}
+                        className={`rounded-md border px-1.5 py-1.5 text-[9px] ${config.recoverySideMode === mode ? `${accent.activeBg} ${accent.activeBorder} ${accent.text}` : "border-white/10 text-muted-foreground"}`}>
+                        {mode === "both" ? "Over + Under" : mode === "primary" ? "Over only" : "Under only"}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {config.recoverySideMode !== "secondary" && <div>
+                      <p className="text-[10px] text-muted-foreground mb-1">RECOVERY OVER</p>
+                      <Select value={String(config.recoveryOverBarrier)} onValueChange={v => set("recoveryOverBarrier", Number(v))}>
+                        <SelectTrigger className="h-7 text-xs bg-black/30 border-white/10"><SelectValue /></SelectTrigger>
+                        <SelectContent>{[0,1,2,3,4,5,6,7,8].map(b => <SelectItem key={b} value={String(b)}>OVER {b} · {(10*(9-b)).toFixed(0)}%</SelectItem>)}</SelectContent>
+                      </Select>
+                    </div>}
+                    {config.recoverySideMode !== "primary" && <div>
+                      <p className="text-[10px] text-muted-foreground mb-1">RECOVERY UNDER</p>
+                      <Select value={String(config.recoveryUnderBarrier)} onValueChange={v => set("recoveryUnderBarrier", Number(v))}>
+                        <SelectTrigger className="h-7 text-xs bg-black/30 border-white/10"><SelectValue /></SelectTrigger>
+                        <SelectContent>{[1,2,3,4,5,6,7,8,9].map(b => <SelectItem key={b} value={String(b)}>UNDER {b} · {(10*b).toFixed(0)}%</SelectItem>)}</SelectContent>
+                      </Select>
+                    </div>}
+                  </div>
+                  <p className="text-[9px] text-emerald-300/80">Static recovery timing · best configured rail · market hunt when switching</p>
                 </div>
               )}
 

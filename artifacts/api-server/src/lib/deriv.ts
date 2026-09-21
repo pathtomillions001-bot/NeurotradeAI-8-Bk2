@@ -2861,7 +2861,7 @@ class DerivJournalManager extends EventEmitter {
     try {
       const msg = typeof raw === "string" ? JSON.parse(raw) : JSON.parse(JSON.stringify(raw));
       if (msg.msg_type === "profit_table" && msg.profit_table) {
-        const isQuick: boolean = msg.passthrough?.quick === true;
+        const isQuick: boolean = msg.passthrough?.quick === true || msg.passthrough?.incremental === true;
         const batch: any[] = msg.profit_table.transactions ?? [];
         this.lastPongMs = Date.now();
 
@@ -2908,12 +2908,25 @@ class DerivJournalManager extends EventEmitter {
             }
           }, 5_000);
         } else {
-          this.cachedTransactions = this.fetchAccumulator;
+          // Commit the page batch. MERGE with the existing cache (dedupe by
+          // transaction_id) instead of a blind replace: a limit-10 incremental
+          // response that missed the quick flag must NEVER wipe the full cached
+          // history — engines read daily P&L/streaks from this cache, and a
+          // truncated cache corrupts those inputs.
+          if (this.hasDoneInitialFetch && this.cachedTransactions.length > this.fetchAccumulator.length) {
+            const batchIds = new Set(this.fetchAccumulator.map((t: any) => t.transaction_id));
+            this.cachedTransactions = [
+              ...this.fetchAccumulator,
+              ...this.cachedTransactions.filter((t: any) => !batchIds.has(t.transaction_id)),
+            ];
+          } else {
+            this.cachedTransactions = this.fetchAccumulator;
+          }
           this.fetchAccumulator = [];
           this.isFetchingPages = false;
           this.hasDoneInitialFetch = true;
           this.lastFetchMs = Date.now();
-          logger.info({ count: this.cachedTransactions.length, lastTxId: this.lastKnownTransactionId }, "JournalManager: full profit table refreshed — incremental mode active");
+          logger.info({ count: this.cachedTransactions.length, lastTxId: this.lastKnownTransactionId }, "JournalManager: profit table refreshed — incremental mode active");
           this.emit("refreshed", this.cachedTransactions);
         }
       }

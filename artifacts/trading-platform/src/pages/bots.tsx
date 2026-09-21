@@ -1,9 +1,9 @@
 /**
  * AI Bot Arena — the specialist bot section.
  *
- * Every bot on this page trades exactly ONE contract family. The catalogue and
- * all analysis live on the server; this page is the control room: pick a
- * specialist, arm its side/digit, set risk, and watch its own telemetry run.
+ * Family specialists and allowlisted multi-contract bots share this control
+ * room. The catalogue and analysis live on the server; each bot owns its
+ * dedicated configuration, risk controls and live telemetry.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";

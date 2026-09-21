@@ -11,6 +11,7 @@
  */
 
 import type { ComponentType } from "react";
+import { OmniConsole } from "@/components/omni-console";
 import { ApexConsole } from "@/components/apex-console";
 import { BastionConsole } from "@/components/bastion-console";
 import { OverUnderNavigatorConsole } from "@/components/overunder-navigator-console";
@@ -33,6 +34,7 @@ export interface BotConsoleProps {
 
 /** Every console this build can render, keyed by its contract id. */
 export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProps>> = {
+  "omni@2": OmniConsole,
   "apex@1": ApexConsole,
   "bastion@1": BastionConsole,
   "overunder-navigator@1": OverUnderNavigatorConsole,

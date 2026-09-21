@@ -1,8 +1,9 @@
 /**
  * Specialist AI Bot routes.
  *
- * One bot = one contract family. The contract family is decided by the bot, not
- * by the request body — a client can pick a SIDE (over/under, rise/fall,
+ * Legacy specialist routes keep one bot = one contract family. Omni owns its
+ * separate allowlisted multi-contract routes. For legacy specialists, the
+ * contract family is decided by the bot, not by the request body — a client can pick a SIDE (over/under, rise/fall,
  * even/odd) or lock a digit, but it can never widen a bot into another family.
  * Recovery uses the same family as normal trading, so a parity bot only ever
  * recovers in Even/Odd.
@@ -36,6 +37,8 @@ import bastionRouter from "./bastion";
 import parityForgeRouter from "./parity-forge";
 import surgeRouter from "./surge";
 import navigatorRouter from "./overunder-navigator";
+import * as omni from "../lib/omni-engine";
+import omniRouter from "./omni";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -56,6 +59,7 @@ router.use("/bastion", bastionRouter);
 router.use("/parity-forge", parityForgeRouter);
 router.use("/surge", surgeRouter);
 router.use("/overunder-navigator", navigatorRouter);
+router.use("/omni", omniRouter);
 
 interface ParsedBotBody {
   contractTypes: BotContractType[];
@@ -77,7 +81,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   // Family bots own their own routes; the generic specialist path must never be
   // able to start them with a mismatched config.
-  if (bot.apex || bot.bastion || bot.parityForge || bot.surge || bot.navigator || bot.killShotFamily || bot.preLocked || bot.oneShot) {
+  if (bot.omni || bot.apex || bot.bastion || bot.parityForge || bot.surge || bot.navigator || bot.killShotFamily || bot.preLocked || bot.oneShot) {
     return { ok: false, error: "This bot is deployed from its own console, not the generic bot endpoint" };
   }
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
@@ -205,11 +209,13 @@ router.get("/", (req, res) => {
   const pfg = visibleParityForgeStatus(req.sessionId);
   const svg = visibleSurgeStatus(req.sessionId);
   const nav = visibleNavigatorStatus(req.sessionId);
+  const omniStatus = omni.getStatus();
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
     bots: BOT_CATALOG.map(bot => {
       const console_ = botConsoleId(bot);
+      if (bot.omni) return { ...bot, console: console_, session: omniStatus.running ? omniStatus : null };
       if (bot.apex) return { ...bot, console: console_, session: apx.running ? apx : null };
       if (bot.bastion) return { ...bot, console: console_, session: bst.running ? bst : null };
       if (bot.parityForge) return { ...bot, console: console_, session: pfg.running ? pfg : null };
@@ -227,6 +233,7 @@ router.get("/", (req, res) => {
       return { ...bot, console: console_, session: status.running && status.botId === bot.id ? status : null };
     }),
     activeBotId: pickActiveBotId([
+      { botId: omni.OMNI_BOT_ID, running: omniStatus.running },
       { botId: dualLock.DUAL_LOCK_BOT_ID, running: dual.running },
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: fam.botId ?? null, running: fam.running },
@@ -735,6 +742,8 @@ function visibleNavigatorStatus(sessionId: string) {
 }
 
 router.get("/status", (req, res) => {
+  const omniStatus = omni.getStatus();
+  if (omniStatus.running) { res.json(omniStatus); return; }
   const apx = visibleApexStatus(req.sessionId);
   if (apx.running) { res.json(apx); return; }
   const bst = visibleBastionStatus(req.sessionId);
@@ -864,7 +873,7 @@ router.post("/:botId/stop", (req, res) => {
     res.status(404).json({ error: "Unknown bot" });
     return;
   }
-  if (botDef.apex || botDef.parityForge || botDef.surge || botDef.navigator || botDef.bastion || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
+  if (botDef.omni || botDef.apex || botDef.parityForge || botDef.surge || botDef.navigator || botDef.bastion || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
     res.status(400).json({ error: "This bot is stopped from its own console" });
     return;
   }

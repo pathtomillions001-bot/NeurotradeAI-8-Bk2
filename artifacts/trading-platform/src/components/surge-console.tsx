@@ -426,7 +426,7 @@ export function SurgeConsole({ bot, open, onOpenChange, session, onSession }: {
                     <p className="text-[10px] text-muted-foreground leading-relaxed">{scanResult.reason}</p>
                     <div className="space-y-2">
                       <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "locked")} disabled={loading} className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}><Lock className="w-4 h-4 mr-2" /> Trade Locked on {(scanResult.best ?? scanResult.bestAvailable)!.displayName}</Button>
-                      <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "switching")} disabled={loading} variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}><Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching — recovery hunts all markets</Button>
+                      <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "switching")} disabled={loading} variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}><Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching</Button>
                     </div>
                   </>
                 ) : (

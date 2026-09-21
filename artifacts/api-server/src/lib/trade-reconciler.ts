@@ -143,6 +143,11 @@ export async function reconcileUnsettledTrades(): Promise<number> {
         if (transactions.length === 0) continue;
 
         for (const row of sessionRows) {
+          // Omni owns a durable purchase intent and atomically settles it with
+          // the shared recovery ledger. Its unknown acknowledgements must NEVER
+          // be fuzzy-matched by this legacy display-only reconciliation path.
+          // Restart recovery is resumed by Omni's next explicit deployment.
+          if (row.agentReasoning?.startsWith("[Omni Sentinel] ")) continue;
           const tx = findTransaction(row, transactions);
           if (!tx) continue;
           const buyPrice = Number(tx.buy_price ?? 0);

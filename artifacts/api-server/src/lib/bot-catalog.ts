@@ -1,10 +1,10 @@
 /**
- * Specialist AI Bot catalogue.
+ * AI Bot catalogue.
  *
- * Each bot trades exactly ONE contract family. That single constraint is what
- * funds its advantage: the analysis budget the NeuroAI Quantum FAB has to split
- * across six families is spent entirely on the estimators this one family can
- * use (see `lib/specialist-analysis.ts`).
+ * Family specialists spend their analysis budget on one contract family (see
+ * `lib/specialist-analysis.ts`). Omni Sentinel instead obeys the user's
+ * multi-contract allowlist in BOTH normal and recovery mode. Dedicated console
+ * ids and route guards keep those execution contracts separate.
  */
 
 import type { SpecialistFamily } from "./specialist-analysis";
@@ -28,8 +28,8 @@ export interface BotDefinition {
   id: string;
   name: string;
   code: string;
-  family: SpecialistFamily | "duallock" | "killshot";
-  /** Human name of the contract family this bot is hard-wired to. */
+  family: SpecialistFamily | "duallock" | "killshot" | "multi";
+  /** Human-readable contract scope advertised by this bot. */
   contractLabel: string;
   tagline: string;
   description: string;
@@ -84,6 +84,8 @@ export interface BotDefinition {
   surge?: boolean;
   /** Over/Under Navigator: four user-selected normal/recovery barriers. */
   navigator?: boolean;
+  /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
+  omni?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -99,6 +101,32 @@ export interface BotDefinition {
 }
 
 export const BOT_CATALOG: BotDefinition[] = [
+  {
+    id: "omni",
+    name: "Omni Sentinel",
+    code: "BOT-OMNI",
+    family: "multi",
+    omni: true,
+    contractLabel: "Rise/Fall · Even/Odd · Matches/Differs · Over/Under",
+    tagline: "Your contracts. Every opportunity. Recovery without ratchets.",
+    description:
+      "A multi-contract opportunity hunter. Enable any combination of Rise, Fall, Even, Odd, Matches, Differs, Over and Under; the AI chooses the digit, barrier and supported automated market. The same allowlist binds recovery. A quote-aware tournament ranks expected log return, uncertainty, debt payment and loss-pair risk, without raising a threshold or adding cooldowns after losses. Lock one market or allow switching for both normal and recovery trades. If no positive estimated opportunity exists, it waits. Recovery can still lose money; estimates are not guarantees.",
+    edge: [
+      "Five causal Bayesian experts: fair prior, slow/fast marginals and order-1/2 Markov backoff, weighted by past log loss",
+      "One allowlist for both phases; all valid enabled digits and barriers compete on the app's supported automated markets",
+      "Debt-aware expected-log-return ranking with uncertainty shrinkage, loss-pair risk and live-payout stake sizing",
+      "Fixed utility floor at zero: no loss-run ratchets, forced recovery trades or progressively longer cooldowns",
+      "Fresh-tick socket-send guards, broker-confirmed settlement and one shared live recovery ledger",
+      "Connected-account execution, chronological replay diagnostics and a transparent cross-contract opportunity radar",
+    ],
+    accent: "indigo",
+    icon: "shield",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "estimated, not guaranteed",
+    nominalPayout: "live quote",
+  },
   {
     id: "overunder-navigator",
     name: "Over/Under Navigator",
@@ -568,6 +596,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
+  if (bot.omni) return "omni@2";
   if (bot.apex) return "apex@1";
   if (bot.bastion) return "bastion@1";
   if (bot.parityForge) return "parity-forge@1";

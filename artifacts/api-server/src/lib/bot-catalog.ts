@@ -98,6 +98,38 @@ export interface BotDefinition {
 
 export const BOT_CATALOG: BotDefinition[] = [
   {
+    id: "barrier-pulse",
+    name: "Barrier Pulse",
+    code: "BOT-BARRIER-PULSE",
+    family: "barrier",
+    contractLabel: "Custom Over / Under · recovery pair",
+    tagline: "Your barriers. Recovery-first timing. No ratcheting gates.",
+    description:
+      "A configurable Over/Under specialist with independent normal and recovery rails. Choose either or both sides and set every barrier separately — for example Over 1 + Under 8 normally, then Over 6 + Under 3 in recovery, or use the same Over 6 rail in both modes. Recovery uses a fixed mathematical decision policy: five-window probability fusion, expected-value ranking, loss-pair risk and execution-tick confirmation. Its thresholds never increase after a recovery loss. Locked mode waits for the best setup on one market; switching mode searches all digit markets for a stronger recovery opportunity.",
+    edge: [
+      "Independent normal and recovery side/barrier controls — any valid Over 0–8 and Under 1–9 combination, including one identical rail in both modes",
+      "Five-window probability fusion (15/30/60/100/200 ticks), confidence overlap, trend, entropy and digit-hazard timing",
+      "Recovery candidates ranked by expected value and consecutive-loss pair risk; the best configured side wins arbitration",
+      "Static recovery requirements — no loss-count input, no post-loss ratchet and no progressively hardening gate",
+      "Execution-tick revalidation reduces stale entries between analysis and purchase",
+      "Locked market waits locally; switching mode scans every digit-enabled market for the best available recovery setup",
+      "Shared debt-driven recovery ledger and barrier-specific live payout sizing",
+    ],
+    accent: "violet",
+    icon: "activity",
+    hasSides: true,
+    primaryLabel: "Over",
+    secondaryLabel: "Under",
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Over & Under", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Normal mode scores both configured rails" },
+      { id: "primary", label: "Over only", contracts: ["DIGITOVER"], desc: "Normal mode trades only your Over rail" },
+      { id: "secondary", label: "Under only", contracts: ["DIGITUNDER"], desc: "Normal mode trades only your Under rail" },
+    ],
+    nominalWinRate: "barrier-dependent",
+    nominalPayout: "1.09–8.93×",
+  },
+  {
     id: "apex",
     name: "Echo Apex",
     code: "BOT-APEX",

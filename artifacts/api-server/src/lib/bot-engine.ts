@@ -107,6 +107,11 @@ export interface BotConfig {
   contractTypes: BotContractType[];
   /** [overBarrier, underBarrier] for the barrier bot; ignored elsewhere. */
   barriers: number[];
+  /** Optional independent rails used only while the shared ledger is in recovery. */
+  recoveryContractTypes?: BotContractType[];
+  recoveryBarriers?: number[];
+  /** Fixed recovery policy: thresholds do not ratchet with consecutive losses. */
+  staticRecoveryTiming?: boolean;
   /** Locked digit for match/differ bots (undefined = specialist selects). */
   lockedBarrier?: number;
   stake: number;
@@ -803,11 +808,14 @@ async function runLoop(config: BotConfig) {
 
       // ── Mode from the SHARED ledger; contract family never changes ─────────
       const inRecovery    = recoveryEngine.isInRecovery();
-      const contractTypes = config.contractTypes;
+      const activeConfig: BotConfig = inRecovery && config.recoveryContractTypes?.length
+        ? { ...config, contractTypes: config.recoveryContractTypes, barriers: config.recoveryBarriers ?? config.barriers }
+        : config;
+      const contractTypes = activeConfig.contractTypes;
       const signalMode: SignalMode = inRecovery ? "recovery" : "normal";
       const usesDigits = contractTypes.some(ct => ct.startsWith("DIGIT"));
 
-      if (awaitFreshRecoveryWindow && inRecovery && usesDigits) {
+      if (awaitFreshRecoveryWindow && inRecovery && usesDigits && !config.staticRecoveryTiming) {
         if (Date.now() - lastTradeMs < 1200) {
           session.message = "Stabilizing after recovery loss…";
           broadcast();
@@ -837,7 +845,7 @@ async function runLoop(config: BotConfig) {
         if (cached) {
           best = cached;
         } else {
-          const result = await scoreMarketForBot(lockedMarket.symbol, lockedMarket.displayName, config, signalMode, session.patternTrades);
+          const result = await scoreMarketForBot(lockedMarket.symbol, lockedMarket.displayName, activeConfig, signalMode, session.patternTrades);
           if (!result) {
             session.message = "Waiting for tick data on locked market…";
             broadcast();
@@ -861,7 +869,7 @@ async function runLoop(config: BotConfig) {
       } else {
         session.message = inRecovery ? "🎯 Sniper scanning recovery markets…" : `${botName} scanning markets…`;
         broadcast();
-        const scored = await analyzeMarketsForBot(config, signalMode, session.patternTrades);
+        const scored = await analyzeMarketsForBot(activeConfig, signalMode, session.patternTrades);
         session.topMarkets = scored;
         if (scored.length === 0) {
           session.message = "Waiting for tick data stream…";
@@ -886,9 +894,9 @@ async function runLoop(config: BotConfig) {
       // ── Gating ──────────────────────────────────────────────────────────────
       if (inRecovery) {
         let candidate: { winner: BotMarketScore; greenLight: boolean } | null = null;
-        const maxAttempts = 4;
+        const maxAttempts = config.staticRecoveryTiming ? 1 : 4;
         for (let attempt = 0; attempt < maxAttempts; attempt++) {
-          candidate = sniperRecoveryGate(best.symbol, best.displayName, config, session.patternTrades);
+          candidate = sniperRecoveryGate(best.symbol, best.displayName, activeConfig, session.patternTrades);
           if (candidate) break;
           session.message = `🎯 Sniper recovery analysis (attempt ${attempt + 1})…`;
           broadcast();
@@ -914,7 +922,7 @@ async function runLoop(config: BotConfig) {
             preAnalyzed = null;
             continue;
           }
-          const refreshed = sniperRecoveryGate(best.symbol, best.displayName, config, session.patternTrades);
+          const refreshed = sniperRecoveryGate(best.symbol, best.displayName, activeConfig, session.patternTrades);
           if (refreshed && refreshed.greenLight) {
             candidate = refreshed;
           } else {
@@ -957,15 +965,15 @@ async function runLoop(config: BotConfig) {
       }
 
       // ── Contract sovereignty: never fire outside the armed family ──────────
-      if (!config.contractTypes.includes(best.contractType)) {
-        logger.warn({ got: best.contractType, allowed: config.contractTypes }, "Discarding trade outside the bot's contract family");
+      if (!activeConfig.contractTypes.includes(best.contractType)) {
+        logger.warn({ got: best.contractType, allowed: activeConfig.contractTypes }, "Discarding trade outside the bot's contract family");
         session.message = "Waiting for a configured contract setup…";
         broadcast();
         preAnalyzed = null;
         await sleep(750);
         continue;
       }
-      const { overBarrier: expectedOver, underBarrier: expectedUnder } = extractBarriers(config.barriers);
+      const { overBarrier: expectedOver, underBarrier: expectedUnder } = extractBarriers(activeConfig.barriers);
       if (best.contractType === "DIGITOVER" && best.barrier !== expectedOver) {
         session.message = `Waiting for a configured over${expectedOver} setup…`;
         broadcast();
@@ -1251,12 +1259,15 @@ async function runLoop(config: BotConfig) {
       // ── Parallel pre-analysis during post-trade settling ───────────────────
       const nextInRecovery = recoveryEngine.isInRecovery();
       const pauseMs = won ? 900 : 1600;
-      if (!won && (inRecovery || nextInRecovery)) awaitFreshRecoveryWindow = true;
+      if (!won && (inRecovery || nextInRecovery) && !config.staticRecoveryTiming) awaitFreshRecoveryWindow = true;
+      const nextConfig: BotConfig = nextInRecovery && config.recoveryContractTypes?.length
+        ? { ...config, contractTypes: config.recoveryContractTypes, barriers: config.recoveryBarriers ?? config.barriers }
+        : config;
 
       const preAnalyzePromise = lockedMarket
-        ? scoreMarketForBot(lockedMarket.symbol, lockedMarket.displayName, config, nextInRecovery ? "recovery" : "normal")
+        ? scoreMarketForBot(lockedMarket.symbol, lockedMarket.displayName, nextConfig, nextInRecovery ? "recovery" : "normal")
             .then(r => (r ? [r] : []))
-        : analyzeMarketsForBot(config, nextInRecovery ? "recovery" : "normal");
+        : analyzeMarketsForBot(nextConfig, nextInRecovery ? "recovery" : "normal");
 
       await sleep(pauseMs);
       if (!session.running || session.stopRequested) break;

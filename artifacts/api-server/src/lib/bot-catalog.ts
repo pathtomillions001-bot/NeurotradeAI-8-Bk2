@@ -68,6 +68,20 @@ export interface BotDefinition {
    * /bastion endpoints, never the generic specialist route.
    */
   bastion?: boolean;
+  /**
+   * Parity Forge: the Even/Odd recovery-first engine (Even/Odd normal,
+   * Even/Odd recovery, four parity lenses, loss-pair-aware utility, STATIC
+   * break-even bar, pacing valve). Deploys from its own console and its own
+   * /parity-forge endpoints, never the generic specialist route.
+   */
+  parityForge?: boolean;
+  /**
+   * Vector Surge: the Rise/Fall recovery-first engine (Rise/Fall normal,
+   * Rise/Fall recovery, four momentum lenses, loss-pair-aware utility, STATIC
+   * break-even bar, pacing valve). Deploys from its own console and its own
+   * /surge endpoints, never the generic specialist route.
+   */
+  surge?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -141,6 +155,74 @@ export const BOT_CATALOG: BotDefinition[] = [
     ],
     nominalWinRate: "80% normal / 60% recovery",
     nominalPayout: "1.23× / 1.63×",
+  },
+  {
+    id: "parity-forge",
+    name: "Parity Forge",
+    code: "BOT-PARITY-FORGE",
+    family: "parity",
+    parityForge: true,
+    contractLabel: "Even / Odd → Even / Odd recovery",
+    tagline: "Even/Odd, recovery-first. Bars frozen, best shot hunts.",
+    description:
+      "The Even/Odd recovery-first engine. Normal trades are Even/Odd parity at 1.95×, timed by a pacing valve that budgets selectivity instead of stacking gates. A loss drops into recovery — still Even/Odd, but the selection is top-tier: four parity lenses (2-state + order-2 Markov at ~5× evidence, run-length hazard, digit-conditioned parity, decayed suffix memory) fuse in a log-pool, temperature-calibrated, and the side with the best loss-pair-adjusted utility fires the MOMENT it clears the frozen 52% break-even bar. No post-loss hardening — the bar cannot move with the loss run, so debt is never left waiting. If the bar is cold here, switching mode migrates and hunts every market for a clean Even/Odd shot; locked mode holds and waits. Every market is scored on an honest walk-forward of the exact live policy, reporting recovery hit rate, loss pairs and ticks in debt.",
+    edge: [
+      "Four-lens parity log-pool: 2-state Markov (order1–2, Jeffreys + shrinkage, ~5× samples/state), Kaplan–Meier run-hazard, digit-conditioned parity Dirichlet, decayed suffix memory (orders 2–5, half-life 550)",
+      "Loss-pair-aware utility: expected value minus priced consecutive-loss risk using the 2-state q_LL — recovery penalty 0.45, normal 0.15, fixed, never indexed to the live loss run",
+      "STATIC recovery bar at 52% (break-even 51.28% + cushion) — no post-loss tightening, no ratchets, no cool-down ladders (structurally impossible: the bar is a frozen const, decideRecovery takes no loss-run argument)",
+      "Best-shot execution: BOTH Even and Odd scored every tick, utilities ranked, the single best fires the next tick it clears the bar — intelligent timing, not a forced trade",
+      "If no side clears, the bot waits; switching mode HUNTS all digit markets and migrates to the best bar-clearing Even/Odd shot — locked mode holds ground",
+      "Pacing valve for normal (0.20 shots/tick, zero floor) — selectivity is a budget, never a stack of vetoes",
+      "Post-loss conditioning via parity Markov + digit parity: the losing parity and losing digit are the conditioning states the next recovery shot is chosen on",
+      "Honest walk-forward per market: the exact live policy replayed on unseen ticks, reporting recovery hit rate, recovery loss pairs and avg ticks in debt — verdicts are labels, never gates",
+    ],
+    accent: "teal",
+    icon: "zap",
+    hasSides: true,
+    primaryLabel: "Even",
+    secondaryLabel: "Odd",
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Even & Odd", contracts: ["DIGITEVEN", "DIGITODD"], desc: "Analyse both, execute the favoured side (recovery always picks the best)" },
+      { id: "primary", label: "Even only", contracts: ["DIGITEVEN"], desc: "Normal stays on Even — recovery still scores both and fires the best" },
+      { id: "secondary", label: "Odd only", contracts: ["DIGITODD"], desc: "Normal stays on Odd — recovery still scores both and fires the best" },
+    ],
+    nominalWinRate: "≈52% normal / ≥56% recovery",
+    nominalPayout: "1.95×",
+  },
+  {
+    id: "surge",
+    name: "Vector Surge",
+    code: "BOT-SURGE",
+    family: "momentum",
+    surge: true,
+    contractLabel: "Rise / Fall → Rise / Fall recovery",
+    tagline: "Rise/Fall, recovery-first. Bars frozen, vectors hunt.",
+    description:
+      "The Rise/Fall recovery-first engine. Normal trades are Rise/Fall at 1.92×, timed by a pacing valve that budgets selectivity instead of stacking gates. A loss drops into recovery — still Rise/Fall, but the selection is top-tier: four momentum lenses (2-state + order-2 direction Markov with Jeffreys + shrinkage, Kaplan–Meier streak hazard, Hurst R/S regime + EMA drift t-stat, decayed suffix memory over ternary direction patterns) fuse in a log-pool, temperature-calibrated, and the side with the best loss-pair-adjusted utility fires the MOMENT it clears the frozen 53% break-even bar. No post-loss hardening — the bar cannot move with the loss run, so debt is never left waiting. If the bar is cold here, switching mode migrates and hunts every market for a clean Rise/Fall shot; locked mode holds and waits. Every market is scored on an honest walk-forward of the exact live policy, reporting recovery hit rate, loss pairs and ticks in debt.",
+    edge: [
+      "Four-lens momentum log-pool: 2-state direction Markov (order1–2, Jeffreys + shrinkage, one chain per side), Kaplan–Meier hazard over Rise/Fall runs, Hurst R/S + EMA drift with split-half agreement and multi-scale direction consistency, decayed suffix memory over rose/fall/flat patterns (orders 2–5, half-life 600)",
+      "Loss-pair-aware utility: expected value minus priced consecutive-loss risk using q_LL per side — recovery penalty 0.45, normal 0.15, fixed, never indexed to the live loss run",
+      "STATIC recovery bar at 53% (break-even 52.08% + cushion) — no post-loss tightening, no ratchets, no cool-down ladders (structurally impossible: the bar is a frozen const, decideRecovery takes no loss-run argument)",
+      "Best-shot execution: BOTH Rise and Fall scored every tick, utilities ranked, the single best fires the next tick it clears the bar — intelligent timing, not a forced trade",
+      "If no side clears, the bot waits; switching mode HUNTS all markets and migrates to the best bar-clearing Rise/Fall shot — locked mode holds ground",
+      "Pacing valve for normal (0.20 shots/tick, zero floor) — selectivity is a budget, never a stack of vetoes",
+      "Post-loss conditioning via direction Markov: the losing direction is the conditioning state the next recovery shot is chosen on",
+      "Honest walk-forward per market: the exact live policy replayed on unseen ticks, reporting recovery hit rate, recovery loss pairs and avg ticks in debt — verdicts are labels, never gates",
+    ],
+    accent: "rose",
+    icon: "trend",
+    hasSides: true,
+    primaryLabel: "Rise",
+    secondaryLabel: "Fall",
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Rise & Fall", contracts: ["CALL", "PUT"], desc: "Analyse both, execute the favoured side (recovery always picks the best)" },
+      { id: "primary", label: "Rise only", contracts: ["CALL"], desc: "Normal stays on Rise — recovery still scores both and fires the best" },
+      { id: "secondary", label: "Fall only", contracts: ["PUT"], desc: "Normal stays on Fall — recovery still scores both and fires the best" },
+    ],
+    nominalWinRate: "≈52% normal / ≥56% recovery",
+    nominalPayout: "1.92×",
   },
   {
     id: "parity",
@@ -453,6 +535,8 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 export function botConsoleId(bot: BotDefinition): string {
   if (bot.apex) return "apex@1";
   if (bot.bastion) return "bastion@1";
+  if (bot.parityForge) return "parity-forge@1";
+  if (bot.surge) return "surge@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

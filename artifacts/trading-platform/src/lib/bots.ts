@@ -47,6 +47,10 @@ export interface BotCardData {
   apex?: boolean;
   /** Barrier Bastion: recovery-first Over/Under bands (own console + routes). */
   bastion?: boolean;
+  /** Parity Forge: Even/Odd parity specialist with recovery-first intelligence. */
+  parityForge?: boolean;
+  /** Vector Surge: Rise/Fall recovery-first momentum engine. */
+  surge?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -124,6 +128,74 @@ export interface BastionWatchStatus {
   verdict: string;
 }
 
+export interface ParityForgeDeployedStatus {
+  symbol: string;
+  displayName: string;
+  verdict: string;
+  confidence: number;
+  paperEdgePerDollar: number;
+  normalHitRate: number;
+  normalShots: number;
+  recoveryHitRate: number;
+  recoveryShots: number;
+  recoveryLossPairs: number;
+  breakEven: number;
+}
+
+export interface ParityForgeWatchStatus {
+  phase: "watching" | "armed" | "firing" | "settling" | "hunting";
+  mode: "normal" | "recovery";
+  sideLabel: string;
+  altLabel: string;
+  p: number;
+  altP: number;
+  bar: number;
+  ready: boolean;
+  pairRisk: number;
+  qLL: number;
+  lenses: [number, number, number, number];
+  recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
+  reason: string;
+  switched: boolean;
+  ticksWatched: number;
+  confidence: number;
+  verdict: string;
+}
+
+export interface SurgeDeployedStatus {
+  symbol: string;
+  displayName: string;
+  verdict: string;
+  confidence: number;
+  paperEdgePerDollar: number;
+  normalHitRate: number;
+  normalShots: number;
+  recoveryHitRate: number;
+  recoveryShots: number;
+  recoveryLossPairs: number;
+  breakEven: number;
+}
+
+export interface SurgeWatchStatus {
+  phase: "watching" | "armed" | "firing" | "settling" | "hunting";
+  mode: "normal" | "recovery";
+  sideLabel: string;
+  altLabel: string;
+  p: number;
+  altP: number;
+  bar: number;
+  ready: boolean;
+  pairRisk: number;
+  qLL: number;
+  lenses: [number, number, number, number];
+  recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
+  reason: string;
+  switched: boolean;
+  ticksWatched: number;
+  confidence: number;
+  verdict: string;
+}
+
 export interface BotSessionStatus {
   /** Echo Apex only: the active (possibly rotated) deployment. */
   apexDeployed?: ApexDeployedStatus;
@@ -133,6 +205,14 @@ export interface BotSessionStatus {
   bastionDeployed?: BastionDeployedStatus;
   /** Barrier Bastion only: live band/recovery watch state. */
   bastionWatch?: BastionWatchStatus;
+  /** Parity Forge only: the measured card it deployed. */
+  parityForgeDeployed?: ParityForgeDeployedStatus;
+  /** Parity Forge only: live parity/recovery watch state. */
+  parityForgeWatch?: ParityForgeWatchStatus;
+  /** Vector Surge only: the measured card it deployed. */
+  surgeDeployed?: SurgeDeployedStatus;
+  /** Vector Surge only: live momentum/recovery watch state. */
+  surgeWatch?: SurgeWatchStatus;
   running: boolean;
   botId: string | null;
   botName: string | null;

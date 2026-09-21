@@ -13,6 +13,8 @@
 import type { ComponentType } from "react";
 import { ApexConsole } from "@/components/apex-console";
 import { BastionConsole } from "@/components/bastion-console";
+import { ParityForgeConsole } from "@/components/parity-forge-console";
+import { SurgeConsole } from "@/components/surge-console";
 import { BotConsole } from "@/components/bot-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
@@ -32,6 +34,8 @@ export interface BotConsoleProps {
 export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProps>> = {
   "apex@1": ApexConsole,
   "bastion@1": BastionConsole,
+  "parity-forge@1": ParityForgeConsole,
+  "surge@1": SurgeConsole,
   "specialist@1": BotConsole,
   "dual-lock@1": DualLockConsole,
   "killshot@1": KillShotConsole,

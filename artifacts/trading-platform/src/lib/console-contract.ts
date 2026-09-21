@@ -19,8 +19,6 @@
  */
 
 export const WEB_CONSOLE_IDS = [
-  /** Match Nexus — source-verified, tick-driven Matches only. */
-  "match-nexus@1",
   /** Legacy specialist suite: sides / digit lock / barrier controls. */
   "specialist@1",
   /** Dual-Lock Range Sentinel — scan once, freeze the pair. */

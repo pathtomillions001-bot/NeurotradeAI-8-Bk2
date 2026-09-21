@@ -8,9 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "DATABASE_URL=pglite:memory tsx --test --test-timeout=90000 --test-force-exit src/lib/recovery-completion.test.ts src/lib/quantum-analysis.test.ts src/lib/signal-value.test.ts src/lib/pip-accuracy.test.ts src/lib/specialist-analysis.test.ts src/lib/bot-recovery-parity.test.ts src/lib/bot-activity.test.ts src/lib/bot-edge-upgrade.test.ts src/lib/friendly-error.test.ts src/lib/dual-lock-analysis.test.ts src/lib/live-registry.test.ts src/lib/accumulator-analysis.test.ts src/lib/killshot-analysis.test.ts src/lib/bot-console-parity.test.ts src/lib/bulk-execution.test.ts src/lib/bulk-pooled-execution.test.ts src/lib/bulk-sync.test.ts src/lib/session-isolation.test.ts src/lib/match-nexus-analysis.test.ts src/lib/match-nexus-runner.test.ts src/lib/match-nexus-integration.test.ts src/lib/match-nexus-transport.test.ts",
-    "test:nexus": "DATABASE_URL=pglite:memory tsx --test --test-timeout=90000 --test-force-exit src/lib/match-nexus-analysis.test.ts src/lib/match-nexus-runner.test.ts src/lib/match-nexus-integration.test.ts src/lib/match-nexus-transport.test.ts",
-    "bench:nexus": "tsx scripts/benchmark-nexus.ts"
+    "test": "DATABASE_URL=pglite:memory tsx --test --test-timeout=90000 --test-force-exit src/lib/recovery-completion.test.ts src/lib/quantum-analysis.test.ts src/lib/signal-value.test.ts src/lib/pip-accuracy.test.ts src/lib/specialist-analysis.test.ts src/lib/bot-recovery-parity.test.ts src/lib/bot-activity.test.ts src/lib/bot-edge-upgrade.test.ts src/lib/friendly-error.test.ts src/lib/dual-lock-analysis.test.ts src/lib/live-registry.test.ts src/lib/accumulator-analysis.test.ts src/lib/killshot-analysis.test.ts src/lib/bot-console-parity.test.ts src/lib/bulk-execution.test.ts src/lib/bulk-pooled-execution.test.ts src/lib/bulk-sync.test.ts src/lib/session-isolation.test.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

@@ -55,8 +55,6 @@ export interface BotDefinition {
    * The UI renders a dedicated console for these.
    */
   killShotFamily?: KillShotFamily;
-  /** Dedicated causal Matches-only engine, not the generic specialist route. */
-  matchNexus?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -72,33 +70,6 @@ export interface BotDefinition {
 }
 
 export const BOT_CATALOG: BotDefinition[] = [
-  {
-    id: "match-nexus",
-    name: "Match Nexus",
-    code: "BOT-NEXUS",
-    family: "match",
-    matchNexus: true,
-    contractLabel: "Matches only",
-    tagline: "One tick ahead. Evidence, not guesswork.",
-    description:
-      "A dedicated Matches engine that learns all ten digits together. Scan first, then lock your chosen market or allow measured switching. Incremental Markov and frequency models compete on past predictive performance; a single payout-aware rule balances entry quality and activity. Paper-first, with honest held-out results and your existing debt-driven Matches recovery.",
-    edge: [
-      "Six online experts: fair baseline, slow/fast frequency, first/second-order Markov and empirical renewal — absence alone never makes a digit due",
-      "Causal walk-forward validation of the complete digit-selection policy; training-only calibration and cross-market evidence correction",
-      "Active / Balanced / Patient pacing with one positive-value entry rule — no entropy, gap or FDR gate stack",
-      "Tick-driven updates, pooled quotes, send-time freshness checks and one outstanding order; a timeout never triggers a duplicate purchase",
-      "Seeded posterior-predictive recovery stress test, uncertainty bands and measured latency — estimates, never guaranteed accuracy",
-      "Locked or switching selected AFTER the scan; normal and recovery contracts are always DIGITMATCH",
-    ],
-    accent: "lime",
-    icon: "zap",
-    hasSides: false,
-    hasDigitLock: true,
-    digitLockHelp: "Let the causal model compare all ten digits, or name a digit. Market locking is a separate choice after analysis.",
-    sides: [{ id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "One digit, one tick — Matches in normal and recovery mode" }],
-    nominalWinRate: "10% fair baseline",
-    nominalPayout: "≈8.93×",
-  },
   {
     id: "parity",
     name: "Parity Sentinel",
@@ -408,7 +379,6 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.matchNexus) return "match-nexus@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

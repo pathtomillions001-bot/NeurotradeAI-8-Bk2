@@ -173,7 +173,6 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
   const Icon = BOT_ICON[bot.icon] ?? Sparkles;
   const s = bot.session;
   const profit = s?.totalProfit ?? 0;
-  const paper = s?.nexus?.executionMode === "paper";
 
   return (
     <motion.div
@@ -210,7 +209,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
                 <h3 className="text-sm font-bold text-white truncate">{bot.name}</h3>
                 {isThisRunning && (
                   <span className={`flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text}`}>
-                    <span className={`w-1 h-1 rounded-full ${a.dot} animate-pulse`} /> {paper ? "PAPER" : "LIVE"}
+                    <span className={`w-1 h-1 rounded-full ${a.dot} animate-pulse`} /> LIVE
                   </span>
                 )}
               </div>
@@ -278,7 +277,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
                 onClick={onOpen}
                 className={`w-full h-9 text-xs font-semibold ${a.solidBtn} text-white`}
               >
-                <Activity className="w-3.5 h-3.5 mr-1.5" /> {paper ? "Open Paper Session" : "Open Live Session"}
+                <Activity className="w-3.5 h-3.5 mr-1.5" /> Open Live Session
               </Button>
             ) : (
               <Button

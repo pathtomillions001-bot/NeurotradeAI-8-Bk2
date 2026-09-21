@@ -7,6 +7,8 @@
  * giving each specialist its own hue.
  */
 
+import type { OmniSessionDetails } from "./omni";
+
 import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
@@ -53,6 +55,8 @@ export interface BotCardData {
   surge?: boolean;
   /** Over/Under Navigator: configurable normal/recovery digit bands. */
   navigator?: boolean;
+  /** Omni Sentinel: user-allowlisted multi-contract opportunity tournament. */
+  omni?: boolean;
   /**
    * Console id + revision the API expects this bot to be driven by
    * (e.g. "dual-lock@1"). The web bundle only renders bots whose console it
@@ -236,6 +240,8 @@ export interface NavigatorWatchStatus {
 }
 
 export interface BotSessionStatus {
+  /** Omni Sentinel: scoped configuration and live opportunity radar. */
+  omni?: OmniSessionDetails;
   /** Echo Apex only: the active (possibly rotated) deployment. */
   apexDeployed?: ApexDeployedStatus;
   /** Echo Apex only: live watch state. */

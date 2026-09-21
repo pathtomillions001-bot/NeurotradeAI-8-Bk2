@@ -25,11 +25,15 @@
  * single temperature scale calibrates the fused distribution.
  *
  * SELECTION WITHOUT GATES — there is deliberately no entropy veto, no FDR
- * stack, no gap veto and no fixed sigma bar. A PACING VALVE (a
- * stochastic-approximation quantile tracker) holds the fire bar exactly where
- * the bot fires at its budgeted rate (Brisk/Steady/Patient): selectivity is a
- * budget, not a stack of vetoes. The only floor is break-even itself, so the
- * bot never knowingly fires a negative-expectancy shot.
+ * stack, no gap veto, no fixed sigma bar and NO break-even reject. A PACING
+ * VALVE (a stochastic-approximation quantile tracker) holds the fire bar
+ * exactly where the bot fires at its budgeted rate: selectivity is a budget,
+ * not a stack of vetoes. The valve's bar may float down to ANY score the
+ * lenses produce — an earlier build clamped it at break-even and ANDed a
+ * `p ≥ break-even` hard reject onto `ready`, which starved the bot completely
+ * (calibrated match probabilities hover near the 10% fair rate, below the
+ * 11.2% break-even, so the gates rejected virtually every shot). Zero vetoes
+ * means zero vetoes: the budget is the only selectivity.
  *
  * HONEST MEASUREMENT — the scan fits every parameter on the first 60% of each
  * market's history and reports the replay of the EXACT live policy (lenses +
@@ -55,19 +59,32 @@ export const APEX_SUFFIX_MAX_ENTRIES = 4000;
 export const APEX_SUFFIX_HALFLIFE_TICKS = 600;
 export const APEX_MATCH_PAYOUT = 8.93;
 export const APEX_BREAKEVEN = 1 / APEX_MATCH_PAYOUT;
+/** Combinatorial fair rate of Matches (1 digit in 10) — used only for fallbacks. */
+export const APEX_FAIR_RATE = 0.1;
 export const APEX_TRAIN_FRACTION = 0.6;
 export const APEX_MIN_FIT_DIGITS = 500;
 export const APEX_MIN_MEASURE_DIGITS = 300;
 
 export type ApexPace = "brisk" | "steady" | "patient";
+/**
+ * THE single pace mode. Echo Apex exposes no pace selector — the user asked
+ * for one mode and one mode only, and it is the budget that allows the MOST
+ * trades. Legacy clients may still send `pace`; every entry point ignores it
+ * and stamps `APEX_ONLY_PACE` (see routes/apex.ts and apex-engine.ts).
+ */
+export const APEX_ONLY_PACE: ApexPace = "brisk";
 /** Budgeted fire rate in shots per tick. Selectivity is a budget, not a veto. */
 export const APEX_PACE_TARGET: Record<ApexPace, number> = {
   brisk: 0.06,
   steady: 0.035,
   patient: 0.02,
 };
-/** Recovery shots are fewer and better: the valve paces tighter while in debt. */
-export const APEX_RECOVERY_PACE_FACTOR = 0.55;
+/**
+ * Recovery no longer paces tighter than normal trading. The old 0.55 factor
+ * made the bot wait LONGER for recovery shots exactly when the debt-driven
+ * ladder needs a win — the budget is the same in debt and out of it.
+ */
+export const APEX_RECOVERY_PACE_FACTOR = 1;
 
 export type ApexVerdict = "prime" | "viable" | "thin";
 
@@ -528,7 +545,7 @@ export function defaultApexParams(pace: ApexPace, lockedDigit?: number): ApexPar
     beta: 0.25,
     weights: [0.4, 0.3, 0.3],
     tau: 1,
-    initBar: APEX_BREAKEVEN + 0.01,
+    initBar: APEX_FAIR_RATE + 0.005,
     pace,
     ...(lockedDigit !== undefined ? { lockedDigit } : {}),
   };
@@ -565,7 +582,13 @@ export class ApexPolicy {
   private hawkes: HawkesBank;
   private memory = new SuffixMemory();
   private valve: PacingValve;
-  private floor = APEX_BREAKEVEN + 0.002;
+  /**
+   * Zero floor: the bar may float down to wherever the budgeted fire rate
+   * lives in the live score distribution. A break-even floor here (plus a
+   * `p ≥ break-even` reject on `ready`) is what starved the bot of trades —
+   * do not reintroduce any hard reject; the budget IS the selectivity.
+   */
+  private floor = 0;
 
   constructor(private params: ApexParams) {
     this.hawkes = new HawkesBank(params.alpha, params.beta);
@@ -597,7 +620,11 @@ export class ApexPolicy {
     const digit = locked !== undefined ? locked : argmax(fused);
     const p = fused[digit];
     const r = APEX_PACE_TARGET[this.params.pace] ?? 0.035;
-    const ready = this.valve.observe(p, opts?.recovery ? r * APEX_RECOVERY_PACE_FACTOR : r) && p >= this.floor;
+    // ONE condition, and it is the pacing valve: when the valve opens, the
+    // shot fires — full stop. No break-even reject, no other hard gate.
+    // (Recovery uses the SAME budget; `opts.recovery` is accepted for call-site
+    // compatibility and deliberately does not tighten anything.)
+    const ready = this.valve.observe(p, opts?.recovery ? r * APEX_RECOVERY_PACE_FACTOR : r);
     const heat = this.hawkes.heat();
     return {
       digit,
@@ -773,12 +800,23 @@ export function fitApexParams(
     }
   }
 
-  // Valve seed: the train quantile at (1 − target rate).
+  // Valve seed: the (1 − target) quantile of the FINAL policy's scores —
+  // temperature-scaled at the chosen τ with the chosen digit (locked or the
+  // calibrated argmax). The old seed took that quantile from the PROBE's
+  // uncalibrated scores; whenever τ > 1 softened the pool the bar landed ABOVE
+  // the live score mass, and the 20–45s re-fit kept resetting the valve back
+  // to that unreachable seed — a perpetual cold start that starved the bot of
+  // every trade no matter which pace was selected.
   const target = APEX_PACE_TARGET[pace] ?? 0.035;
-  const scores = (collected.scores ?? []).slice().sort((a, b) => a - b);
-  const initBar = scores.length > 0
-    ? Math.max(APEX_BREAKEVEN + 0.002, quantile(scores, 1 - target))
-    : APEX_BREAKEVEN + 0.01;
+  const finalScores: number[] = [];
+  for (let i = 0; i < fused.length; i++) {
+    const cal = temperatureScale(fused[i], tau);
+    finalScores.push(lockedDigit !== undefined ? cal[lockedDigit] : cal[argmax(cal)]);
+  }
+  finalScores.sort((a, b) => a - b);
+  const initBar = finalScores.length > 0
+    ? quantile(finalScores, 1 - target)
+    : APEX_FAIR_RATE + 0.005;
 
   const params: ApexParams = { alpha, beta, weights, tau, initBar, pace, ...(lockedDigit !== undefined ? { lockedDigit } : {}) };
   const { metrics: testMetrics } = replayPolicy(test, params, { warmup: Math.min(300, Math.floor(test.length / 3)), payout });

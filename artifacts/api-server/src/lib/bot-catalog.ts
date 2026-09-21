@@ -61,6 +61,13 @@ export interface BotDefinition {
    * console and its own /apex endpoints, never the generic specialist route.
    */
   apex?: boolean;
+  /**
+   * Barrier Bastion: the recovery-first Over/Under engine (Over 1 / Under 8
+   * normal, Over 3 / Under 6 recovery, four-lens log-pool fusion, loss-pair
+   * utility, STATIC recovery bar). Deploys from its own console and its own
+   * /bastion endpoints, never the generic specialist route.
+   */
+  bastion?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -102,6 +109,38 @@ export const BOT_CATALOG: BotDefinition[] = [
     sides: [{ id: "both", label: "Matches", contracts: ["DIGITMATCH"], desc: "One digit, one tick — Matches in normal and recovery mode" }],
     nominalWinRate: "measured held-out",
     nominalPayout: "8.93×",
+  },
+  {
+    id: "bastion",
+    name: "Barrier Bastion",
+    code: "BOT-BASTION",
+    family: "barrier",
+    bastion: true,
+    contractLabel: "Over 1 / Under 8 → Over 3 / Under 6",
+    tagline: "Recovery-first bands. Bars that never harden.",
+    description:
+      "The recovery-first Over/Under engine. Normal trades ride the outer 80% bands (Over 1 or Under 8 — the AI picks the side the tape is leaning to); a loss drops straight into the inner 60% recovery bands (Over 3 or Under 6) and fires the BEST shot the market offers the moment it shows tilt. The recovery bar is a frozen constant at the fair rate — it can never tighten after a recovery loss, so debt is never left waiting on a hardening gate. Side choice minimises loss PAIRS (the thing that actually kills a recovery ladder) with a clustering-aware utility, and switching mode HUNTS every market for a clean recovery shot while locked mode holds its ground.",
+    edge: [
+      "Four-lens log-pool fusion: 2-state band Markov (≈5× samples/state), order-2 digit Markov, Kaplan–Meier hole hazard, decayed suffix memory",
+      "Loss-pair-aware side utility: expected value minus the priced risk that this shot extends a recovery loss run",
+      "STATIC recovery bar at the combinatorial fair rate — no post-loss tightening, no ratchets, no cool-down ladders (structurally impossible: the bar is a frozen const)",
+      "Recovery fires the best Over 3 / Under 6 shot the next tick it shows tilt — and if none exists here, switching mode hunts ALL markets for one",
+      "Post-loss conditioning: the losing digit is the Markov state — the exact predictor the next recovery shot is chosen on",
+      "Honest walk-forward per market: the exact live policy replayed on unseen ticks, reporting recovery hit rate, loss pairs and ticks spent in debt",
+    ],
+    accent: "orange",
+    icon: "shield",
+    hasSides: true,
+    primaryLabel: "Over 1",
+    secondaryLabel: "Under 8",
+    hasDigitLock: false,
+    sides: [
+      { id: "both", label: "Over 1 & Under 8", contracts: ["DIGITOVER", "DIGITUNDER"], desc: "Analyse both bands, execute the favoured side (recovery always uses both)" },
+      { id: "primary", label: "Over 1 only", contracts: ["DIGITOVER"], desc: "Normal trades stay on Over 1 — recovery still picks the best of Over 3 / Under 6" },
+      { id: "secondary", label: "Under 8 only", contracts: ["DIGITUNDER"], desc: "Normal trades stay on Under 8 — recovery still picks the best of Over 3 / Under 6" },
+    ],
+    nominalWinRate: "80% normal / 60% recovery",
+    nominalPayout: "1.23× / 1.63×",
   },
   {
     id: "parity",
@@ -413,6 +452,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
   if (bot.apex) return "apex@1";
+  if (bot.bastion) return "bastion@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

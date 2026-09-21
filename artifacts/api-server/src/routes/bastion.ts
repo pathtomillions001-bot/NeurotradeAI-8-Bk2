@@ -1,99 +1,86 @@
 /**
- * Echo Apex routes — the 11th AI bot (Matches only).
+ * Barrier Bastion routes — the 12th AI bot (Over 1 / Under 8 normal,
+ * Over 3 / Under 6 recovery).
  *
- * Mounted at /api/bots/apex (see routes/bots.ts). The bot deploys ONLY from
+ * Mounted at /api/bots/bastion (see routes/bots.ts). The bot deploys ONLY from
  * its own console: the generic /:botId/* specialist endpoints refuse it, and
- * every start re-validates the digit, market, boundaries and the measured
- * parameter card the scan produced.
+ * every start re-validates the side mode, market, boundaries and the measured
+ * card the scan produced. There is deliberately NO pace parameter — one mode.
  */
 
 import { Router } from "express";
 import { logger } from "../lib/logger";
 import { AUTOMATED_DERIV_MARKETS, isAutomatedMarket } from "../lib/deriv";
-import { sanitizeApexParams, APEX_ONLY_PACE } from "../lib/apex-analysis";
+import type { BastionParams, BastionSideMode } from "../lib/bastion-analysis";
 import {
-  APEX_BOT_ID,
+  BASTION_BOT_ID,
   getStatus,
   isRunning,
   getOwnerSessionId,
-  scanForApex,
+  scanForBastion,
   startSession,
   stopSession,
-  type ApexCandidate,
-} from "../lib/apex-engine";
+  type BastionCandidate,
+} from "../lib/bastion-engine";
 
 const router = Router();
 
-/**
- * Echo Apex runs ONE pace mode (`APEX_ONLY_PACE` — the most permissive trade
- * budget). Legacy consoles still send `pace: brisk|steady|patient`; it is
- * accepted and discarded so old bundles keep working, but the user never has
- * to (and never can) change modes — nothing gates the shots except the pacing
- * budget itself.
- */
-function parsePace(_raw: unknown): typeof APEX_ONLY_PACE {
-  return APEX_ONLY_PACE;
+function parseSideMode(raw: unknown): BastionSideMode {
+  return raw === "over" || raw === "under" ? raw : "both";
 }
 
-function parseDigit(raw: unknown): number | undefined | null {
-  if (raw === undefined || raw === null || raw === "") return undefined;
-  const d = Number(raw);
-  if (!Number.isInteger(d) || d < 0 || d > 9) return null;
-  return d;
+function parseParams(raw: any): BastionParams | null {
+  if (!raw || typeof raw !== "object") return null;
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) ? v : null;
+  const w = Array.isArray(raw.weights) ? raw.weights.map(num) : null;
+  const tau = num(raw.tau);
+  const normalInitBar = num(raw.normalInitBar);
+  if (!w || w.length !== 4 || w.some((v: number | null) => v === null)) return null;
+  if (tau === null || normalInitBar === null) return null;
+  if (tau < 0.3 || tau > 3) return null;
+  const sum = (w[0] as number) + (w[1] as number) + (w[2] as number) + (w[3] as number);
+  if (!(sum > 0)) return null;
+  return {
+    weights: [(w[0] as number) / sum, (w[1] as number) / sum, (w[2] as number) / sum, (w[3] as number) / sum],
+    tau,
+    normalInitBar: Math.min(0.95, Math.max(0, normalInitBar)),
+  };
 }
 
-function parseCandidate(raw: any): ApexCandidate | null {
+function parseCandidate(raw: any): BastionCandidate | null {
   if (!raw || typeof raw !== "object") return null;
   if (typeof raw.symbol !== "string" || typeof raw.displayName !== "string") return null;
-  if (!Number.isInteger(raw.digit) || raw.digit < 0 || raw.digit > 9) return null;
   if (typeof raw.verdict !== "string" || typeof raw.confidence !== "number") return null;
-  if (typeof raw.edgePerDollar !== "number" || typeof raw.hitRate !== "number") return null;
-  if (typeof raw.shots !== "number" || typeof raw.fireRate !== "number") return null;
-  if (typeof raw.breakEven !== "number" || typeof raw.payout !== "number") return null;
+  if (typeof raw.paperEdgePerDollar !== "number" || typeof raw.recoveryHitRate !== "number") return null;
+  if (typeof raw.recoveryShots !== "number" || typeof raw.normalShots !== "number") return null;
   if (!raw.params || typeof raw.params !== "object") return null;
-  if (!raw.diag || typeof raw.diag !== "object") return null;
-  return raw as ApexCandidate;
+  return raw as BastionCandidate;
 }
 
 router.get("/status", (req, res) => {
   const owner = getOwnerSessionId();
   const status = getStatus();
   if (owner && owner !== req.sessionId) {
-    res.json({ ...status, running: false, sessionId: null, config: undefined, apexDeployed: undefined, apexWatch: undefined });
+    res.json({ ...status, running: false, sessionId: null, config: undefined, bastionDeployed: undefined, bastionWatch: undefined });
     return;
   }
   res.json(status);
 });
 
 router.post("/scan", async (req, res): Promise<void> => {
-  const body = req.body ?? {};
-  const pace = parsePace(body.pace); // single mode — legacy value accepted and discarded
-  const digit = parseDigit(body.digit);
-  if (digit === null) {
-    res.status(400).json({ error: "digit must be an integer 0–9" });
-    return;
-  }
   try {
-    const result = await scanForApex(req.sessionId, {
-      pace,
-      ...(digit !== undefined ? { digit } : {}),
-      aiDigit: digit === undefined,
-    });
+    const result = await scanForBastion(req.sessionId);
     res.json(result);
   } catch (err) {
-    logger.error({ err }, "Echo Apex scan failed");
+    logger.error({ err }, "Barrier Bastion scan failed");
     res.status(500).json({ error: "Scan failed" });
   }
 });
 
 router.post("/start", async (req, res): Promise<void> => {
   const body = req.body ?? {};
-  const pace = parsePace(body.pace); // single mode — legacy value accepted and discarded
-  const digit = parseDigit(body.digit);
-  if (digit === null) {
-    res.status(400).json({ error: "digit must be an integer 0–9" });
-    return;
-  }
+  const sideMode = parseSideMode(body.sideMode);
   const marketMode: "locked" | "switching" = body.marketMode === "locked" ? "locked" : "switching";
   const requested = typeof body.symbol === "string" ? body.symbol : undefined;
   if (!requested || !isAutomatedMarket(requested)) {
@@ -110,8 +97,6 @@ router.post("/start", async (req, res): Promise<void> => {
     return;
   }
 
-  // A locked deployment pins the measured market; switching starts there and
-  // may migrate. Older bundles may omit lockedSymbol — default to the market.
   let lockedSymbol: string | undefined;
   if (marketMode === "locked") {
     const want = typeof body.lockedSymbol === "string" && body.lockedSymbol ? body.lockedSymbol : requested;
@@ -122,16 +107,12 @@ router.post("/start", async (req, res): Promise<void> => {
     lockedSymbol = want;
   }
 
-  const params = sanitizeApexParams(body.params ?? body.analysis?.params, pace, digit);
+  const params = parseParams(body.params ?? body.analysis?.params);
   if (!params) {
     res.status(400).json({ error: "Run the scan first — the measured parameter card is required before this bot can deploy" });
     return;
   }
   const analysis = parseCandidate(body.analysis ?? null);
-  if (digit !== undefined && analysis && analysis.digit !== digit) {
-    res.status(400).json({ error: "The locked digit does not match the measured card — re-scan before deploying" });
-    return;
-  }
 
   const existingOwner = getOwnerSessionId();
   if (isRunning() && existingOwner && existingOwner !== req.sessionId) {
@@ -141,7 +122,7 @@ router.post("/start", async (req, res): Promise<void> => {
 
   const result = await startSession({
     ownerSessionId: req.sessionId,
-    spec: { pace, ...(digit !== undefined ? { digit } : {}), aiDigit: digit === undefined },
+    spec: { sideMode },
     stake: body.stake,
     stopLoss: typeof body.stopLoss === "number" && body.stopLoss > 0 ? body.stopLoss : 5,
     takeProfit: typeof body.takeProfit === "number" && body.takeProfit > 0 ? body.takeProfit : 10,
@@ -157,7 +138,7 @@ router.post("/start", async (req, res): Promise<void> => {
     res.status(409).json({ error: result.error });
     return;
   }
-  logger.info({ botId: APEX_BOT_ID, symbol: market.symbol, pace, marketMode }, "Echo Apex deployed");
+  logger.info({ botId: BASTION_BOT_ID, symbol: market.symbol, sideMode, marketMode }, "Barrier Bastion deployed");
   const status = getStatus();
   res.json({ ok: true, status });
 });

@@ -27,7 +27,9 @@ import { listLiveBots } from "../lib/live-registry";
 import * as killshot from "../lib/killshot-engine";
 import * as killshotFamily from "../lib/killshot-family-engine";
 import * as apex from "../lib/apex-engine";
+import * as bastion from "../lib/bastion-engine";
 import apexRouter from "./apex";
+import bastionRouter from "./bastion";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
 import {
   DUAL_LOCK_NORMAL_CONTRACTS,
@@ -44,6 +46,7 @@ const router = Router();
 
 // Registered before /:botId/* so the generic specialist route cannot start it.
 router.use("/apex", apexRouter);
+router.use("/bastion", bastionRouter);
 
 interface ParsedBotBody {
   contractTypes: BotContractType[];
@@ -65,7 +68,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   // Family bots own their own routes; the generic specialist path must never be
   // able to start them with a mismatched config.
-  if (bot.apex || bot.killShotFamily || bot.preLocked || bot.oneShot) {
+  if (bot.apex || bot.bastion || bot.killShotFamily || bot.preLocked || bot.oneShot) {
     return { ok: false, error: "This bot is deployed from its own console, not the generic bot endpoint" };
   }
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
@@ -189,12 +192,14 @@ router.get("/", (req, res) => {
   const shot = visibleKillShotStatus(req.sessionId);
   const fam = visibleFamilyStatus(req.sessionId);
   const apx = visibleApexStatus(req.sessionId);
+  const bst = visibleBastionStatus(req.sessionId);
   res.json({
     release: API_RELEASE,
     consoles: botConsoleIds(),
     bots: BOT_CATALOG.map(bot => {
       const console_ = botConsoleId(bot);
       if (bot.apex) return { ...bot, console: console_, session: apx.running ? apx : null };
+      if (bot.bastion) return { ...bot, console: console_, session: bst.running ? bst : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
       }
@@ -211,6 +216,7 @@ router.get("/", (req, res) => {
       { botId: killshot.KILLSHOT_BOT_ID, running: shot.running },
       { botId: fam.botId ?? null, running: fam.running },
       { botId: apex.APEX_BOT_ID, running: apx.running },
+      { botId: bastion.BASTION_BOT_ID, running: bst.running },
       { botId: status.botId, running: status.running },
     ]),
   });
@@ -682,9 +688,18 @@ function visibleApexStatus(sessionId: string) {
   return { ...status, running: false, sessionId: null, config: undefined, apexDeployed: undefined, apexWatch: undefined };
 }
 
+function visibleBastionStatus(sessionId: string) {
+  const status = bastion.getStatus();
+  const owner = bastion.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, bastionDeployed: undefined, bastionWatch: undefined };
+}
+
 router.get("/status", (req, res) => {
   const apx = visibleApexStatus(req.sessionId);
   if (apx.running) { res.json(apx); return; }
+  const bst = visibleBastionStatus(req.sessionId);
+  if (bst.running) { res.json(bst); return; }
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);

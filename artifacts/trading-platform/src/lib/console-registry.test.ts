@@ -24,6 +24,8 @@ import { WEB_CONSOLE_IDS } from "./console-contract.js";
  */
 const API_CONSOLE_IDS = [
   "apex@1",
+  "bastion@1",
+  "parity-forge@1",
   "specialist@1",
   "dual-lock@1",
   "killshot@1",

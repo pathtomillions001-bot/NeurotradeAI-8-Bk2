@@ -55,7 +55,7 @@ describe("bot console contract", () => {
   });
 
   it("uses the dedicated console for the pre-locked and one-shot bots", () => {
-    assert.equal(botConsoleId(getBotDefinition("omni")!), "omni@1");
+    assert.equal(botConsoleId(getBotDefinition("omni")!), "omni@2");
     assert.equal(botConsoleId(getBotDefinition("apex")!), "apex@1");
     assert.equal(botConsoleId(getBotDefinition("bastion")!), "bastion@1");
     assert.equal(botConsoleId(getBotDefinition("overunder-navigator")!), "overunder-navigator@1");
@@ -78,7 +78,7 @@ describe("bot console contract", () => {
       "dual-lock@1",
       "killshot-family@1",
       "killshot@1",
-      "omni@1",
+      "omni@2",
       "overunder-navigator@1",
       "parity-forge@1",
       "specialist@1",

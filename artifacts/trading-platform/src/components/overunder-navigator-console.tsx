@@ -9,12 +9,11 @@
  * loss.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { toast } from "sonner";
 import {
   Activity,
-  ChevronLeft,
   Crosshair,
   Loader2,
   Lock,
@@ -80,7 +79,9 @@ function NumInput({
 }) {
   const a = ACCENTS[accent];
   return (
-    <label className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+    <label
+      className={`flex items-center justify-between gap-2 text-muted-foreground ${max < 10 ? "text-[10px]" : "text-xs"}`}
+    >
       <span>{label}</span>
       <Input
         type="number"
@@ -90,7 +91,7 @@ function NumInput({
         onChange={(e) =>
           onChange(Math.max(min, Math.min(max, Number(e.target.value))))
         }
-        className={`w-20 h-8 text-right font-mono bg-black/30 border-white/10 ${a.focusBorder}`}
+        className={`${max < 10 ? "w-12 px-2" : "w-20"} shrink-0 h-7 text-xs text-right font-mono bg-black/30 border-white/10 ${a.focusBorder}`}
       />
     </label>
   );
@@ -108,24 +109,26 @@ function SidePicker({
 }) {
   const a = ACCENTS[accent];
   return (
-    <div className="grid grid-cols-3 gap-1.5">
+    <div
+      className="grid grid-cols-3 gap-1.5"
+      title={
+        recovery
+          ? "Recovery scores every enabled side and chooses the best utility."
+          : "Normal timing uses the soft pacing valve."
+      }
+    >
       {(["both", "over", "under"] as Side[]).map((side) => (
         <button
           key={side}
           type="button"
           onClick={() => onChange(side)}
-          className={`rounded-md border px-2 py-2 text-[10px] font-semibold transition ${value === side ? `${a.badgeBg} ${a.panelBorder} ${a.text}` : "border-white/10 text-muted-foreground hover:border-white/25"}`}
+          className={`rounded-md border px-1.5 py-1.5 text-[10px] font-semibold transition ${value === side ? `${a.badgeBg} ${a.panelBorder} ${a.text}` : "border-white/10 text-muted-foreground hover:border-white/25"}`}
         >
           {side === "both"
             ? "Over + Under"
             : `${side[0]!.toUpperCase()}${side.slice(1)} only`}
         </button>
       ))}
-      <p className="col-span-3 text-[9px] text-muted-foreground/60">
-        {recovery
-          ? "Recovery scores every armed recovery side and chooses the best utility."
-          : "Normal timing uses the soft pacing valve."}
-      </p>
     </div>
   );
 }
@@ -179,19 +182,19 @@ function DigitBand({
         {Array.from({ length: 10 }, (_, d) => (
           <div key={d} className="space-y-1 text-center">
             <div
-              className={`h-3 rounded-sm ${d > normalOver ? "bg-sky-400/75" : "bg-black/35"}`}
+              className={`h-1.5 rounded-sm ${d > normalOver ? "bg-sky-400/75" : "bg-black/35"}`}
               title={`Normal Over ${normalOver}`}
             />
             <div
-              className={`h-3 rounded-sm ${d < normalUnder ? "bg-indigo-400/75" : "bg-black/35"}`}
+              className={`h-1.5 rounded-sm ${d < normalUnder ? "bg-indigo-400/75" : "bg-black/35"}`}
               title={`Normal Under ${normalUnder}`}
             />
             <div
-              className={`h-3 rounded-sm ${d > recoveryOver ? "bg-fuchsia-400/80" : "bg-black/35"}`}
+              className={`h-1.5 rounded-sm ${d > recoveryOver ? "bg-fuchsia-400/80" : "bg-black/35"}`}
               title={`Recovery Over ${recoveryOver}`}
             />
             <div
-              className={`h-3 rounded-sm ${d < recoveryUnder ? "bg-violet-400/80" : "bg-black/35"}`}
+              className={`h-1.5 rounded-sm ${d < recoveryUnder ? "bg-violet-400/80" : "bg-black/35"}`}
               title={`Recovery Under ${recoveryUnder}`}
             />
             <span className="text-[9px] font-mono text-muted-foreground/70">
@@ -250,9 +253,8 @@ export function OverUnderNavigatorConsole({
   const [sameDigits, setSameDigits] = useState(false);
   const [normalSide, setNormalSide] = useState<Side>("both");
   const [recoverySide, setRecoverySide] = useState<Side>("both");
-  const [marketMode, setMarketMode] = useState<"locked" | "switching">(
-    "switching",
-  );
+  const [selectedSymbol, setSelectedSymbol] = useState("");
+  const panelRef = useRef<HTMLDivElement>(null);
   const [risk, setRisk] = useState({
     stake: 1,
     takeProfit: 10,
@@ -263,6 +265,9 @@ export function OverUnderNavigatorConsole({
   const isRunning = session?.running === true && session?.botId === bot?.id;
   const Icon = bot ? (BOT_ICON[bot.icon] ?? Crosshair) : Crosshair;
 
+  useEffect(() => {
+    panelRef.current?.scrollTo({ top: 0 });
+  }, [step, selectedSymbol]);
   useEffect(() => {
     if (sameDigits) {
       setRecoveryOver(normalOver);
@@ -335,6 +340,7 @@ export function OverUnderNavigatorConsole({
     setLoading(true);
     setStep("scanning");
     setScan(null);
+    setSelectedSymbol("");
     setProgress({
       scanning: "Starting multi-market scan",
       scanned: 0,
@@ -411,7 +417,10 @@ export function OverUnderNavigatorConsole({
       setLoading(false);
     }
   };
-  const candidate = scan?.best ?? scan?.bestAvailable;
+  const candidate =
+    scan?.allScored.find((market) => market.symbol === selectedSymbol) ??
+    scan?.best ??
+    scan?.bestAvailable;
   const watch = session?.navigatorWatch;
   const deployed = session?.navigatorDeployed;
   const profit = session?.totalProfit ?? 0;
@@ -419,25 +428,20 @@ export function OverUnderNavigatorConsole({
   const Header = () => (
     <div className="flex items-center justify-between gap-3">
       <div className="flex items-center gap-2">
-        <button
-          onClick={() => onOpenChange(false)}
-          className="rounded-md p-1.5 text-muted-foreground hover:bg-white/10"
-        >
-          <ChevronLeft className="h-4 w-4" />
-        </button>
         <div
           className={`flex h-9 w-9 items-center justify-center rounded-lg ${a.iconBg} ${a.iconBorder}`}
         >
           <Icon className={`h-4 w-4 ${a.text}`} />
         </div>
         <div>
-          <h2 className="text-sm font-bold text-white">{bot.name}</h2>
+          <h2 className="text-xs font-bold text-white">{bot.name}</h2>
           <p className="text-[10px] text-muted-foreground">
             Custom barriers · recovery-first execution
           </p>
         </div>
       </div>
       <button
+        aria-label="Close console"
         onClick={() => onOpenChange(false)}
         className="rounded-md p-1.5 text-muted-foreground hover:bg-white/10"
       >
@@ -446,44 +450,38 @@ export function OverUnderNavigatorConsole({
     </div>
   );
   const InfoStrip = () => (
-    <div className="grid grid-cols-3 gap-2">
-      <div className="rounded-lg border border-fuchsia-500/25 bg-fuchsia-500/[0.06] p-2">
-        <p className="text-[9px] font-bold text-fuchsia-300">
-          STATIC RECOVERY BAR
-        </p>
-        <p className="mt-1 text-[10px] text-muted-foreground">
-          A loss never ratchets this bar. The bot waits or hunts.
-        </p>
-      </div>
-      <div className="rounded-lg border border-sky-500/25 bg-sky-500/[0.06] p-2">
-        <p className="text-[9px] font-bold text-sky-300">PAIR-AWARE</p>
-        <p className="mt-1 text-[10px] text-muted-foreground">
-          EV is reduced by clustered-loss risk.
-        </p>
-      </div>
-      <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/[0.06] p-2">
-        <p className="text-[9px] font-bold text-emerald-300">NO HARDENING</p>
-        <p className="mt-1 text-[10px] text-muted-foreground">
-          No post-loss cool-down gate.
-        </p>
-      </div>
+    <div className="rounded-lg border border-fuchsia-500/25 bg-fuchsia-500/[0.06] p-2.5">
+      <p className="text-[9px] font-bold text-fuchsia-300">
+        FIXED RECOVERY BAR · PAIR-AWARE
+      </p>
+      <p className="mt-1 text-[10px] text-muted-foreground">
+        Recovery waits or hunts. Losses never tighten the entry rules.
+      </p>
     </div>
   );
 
   const configPanel = (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <InfoStrip />
-      <div className="grid gap-4 lg:grid-cols-[1.15fr_.85fr]">
+      <div className="space-y-3">
         <div className="space-y-3">
-          <DigitBand
-            normalOver={normalOver}
-            normalUnder={normalUnder}
-            recoveryOver={recoveryOver}
-            recoveryUnder={recoveryUnder}
-            accent="fuchsia"
-          />
+          <details className="text-[10px] text-fuchsia-200">
+            <summary className="cursor-pointer">
+              Barrier map · normal {normalOver}/{normalUnder} → recovery{" "}
+              {recoveryOver}/{recoveryUnder}
+            </summary>
+            <div className="mt-2">
+              <DigitBand
+                normalOver={normalOver}
+                normalUnder={normalUnder}
+                recoveryOver={recoveryOver}
+                recoveryUnder={recoveryUnder}
+                accent="fuchsia"
+              />
+            </div>
+          </details>
           <Card className="border-white/10 bg-white/[.025]">
-            <CardContent className="space-y-3 p-4">
+            <CardContent className="space-y-2.5 p-3">
               <div className="flex items-center justify-between">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                   Normal plan
@@ -492,7 +490,7 @@ export function OverUnderNavigatorConsole({
                   outer choice
                 </span>
               </div>
-              <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid grid-cols-2 gap-2">
                 <NumInput
                   label="Over digit"
                   value={normalOver}
@@ -518,7 +516,7 @@ export function OverUnderNavigatorConsole({
             </CardContent>
           </Card>
           <Card className="border-white/10 bg-white/[.025]">
-            <CardContent className="space-y-3 p-4">
+            <CardContent className="space-y-2.5 p-3">
               <div className="flex items-center justify-between">
                 <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
                   Recovery plan
@@ -533,7 +531,7 @@ export function OverUnderNavigatorConsole({
                   same digits as normal
                 </label>
               </div>
-              <div className="grid gap-2 sm:grid-cols-2">
+              <div className="grid grid-cols-2 gap-2">
                 <NumInput
                   label="Over digit"
                   value={recoveryOver}
@@ -567,7 +565,7 @@ export function OverUnderNavigatorConsole({
           </Card>
         </div>
         <Card className="border-white/10 bg-white/[.025]">
-          <CardContent className="space-y-3 p-4">
+          <CardContent className="space-y-2.5 p-3">
             <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
               Execution budget
             </p>
@@ -605,32 +603,10 @@ export function OverUnderNavigatorConsole({
               max={10}
               accent="fuchsia"
             />
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setMarketMode("locked")}
-                className={`rounded-lg border p-2 text-left ${marketMode === "locked" ? "border-sky-400/40 bg-sky-500/10 text-sky-200" : "border-white/10 text-muted-foreground"}`}
-              >
-                <Lock className="mb-1 h-3.5 w-3.5" />
-                <p className="text-[10px] font-bold">Lock market</p>
-                <p className="text-[9px] opacity-70">Wait here for recovery.</p>
-              </button>
-              <button
-                type="button"
-                onClick={() => setMarketMode("switching")}
-                className={`rounded-lg border p-2 text-left ${marketMode === "switching" ? "border-fuchsia-400/40 bg-fuchsia-500/10 text-fuchsia-200" : "border-white/10 text-muted-foreground"}`}
-              >
-                <Shuffle className="mb-1 h-3.5 w-3.5" />
-                <p className="text-[10px] font-bold">Allow switching</p>
-                <p className="text-[9px] opacity-70">
-                  Hunt better recovery tape.
-                </p>
-              </button>
-            </div>
             <Button
               onClick={handleScan}
               disabled={loading}
-              className="mt-2 w-full bg-fuchsia-400 text-slate-950 hover:bg-fuchsia-300"
+              className={`mt-2 w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
             >
               <ScanSearch className="mr-2 h-4 w-4" /> Scan all digit markets
             </Button>
@@ -663,15 +639,22 @@ export function OverUnderNavigatorConsole({
     </div>
   );
   const resultPanel = scan && (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
+    <div className="space-y-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
           <p className="text-[10px] uppercase tracking-widest text-muted-foreground">
             Navigator scan
           </p>
-          <p className="text-sm font-semibold text-white">{scan.reason}</p>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {scan.reason}
+          </p>
         </div>
-        <Button size="sm" variant="outline" onClick={() => setStep("config")}>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 shrink-0 px-2 text-[10px]"
+          onClick={() => setStep("config")}
+        >
           <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Edit plan
         </Button>
       </div>
@@ -679,10 +662,10 @@ export function OverUnderNavigatorConsole({
         <Card
           className={`border ${candidate.verdict === "prime" ? "border-emerald-400/35 bg-emerald-400/[.06]" : "border-fuchsia-400/30 bg-fuchsia-400/[.05]"}`}
         >
-          <CardContent className="space-y-3 p-4">
+          <CardContent className="space-y-2.5 p-3">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-base font-bold text-white">
+                <p className="text-xs font-bold text-white">
                   {candidate.displayName}
                 </p>
                 <p className="text-[10px] text-muted-foreground">
@@ -690,11 +673,11 @@ export function OverUnderNavigatorConsole({
                   confidence {candidate.confidence}%
                 </p>
               </div>
-              <span className="rounded border border-white/10 px-2 py-1 text-[10px] font-mono text-fuchsia-200">
+              <span className="shrink-0 rounded border border-white/10 px-1.5 py-1 text-[9px] font-mono text-fuchsia-200">
                 {(candidate.paperEdgePerDollar * 100).toFixed(2)}% edge
               </span>
             </div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+            <div className="grid grid-cols-2 gap-1.5">
               <Stat
                 label="Normal hits"
                 value={`${(candidate.normalHitRate * 100).toFixed(0)}% / ${candidate.normalShots}`}
@@ -726,57 +709,66 @@ export function OverUnderNavigatorConsole({
                 value={`${candidate.fireRatePer100.toFixed(1)}/100`}
               />
             </div>
-            <div className="flex flex-wrap gap-2">
+            <div className="space-y-2">
               <Button
                 onClick={() => handleStart(candidate, "locked")}
                 disabled={loading}
-                className="bg-sky-400 text-slate-950 hover:bg-sky-300"
+                className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}
               >
-                <Lock className="mr-1.5 h-3.5 w-3.5" /> Lock{" "}
-                {candidate.displayName}
+                <Lock className="mr-2 h-4 w-4" /> Trade Locked
               </Button>
               <Button
                 onClick={() => handleStart(candidate, "switching")}
                 disabled={loading}
                 variant="outline"
-                className="border-fuchsia-400/40 text-fuchsia-200"
+                className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}
               >
-                <Shuffle className="mr-1.5 h-3.5 w-3.5" /> Deploy with switching
+                <Shuffle className="mr-2 h-3.5 w-3.5" /> Smart Switching
               </Button>
+              <p className="text-[9px] leading-relaxed text-muted-foreground">
+                Lock stays on this market. Switching can hunt recovery
+                opportunities elsewhere.
+              </p>
             </div>
           </CardContent>
         </Card>
       )}
-      {scan.allScored.slice(1, 5).map((c) => (
-        <div
-          key={c.symbol}
-          className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[.02] p-3"
-        >
-          <div>
-            <p className="text-xs font-semibold text-white">{c.displayName}</p>
-            <p className="text-[10px] text-muted-foreground">
-              {c.verdict} · rec {(c.recoveryHitRate * 100).toFixed(0)}% ·{" "}
-              {c.recoveryLossPairs} loss pairs
-            </p>
-          </div>
-          <button
-            onClick={() => handleStart(c, marketMode)}
-            className="rounded border border-white/15 px-2 py-1 text-[10px] text-fuchsia-200 hover:bg-white/5"
+      {scan.allScored
+        .filter((c) => c.symbol !== candidate?.symbol)
+        .slice(0, 4)
+        .map((c) => (
+          <div
+            key={c.symbol}
+            className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[.02] p-3"
           >
-            Use this
-          </button>
-        </div>
-      ))}
+            <div>
+              <p className="text-xs font-semibold text-white">
+                {c.displayName}
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                {c.verdict} · rec {(c.recoveryHitRate * 100).toFixed(0)}% ·{" "}
+                {c.recoveryLossPairs} loss pairs
+              </p>
+            </div>
+            <button
+              onClick={() => setSelectedSymbol(c.symbol)}
+              aria-label={`Select ${c.displayName}`}
+              className="shrink-0 rounded border border-white/15 px-2 py-1 text-[10px] text-fuchsia-200 hover:bg-white/5"
+            >
+              Select
+            </button>
+          </div>
+        ))}
     </div>
   );
   const livePanel = (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[10px] uppercase tracking-widest text-fuchsia-300">
             Navigator live
           </p>
-          <p className="text-lg font-bold text-white">
+          <p className="text-sm font-bold text-white">
             {session?.currentMarket ?? deployed?.displayName ?? "Starting…"}
           </p>
           <p className="text-[10px] text-muted-foreground">
@@ -792,7 +784,7 @@ export function OverUnderNavigatorConsole({
           <StopCircle className="mr-2 h-4 w-4" /> Stop
         </Button>
       </div>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+      <div className="grid grid-cols-2 gap-1.5">
         <Stat
           label="P&L"
           value={`${profit >= 0 ? "+" : "−"}$${Math.abs(profit).toFixed(2)}`}
@@ -876,7 +868,7 @@ export function OverUnderNavigatorConsole({
         </div>
       )}
       {deployed && (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-1.5">
           <Stat
             label="Measured normal"
             value={`${(deployed.normalHitRate * 100).toFixed(0)}% / ${deployed.normalShots}`}
@@ -912,20 +904,32 @@ export function OverUnderNavigatorConsole({
   return (
     <AnimatePresence>
       {open && (
-        <motion.div
-          initial={{ opacity: 0, y: 12 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 12 }}
-          className="fixed inset-x-3 bottom-3 z-50 mx-auto max-w-5xl overflow-hidden rounded-2xl border border-fuchsia-400/20 bg-[#080b18]/[.98] shadow-2xl shadow-fuchsia-950/30 backdrop-blur-xl"
-        >
-          <div className="max-h-[calc(100vh-2rem)] overflow-y-auto space-y-4 p-4 md:p-5">
-            <Header />
-            {step === "config" && configPanel}
-            {step === "scanning" && scanningPanel}
-            {step === "result" && resultPanel}
-            {step === "running" && livePanel}
-          </div>
-        </motion.div>
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black/40 z-40"
+            onClick={() => onOpenChange(false)}
+          />
+          <motion.div
+            initial={{ opacity: 0, y: 12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 12 }}
+            ref={panelRef}
+            role="dialog"
+            aria-label={`${bot.name} console`}
+            className="fixed bottom-20 right-4 z-50 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-2xl border border-fuchsia-400/20 bg-[#080b18]/[.98] shadow-2xl shadow-fuchsia-950/30 backdrop-blur-xl"
+          >
+            <div className="space-y-3 p-3">
+              <Header />
+              {step === "config" && configPanel}
+              {step === "scanning" && scanningPanel}
+              {step === "result" && resultPanel}
+              {step === "running" && livePanel}
+            </div>
+          </motion.div>
+        </>
       )}
     </AnimatePresence>
   );

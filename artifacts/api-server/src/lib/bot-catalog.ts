@@ -117,7 +117,7 @@ export const BOT_CATALOG: BotDefinition[] = [
       "Debt-aware expected-log-return ranking with uncertainty shrinkage, loss-pair risk and live-payout stake sizing",
       "Fixed utility floor at zero: no loss-run ratchets, forced recovery trades or progressively longer cooldowns",
       "Fresh-tick socket-send guards, broker-confirmed settlement and one shared live recovery ledger",
-      "Separate paper rehearsal, chronological replay diagnostics and a transparent cross-contract opportunity radar",
+      "Connected-account execution, chronological replay diagnostics and a transparent cross-contract opportunity radar",
     ],
     accent: "indigo",
     icon: "shield",
@@ -596,7 +596,7 @@ export function getBotDefinition(botId: string): BotDefinition | undefined {
 
 /** Console id + revision the web bundle must implement to drive this bot. */
 export function botConsoleId(bot: BotDefinition): string {
-  if (bot.omni) return "omni@1";
+  if (bot.omni) return "omni@2";
   if (bot.apex) return "apex@1";
   if (bot.bastion) return "bastion@1";
   if (bot.parityForge) return "parity-forge@1";

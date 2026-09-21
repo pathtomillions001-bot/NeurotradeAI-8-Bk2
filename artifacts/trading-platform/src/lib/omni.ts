@@ -41,7 +41,7 @@ export interface OmniConfig {
   stopLoss: number;
   takeProfit: number;
   marketMode: "locked" | "switching";
-  executionMode: "paper" | "live";
+  executionMode: "live";
 }
 export interface OmniOpportunity {
   symbol: string;
@@ -118,6 +118,8 @@ export interface OmniSessionDetails {
 }
 
 export function omniConfigError(config: OmniConfig): string | null {
+  if (config.executionMode !== "live")
+    return "Omni Sentinel trades the connected account.";
   if (config.enabledContracts.length === 0)
     return "Enable at least one contract.";
   if (

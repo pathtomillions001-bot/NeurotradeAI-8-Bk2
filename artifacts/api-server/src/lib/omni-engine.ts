@@ -282,7 +282,7 @@ async function loadContext(config: OmniConfig): Promise<Context> {
     );
   if (settings?.paperTradeMode)
     throw new Error(
-      "Account paper-trade mode is enabled; use Paper here or change Settings before a live deployment",
+      "Account paper-trade mode is enabled; disable it in Settings before trading on the connected account",
     );
   const balance = Number(account.balance);
   if (!Number.isFinite(balance) || balance < 0)

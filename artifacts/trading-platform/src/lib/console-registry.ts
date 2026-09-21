@@ -34,7 +34,7 @@ export interface BotConsoleProps {
 
 /** Every console this build can render, keyed by its contract id. */
 export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProps>> = {
-  "omni@1": OmniConsole,
+  "omni@2": OmniConsole,
   "apex@1": ApexConsole,
   "bastion@1": BastionConsole,
   "overunder-navigator@1": OverUnderNavigatorConsole,

@@ -14,7 +14,12 @@ import {
   type OmniPrediction,
   type OmniRisk,
 } from "./omni-analysis";
-import { omniConfigSchema } from "./omni-config";
+import {
+  omniConfigKey,
+  omniConfigSchema,
+  omniConnectedConfigSchema,
+  omniStartSchema,
+} from "./omni-config";
 import { getFallbackPayout } from "./payouts";
 
 const risk: OmniRisk = {
@@ -124,6 +129,69 @@ describe("Omni contract sovereignty", () => {
         false,
         JSON.stringify(patch),
       );
+  });
+  it("allows only connected-account scans and deployments through the public API schemas", () => {
+    const config = omniConfigSchema.parse({
+      enabledContracts: ["DIGITOVER", "DIGITMATCH"],
+      stake: 1,
+      stopLoss: 10,
+      takeProfit: 10,
+      marketMode: "switching",
+      executionMode: "live",
+    });
+    const deployment = {
+      config,
+      scanId: "123e4567-e89b-42d3-a456-426614174000",
+      symbol: "R_10",
+      acknowledgeLiveRisk: true,
+    };
+    assert.ok(omniConnectedConfigSchema.safeParse(config).success);
+    assert.ok(omniStartSchema.safeParse(deployment).success);
+    for (const executionMode of ["paper", "auto", undefined]) {
+      assert.equal(
+        omniConnectedConfigSchema.safeParse({ ...config, executionMode })
+          .success,
+        false,
+      );
+      assert.equal(
+        omniStartSchema.safeParse({
+          ...deployment,
+          config: { ...config, executionMode },
+        }).success,
+        false,
+      );
+    }
+  });
+  it("binds scan tokens to risk and contracts while allowing the post-scan lock/switch choice", () => {
+    const config = omniConfigSchema.parse({
+      enabledContracts: ["DIGITOVER", "DIGITMATCH"],
+      stake: 1,
+      stopLoss: 10,
+      takeProfit: 10,
+      marketMode: "switching",
+      executionMode: "live",
+    });
+    const key = omniConfigKey(config);
+    assert.equal(omniConfigKey({ ...config, marketMode: "locked" }), key);
+    assert.equal(
+      omniConfigKey({
+        ...config,
+        enabledContracts: [...config.enabledContracts].reverse(),
+      }),
+      key,
+    );
+    for (const patch of [
+      { stake: 2 },
+      { stopLoss: 20 },
+      { takeProfit: 20 },
+      { enabledContracts: ["DIGITDIFF"] as const },
+      { executionMode: "paper" as const },
+    ]) {
+      assert.notEqual(
+        omniConfigKey(omniConfigSchema.parse({ ...config, ...patch })),
+        key,
+      );
+    }
   });
   it("uses the exact contract payoff and treats unchanged prices as loss on BOTH directions", () => {
     for (const c of omniContracts(OMNI_CONTRACT_TYPES)) {

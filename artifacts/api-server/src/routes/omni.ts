@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { omniConfigSchema, omniStartSchema } from "../lib/omni-config";
+import { omniConnectedConfigSchema, omniStartSchema } from "../lib/omni-config";
 import {
   getStatus,
   scanForOmni,
@@ -14,13 +14,11 @@ router.get("/status", (_req, res) => {
   res.json(getStatus());
 });
 router.post("/scan", async (req, res): Promise<void> => {
-  const parsed = omniConfigSchema.safeParse(req.body);
+  const parsed = omniConnectedConfigSchema.safeParse(req.body);
   if (!parsed.success) {
-    res
-      .status(400)
-      .json({
-        error: parsed.error.issues[0]?.message ?? "Invalid scan configuration",
-      });
+    res.status(400).json({
+      error: parsed.error.issues[0]?.message ?? "Invalid scan configuration",
+    });
     return;
   }
   try {
@@ -41,12 +39,10 @@ router.post("/start", async (req, res): Promise<void> => {
     parsed.data.config.executionMode === "live" &&
     parsed.data.acknowledgeLiveRisk !== true
   ) {
-    res
-      .status(400)
-      .json({
-        error:
-          "Acknowledge that live trading and recovery can lose money before deploying",
-      });
+    res.status(400).json({
+      error:
+        "Acknowledge that live trading and recovery can lose money before deploying",
+    });
     return;
   }
   try {

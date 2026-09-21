@@ -33,9 +33,15 @@ export const omniConfigSchema = z
     "Base stake must fit the session stop loss",
   );
 export type OmniConfig = z.infer<typeof omniConfigSchema>;
+/** Public scans/deployments only execute on the connected (demo or real) account.
+ * Internal paper execution remains only as a deterministic engine test harness. */
+export const omniConnectedConfigSchema = omniConfigSchema.refine(
+  (config) => config.executionMode === "live",
+  "Omni Sentinel trades the connected account; paper mode is not available",
+);
 export const omniStartSchema = z
   .object({
-    config: omniConfigSchema,
+    config: omniConnectedConfigSchema,
     scanId: z.string().uuid(),
     symbol: z.string().min(1).max(40),
     acknowledgeLiveRisk: z.boolean().optional(),
@@ -43,8 +49,12 @@ export const omniStartSchema = z
   .strict();
 
 export function omniConfigKey(config: OmniConfig): string {
+  // The scan measures ALL markets with the same models regardless of the
+  // eventual deployment mode. Only lock/switch may change after the scan;
+  // contract permissions, risk and execution mode remain bound to its token.
+  const { marketMode: _deploymentChoice, ...scannedConfig } = config;
   return JSON.stringify({
-    ...config,
+    ...scannedConfig,
     enabledContracts: [...config.enabledContracts].sort(),
   });
 }

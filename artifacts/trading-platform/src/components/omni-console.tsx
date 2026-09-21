@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
-  ArrowRight,
+  ChevronLeft,
   Check,
   CircleHelp,
   Globe2,
@@ -17,6 +17,7 @@ import { toast } from "sonner";
 import { useGetSettings } from "@workspace/api-client-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "./ui/tabs";
 import {
   Dialog,
   DialogContent,
@@ -43,7 +44,7 @@ const DEFAULT_CONFIG: OmniConfig = {
   stopLoss: 10,
   takeProfit: 10,
   marketMode: "switching",
-  executionMode: "paper",
+  executionMode: "live",
 };
 async function api<T>(
   path: string,
@@ -74,11 +75,13 @@ function Metric({
   tone?: string;
 }) {
   return (
-    <div className="rounded-lg border border-white/5 bg-black/20 p-3">
-      <p className="text-[10px] uppercase tracking-wider text-slate-400">
+    <div className="min-w-0 rounded-lg border border-white/5 bg-black/20 p-2">
+      <p className="text-[8px] uppercase tracking-wide text-slate-400">
         {label}
       </p>
-      <p className={`mt-1 font-mono text-sm font-semibold ${tone}`}>{value}</p>
+      <p className={`mt-0.5 font-mono text-[11px] font-semibold ${tone}`}>
+        {value}
+      </p>
     </div>
   );
 }
@@ -90,44 +93,43 @@ function Opportunity({
   title: string;
 }) {
   return (
-    <div className="rounded-xl border border-indigo-400/20 bg-indigo-500/5 p-4 space-y-3">
+    <div className="rounded-xl border border-indigo-400/20 bg-indigo-500/5 p-2.5 space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <h4 className="text-xs font-semibold uppercase tracking-wider text-indigo-200">
+        <h4 className="text-[9px] font-semibold uppercase tracking-wide text-indigo-200">
           {title}
         </h4>
         <span
-          className={`text-[10px] rounded-full px-2 py-1 ${shot?.ready ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/10 text-amber-200"}`}
+          className={`shrink-0 text-[8px] rounded-full px-1.5 py-0.5 ${shot?.ready ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/10 text-amber-200"}`}
         >
-          {shot?.ready ? "Estimated opportunity" : "Waiting"}
+          {shot?.ready ? "Candidate" : "Waiting"}
         </span>
       </div>
       {shot ? (
         <>
-          <p className="text-lg font-semibold">{shot.contract.label}</p>
-          <div className="grid grid-cols-2 gap-2">
+          <p className="text-sm font-semibold">{shot.contract.label}</p>
+          <div className="grid grid-cols-2 gap-1.5">
             <Metric label="Estimated win" value={pct(shot.probability)} />
             <Metric label="Break-even" value={pct(shot.breakEven)} />
-            <Metric
-              label="Stake / payout"
-              value={`${money(shot.stake)} / ${shot.payout.toFixed(2)}×`}
-            />
-            <Metric
-              label="Utility / loss-pair risk"
-              value={`${shot.utility.toFixed(3)} / ${pct(shot.lossPairRisk)}`}
-            />
           </div>
-          <p className="text-xs text-slate-400 leading-relaxed">
-            {shot.reason}.{" "}
-            <span className="text-slate-500">
-              {shot.quoteSource === "live"
-                ? "Broker-priced"
-                : "Indicative payout"}
-              ; estimates can be wrong.
+          <p className="text-[10px] text-slate-300">
+            Stake {money(shot.stake)} · payout {shot.payout.toFixed(2)}×
+            <span className="text-[9px] text-slate-500">
+              {" "}
+              · {shot.quoteSource}
             </span>
           </p>
+          <details className="text-[9px] text-slate-400">
+            <summary className="cursor-pointer">
+              Utility {shot.utility.toFixed(3)} · loss-pair risk{" "}
+              {pct(shot.lossPairRisk)}
+            </summary>
+            <p className="mt-1 leading-relaxed">
+              {shot.reason}. Estimates can be wrong.
+            </p>
+          </details>
         </>
       ) : (
-        <p className="text-xs text-slate-400">
+        <p className="text-[10px] text-slate-400">
           Waiting for enough market data.
         </p>
       )}
@@ -157,6 +159,7 @@ export function OmniConsole({
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const request = useRef<AbortController | null>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const edited = useRef(false);
   const initialized = useRef(false);
   const { data: settings } = useGetSettings();
@@ -271,6 +274,8 @@ export function OmniConsole({
     setBusy("scan");
     setError(null);
     setScan(null);
+    setSelected("");
+    setAcknowledged(false);
     setProgress({ scanning: "Preparing market history", scanned: 0, total: 0 });
     try {
       const next = await api<OmniScan>("scan", config, controller.signal);
@@ -281,23 +286,26 @@ export function OmniConsole({
       if (!controller.signal.aborted)
         setError(err instanceof Error ? err.message : "Scan failed");
     } finally {
-      if (!controller.signal.aborted) setBusy(null);
+      if (request.current === controller) {
+        request.current = null;
+        setBusy(null);
+      }
     }
   };
-  const handleStart = async () => {
+  const handleStart = async (marketMode: OmniConfig["marketMode"]) => {
     if (!scan || !selected) return;
     setBusy("start");
     setError(null);
     try {
       const result = await api<{ status: BotSessionStatus }>("start", {
-        config,
+        config: { ...config, marketMode, executionMode: "live" },
         scanId: scan.scanId,
         symbol: selected,
         acknowledgeLiveRisk: acknowledged,
       });
       acceptStatus(result.status);
       setMonitor(true);
-      toast.success(`${bot.name} deployed in ${config.executionMode} mode`);
+      toast.success(`${bot.name} deployed on your connected account`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Deployment failed");
     } finally {
@@ -327,64 +335,64 @@ export function OmniConsole({
   )
     .map((c) => c.label)
     .join(" · ");
-  const isLive = activeConfig.executionMode === "live";
+  const screen =
+    monitor && details
+      ? "monitor"
+      : busy === "scan"
+        ? "scanning"
+        : scan
+          ? "results"
+          : "config";
+  useEffect(() => {
+    panelRef.current?.scrollTo({ top: 0 });
+  }, [screen]);
+  const startDisabled =
+    busy !== null ||
+    expired ||
+    !selected ||
+    !acknowledged ||
+    chosen?.source !== "live";
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[calc(100%-1rem)] max-w-5xl max-h-[92dvh] overflow-y-auto border-indigo-400/20 bg-[#0a101f] p-0 text-slate-100 rounded-2xl">
-        <DialogHeader className="px-5 pt-5 pb-4 border-b border-white/10 sm:px-7">
-          <div className="flex items-center gap-3 pr-7">
-            <div className="p-3 rounded-xl bg-indigo-500/15 border border-indigo-400/25">
-              <Radar className="w-6 h-6 text-indigo-300" />
+      <DialogContent
+        ref={panelRef}
+        className="left-auto top-auto bottom-20 right-4 w-84 max-w-[calc(100vw-2rem)] max-h-[calc(100dvh-6rem)] translate-x-0 translate-y-0 overflow-y-auto border-indigo-400/20 bg-[#0a101f] p-0 gap-0 text-slate-100 rounded-2xl sm:rounded-2xl data-[state=open]:slide-in-from-left-0 data-[state=open]:slide-in-from-top-0 data-[state=closed]:slide-out-to-left-0 data-[state=closed]:slide-out-to-top-0"
+      >
+        <DialogHeader className="p-3 border-b border-white/10 text-left">
+          <div className="flex items-center gap-2.5 pr-6">
+            <div className="p-2 rounded-lg bg-indigo-500/15 border border-indigo-400/25">
+              <Radar className="w-4 h-4 text-indigo-300" />
             </div>
-            <div>
-              <p className="text-[10px] tracking-[0.2em] text-indigo-300 uppercase">
+            <div className="min-w-0">
+              <p className="text-[9px] tracking-widest text-indigo-300 uppercase">
                 Multi-contract intelligence
               </p>
-              <DialogTitle className="mt-1 text-xl sm:text-2xl">
-                {bot.name}
-              </DialogTitle>
+              <DialogTitle className="mt-1 text-sm">{bot.name}</DialogTitle>
             </div>
-            <span
-              className={`ml-auto rounded-full px-2.5 py-1 text-[10px] font-bold tracking-wider ${isLive ? "bg-amber-500/15 text-amber-200" : "bg-sky-500/10 text-sky-300"}`}
-            >
-              {isLive ? "LIVE ACCOUNT" : "PAPER"}
-            </span>
           </div>
-          <DialogDescription className="pt-3 text-left text-xs leading-relaxed text-slate-400">
-            You choose the contracts. The bot compares markets, digits, barriers
-            and timing — for both normal trades and recovery. No progressively
-            harder loss gates.
+          <DialogDescription className="pt-1 text-left text-[10px] leading-relaxed text-slate-400">
+            Your contracts. Bot-selected entries for normal trading and
+            recovery.
           </DialogDescription>
         </DialogHeader>
-        <div className="px-5 pb-5 sm:px-7 space-y-5">
-          <div className="flex flex-wrap gap-2 text-[10px] font-medium">
-            <span className="rounded-full px-2.5 py-1.5 bg-indigo-400/10 text-indigo-200 flex items-center gap-1">
-              <ShieldCheck className="w-3 h-3" /> Same allowlist in recovery
-            </span>
-            <span className="rounded-full px-2.5 py-1.5 bg-white/5 text-slate-300 flex items-center gap-1">
-              <LockKeyhole className="w-3 h-3" /> Utility floor stays at zero
-            </span>
-            <span className="rounded-full px-2.5 py-1.5 bg-white/5 text-slate-300">
-              One outstanding trade at a time
-            </span>
-          </div>
+        <div className="p-3 space-y-3">
           {error && (
             <div
               role="alert"
-              className="rounded-lg border border-red-400/25 bg-red-500/10 p-3 text-xs text-red-200"
+              className="rounded-lg border border-red-400/25 bg-red-500/10 p-2.5 text-[11px] text-red-200"
             >
               {error}
             </div>
           )}
 
           {monitor && details ? (
-            <div className="space-y-4" data-testid="omni-monitor">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <h3 className="font-semibold flex items-center gap-2">
+            <div className="space-y-3" data-testid="omni-monitor">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <h3 className="text-xs font-semibold flex items-center gap-1.5">
                     <Activity
-                      className={`w-4 h-4 ${running ? "text-emerald-400" : "text-slate-500"}`}
+                      className={`w-3.5 h-3.5 shrink-0 ${running ? "text-emerald-400" : "text-slate-500"}`}
                     />
                     {details.stopping && running
                       ? "Stopping safely"
@@ -392,15 +400,17 @@ export function OmniConsole({
                         ? "Opportunity radar"
                         : "Session finished"}
                   </h3>
-                  <p className="mt-1 text-xs text-slate-400">{enabledLabels}</p>
+                  <p className="mt-1 text-[10px] text-slate-400">
+                    {enabledLabels}
+                  </p>
                 </div>
                 <span
-                  className={`text-xs font-semibold ${status?.inRecovery ? "text-amber-300" : "text-indigo-300"}`}
+                  className={`text-[9px] font-semibold ${status?.inRecovery ? "text-amber-300" : "text-indigo-300"}`}
                 >
                   {status?.inRecovery ? "RECOVERY" : "NORMAL"}
                 </span>
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 gap-1.5">
                 <Metric
                   label="Session P&L"
                   value={money(status?.totalProfit ?? 0)}
@@ -424,136 +434,336 @@ export function OmniConsole({
                   value={money(status?.currentStake ?? 0)}
                 />
               </div>
-              <div className="rounded-xl border border-indigo-400/20 bg-indigo-400/5 p-4">
-                <div className="flex items-center gap-2 text-xs font-semibold text-indigo-200">
+              <div className="rounded-xl border border-indigo-400/20 bg-indigo-400/5 p-2.5">
+                <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-semibold text-indigo-200">
                   <span
-                    className={`h-2 w-2 rounded-full ${running ? "bg-emerald-400 animate-pulse" : "bg-slate-500"}`}
+                    className={`h-1.5 w-1.5 rounded-full ${running ? "bg-emerald-400 animate-pulse" : "bg-slate-500"}`}
                   />
                   {watch?.phase.toUpperCase() ?? "IDLE"}
-                  <span className="ml-auto text-[10px] text-slate-400">
+                  <span className="ml-auto text-[9px] text-slate-400">
                     {details.lockedSymbol
                       ? `LOCKED · ${details.lockedSymbol}`
                       : `${watch?.marketsConsidered ?? 0} MARKETS · SWITCHING`}
                   </span>
                 </div>
-                <p className="mt-2 text-sm leading-relaxed">
+                <p className="mt-2 text-[11px] leading-relaxed">
                   {status?.message}
                 </p>
-                <p className="mt-2 text-[10px] text-slate-400">
+                <p className="mt-1.5 text-[9px] text-slate-400">
                   Feed: {watch?.source ?? "waiting"} ·{" "}
-                  {watch?.ticksEvaluated ?? 0} new ticks evaluated ·{" "}
-                  {isLive
-                    ? "Shared account debt ledger"
-                    : "Isolated paper debt; no account money is used"}
+                  {watch?.ticksEvaluated ?? 0} ticks evaluated · Shared account
+                  debt ledger
                 </p>
               </div>
-              <div className="overflow-x-auto rounded-xl border border-white/10">
-                <table className="w-full text-left text-xs min-w-[620px]">
-                  <caption className="sr-only">
-                    Best allowed normal or recovery opportunities, ranked by
-                    risk-adjusted utility
-                  </caption>
-                  <thead className="bg-white/5 text-[10px] uppercase tracking-wide text-slate-400">
-                    <tr>
-                      {[
-                        "Market / contract",
-                        "Estimated win",
-                        "Payout",
-                        "Stake",
-                        "Debt paid if won",
-                        "Utility",
-                      ].map((h) => (
-                        <th className="px-3 py-3 font-medium" key={h}>
-                          {h}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {watch?.candidates.map((shot, i) => (
-                      <tr
-                        key={`${shot.symbol}:${shot.contract.id}`}
-                        className={`border-t border-white/5 ${i === 0 ? "bg-indigo-500/10" : ""}`}
+              <div
+                className="max-h-64 space-y-1.5 overflow-y-auto"
+                aria-label="Ranked opportunities"
+              >
+                {watch?.candidates.map((shot, i) => (
+                  <div
+                    key={`${shot.symbol}:${shot.contract.id}`}
+                    className={`rounded-lg border border-white/10 p-2.5 ${i === 0 ? "bg-indigo-500/10" : "bg-white/[0.02]"}`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-semibold">
+                        {shot.contract.label}
+                      </p>
+                      <span
+                        className={`text-[10px] font-mono ${shot.utility > 0 ? "text-emerald-300" : "text-slate-400"}`}
                       >
-                        <td className="p-3">
-                          <p className="font-semibold">{shot.contract.label}</p>
-                          <p className="text-[10px] text-slate-400 mt-1">
-                            {shot.displayName}
-                          </p>
-                          <p
-                            className={`mt-1 text-[9px] ${shot.ready ? "text-emerald-300" : "text-slate-500"}`}
-                          >
-                            {shot.ready ? "Candidate" : shot.reason}
-                          </p>
-                        </td>
-                        <td className="px-3 font-mono">
+                        {shot.utility.toFixed(3)} utility
+                      </span>
+                    </div>
+                    <p className="mt-0.5 text-[9px] text-slate-400">
+                      {shot.displayName}
+                    </p>
+                    <div className="mt-2 grid grid-cols-3 gap-1 text-[9px] text-slate-400">
+                      <span>
+                        Est. win{" "}
+                        <b className="block text-[11px] font-mono text-slate-200">
                           {pct(shot.probability)}
-                        </td>
-                        <td className="px-3 font-mono">
+                        </b>
+                      </span>
+                      <span>
+                        Payout{" "}
+                        <b className="block text-[11px] font-mono text-slate-200">
                           {shot.payout.toFixed(2)}×
-                          <span className="block text-[9px] text-slate-500">
-                            {shot.quoteSource}
-                          </span>
-                        </td>
-                        <td className="px-3 font-mono">{money(shot.stake)}</td>
-                        <td className="px-3 font-mono">
-                          {status?.inRecovery ? pct(shot.debtCoverage) : "—"}
-                        </td>
-                        <td
-                          className={`px-3 font-mono ${shot.utility > 0 ? "text-emerald-300" : "text-slate-400"}`}
-                        >
-                          {shot.utility.toFixed(3)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                        </b>
+                      </span>
+                      <span>
+                        Stake{" "}
+                        <b className="block text-[11px] font-mono text-slate-200">
+                          {money(shot.stake)}
+                        </b>
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-[9px] text-slate-400">
+                      {shot.quoteSource} quote
+                      {status?.inRecovery
+                        ? ` · ${pct(shot.debtCoverage)} debt covered if won`
+                        : ""}
+                    </p>
+                    <p
+                      className={`mt-1 text-[9px] ${shot.ready ? "text-emerald-300" : "text-slate-500"}`}
+                    >
+                      {shot.ready ? "Candidate" : shot.reason}
+                    </p>
+                  </div>
+                ))}
                 {!watch?.candidates.length && (
-                  <p className="p-5 text-center text-xs text-slate-400">
+                  <p className="p-3 text-center text-[11px] text-slate-400">
                     Collecting observations for the opportunity radar…
                   </p>
                 )}
               </div>
-              <div className="flex gap-3">
-                {running ? (
-                  <Button
-                    className="bg-red-500/15 hover:bg-red-500/25 text-red-200 border border-red-400/25"
-                    disabled={busy !== null || details.stopping}
-                    onClick={handleStop}
-                  >
-                    <StopCircle className="w-4 h-4 mr-2" />
-                    {details.stopping ? "Waiting for settlement…" : "Stop bot"}
-                  </Button>
-                ) : (
-                  <Button
-                    variant="outline"
-                    onClick={() => {
-                      setMonitor(false);
-                      setScan(null);
-                      setAcknowledged(false);
-                      setError(null);
-                    }}
-                  >
-                    Configure a new session
-                  </Button>
-                )}
-                <p className="text-[10px] leading-relaxed text-slate-500 self-center">
-                  Closing this console does not stop a running bot. Use Stop
-                  bot.
-                </p>
-              </div>
+              {running ? (
+                <Button
+                  className="w-full h-9 text-xs bg-red-500/15 hover:bg-red-500/25 text-red-200 border border-red-400/25"
+                  disabled={busy !== null || details.stopping}
+                  onClick={handleStop}
+                >
+                  <StopCircle className="w-3.5 h-3.5 mr-2" />
+                  {details.stopping ? "Waiting for settlement…" : "Stop bot"}
+                </Button>
+              ) : (
+                <Button
+                  className="w-full h-9 text-xs"
+                  variant="outline"
+                  onClick={() => {
+                    setMonitor(false);
+                    setScan(null);
+                    setAcknowledged(false);
+                    setError(null);
+                  }}
+                >
+                  Configure a new session
+                </Button>
+              )}
+              <p className="text-[9px] leading-relaxed text-slate-500">
+                Closing this console does not stop the bot. Stop waits for any
+                outstanding order to settle.
+              </p>
             </div>
-          ) : (
-            <>
-              <section className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm font-semibold">
-                    01 <span className="ml-2">Enable your contracts</span>
+          ) : busy === "scan" ? (
+            <div
+              role="status"
+              className="py-6 space-y-3 text-center"
+              data-testid="omni-scanning"
+            >
+              <Loader2 className="mx-auto w-7 h-7 animate-spin text-indigo-300" />
+              <h3 className="text-xs font-semibold">Measuring opportunities</h3>
+              <p className="text-[10px] text-slate-400">
+                {progress.scanning} · {progress.scanned} /{" "}
+                {progress.total || "—"}
+              </p>
+              <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-indigo-400 transition-all"
+                  style={{
+                    width: `${progress.total ? (100 * progress.scanned) / progress.total : 3}%`,
+                  }}
+                />
+              </div>
+              <p className="text-[9px] text-slate-500">
+                Causal model fitting and chronological replay. Scanning does not
+                place trades.
+              </p>
+            </div>
+          ) : scan ? (
+            <section className="space-y-3" data-testid="omni-scan-results">
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <h3 className="text-xs font-semibold flex items-center gap-1.5">
+                    <Globe2 className="w-3.5 h-3.5 text-indigo-300" />
+                    {scan.markets.length} / {scan.marketsScanned} markets
                   </h3>
-                  <div className="flex gap-3 text-[11px]">
+                  <p className="mt-1 text-[10px] text-slate-400">
+                    Choose a market, then lock or switch.
+                  </p>
+                </div>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 px-2 text-[10px] shrink-0"
+                  onClick={() => {
+                    setScan(null);
+                    setSelected("");
+                    setAcknowledged(false);
+                    setError(null);
+                  }}
+                  disabled={busy !== null}
+                >
+                  <ChevronLeft className="w-3 h-3 mr-1" /> Edit setup
+                </Button>
+              </div>
+              {scan.markets.length === 0 ? (
+                <p className="text-[11px] text-slate-400">{scan.reason}</p>
+              ) : (
+                <>
+                  <label className="block text-[10px] text-slate-400">
+                    Deployment market
+                    <select
+                      aria-label="Deployment market"
+                      className="mt-1 w-full rounded-lg border border-indigo-400/20 bg-[#10192c] px-2 py-2 text-[11px] text-white"
+                      value={selected}
+                      disabled={lockedControls}
+                      onChange={(event) => setSelected(event.target.value)}
+                    >
+                      {scan.markets.map((market) => (
+                        <option key={market.symbol} value={market.symbol}>
+                          {market.displayName} · {market.source}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {chosen && (
+                    <>
+                      <Tabs defaultValue="normal">
+                        <TabsList
+                          aria-label="Opportunity previews"
+                          className="grid w-full grid-cols-2 h-8 bg-black/20"
+                        >
+                          <TabsTrigger
+                            value="normal"
+                            className="text-[10px] data-[state=active]:bg-indigo-500/20 data-[state=active]:text-indigo-200"
+                          >
+                            Normal preview
+                          </TabsTrigger>
+                          <TabsTrigger
+                            value="recovery"
+                            className="text-[10px] data-[state=active]:bg-indigo-500/20 data-[state=active]:text-indigo-200"
+                          >
+                            Recovery preview
+                          </TabsTrigger>
+                        </TabsList>
+                        <TabsContent value="normal" className="mt-2">
+                          <Opportunity
+                            shot={chosen.normal}
+                            title="Normal opportunity"
+                          />
+                        </TabsContent>
+                        <TabsContent value="recovery" className="mt-2">
+                          <Opportunity
+                            shot={chosen.recovery}
+                            title="Recovery · one base-stake debt"
+                          />
+                        </TabsContent>
+                      </Tabs>
+                      <details className="rounded-lg border border-white/10 p-2.5 text-[10px]">
+                        <summary className="cursor-pointer font-semibold text-slate-300">
+                          Replay diagnostics · {chosen.samples} ticks
+                        </summary>
+                        <div className="mt-2 grid grid-cols-2 gap-1.5">
+                          <Metric
+                            label="Normal wins / shots"
+                            value={`${chosen.replay.normalWins} / ${chosen.replay.normalShots}`}
+                          />
+                          <Metric
+                            label="Recovery wins / shots"
+                            value={`${chosen.replay.recoveryWins} / ${chosen.replay.recoveryShots}`}
+                          />
+                          <Metric
+                            label="Recovery loss pairs"
+                            value={String(chosen.replay.recoveryLossPairs)}
+                          />
+                          <Metric
+                            label="Replay P&L"
+                            value={`${money(chosen.replay.profit)} ${scan.currency}`}
+                          />
+                        </div>
+                        <p className="mt-2 leading-relaxed text-slate-500">
+                          {scan.reason} Warm-up uses the first 60%; replay uses
+                          the last 40% with indicative next-tick fills. No
+                          broker latency or historical quotes are modeled.
+                          Comparing markets adds selection bias.{" "}
+                          {chosen.replay.stoppedByRisk
+                            ? "This replay exhausted its risk budget. "
+                            : ""}
+                          These are diagnostics, not a forecast of live returns.
+                        </p>
+                      </details>
+                    </>
+                  )}
+                  <label className="flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-400/5 p-2.5 text-[10px] leading-relaxed text-amber-100">
+                    <input
+                      type="checkbox"
+                      checked={acknowledged}
+                      disabled={busy !== null}
+                      onChange={(event) =>
+                        setAcknowledged(event.target.checked)
+                      }
+                      className="mt-0.5 accent-indigo-400"
+                    />
+                    I understand this trades my connected Deriv account.
+                    Recovery stakes can grow; further losses are possible.
+                    Profit is not guaranteed.
+                  </label>
+                  {expired && (
+                    <p role="alert" className="text-[10px] text-amber-200">
+                      This scan has expired. Run a fresh scan before deploying.
+                    </p>
+                  )}
+                  {chosen?.source !== "live" && (
+                    <p role="alert" className="text-[10px] text-amber-200">
+                      A live market feed is required. Wait for live data and
+                      scan again.
+                    </p>
+                  )}
+                  <div className="space-y-2">
+                    <Button
+                      onClick={() => handleStart("locked")}
+                      disabled={startDisabled}
+                      className="w-full h-10 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-bold"
+                    >
+                      {busy === "start" ? (
+                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                      ) : (
+                        <LockKeyhole className="w-4 h-4 mr-2" />
+                      )}{" "}
+                      Trade Locked
+                    </Button>
+                    <Button
+                      onClick={() => handleStart("switching")}
+                      disabled={startDisabled}
+                      variant="outline"
+                      className="w-full h-9 border-indigo-400/40 text-indigo-200 hover:bg-indigo-400/10 text-xs font-semibold"
+                    >
+                      <Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching
+                    </Button>
+                    <p className="text-[9px] leading-relaxed text-slate-500">
+                      Lock keeps both phases on this market. Switching searches
+                      all supported markets for normal and recovery trades.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleScan}
+                    disabled={busy !== null}
+                    className="w-full py-1 text-[10px] text-slate-400 hover:text-white disabled:opacity-50"
+                  >
+                    Run a fresh scan
+                  </button>
+                </>
+              )}
+            </section>
+          ) : (
+            <div className="space-y-3" data-testid="omni-setup">
+              <div className="flex flex-wrap gap-1.5 text-[9px] text-indigo-200">
+                <span className="rounded-full px-2 py-1 bg-indigo-400/10 flex items-center gap-1">
+                  <ShieldCheck className="w-3 h-3" /> Same recovery allowlist
+                </span>
+                <span className="rounded-full px-2 py-1 bg-white/5 text-slate-300">
+                  No loss ratchets
+                </span>
+              </div>
+              <section className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-[11px] font-semibold">
+                    01 · Enable contracts
+                  </h3>
+                  <div className="flex gap-2.5 text-[10px]">
                     <button
                       type="button"
-                      className="text-indigo-300 hover:text-white disabled:opacity-40"
                       disabled={lockedControls}
                       onClick={() =>
                         change(
@@ -561,354 +771,129 @@ export function OmniConsole({
                           OMNI_CONTRACTS.map((c) => c.id),
                         )
                       }
+                      className="text-indigo-300 hover:text-indigo-100 disabled:opacity-50"
                     >
                       Enable all
                     </button>
                     <button
                       type="button"
-                      className="text-slate-400 hover:text-white disabled:opacity-40"
                       disabled={lockedControls}
                       onClick={() => change("enabledContracts", [])}
+                      className="text-slate-400 hover:text-white disabled:opacity-50"
                     >
                       Clear
                     </button>
                   </div>
                 </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 gap-1.5">
                   {OMNI_CONTRACTS.map((contract) => {
                     const enabled = config.enabledContracts.includes(
                       contract.id,
                     );
                     return (
                       <button
-                        type="button"
                         key={contract.id}
+                        type="button"
                         aria-label={`${contract.label} contract`}
                         aria-pressed={enabled}
+                        title={contract.hint}
                         disabled={lockedControls}
                         onClick={() => toggle(contract.id)}
-                        className={`relative rounded-xl border p-3 text-left transition-colors disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-400 ${enabled ? "border-indigo-400/50 bg-indigo-500/15" : "border-white/10 bg-white/[0.02] hover:border-white/25"}`}
+                        className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors disabled:opacity-50 ${enabled ? "bg-indigo-500/15 border-indigo-400/50 text-indigo-100" : "bg-black/15 border-white/10 text-slate-400 hover:border-indigo-400/30"}`}
                       >
-                        <span className="text-[9px] uppercase tracking-widest text-slate-500">
-                          {contract.group}
-                        </span>
                         <span
-                          className={`block mt-1 font-semibold text-sm ${enabled ? "text-indigo-100" : "text-slate-400"}`}
+                          className={`flex w-3.5 h-3.5 shrink-0 items-center justify-center rounded border ${enabled ? "bg-indigo-400 border-indigo-400 text-indigo-950" : "border-slate-600"}`}
                         >
+                          {enabled && <Check className="w-2.5 h-2.5" />}
+                        </span>
+                        <span className="text-[11px] font-semibold">
                           {contract.label}
-                        </span>
-                        <span className="block text-[10px] mt-1 text-slate-500">
-                          {contract.hint}
-                        </span>
-                        <span
-                          className={`absolute top-3 right-3 h-4 w-4 rounded flex items-center justify-center ${enabled ? "bg-indigo-400 text-slate-950" : "border border-white/15"}`}
-                        >
-                          {enabled && <Check className="w-3 h-3" />}
                         </span>
                       </button>
                     );
                   })}
                 </div>
-                <p className="text-[11px] text-slate-400">
-                  {config.enabledContracts.length} of 8 enabled. Disabled
-                  contracts are never used — including during recovery. Digits
-                  and barriers are selected automatically.
+                <p className="text-[9px] text-slate-500">
+                  {config.enabledContracts.length} of 8 enabled in both phases.
+                  Digits and barriers are automatic.
                 </p>
               </section>
-              <section className="grid md:grid-cols-2 gap-4">
-                <div className="rounded-xl border border-white/10 p-4 space-y-4">
-                  <h3 className="text-sm font-semibold">
-                    02 <span className="ml-2">Risk & execution</span>
-                  </h3>
-                  <div className="flex rounded-lg bg-black/25 p-1 gap-1">
-                    {(["paper", "live"] as const).map((mode) => (
-                      <button
-                        type="button"
-                        key={mode}
-                        disabled={lockedControls}
-                        aria-pressed={config.executionMode === mode}
-                        onClick={() => change("executionMode", mode)}
-                        className={`flex-1 rounded-md p-2 text-xs transition-colors ${config.executionMode === mode ? "bg-indigo-500/20 text-indigo-200" : "text-slate-500 hover:text-white"}`}
-                      >
-                        {mode === "paper"
-                          ? "Paper rehearsal"
-                          : "Connected account"}
-                      </button>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-slate-400">
-                    {config.executionMode === "paper"
-                      ? "Starts with 1,000 virtual USD. Separate paper debt; account funds and live recovery debt are untouched."
-                      : "Uses the active Deriv account, including demo accounts. Simulated feeds cannot place live orders."}
-                  </p>
-                  <div className="grid grid-cols-3 gap-3">
-                    {(
-                      [
-                        { key: "stake", label: "Base stake" },
-                        { key: "stopLoss", label: "Stop loss" },
-                        { key: "takeProfit", label: "Take profit" },
-                      ] as const
-                    ).map((field) => (
-                      <label
-                        className="text-[10px] text-slate-400"
-                        key={field.key}
-                      >
-                        {field.label}
-                        <Input
-                          aria-label={field.label}
-                          type="number"
-                          min={field.key === "takeProfit" ? 0.01 : 0.35}
-                          step="0.01"
-                          value={config[field.key]}
-                          disabled={lockedControls}
-                          onChange={(event) =>
-                            change(field.key, Number(event.target.value))
-                          }
-                          className="mt-1.5 h-9 bg-black/20 border-white/10 text-slate-200 font-mono text-xs"
-                        />
-                      </label>
-                    ))}
-                  </div>
-                  <p className="text-[10px] text-slate-500">
-                    Recovery stake = debt × (1 + markup) ÷ net payout. Markup:{" "}
-                    {Number(settings?.botRecoveryMarkup ?? 10).toFixed(1)}% from
-                    Settings. Balance, max stake and remaining stop-loss cap
-                    every order; capped wins may only repay part of the debt.
-                  </p>
-                </div>
-                <div className="rounded-xl border border-white/10 p-4 space-y-3">
-                  <h3 className="text-sm font-semibold">
-                    03 <span className="ml-2">Market freedom</span>
-                  </h3>
-                  {(["switching", "locked"] as const).map((mode) => (
-                    <button
-                      type="button"
-                      key={mode}
-                      disabled={lockedControls}
-                      aria-pressed={config.marketMode === mode}
-                      onClick={() => change("marketMode", mode)}
-                      className={`w-full flex items-start gap-3 rounded-lg border p-3 text-left transition-colors ${config.marketMode === mode ? "border-indigo-400/40 bg-indigo-500/10" : "border-white/5 bg-black/15"}`}
+              <section className="rounded-xl border border-white/10 p-2.5 space-y-2.5">
+                <h3 className="text-[11px] font-semibold">
+                  02 · Risk & execution
+                </h3>
+                <p className="text-[10px] text-slate-400">
+                  Trades your connected Deriv account — demo or real.
+                </p>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { key: "stake", label: "Base stake" },
+                      { key: "stopLoss", label: "Stop loss" },
+                      { key: "takeProfit", label: "Take profit" },
+                    ] as const
+                  ).map((field) => (
+                    <label
+                      className="min-w-0 text-[9px] text-slate-400"
+                      key={field.key}
                     >
-                      {mode === "switching" ? (
-                        <Shuffle className="w-4 h-4 mt-0.5 text-indigo-300" />
-                      ) : (
-                        <LockKeyhole className="w-4 h-4 mt-0.5 text-indigo-300" />
-                      )}
-                      <span>
-                        <span className="block text-xs font-medium">
-                          {mode === "switching"
-                            ? "Switch to the best opportunity"
-                            : "Lock one market"}
-                        </span>
-                        <span className="block mt-1 text-[10px] leading-relaxed text-slate-400">
-                          {mode === "switching"
-                            ? "Normal and recovery both compare every supported automated market, even when another market already has a viable shot."
-                            : "Choose a market after the scan. Contracts can change within your allowlist, but both phases stay on that market."}
-                        </span>
-                      </span>
-                    </button>
+                      {field.label}
+                      <Input
+                        aria-label={field.label}
+                        type="number"
+                        min={field.key === "takeProfit" ? 0.01 : 0.35}
+                        step="0.01"
+                        value={config[field.key]}
+                        disabled={lockedControls}
+                        onChange={(event) =>
+                          change(field.key, Number(event.target.value))
+                        }
+                        className="mt-1 h-8 px-2 bg-black/20 border-white/10 text-slate-200 font-mono text-xs"
+                      />
+                    </label>
                   ))}
-                  <p className="text-[10px] text-slate-500">
-                    If no positive risk-adjusted opportunity exists, the bot
-                    waits. Neither the utility floor nor a cooldown increases
-                    with the loss run.
-                  </p>
                 </div>
+                <details className="text-[9px] text-slate-500">
+                  <summary className="cursor-pointer">
+                    Recovery sizing ·{" "}
+                    {Number(settings?.botRecoveryMarkup ?? 10).toFixed(1)}%
+                    markup
+                  </summary>
+                  <p className="mt-1 leading-relaxed">
+                    Stake = debt × (1 + markup) ÷ net payout. Balance, max stake
+                    and remaining stop-loss cap every order. Capped wins may
+                    repay only part of the debt.
+                  </p>
+                </details>
               </section>
-              <div className="flex items-center gap-3">
-                <Button
-                  onClick={handleScan}
-                  disabled={lockedControls || !!omniConfigError(config)}
-                  className="bg-indigo-500 hover:bg-indigo-400 text-white h-10"
-                >
-                  {busy === "scan" ? (
-                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                  ) : (
-                    <ScanSearch className="w-4 h-4 mr-2" />
-                  )}
-                  {busy === "scan"
-                    ? "Measuring opportunities…"
-                    : scan
-                      ? "Run a fresh scan"
-                      : "Scan all supported markets"}
-                </Button>
-                <p className="text-xs text-amber-200">
+              {omniConfigError(config) && (
+                <p role="alert" className="text-[10px] text-amber-200">
                   {omniConfigError(config)}
                 </p>
-              </div>
-              {busy === "scan" && (
-                <div
-                  role="status"
-                  className="rounded-xl border border-indigo-400/20 p-4 space-y-2"
-                >
-                  <div className="flex justify-between text-xs text-indigo-200">
-                    <span>{progress.scanning}</span>
-                    <span>
-                      {progress.scanned} / {progress.total || "—"}
-                    </span>
-                  </div>
-                  <div className="h-1.5 bg-white/5 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-indigo-400 transition-all"
-                      style={{
-                        width: `${progress.total ? (100 * progress.scanned) / progress.total : 3}%`,
-                      }}
-                    />
-                  </div>
-                  <p className="text-[10px] text-slate-500">
-                    Chronological replay and causal model fitting. No trades are
-                    placed during the scan.
-                  </p>
-                </div>
               )}
-              {scan && (
-                <section className="space-y-4" data-testid="omni-scan-results">
-                  <div>
-                    <h3 className="text-sm font-semibold flex items-center gap-2">
-                      <Globe2 className="w-4 h-4 text-indigo-300" />
-                      {scan.markets.length} measured / {scan.marketsScanned}{" "}
-                      supported markets
-                    </h3>
-                    <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
-                      {scan.reason}
-                    </p>
-                  </div>
-                  {scan.markets.length > 0 && (
-                    <>
-                      <label className="block text-xs text-slate-400">
-                        {config.marketMode === "locked"
-                          ? "Market to lock for normal AND recovery"
-                          : "Initial market (the bot can switch immediately)"}
-                        <select
-                          aria-label="Deployment market"
-                          className="mt-2 w-full rounded-lg border border-indigo-400/20 bg-[#10192c] px-3 py-2.5 text-sm text-white"
-                          value={selected}
-                          disabled={lockedControls}
-                          onChange={(event) => setSelected(event.target.value)}
-                        >
-                          {scan.markets.map((market) => (
-                            <option key={market.symbol} value={market.symbol}>
-                              {market.displayName} · {market.source} ·{" "}
-                              {market.samples} ticks
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                      {chosen && (
-                        <>
-                          <div className="grid md:grid-cols-2 gap-3">
-                            <Opportunity
-                              shot={chosen.normal}
-                              title="Normal opportunity"
-                            />
-                            <Opportunity
-                              shot={chosen.recovery}
-                              title="Recovery · one base-stake debt"
-                            />
-                          </div>
-                          <div className="rounded-xl border border-white/10 p-4 space-y-3">
-                            <h4 className="text-[11px] uppercase tracking-wide text-slate-300">
-                              Chronological replay · last 40% of{" "}
-                              {chosen.samples} ticks · indicative fills
-                            </h4>
-                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                              <Metric
-                                label="Normal wins / shots"
-                                value={`${chosen.replay.normalWins} / ${chosen.replay.normalShots}`}
-                              />
-                              <Metric
-                                label="Recovery wins / shots"
-                                value={`${chosen.replay.recoveryWins} / ${chosen.replay.recoveryShots}`}
-                              />
-                              <Metric
-                                label="Recovery loss pairs"
-                                value={String(chosen.replay.recoveryLossPairs)}
-                              />
-                              <Metric
-                                label="Replay P&L"
-                                value={`${money(chosen.replay.profit)} ${scan.currency}`}
-                              />
-                            </div>
-                            <p className="text-[10px] leading-relaxed text-slate-500">
-                              Warm-up uses the first 60%; each replay decision
-                              only sees past observations. No broker latency or
-                              actual historical quotes are modeled. Selecting a
-                              market from many replays adds selection bias.{" "}
-                              {chosen.replay.stoppedByRisk
-                                ? "This replay exhausted its risk budget. "
-                                : ""}
-                              These are diagnostics, not a forecast of live
-                              returns.
-                            </p>
-                          </div>
-                        </>
-                      )}
-                      {config.executionMode === "live" && (
-                        <label className="flex items-start gap-3 rounded-lg border border-amber-400/20 bg-amber-400/5 p-3 text-xs leading-relaxed text-amber-100">
-                          <input
-                            type="checkbox"
-                            checked={acknowledged}
-                            onChange={(event) =>
-                              setAcknowledged(event.target.checked)
-                            }
-                            className="mt-0.5 accent-indigo-400"
-                          />
-                          I understand this places orders on my connected Deriv
-                          account. Recovery stakes can grow, further losses are
-                          possible, and none of these estimates guarantees
-                          repayment or profit.
-                        </label>
-                      )}
-                      {expired && (
-                        <p role="alert" className="text-xs text-amber-200">
-                          This scan has expired. Run a fresh scan before
-                          deploying.
-                        </p>
-                      )}
-                      {config.executionMode === "live" &&
-                        chosen?.source !== "live" && (
-                          <p role="alert" className="text-xs text-amber-200">
-                            Only simulated data is available for this market.
-                            Use Paper or wait for a live feed and scan again.
-                          </p>
-                        )}
-                      <Button
-                        onClick={handleStart}
-                        disabled={
-                          busy !== null ||
-                          expired ||
-                          !selected ||
-                          (config.executionMode === "live" &&
-                            (!acknowledged || chosen?.source !== "live"))
-                        }
-                        className="bg-indigo-500 hover:bg-indigo-400 text-white w-full sm:w-auto"
-                      >
-                        {busy === "start" ? (
-                          <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                        ) : (
-                          <ArrowRight className="w-4 h-4 mr-2" />
-                        )}
-                        {config.executionMode === "paper"
-                          ? "Start paper rehearsal"
-                          : "Deploy on connected account"}
-                      </Button>
-                    </>
-                  )}
-                </section>
-              )}
-            </>
+              <Button
+                onClick={handleScan}
+                disabled={lockedControls || !!omniConfigError(config)}
+                className="w-full h-10 bg-indigo-500 hover:bg-indigo-400 text-white text-xs font-bold"
+              >
+                <ScanSearch className="w-4 h-4 mr-2" /> Scan markets
+              </Button>
+            </div>
           )}
-          <div className="border-t border-white/10 pt-4 flex gap-2 text-[10px] leading-relaxed text-slate-500">
-            <CircleHelp className="w-4 h-4 shrink-0 text-indigo-300/70" />
-            <p>
-              “Best” means the highest estimated utility among supported,
-              enabled opportunities — not a certain winner. The score combines
-              expected log return, model uncertainty and loss-pair risk;
-              recovery also weights win probability and debt coverage. A live
-              buy requires a valid quote and fresh tick. No positive opportunity
-              means wait, not force a trade.
+          <details className="border-t border-white/10 pt-2.5 text-[9px] leading-relaxed text-slate-500">
+            <summary className="cursor-pointer text-slate-400">
+              <CircleHelp className="inline w-3 h-3 mr-1 text-indigo-300/70" />{" "}
+              Estimated opportunities, not guaranteed wins
+            </summary>
+            <p className="mt-2">
+              “Best” means the highest estimated utility among enabled
+              opportunities. Scoring combines expected log return, uncertainty
+              and loss-pair risk; recovery also weighs win probability and debt
+              coverage. Every buy needs a valid quote and fresh tick. The
+              utility floor stays at zero: no positive opportunity means wait,
+              not force a trade.
             </p>
-          </div>
+          </details>
         </div>
       </DialogContent>
     </Dialog>

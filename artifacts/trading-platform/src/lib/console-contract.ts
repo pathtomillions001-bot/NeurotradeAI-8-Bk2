@@ -20,7 +20,7 @@
 
 export const WEB_CONSOLE_IDS = [
   /** Omni Sentinel — multi-contract, cross-market normal and recovery. */
-  "omni@1",
+  "omni@2",
   /** Echo Apex — institutional Matches engine. */
   "apex@1",
   /** Barrier Bastion — recovery-first Over/Under bands (Over 1 / Under 8 → Over 3 / Under 6). */

@@ -9,7 +9,7 @@ const config: OmniConfig = {
   stopLoss: 10,
   takeProfit: 10,
   marketMode: "switching",
-  executionMode: "paper",
+  executionMode: "live",
 };
 
 describe("Omni console controls", () => {
@@ -45,6 +45,15 @@ describe("Omni console controls", () => {
     assert.equal(
       omniConfigError({ ...config, stake: 0.35, stopLoss: 0.35 }),
       null,
+    );
+  });
+  it("never accepts paper execution from a stale client configuration", () => {
+    assert.equal(omniConfigError(config), null);
+    assert.ok(
+      omniConfigError({
+        ...config,
+        executionMode: "paper",
+      } as unknown as OmniConfig),
     );
   });
   it("opens and stops the dedicated engine from the global live indicator", () => {

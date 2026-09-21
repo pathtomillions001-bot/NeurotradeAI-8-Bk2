@@ -131,6 +131,31 @@ describe("Omni trusted deployment and account isolation", () => {
     );
     assert.equal(scoped(a, currentTradingOwner), null);
   });
+  for (const marketMode of ["locked", "switching"] as const) {
+    it(`accepts ${marketMode} chosen after a scan in the other mode`, async () => {
+      const a = owner();
+      const scan = await scoped(a, () =>
+        scanForOmni({
+          ...config,
+          marketMode: marketMode === "locked" ? "switching" : "locked",
+        }),
+      );
+      const result = await scoped(a, () =>
+        startSession({
+          config: { ...config, marketMode },
+          scanId: scan.scanId,
+          symbol: "R_10",
+        }),
+      );
+      assert.ok(result.ok, result.error);
+      const status = scoped(a, getStatus);
+      assert.equal(status.omni?.config.marketMode, marketMode);
+      assert.equal(
+        status.omni?.lockedSymbol,
+        marketMode === "locked" ? "R_10" : null,
+      );
+    });
+  }
   it("admits only one simultaneous start and prevents another bot from taking the slot", async () => {
     const a = owner();
     const scan = await scoped(a, () => scanForOmni(config));

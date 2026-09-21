@@ -1,6 +1,6 @@
 # Omni Sentinel
 
-`BOT-OMNI` / bot id `omni` / console contract `omni@1`.
+`BOT-OMNI` / bot id `omni` / console contract `omni@2`.
 
 A dedicated multi-contract bot, not a preset of the specialist engine. Existing specialist scoring, barriers, timing policies and recovery formulas are unchanged.
 
@@ -9,9 +9,10 @@ A dedicated multi-contract bot, not a preset of the specialist engine. Existing 
 - Independently enable **Rise, Fall, Even, Odd, Matches, Differs, Over, Under**. Any non-empty combination is valid.
 - The **same allowlist** applies to normal **and** recovery trades. There is no hidden Matches → Differs fallback or recovery-side override.
 - The bot chooses digits and barriers itself: Matches/Differs 0–9, Over 0–8, Under 1–9. With all contracts enabled there are **42 candidates per market**. Orders are one tick long.
+- Choose **Trade Locked** or **Smart Switching** only **after the market scan**. Setup contains only contract and risk controls.
 - **Switching:** continuously compare all markets in `AUTOMATED_DERIV_MARKETS`, even when the current market already has a positive opportunity. Both normal and recovery can change market and contract.
 - **Locked:** choose one measured market after the scan. Both phases stay there, but can change between enabled contracts/digits/barriers.
-- Base stake, session stop loss, take profit, and explicit Paper / Connected-account execution mode. Paper is the default.
+- Base stake, session stop loss and take profit. Execution uses the connected Deriv account (demo or real); there is no user-facing paper mode.
 - Existing Settings supply maximum trade stake and bot recovery markup. No multiplier ladder or loss-count-dependent entry control is added.
 
 “All markets” means the app's existing **19 automated synthetic markets**, not every market offered by Deriv. The app's manual-only exclusion (`JD100`) is preserved. This change does not add Forex, commodities, accumulators, or other unsupported markets/contracts. Broker proposals remain authoritative for current contract availability.
@@ -73,13 +74,13 @@ Requests round upward to cents, but **never above** the downward-rounded minimum
 
 Zero or sub-minimum balance is **not** interpreted as unlimited. An unaffordable normal base stake is not silently increased. The broker minimum remains 0.35. A capped recovery win may pay only part of the debt; the rest carries forward. Recovery ends as soon as mandatory loss debt is cleared, not when an optional target-profit remainder reaches zero.
 
-Paper mode starts with 1,000 virtual USD, uses the same recovery transition on an isolated paper state, and never changes account balances or shared live recovery debt. Paper orders are explicitly marked in their journal metadata. Starting another paper rehearsal resets its virtual session, not the live account ledger.
+Public scan/start endpoints reject paper execution and require the connected account. They never silently fall back to virtual funds. The internal isolated-paper runner is retained solely for deterministic engine regression tests; it is not exposed by the console or deployment API. Existing global account paper-trade safeguards are respected rather than overridden.
 
 ## Execution integrity
 
 - Browser/account session-scoped state through the existing AsyncLocalStorage infrastructure. The existing arbiter, engine registry, live indicator and owner-scoped SSE are used.
 - One outstanding order per bot. A second start is rejected even while the first start awaits database/broker operations.
-- Scan results and fitted models stay on the server. Start requires the owner's unexpired scan id, the exact validated configuration, and a market actually measured by that scan. No client-provided probability, payout or fitted parameter is trusted.
+- Scan results and fitted models stay on the server. Start requires the owner's unexpired scan id, the same contract/risk/execution settings, and a market actually measured by that scan. Market lock/switch is intentionally chosen after the scan and is the only configuration field excluded from its fingerprint; every scan fits the same all-market models. No client-provided probability, payout or fitted parameter is trusted.
 - Monotonic `DigitTape` sequence + generation + source identify observations. Identical prices/digits and full ring buffers still advance the model and paper settlement. Source changes/gaps rebuild the model rather than splice simulated and real data.
 - Broker history merges by **epoch and price**, preserving repeated values and rejecting conflicts.
 - Indicative payout tables can rank unpriced candidates, but **never authorize a live buy**. The leading estimated candidate is quoted on its pinned account socket; quotes are cached for ranking for 30 seconds. A changed quote reranks the field. The stake is re-quoted if payout changes alter recovery sizing. This is a quote-aware estimated tournament, not a claim that every possible order is simultaneously priced at the broker.
@@ -93,18 +94,18 @@ If a lost acknowledgement cannot be matched safely (for example, the broker omit
 
 ## Console and diagnostics
 
-The dedicated console includes eight contract toggles, market freedom controls, explicit paper/live selection, scan progress, per-market normal/recovery cards, chronological replay diagnostics, an opportunity radar, pending-order/stopping state and a live-mode risk acknowledgement.
+The dedicated console uses the standard 336px, bottom-right bot panel with compact cards, responsive viewport limits and no wide tables. Setup contains eight contract toggles and risk inputs. After scanning, the user selects a market, acknowledges account-trading risk and explicitly chooses the full-width **Trade Locked** or **Smart Switching** action. Normal/recovery preview tabs and expandable diagnostics avoid a tall stack of panels. Running sessions show a compact opportunity radar and safe Stop state. No execution-mode or market-freedom controls are duplicated in setup.
 
 A scan warms the causal model on the first 60% of up to 2,400 ticks, then evaluates the same **single-market** selection rule chronologically on the last 40%, updating only from earlier outcomes. It reports normal/recovery wins and shots, consecutive recovery loss pairs, replay P&L, remaining debt, and risk-budget exhaustion. It is **not** a backtest of cross-market switching. It uses indicative payouts and ideal next-observed-tick fills, not historical executable quotes or broker latency. Comparing many replay cards introduces selection bias. Simulated feeds are prominently labelled and cannot authorize live deployment.
 
-Recovery can increase exposure and produce additional losses. Neither a high estimated win rate, positive utility nor a good replay guarantees recovery or profit. Validate in paper/demo before considering real-money use.
+Recovery can increase exposure and produce additional losses. Neither a high estimated win rate, positive utility nor a good replay guarantees recovery or profit. Validate with a connected Deriv demo account before considering real-money use.
 
 ## API
 
 Mounted before the generic specialist routes:
 
-- `POST /api/bots/omni/scan` — strict `OmniConfig` body.
-- `POST /api/bots/omni/start` — `{ config, scanId, symbol, acknowledgeLiveRisk? }`; live mode requires explicit acknowledgement.
+- `POST /api/bots/omni/scan` — strict connected-account `OmniConfig` body.
+- `POST /api/bots/omni/start` — `{ config, scanId, symbol, acknowledgeLiveRisk? }`; connected-account deployment requires explicit acknowledgement.
 - `GET /api/bots/omni/status` — the current browser/account session only.
 - `POST /api/bots/omni/stop` — request drain/stop; `running` remains true during unresolved settlement.
 
@@ -117,11 +118,11 @@ Mounted before the generic specialist routes:
   "stopLoss": 10,
   "takeProfit": 10,
   "marketMode": "switching",
-  "executionMode": "paper"
+  "executionMode": "live"
 }
 ```
 
-Unknown keys, empty/duplicate/unsupported selections, non-finite amounts, fractional-cent stakes, invalid modes and risk-inconsistent configurations are rejected. Both generic catalogue/status and the global live registry include Omni; the web/API release handshake publishes `omni@1`.
+Unknown keys, empty/duplicate/unsupported selections, non-finite amounts, fractional-cent stakes, paper execution, invalid modes and risk-inconsistent configurations are rejected. A fresh scan remains valid when choosing only lock/switch afterward; changing contracts, stake, stop loss or take profit still requires a new scan. Both generic catalogue/status and the global live registry include Omni; the web/API release handshake publishes `omni@2`.
 
 ## Validation
 
@@ -129,6 +130,6 @@ Unknown keys, empty/duplicate/unsupported selections, non-finite amounts, fracti
 - `omni-execution.test.ts`: live repricing, actual-stake re-quoting, stop/queue races, journaling failure, lost buy acknowledgements, strict reconciliation matching, tick identity and provenance.
 - `omni-engine.test.ts`: trusted scan binding, account isolation, concurrent starts, shared execution lease, real paper loss → recovery transitions, shared-live-debt isolation, same-price next ticks, stop draining, stop-loss preservation and ambiguous database-commit retries.
 - Web tests cover all contract controls, validation, dedicated-console handshake and global open/stop paths.
-- Browser smoke checks cover subset selection → scan → locked paper deployment → reload → stop, plus 390px mobile layout. No live account was connected or live-money order placed during validation.
+- Browser smoke checks cover compact desktop/mobile sizing, subset selection, post-scan lock/switch actions, risk acknowledgement, account-only request payloads and all three shortened specialist button labels. Broker start responses are mocked; no live-money orders are placed during UI validation.
 
 The repository also has existing session/authentication failures in `session-isolation.test.ts` and existing API TypeScript errors in `routes/auth.ts` (`isTabSession` / `clientId`). Those files are unchanged by this feature. Review those separately before a production live-trading rollout; a passing feature suite is not a clean bill of health for the entire app.

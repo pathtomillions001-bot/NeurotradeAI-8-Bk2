@@ -479,7 +479,7 @@ export function BastionConsole({ bot, open, onOpenChange, session, onSession }: 
                       </Button>
                       <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "switching")} disabled={loading}
                               variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
-                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching — recovery hunts all markets
+                        <Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching
                       </Button>
                     </div>
                   </>

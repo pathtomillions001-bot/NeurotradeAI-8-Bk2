@@ -59,8 +59,6 @@ export interface BotCardData {
 export interface BotSessionStatus {
   /** Prism Match runner: prismatic probabilities, execution integrity and paper/live mode. */
   prism?: PrismTelemetry;
-  /** Legacy field kept for API compatibility — use `prism` for Prism Match. */
-  nexus?: PrismTelemetry;
   running: boolean;
   botId: string | null;
   botName: string | null;

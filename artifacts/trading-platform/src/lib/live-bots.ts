@@ -34,14 +34,12 @@ export interface LiveBotStatus {
   inRecovery?: boolean;
   recoveryStep?: number;
   prism?: { executionMode: "paper" | "live" };
-  /** Legacy field for backward compatibility */
-  nexus?: { executionMode: "paper" | "live" };
   [key: string]: unknown;
 }
 
 /** Paper performance must never be labelled as a live account result. */
 export function isPaperBot(status: LiveBotStatus): boolean {
-  return status.prism?.executionMode === "paper" || status.nexus?.executionMode === "paper";
+  return status.prism?.executionMode === "paper";
 }
 
 export interface LiveBot {

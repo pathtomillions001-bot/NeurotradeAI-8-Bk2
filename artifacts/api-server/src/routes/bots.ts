@@ -42,7 +42,7 @@ import { logger } from "../lib/logger";
 
 const router = Router();
 
-// Registered before /:botId/* so a generic route cannot widen Nexus contracts.
+// Registered before /:botId/* so a generic route cannot widen Prism contracts.
 router.use("/prism-match", prismMatchRouter);
 
 interface ParsedBotBody {

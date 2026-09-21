@@ -179,8 +179,6 @@ export interface PrismStatus {
     lockedSymbol?: string;
   };
   prism: PrismTelemetry;
-  /** @deprecated — legacy alias kept for a smooth cut-over of stale front-ends. */
-  nexus?: PrismTelemetry;
 }
 
 const errorMessage = (err: unknown) =>
@@ -820,7 +818,6 @@ export class PrismRunner {
           this.marketMode === "locked" ? this.selectedSymbol : undefined,
       },
       prism,
-      nexus: prism,
     };
   }
 }

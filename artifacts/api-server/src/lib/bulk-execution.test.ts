@@ -13,6 +13,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { WebSocketServer } from "ws";
 import {
+  BULK_REQ_ID_BASE,
+  bulkReqId,
   commitDelayMs,
   executeBulkLiveTrades,
   isRetryableDerivError,
@@ -30,12 +32,24 @@ function legParams(n: number) {
   }));
 }
 
+/**
+ * Mimics REAL Deriv `req_id` validation: the field must be an integer. The
+ * original bulk bug shipped because these fakes accepted the string req_ids
+ * real Deriv rejects with `Input validation failed: req_id` before any
+ * contract was created — so this helper reproduces the server-side validation
+ * and every fake below routes through it. A regression can never pass again.
+ */
+function decodeBulkReq(req: Record<string, any>) {
+  if (!Number.isInteger(req.req_id)) return null;
+  return parseBulkLegRef(req);
+}
+
 describe("parseBulkLegRef", () => {
   it("reads the top-level req_id on normal responses", () => {
     assert.deepEqual(
       parseBulkLegRef({
         msg_type: "proposal",
-        req_id: "bulk-proposal-3-1",
+        req_id: bulkReqId("proposal", 3, 1),
         proposal: {},
       }),
       {
@@ -45,7 +59,7 @@ describe("parseBulkLegRef", () => {
       },
     );
     assert.deepEqual(
-      parseBulkLegRef({ msg_type: "buy", req_id: "bulk-buy-0-2", buy: {} }),
+      parseBulkLegRef({ msg_type: "buy", req_id: bulkReqId("buy", 0, 2), buy: {} }),
       {
         phase: "buy",
         leg: 0,
@@ -58,7 +72,7 @@ describe("parseBulkLegRef", () => {
     assert.deepEqual(
       parseBulkLegRef({
         msg_type: "proposal",
-        echo_req: { proposal: 1, req_id: "bulk-proposal-7-1" },
+        echo_req: { proposal: 1, req_id: bulkReqId("proposal", 7, 1) },
         error: {
           code: "RateLimit",
           message: "You have reached the rate limit for proposal.",
@@ -71,8 +85,31 @@ describe("parseBulkLegRef", () => {
   it("returns null for unattributed or foreign messages", () => {
     assert.equal(parseBulkLegRef({ msg_type: "proposal", proposal: {} }), null);
     assert.equal(parseBulkLegRef({ req_id: "something-else" }), null);
+    // Foreign integer req_ids (journal, settlement polls, single trades) and
+    // STRING req_ids (which real Deriv rejects with InputValidationFailed)
+    // must never be attributed to a bulk leg.
+    assert.equal(parseBulkLegRef({ req_id: 1 }), null);
+    assert.equal(parseBulkLegRef({ req_id: 42 }), null);
+    assert.equal(parseBulkLegRef({ req_id: "bulk-proposal-3-1" }), null);
+    assert.equal(parseBulkLegRef({ req_id: BULK_REQ_ID_BASE + 4096 }), null);
     assert.equal(parseBulkLegRef(null), null);
     assert.equal(parseBulkLegRef({}), null);
+  });
+
+  it("bulkReqId emits integers Deriv accepts — round-trips through parseBulkLegRef", () => {
+    for (let leg = 0; leg < 10; leg++) {
+      for (const phase of ["proposal", "buy"] as const) {
+        for (let attempt = 1; attempt <= 4; attempt++) {
+          const id = bulkReqId(phase, leg, attempt);
+          assert.ok(Number.isInteger(id), `req_id ${id} is an integer`);
+          assert.deepEqual(parseBulkLegRef({ req_id: id }), { phase, leg, attempt });
+          assert.deepEqual(
+            parseBulkLegRef({ echo_req: { req_id: id } }),
+            { phase, leg, attempt },
+          );
+        }
+      }
+    }
   });
 });
 
@@ -155,17 +192,10 @@ describe("executeBulkLiveTrades against a hostile fake Deriv", () => {
       socket.on("close", () => sockets.delete(socket));
       socket.on("message", (raw) => {
         const req = JSON.parse(String(raw)) as Record<string, any>;
-        const reqId = String(req.req_id ?? "");
-        const m = /^bulk-(proposal|buy)-(\d+)-(\d+)$/.exec(reqId);
-        if (!m) return;
-        const [, phase, legStr, attemptStr] = m as unknown as [
-          string,
-          string,
-          string,
-          string,
-        ];
-        const leg = Number(legStr);
-        const attempt = Number(attemptStr);
+        const ref = decodeBulkReq(req);
+        if (!ref) return;
+        const { phase, leg, attempt } = ref;
+        const reqId = req.req_id as number;
 
         if (phase === "proposal") {
           // Legs 0-2 quote cleanly; legs 3-9 are throttled on attempt 1 with
@@ -262,11 +292,11 @@ describe("executeBulkLiveTrades against a hostile fake Deriv", () => {
       socket.on("close", () => sockets.delete(socket));
       socket.on("message", (raw) => {
         const req = JSON.parse(String(raw)) as Record<string, any>;
-        const reqId = String(req.req_id ?? "");
-        const m = /^bulk-(proposal|buy)-(\d+)-(\d+)$/.exec(reqId);
-        if (!m) return;
-        const [, phase, legStr] = m as unknown as [string, string, string];
-        const leg = Number(legStr);
+        const ref = decodeBulkReq(req);
+        if (!ref) return;
+        const { phase, leg } = ref;
+        const reqId = req.req_id as number;
+
         if (phase === "proposal" && leg === 1) {
           socket.send(
             JSON.stringify({
@@ -352,11 +382,11 @@ describe("executeBulkLiveTrades against a hostile fake Deriv", () => {
       socket.on("close", () => sockets.delete(socket));
       socket.on("message", (raw) => {
         const req = JSON.parse(String(raw)) as Record<string, any>;
-        const reqId = String(req.req_id ?? "");
-        const m = /^bulk-(proposal|buy)-(\d+)-(\d+)$/.exec(reqId);
-        if (!m) return;
-        const [, phase, legStr] = m as unknown as [string, string, string];
-        const leg = Number(legStr);
+        const ref = decodeBulkReq(req);
+        if (!ref) return;
+        const { phase, leg } = ref;
+        const reqId = req.req_id as number;
+
         if (phase === "proposal") {
           proposalTimes.push(Date.now());
           proposedLegs.add(leg);

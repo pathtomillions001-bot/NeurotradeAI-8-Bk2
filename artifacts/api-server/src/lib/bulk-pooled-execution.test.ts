@@ -49,6 +49,25 @@ interface FakeDeriv {
   close: () => Promise<void>;
 }
 
+// Mirrors BULK_REQ_ID_BASE/bulkReqId in deriv.ts (kept local so this file can
+// keep its lazy dynamic import of the module under test). Real Deriv validates
+// req_id as an INTEGER — the fakes must too, or they silently accept what the
+// exchange rejects (the original bulk bug).
+const BULK_REQ_ID_BASE = 100_000_000;
+
+function decodeBulkReq(
+  req: Record<string, any>,
+): { phase: "proposal" | "buy"; leg: number; attempt: number } | null {
+  const raw = req.req_id;
+  if (typeof raw !== "number" || !Number.isInteger(raw)) return null;
+  const offset = raw - BULK_REQ_ID_BASE;
+  if (offset < 0 || offset > 1023) return null;
+  const attempt = (offset >> 1) & 15;
+  const leg = (offset >> 5) & 15;
+  if (attempt === 0) return null;
+  return { phase: offset & 1 ? "buy" : "proposal", leg, attempt };
+}
+
 async function startFakeDeriv(): Promise<FakeDeriv> {
   const state: FakeDeriv = {
     httpPort: 0,
@@ -70,9 +89,8 @@ async function startFakeDeriv(): Promise<FakeDeriv> {
     socket.on("close", () => state.sockets.delete(socket));
     socket.on("message", (raw) => {
       const req = JSON.parse(String(raw)) as Record<string, any>;
-      const reqId = String(req.req_id ?? "");
-      const m = /^bulk-(proposal|buy)-(\d+)-(\d+)$/.exec(reqId);
-      if (!m) {
+      const ref = decodeBulkReq(req);
+      if (!ref) {
         // Anything else (ping/portfolio/journal) gets a benign answer so the
         // pooled connection is never left waiting.
         if (req.req_id !== undefined) {
@@ -80,8 +98,8 @@ async function startFakeDeriv(): Promise<FakeDeriv> {
         }
         return;
       }
-      const phase = m[1] as "proposal" | "buy";
-      const leg = Number(m[2]);
+      const { phase, leg, attempt } = ref;
+      const reqId = req.req_id as number;
 
       if (phase === "proposal") {
         state.proposalAt.set(leg, Date.now());
@@ -90,7 +108,7 @@ async function startFakeDeriv(): Promise<FakeDeriv> {
           JSON.stringify({
             msg_type: "proposal",
             req_id: reqId,
-            proposal: { id: `P-${leg}-${m[3]}`, ask_price: 1 },
+            proposal: { id: `P-${leg}-${attempt}`, ask_price: 1 },
           }),
         );
         return;

@@ -3446,13 +3446,35 @@ export function commitDelayMs(
   return waitMs <= maxWaitMs ? Math.ceil(waitMs) : 0;
 }
 
-/** req_id one leg's proposal/buy carries — attempt-suffixed so a stale retry response can never double-buy. */
+/**
+ * req_id one leg's proposal/buy carries — attempt-suffixed so a stale retry
+ * response can never double-buy.
+ *
+ * CRITICAL: Deriv validates `req_id` as an INTEGER. The original string form
+ * ("bulk-proposal-0-1") was rejected server-side with
+ * `Input validation failed: req_id` before a contract was ever created —
+ * every bulk batch died instantly while single trades (integer req_id via the
+ * connection's counter) worked. The (phase, leg, attempt) tuple is now packed
+ * into one integer:
+ *
+ *   reqId = BULK_REQ_ID_BASE + (leg << 5) + (attempt << 1) + phaseBit
+ *
+ * phaseBit: proposal = 0, buy = 1. leg needs 4 bits (max 10 legs), attempt 4
+ * bits (max 15; BULK_MAX_ATTEMPTS is 4), so the packed offset fits in 10 bits
+ * (≤ 511) and the whole id stays a 9-digit integer — far below any integer
+ * ceiling and collision-free with the connection's small sequential ids.
+ */
+export const BULK_REQ_ID_BASE = 100_000_000;
+const BULK_REQ_OFFSET_MAX = 1023;
+
 export function bulkReqId(
   phase: "proposal" | "buy",
   legIndex: number,
   attempt: number,
-): string {
-  return `bulk-${phase}-${legIndex}-${attempt}`;
+): number {
+  const phaseBit = phase === "buy" ? 1 : 0;
+  const offset = ((legIndex & 15) << 5) | ((attempt & 15) << 1) | phaseBit;
+  return BULK_REQ_ID_BASE + offset;
 }
 
 /**
@@ -3462,18 +3484,25 @@ export function bulkReqId(
  * envelopes only reliably carry the original request under `echo_req` —
  * matching errors on `msg.req_id` alone mis-attributes per-leg failures as
  * batch-fatal and kills the healthy legs with them.
+ *
+ * Any req_id below BULK_REQ_ID_BASE belongs to another consumer of the shared
+ * socket (journal refreshes, settlement polls, single trades) and is ignored.
  */
 export function parseBulkLegRef(
   msg: any,
 ): { phase: "proposal" | "buy"; leg: number; attempt: number } | null {
   const raw = msg?.req_id ?? msg?.echo_req?.req_id;
-  if (typeof raw !== "string") return null;
-  const m = /^bulk-(proposal|buy)-(\d+)-(\d+)$/.exec(raw.trim());
-  if (!m) return null;
+  if (typeof raw !== "number" || !Number.isInteger(raw)) return null;
+  const offset = raw - BULK_REQ_ID_BASE;
+  if (offset < 0 || offset > BULK_REQ_OFFSET_MAX) return null;
+  const phaseBit = offset & 1;
+  const attempt = (offset >> 1) & 15;
+  const leg = (offset >> 5) & 15;
+  if (attempt === 0) return null; // attempts start at 1 — not one of ours
   return {
-    phase: m[1] as "proposal" | "buy",
-    leg: Number(m[2]),
-    attempt: Number(m[3]),
+    phase: phaseBit === 1 ? "buy" : "proposal",
+    leg,
+    attempt,
   };
 }
 

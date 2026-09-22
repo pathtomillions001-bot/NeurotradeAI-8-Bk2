@@ -1129,6 +1129,12 @@ function computeJournalStats(trades: any[]) {
   // the actual latest trades are a win streak).
   const todayStats = computeStatsCore([...today].reverse());
 
+  // Streak is the ONLY stat tied to the recent-100 window the journal displays:
+  // compute it over the 100 most recent trades of the day (newest-first) rather
+  // than the full day, per the journal's display contract.
+  const streakWindow = [...today].reverse().slice(0, 100);
+  const streakStats = computeStatsCore(streakWindow);
+
   return {
     ...allTime,
     todayProfit: todayStats.totalProfit,
@@ -1136,7 +1142,9 @@ function computeJournalStats(trades: any[]) {
     todayWon: todayStats.wonTrades,
     todayLost: todayStats.lostTrades,
     // Clean-slate view for Dashboard/Journal — everything scoped to "today" only.
-    todayStats,
+    // Win rate / profit / trades taken / best / worst come from ALL of today's
+    // trades (todayStats); only currentStreak comes from the recent-100 window.
+    todayStats: { ...todayStats, currentStreak: streakStats.currentStreak },
     // The actual today-scoped trade list (oldest → newest), so every consumer
     // (Analytics charts/timeline included) renders the exact same rows the
     // stats above were computed from, instead of re-deriving its own filter.
@@ -1238,11 +1246,15 @@ router.get("/deriv-journal", async (req, res): Promise<void> => {
   // Disable Express ETag / HTTP caching so the client always gets fresh data
   // and React Query doesn't receive stale 304 responses after a journalManager refresh.
   res.set("Cache-Control", "no-store");
-  // Limit the trade list to the 200 most recent for display.
-  // Stats are computed from the full set above — only the rendered list is capped.
-  // This reduces the JSON payload from ~1 MB (5000+ trades) to ~40 KB, which
-  // eliminates the main-thread JSON.parse stall that froze the FAB and delayed navigation.
-  res.json({ source: "deriv" as const, trades: mapped.slice(0, 100), todayTrades: journalStats.todayTradesList, stats: journalStats });
+  // The journal shows ONLY today's trades — the 100 most recent of the current
+  // calendar day (`mapped` is newest-first from Deriv's profit_table). Stats are
+  // computed from the full set above (todayStats covers the whole day), so the
+  // displayed 100 never influence the win rate / profit / trades / best / worst.
+  // This also keeps the payload small (~40 KB), eliminating the main-thread
+  // JSON.parse stall that used to freeze the FAB.
+  const todayStart = getTodayStart();
+  const todaysTrades = mapped.filter((t) => new Date(t.createdAt) >= todayStart);
+  res.json({ source: "deriv" as const, trades: todaysTrades.slice(0, 100), todayTrades: journalStats.todayTradesList, stats: journalStats });
 });
 
 router.get("/:id", async (req, res): Promise<void> => {

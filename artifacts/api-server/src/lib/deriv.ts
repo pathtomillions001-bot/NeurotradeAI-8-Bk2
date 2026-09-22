@@ -1783,11 +1783,11 @@ export async function ensureFreshBearerToken(
 // calls, so the app can trade as often as before without approaching a limit.
 
 /** Minimum gap between two outgoing messages on one connection (40 msg/s max). */
-const ACCOUNT_SEND_INTERVAL_MS = 25;
+const ACCOUNT_SEND_INTERVAL_MS = 100;
 /** Default per-request timeout on the pooled socket. */
 const ACCOUNT_REQUEST_TIMEOUT_MS = 20_000;
 /** How long a RateLimit error pauses the outgoing queue. */
-const ACCOUNT_RATE_LIMIT_PAUSE_MS = 2_000;
+const ACCOUNT_RATE_LIMIT_PAUSE_MS = 4_000;
 /** Tear a connection down when it has been idle this long (frees the slot). */
 const ACCOUNT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -1965,16 +1965,40 @@ class DerivAccountConnection extends EventEmitter {
   }
 
   private processQueue(): void {
-    if (Date.now() < this.pausedUntil) return;
+    if (Date.now() < this.pausedUntil) { this.scheduleDrain(); return; }
     if (!this.isOpen()) return;
     if (this.sendQueue.length === 0) return;
-    if (Date.now() - this.lastSendMs < ACCOUNT_SEND_INTERVAL_MS) return;
+    if (Date.now() - this.lastSendMs < ACCOUNT_SEND_INTERVAL_MS) { this.scheduleDrain(); return; }
     const task = this.sendQueue.shift();
     try {
       task?.();
     } catch {
       /* ignore */
     }
+    // Keep draining on a timer: callers that enqueue in a burst (several
+    // settlement pollers waking at once) must be spaced out, not blasted
+    // back-to-back — the un-spaced burst is what tripped Deriv's per-second
+    // rate limit and paused the whole socket.
+    this.scheduleDrain();
+  }
+
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** True while Deriv's per-second rate limit has the socket paused. Callers
+   *  with optional/backoff traffic (settlement polling) check this to avoid
+   *  piling requests into the queue during a pause. */
+  isRateLimitPaused(): boolean {
+    return Date.now() < this.pausedUntil;
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainTimer) return;
+    const wait = Math.max(ACCOUNT_SEND_INTERVAL_MS - (Date.now() - this.lastSendMs), 0);
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = null;
+      this.processQueue();
+    }, wait);
+    this.drainTimer.unref?.();
   }
 
   private touchIdle(): void {
@@ -2155,6 +2179,7 @@ class DerivAccountConnection extends EventEmitter {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     if (this.queueTimer) { clearInterval(this.queueTimer); this.queueTimer = null; }
+    if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
     this.failPending();
     try { this.ws?.terminate(); } catch { /* ignore */ }
     this.ws = null;
@@ -4010,9 +4035,6 @@ export async function waitForBulkContractResults(
   if (contractIds.length === 0) return [];
 
   const found = new Map<number, ContractResult>();
-  // Ask for strictly more rows than the batch so a busy account (bots trading
-  // on the same wallet) can never push a leg out of the page we read.
-  const tableLimit = Math.min(500, Math.max(50, contractIds.length + 20));
   const deadline = Date.now() + timeoutMs + 10_000;
 
   const collectFromProfitTable = (msg: any): void => {
@@ -4038,32 +4060,20 @@ export async function waitForBulkContractResults(
     }
   };
 
-  // Poll over the account's PERSISTENT socket — no OTP handshake, no extra
-  // connection, and the same socket the batch was bought over.
+  // Poll over the account's PERSISTENT socket via the SHARED, throttled
+  // settlement snapshot — no direct per-batch requests here. A busy account
+  // with several batches settling concurrently now shares one poll stream
+  // instead of multiplying the request rate past Deriv's per-second limit.
   while (found.size < contractIds.length && Date.now() < deadline) {
-    let portfolioMsg: any = null;
-    let profitMsg: any = null;
-    try {
-      [portfolioMsg, profitMsg] = await Promise.all([
-        accountRequest(bearerToken, accountId, { portfolio: 1 }, 12_000),
-        accountRequest(
-          bearerToken, accountId,
-          { profit_table: 1, limit: tableLimit, sort: "DESC" },
-          12_000,
-        ),
-      ]);
-    } catch {
-      // Transient socket problem — retry until the deadline. The contract is
-      // safe on Deriv's side; the reconciler also covers a hard failure.
-      await sleep(1_000);
-      continue;
+    const snap = await pollSettlementSnapshot(bearerToken, accountId);
+    if (snap.profitTxs.length > 0) {
+      collectFromProfitTable({ profit_table: { transactions: snap.profitTxs } });
     }
-    if (profitMsg) collectFromProfitTable(profitMsg);
     if (found.size >= contractIds.length) break;
-    // `portfolio` tells us the legs are still open; keep polling. A transient
-    // null (socket hiccup) also just means "poll again".
-    if (!portfolioMsg && !profitMsg && Date.now() >= deadline) break;
-    await sleep(1_000);
+    // An empty snapshot (socket hiccup / rate-limit stand-down) just means
+    // "poll again"; the contract is safe on Deriv's side and the reconciler
+    // also covers a hard failure.
+    await sleep(2_000);
   }
 
   // Resolve with whatever settled; legs Deriv never journalued in time are
@@ -4098,7 +4108,72 @@ export async function fetchDerivProfitTable(
   }
 }
 
-// ── Wait for contract result via OTP WebSocket ────────────────────────────────
+// ── Shared settlement-poll snapshot ──────────────────────────────────────────
+// Each settling trade used to run its OWN portfolio + profit_table poll loop
+// at a 1-2 s cadence — N open trades meant N× the requests per second on the
+// shared account socket, which tripped Deriv's per-second rate limit and
+// paused ALL outgoing traffic (bots' proposals/buys + journal refreshes) for
+// minutes at a time. Every poller now shares ONE throttled snapshot per
+// account: at most one poll pair every SETTLEMENT_POLL_INTERVAL_MS, with
+// concurrent pollers inside that window reusing the last snapshot for free.
+// While Deriv is rate-limiting the socket, the poller stands down entirely
+// instead of piling requests into the queue and re-tripping the limit.
+const SETTLEMENT_POLL_INTERVAL_MS = 4_000;
+const settlementPollState = new Map<string, {
+  lastDoneMs: number;
+  last: { portfolioMsg: any; profitTxs: any[] };
+  inFlight: Promise<{ portfolioMsg: any; profitTxs: any[] }> | null;
+}>();
+
+const EMPTY_SNAPSHOT = { portfolioMsg: null, profitTxs: [] as any[] };
+
+async function pollSettlementSnapshot(
+  bearerToken: string,
+  accountId: string,
+): Promise<{ portfolioMsg: any; profitTxs: any[] }> {
+  let state = settlementPollState.get(accountId);
+  if (!state) {
+    state = { lastDoneMs: 0, last: EMPTY_SNAPSHOT, inFlight: null };
+    settlementPollState.set(accountId, state);
+  }
+  const now = Date.now();
+  // Fresh-enough snapshot — reuse it for free (no Deriv request at all).
+  if (state.inFlight) return state.inFlight;
+  if (state.last && now - state.lastDoneMs < SETTLEMENT_POLL_INTERVAL_MS) return state.last;
+  // Deriv is rate-limiting this account — stand down instead of re-tripping.
+  let conn: DerivAccountConnection;
+  try {
+    conn = getAccountConnection(bearerToken, accountId);
+  } catch {
+    return EMPTY_SNAPSHOT;
+  }
+  if (conn.isRateLimitPaused()) return state.last;
+
+  const send = (async () => {
+    let profitTxs: any[] = [];
+    try {
+      const prof = await accountRequest(
+        bearerToken, accountId,
+        { profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT },
+        12_000,
+      );
+      if (prof && !prof.error) profitTxs = prof.profit_table?.transactions ?? [];
+    } catch {
+      /* transient socket problem — the caller's loop retries on its next tick */
+    }
+    state.last = { portfolioMsg: null, profitTxs };
+    state.lastDoneMs = Date.now();
+    return state.last;
+  })();
+  state.inFlight = send;
+  try {
+    return await send;
+  } finally {
+    state.inFlight = null;
+  }
+}
+
+
 /**
  * NOTE: proposal_open_contracts is unsupported for this account/app_id combination.
  * We poll `portfolio` (checks if contract is still open) then `profit_table`
@@ -4124,44 +4199,27 @@ export async function waitForContractResult(
   const deadline = Date.now() + timeoutMs + 5_000;
 
   while (Date.now() < deadline) {
-    let portfolioMsg: any = null;
-    let profitMsg: any = null;
-    try {
-      [portfolioMsg, profitMsg] = await Promise.all([
-        accountRequest(bearerToken, accountId, { portfolio: 1 }, 12_000),
-        accountRequest(bearerToken, accountId, { profit_table: 1, limit: 50, sort: "DESC" }, 12_000),
-      ]);
-    } catch {
-      // Transient socket problem — keep polling until the deadline instead of
-      // marking a healthy trade as failed.
-      await sleep(2_000);
-      continue;
+    // Shared, throttled snapshot — no direct per-trade requests here. Most
+    // results arrive from the journal's real-time sell events anyway; this
+    // poll is only the fallback, so it must never flood the shared socket.
+    const snap = await pollSettlementSnapshot(bearerToken, accountId);
+    const txs: any[] = snap.profitTxs;
+    const tx = txs.find((t) => Number(t.contract_id) === contractId);
+    if (tx) {
+      const buyPrice = Number(tx.buy_price ?? 0);
+      const sellPrice = Number(tx.sell_price ?? 0);
+      const profit = sellPrice - buyPrice;
+      return {
+        contractId,
+        won: profit > 0,
+        profit,
+        exitSpot: 0,
+        sellPrice,
+        entrySpot: buyPrice,
+        purchasedAtMs: toEpochMs(tx.purchase_time),
+        exitedAtMs: toEpochMs(tx.sell_time),
+      };
     }
-
-    if (profitMsg && !profitMsg.error) {
-      const txs: any[] = profitMsg.profit_table?.transactions ?? [];
-      const tx = txs.find((t) => Number(t.contract_id) === contractId);
-      if (tx) {
-        const buyPrice = Number(tx.buy_price ?? 0);
-        const sellPrice = Number(tx.sell_price ?? 0);
-        const profit = sellPrice - buyPrice;
-        return {
-          contractId,
-          won: profit > 0,
-          profit,
-          exitSpot: 0,
-          sellPrice,
-          entrySpot: buyPrice,
-          purchasedAtMs: toEpochMs(tx.purchase_time),
-          exitedAtMs: toEpochMs(tx.sell_time),
-        };
-      }
-    }
-
-    // Not settled yet. If the contract is no longer in the open portfolio and
-    // Deriv has not journalued it yet, keep polling — the journal entry is what
-    // gives us Deriv's exact profit.
-    void portfolioMsg;
     await sleep(2_000);
   }
 

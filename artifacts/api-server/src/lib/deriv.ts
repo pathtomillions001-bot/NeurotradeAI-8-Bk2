@@ -2592,13 +2592,34 @@ class DerivJournalManager extends EventEmitter {
   /** Self-healing backfill state: while a detail-repair profit_table fetch is outstanding */
   private backfillInFlight = false;
   private lastBackfillSentMs = 0;
+  /** Consecutive backfills that produced no progress — caps retry loops */
+  private backfillAttempts = 0;
+  /** Healable-row count sampled when the current backfill was sent */
+  private healableBeforeBackfill = -1;
+  /** Last real-time `sell` transaction event seen on the socket — bots actively
+   *  trading produce these continuously; used to pause backfill while trading. */
+  private lastSellEventMs = 0;
+
+  /** Transactions the 24h backfill window can actually heal (missing details
+   *  AND purchased within the window). Older rows are unhealable by this fetch
+   *  and must not keep the retry loop alive forever. */
+  private countHealable(): number {
+    const cutoffSec = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
+    return this.cachedTransactions.filter((t: any) =>
+      !DerivJournalManager.hasFullDetail(t) &&
+      Number(t.purchase_time ?? 0) >= cutoffSec).length;
+  }
 
   /**
-   * Self-healing backfill: if the cache holds transactions whose payload lacks
-   * display details (longcode/underlying_symbol — e.g. hydrated from rows
-   * written by an incomplete snapshot), re-fetch the last 24 h of profit_table
-   * with full descriptions and upsert them. Rate-limited to one request every
-   * 60 s and never while a paginated chain is running, so trading is unaffected.
+   * Self-healing backfill: if the cache holds in-window transactions whose
+   * payload lacks display details (longcode/underlying_symbol), re-fetch the
+   * last 24 h of profit_table with full descriptions and upsert them.
+   * Guards (all journal-internal, never touched by or touching trading):
+   * - paused while bots are live-trading (sell events within the last 2 min)
+   * - never while a paginated chain is running
+   * - max one request every 60 s, released after 30 s if the response is lost
+   * - stops after 5 no-progress attempts, and never retries rows outside the
+   *   24 h window (those would loop forever without ever healing)
    */
   private maybeScheduleBackfill(): void {
     const now = Date.now();
@@ -2608,17 +2629,25 @@ class DerivJournalManager extends EventEmitter {
       this.backfillInFlight = false;
     }
     if (this.backfillInFlight || this.isFetchingPages || !this.sock?.isOpen()) return;
+    // Bots are actively trading (a contract settled within the last 2 min) —
+    // the journal's repair job must never compete with live trading traffic.
+    if (now - this.lastSellEventMs < 120_000) return;
     if (now - this.lastBackfillSentMs < 60_000) return;
-    const missing = this.cachedTransactions.filter((t: any) => !DerivJournalManager.hasFullDetail(t)).length;
-    if (missing === 0) return;
+    if (this.backfillAttempts >= 5) return;
+    const healable = this.countHealable();
+    if (healable === 0) {
+      this.backfillAttempts = 0;
+      return;
+    }
     this.backfillInFlight = true;
     this.lastBackfillSentMs = now;
+    this.healableBeforeBackfill = healable;
     const dateFrom = Math.floor((now - 24 * 60 * 60 * 1000) / 1000);
     this.sock.send({
       profit_table: 1, description: 1, sort: "DESC", limit: 500, date_from: dateFrom,
       passthrough: { backfill: true },
     });
-    logger.info({ missing }, "JournalManager: detail backfill requested (last 24h)");
+    logger.info({ missing: healable, attempts: this.backfillAttempts }, "JournalManager: detail backfill requested (last 24h)");
   }
 
   setCredentials(bearerToken: string, accountId: string) {
@@ -2640,6 +2669,9 @@ class DerivJournalManager extends EventEmitter {
       this.hasDoneInitialFetch = false;
       this.backfillInFlight = false;
       this.lastBackfillSentMs = 0;
+      this.backfillAttempts = 0;
+      this.healableBeforeBackfill = -1;
+      this.lastSellEventMs = 0;
       // Emit empty immediately so the frontend journal shows "loading" state
       this.emit("refreshed", []);
       this.detach();
@@ -2899,12 +2931,24 @@ class DerivJournalManager extends EventEmitter {
     // from a previous connection has time to cool down.
     if (this.firstFetchTimer) clearTimeout(this.firstFetchTimer);
     this.firstFetchTimer = setTimeout(() => {
-      if (this.sock?.isOpen() && !this.isFetchingPages) {
-        this.fetchAccumulator = [];
-        this.isFetchingPages = true;
-        this.lastRefreshSentMs = Date.now();
-        this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, passthrough: { chain: true } });
+      if (!this.sock?.isOpen() || this.isFetchingPages) return;
+      // RECONNECT OPTIMIZATION: if this process has already completed a full
+      // paginated fetch, do NOT re-page the entire history on every reconnect.
+      // A full chain over ~26k trades is ~53 requests spaced 5 s apart (~4.5 min
+      // of continuous traffic) — after every WS drop/redeploy that burst tripped
+      // Deriv's general per-second rate limit and degraded live trading. The
+      // durable DB copy already holds history and the incremental refresh picks
+      // up new trades. Only a genuinely first fetch (no cache) paginates fully.
+      if (this.hasDoneInitialFetch && this.cachedTransactions.length > 0) {
+        // forceRefresh() applies its own rate-limit guard and, with the cache
+        // populated, uses the single-request incremental (limit:10) mode.
+        this.forceRefresh();
+        return;
       }
+      this.fetchAccumulator = [];
+      this.isFetchingPages = true;
+      this.lastRefreshSentMs = Date.now();
+      this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, passthrough: { chain: true } });
     }, 5_000);
   }
 
@@ -2948,7 +2992,19 @@ class DerivJournalManager extends EventEmitter {
             logger.info({ newInBatch: batch.length, total: this.cachedTransactions.length }, "JournalManager: refresh merged — live trades updated");
             this.emit("refreshed", this.cachedTransactions);
           }
-          if (isBackfill) this.backfillInFlight = false;
+          if (isBackfill) {
+            this.backfillInFlight = false;
+            // Progress check: if the backfill didn't reduce the healable count
+            // (e.g. Deriv returned the same incomplete snapshot), count it as a
+            // failed attempt so the retry loop eventually stops.
+            const healableNow = this.countHealable();
+            if (this.healableBeforeBackfill >= 0 && healableNow >= this.healableBeforeBackfill) {
+              this.backfillAttempts++;
+            } else {
+              this.backfillAttempts = 0;
+            }
+            this.healableBeforeBackfill = -1;
+          }
           this.maybeScheduleBackfill();
           return;
         }
@@ -3000,6 +3056,9 @@ class DerivJournalManager extends EventEmitter {
           this.lastFetchMs = Date.now();
           logger.info({ count: this.cachedTransactions.length, lastTxId: this.lastKnownTransactionId }, "JournalManager: profit table refreshed — incremental mode active");
           this.emit("refreshed", this.cachedTransactions);
+          // A completed full chain should leave the cache complete; this also
+          // resets the backfill attempt counter when nothing remains to heal.
+          this.maybeScheduleBackfill();
         }
       }
 
@@ -3007,6 +3066,9 @@ class DerivJournalManager extends EventEmitter {
       if (msg.msg_type === "transaction" && msg.transaction) {
         const actionType: string = msg.transaction.action ?? msg.transaction.action_type ?? "";
         if (actionType === "sell") {
+          // A contract just settled — bots (or the user) are actively trading.
+          // The backfill uses this to stay out of the way during live trading.
+          this.lastSellEventMs = Date.now();
           logger.info({ action: actionType, id: msg.transaction.contract_id }, "JournalManager: sell event — quick refresh + scheduled full refresh");
           this.forceQuickRefresh();
           this.scheduleTransactionRefresh();

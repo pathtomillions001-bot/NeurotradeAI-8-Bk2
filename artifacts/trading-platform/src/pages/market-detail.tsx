@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { toast } from "sonner";
-import { ArrowLeft, TrendingDown, AlertTriangle, Wifi, WifiOff, ArrowUp, ArrowDown, Brain, Zap, Copy, ShieldCheck } from "lucide-react";
+import { ArrowLeft, TrendingUp, TrendingDown, AlertTriangle, Wifi, WifiOff, Activity, ArrowUp, ArrowDown, Brain, Zap, Copy, ShieldCheck } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
@@ -123,6 +123,7 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
     <Card className="bg-card">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
+          <TrendingUp className="w-4 h-4 text-indigo-400" />
           Rise &amp; Fall Analysis
           {samples > 0 && <span className="text-[10px] text-muted-foreground font-normal">({samples} ticks)</span>}
           {(rsiOverbought || rsiOversold) && (
@@ -231,12 +232,12 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
         <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
           <span className="text-foreground font-medium">AI Signal: </span>
           {isRiseRecommended
-            ? `RISE recommended — ${rsiOversold ? `RSI oversold (${rsi})` : recentFallPct > 65 ? `mean-reversion after ${recentFallPct}% recent falls` : `${risePct}% long-run rise bias`}`
+            ? `📈 RISE recommended — ${rsiOversold ? `RSI oversold (${rsi})` : recentFallPct > 65 ? `mean-reversion after ${recentFallPct}% recent falls` : `${risePct}% long-run rise bias`}`
             : isFallRecommended
-            ? `FALL recommended — ${rsiOverbought ? `RSI overbought (${rsi})` : recentRisePct > 65 ? `mean-reversion after ${recentRisePct}% recent rises` : `${fallPct}% long-run fall bias`}`
+            ? `📉 FALL recommended — ${rsiOverbought ? `RSI overbought (${rsi})` : recentRisePct > 65 ? `mean-reversion after ${recentRisePct}% recent rises` : `${fallPct}% long-run fall bias`}`
             : isHotStreak
-            ? `${hotStreak}× ${hotDirection.toUpperCase()} streak — reversal possible but not confirmed`
-            : "Balanced — no clear edge. Wait for a stronger signal before trading Rise/Fall."}
+            ? `⚠ ${hotStreak}× ${hotDirection.toUpperCase()} streak — reversal possible but not confirmed`
+            : "⚖ Balanced — no clear edge. Wait for a stronger signal before trading Rise/Fall."}
         </div>
       </CardContent>
     </Card>
@@ -253,6 +254,7 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
     <Card className="bg-card">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
+          <span className="text-base leading-none">⚡</span>
           Even &amp; Odd Analysis
         </CardTitle>
       </CardHeader>
@@ -313,6 +315,7 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
     <Card className="bg-card">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm flex items-center gap-2">
+          <span className="text-base leading-none">⚡</span>
           Even &amp; Odd Analysis
           <span className="text-[10px] text-muted-foreground font-normal">({s100} ticks)</span>
           {chiSig && (
@@ -436,20 +439,20 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
         <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
           <span className="text-foreground font-medium">AI Signal: </span>
           {isEvenRecommended
-            ? `EVEN recommended — ${
+            ? `🎯 EVEN recommended — ${
                 streakReversalSignal === "even" ? `reversal after ${streak}× ODD streak`
                 : markovSignal === "even" ? `Markov P(even|last)=${(markovNextEvenProb * 100).toFixed(0)}%`
                 : chiSig ? `χ² confirmed bias (${evenPct100.toFixed(1)}%)` : "multi-signal consensus"
               }`
             : isOddRecommended
-            ? `ODD recommended — ${
+            ? `🎯 ODD recommended — ${
                 streakReversalSignal === "odd" ? `reversal after ${streak}× EVEN streak`
                 : markovSignal === "odd" ? `Markov P(odd|last)=${((1-markovNextEvenProb) * 100).toFixed(0)}%`
                 : chiSig ? `χ² confirmed bias (${oddPct100.toFixed(1)}%)` : "multi-signal consensus"
               }`
             : isStrongStreak
-            ? `${streak}× ${streakType.toUpperCase()} streak — reversal to ${reversalSide} possible but not confirmed`
-            : "Balanced — no clear edge. Avoid trading Even/Odd until a signal forms."}
+            ? `⚠ ${streak}× ${streakType.toUpperCase()} streak — reversal to ${reversalSide} possible but not confirmed`
+            : "⚖ Balanced — no clear edge. Avoid trading Even/Odd until a signal forms."}
         </div>
       </CardContent>
     </Card>
@@ -833,6 +836,7 @@ export default function MarketDetail() {
         <Card className="bg-card">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">
+              <Activity className="w-4 h-4 text-primary" />
               Digit Analysis — OVER/UNDER Intelligence
             </CardTitle>
           </CardHeader>
@@ -848,6 +852,7 @@ export default function MarketDetail() {
         <Card className="bg-card">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">
+              <Activity className="w-4 h-4 text-primary" />
               Digit Analysis — OVER/UNDER Intelligence
               {lastLiveDigit !== null && (
                 <span className="ml-2 flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-primary/15 border border-primary/30">
@@ -941,9 +946,9 @@ export default function MarketDetail() {
             </div>
             <div className="p-2 rounded-lg bg-secondary/30 border border-border text-xs text-muted-foreground">
               <span className="text-foreground font-medium">AI Signal: </span>
-              {digitStats.bias === "over" ? `OVER bias detected — ${digitStats.overPct}% of recent ticks ended with digits 6-9` :
-               digitStats.bias === "under" ? `UNDER bias detected — ${digitStats.underPct}% ended with digits 0-4` :
-               "Neutral — digit distribution is balanced"}
+              {digitStats.bias === "over" ? `📈 OVER bias detected — ${digitStats.overPct}% of recent ticks ended with digits 6-9` :
+               digitStats.bias === "under" ? `📉 UNDER bias detected — ${digitStats.underPct}% ended with digits 0-4` :
+               "⚖ Neutral — digit distribution is balanced"}
               {digitStats.streakInfo && <span className="ml-2 text-amber-400">· {digitStats.streakInfo}</span>}
             </div>
           </CardContent>
@@ -957,6 +962,7 @@ export default function MarketDetail() {
         <Card className="bg-card">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">
+              <span className="text-base leading-none">🎯</span>
               Matches &amp; Differs Intelligence
             </CardTitle>
           </CardHeader>
@@ -972,6 +978,7 @@ export default function MarketDetail() {
         <Card className="bg-card">
           <CardHeader className="pb-2">
             <CardTitle className="text-sm flex items-center gap-2">
+              <span className="text-base leading-none">🎯</span>
               Matches &amp; Differs Intelligence
               <span className="ml-auto w-2 h-2 rounded-full bg-green-500 animate-pulse" title="Live" />
             </CardTitle>

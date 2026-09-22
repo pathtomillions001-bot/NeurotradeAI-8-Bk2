@@ -1769,12 +1769,12 @@ export async function ensureFreshBearerToken(
 // below Deriv's ceiling. A trade costs ZERO extra sockets and ZERO extra REST
 // calls, so the app can trade as often as before without approaching a limit.
 
-/** Minimum gap between two outgoing messages on one connection (40 msg/s max). */
-const ACCOUNT_SEND_INTERVAL_MS = 25;
+/** Minimum gap between two outgoing messages on one connection (10 msg/s max). */
+const ACCOUNT_SEND_INTERVAL_MS = 100;
 /** Default per-request timeout on the pooled socket. */
 const ACCOUNT_REQUEST_TIMEOUT_MS = 20_000;
 /** How long a RateLimit error pauses the outgoing queue. */
-const ACCOUNT_RATE_LIMIT_PAUSE_MS = 2_000;
+const ACCOUNT_RATE_LIMIT_PAUSE_MS = 4_000;
 /** Tear a connection down when it has been idle this long (frees the slot). */
 const ACCOUNT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -1912,16 +1912,40 @@ class DerivAccountConnection extends EventEmitter {
   }
 
   private processQueue(): void {
-    if (Date.now() < this.pausedUntil) return;
+    if (Date.now() < this.pausedUntil) { this.scheduleDrain(); return; }
     if (!this.isOpen()) return;
     if (this.sendQueue.length === 0) return;
-    if (Date.now() - this.lastSendMs < ACCOUNT_SEND_INTERVAL_MS) return;
+    if (Date.now() - this.lastSendMs < ACCOUNT_SEND_INTERVAL_MS) { this.scheduleDrain(); return; }
     const task = this.sendQueue.shift();
     try {
       task?.();
     } catch {
       /* ignore */
     }
+    // Keep draining on a timer: callers that enqueue in a burst (several
+    // settlement pollers waking at once) must be spaced out, not blasted
+    // back-to-back — the un-spaced burst is what tripped Deriv's per-second
+    // rate limit and paused the whole socket.
+    this.scheduleDrain();
+  }
+
+  private drainTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** True while Deriv's per-second rate limit has the socket paused. Callers
+   *  with optional/backoff traffic (settlement polling) check this to avoid
+   *  piling requests into the queue during a pause. */
+  isRateLimitPaused(): boolean {
+    return Date.now() < this.pausedUntil;
+  }
+
+  private scheduleDrain(): void {
+    if (this.drainTimer) return;
+    const wait = Math.max(ACCOUNT_SEND_INTERVAL_MS - (Date.now() - this.lastSendMs), 0);
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = null;
+      this.processQueue();
+    }, wait);
+    this.drainTimer.unref?.();
   }
 
   private touchIdle(): void {
@@ -2102,6 +2126,7 @@ class DerivAccountConnection extends EventEmitter {
     if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
     if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     if (this.queueTimer) { clearInterval(this.queueTimer); this.queueTimer = null; }
+    if (this.drainTimer) { clearTimeout(this.drainTimer); this.drainTimer = null; }
     this.failPending();
     try { this.ws?.terminate(); } catch { /* ignore */ }
     this.ws = null;
@@ -2458,6 +2483,66 @@ class DerivJournalManager extends EventEmitter {
   private lastKnownTransactionId = 0;
   /** Whether we have ever done a full initial paginated fetch (needed before incremental works) */
   private hasDoneInitialFetch = false;
+  /** Self-healing backfill state: while a detail-repair profit_table fetch is outstanding */
+  private backfillInFlight = false;
+  private lastBackfillSentMs = 0;
+  /** Consecutive backfills that produced no progress — caps retry loops */
+  private backfillAttempts = 0;
+  /** Healable-row count sampled when the current backfill was sent */
+  private healableBeforeBackfill = -1;
+  /** Last real-time `sell` transaction event seen on the socket — bots actively
+   *  trading produce these continuously; used to pause backfill while trading. */
+  private lastSellEventMs = 0;
+
+  /** Transactions the 24h backfill window can actually heal (missing details
+   *  AND purchased within the window). Older rows are unhealable by this fetch
+   *  and must not keep the retry loop alive forever. */
+  private countHealable(): number {
+    const cutoffSec = Math.floor((Date.now() - 24 * 60 * 60 * 1000) / 1000);
+    return this.cachedTransactions.filter((t: any) =>
+      !DerivJournalManager.hasFullDetail(t) &&
+      Number(t.purchase_time ?? 0) >= cutoffSec).length;
+  }
+
+  /**
+   * Self-healing backfill: if the cache holds in-window transactions whose
+   * payload lacks display details (longcode/underlying_symbol), re-fetch the
+   * last 24 h of profit_table with full descriptions and upsert them.
+   * Guards (all journal-internal, never touched by or touching trading):
+   * - paused while bots are live-trading (sell events within the last 2 min)
+   * - never while a paginated chain is running
+   * - max one request every 60 s, released after 30 s if the response is lost
+   * - stops after 5 no-progress attempts, and never retries rows outside the
+   *   24 h window (those would loop forever without ever healing)
+   */
+  private maybeScheduleBackfill(): void {
+    const now = Date.now();
+    // Stuck-request safety: a lost/never-answered backfill response releases
+    // the flag after 30 s so healing can retry.
+    if (this.backfillInFlight && now - this.lastBackfillSentMs > 30_000) {
+      this.backfillInFlight = false;
+    }
+    if (this.backfillInFlight || this.isFetchingPages || !this.sock?.isOpen()) return;
+    // Bots are actively trading (a contract settled within the last 2 min) —
+    // the journal's repair job must never compete with live trading traffic.
+    if (now - this.lastSellEventMs < 120_000) return;
+    if (now - this.lastBackfillSentMs < 60_000) return;
+    if (this.backfillAttempts >= 5) return;
+    const healable = this.countHealable();
+    if (healable === 0) {
+      this.backfillAttempts = 0;
+      return;
+    }
+    this.backfillInFlight = true;
+    this.lastBackfillSentMs = now;
+    this.healableBeforeBackfill = healable;
+    const dateFrom = Math.floor((now - 24 * 60 * 60 * 1000) / 1000);
+    this.sock.send({
+      profit_table: 1, description: 1, sort: "DESC", limit: 500, date_from: dateFrom,
+      passthrough: { backfill: true },
+    });
+    logger.info({ missing: healable, attempts: this.backfillAttempts }, "JournalManager: detail backfill requested (last 24h)");
+  }
 
   setCredentials(bearerToken: string, accountId: string) {
     const changed = this.bearerToken !== bearerToken || this.accountId !== accountId;
@@ -2476,6 +2561,11 @@ class DerivJournalManager extends EventEmitter {
       this.hydratedFromDb = false;
       this.lastKnownTransactionId = 0;
       this.hasDoneInitialFetch = false;
+      this.backfillInFlight = false;
+      this.lastBackfillSentMs = 0;
+      this.backfillAttempts = 0;
+      this.healableBeforeBackfill = -1;
+      this.lastSellEventMs = 0;
       // Emit empty immediately so the frontend journal shows "loading" state
       this.emit("refreshed", []);
       this.detach();
@@ -2543,22 +2633,39 @@ class DerivJournalManager extends EventEmitter {
       this.lastFetchMs = Date.now();
       logger.info({ count: parsed.length }, "JournalManager: hydrated journal from durable store");
       this.emit("refreshed", this.cachedTransactions);
+      // Rows restored from disk may predate a detail-less snapshot — kick the
+      // self-healing backfill so incomplete payloads get repaired automatically.
+      this.maybeScheduleBackfill();
     } catch (err) {
       logger.debug({ err }, "JournalManager: journal hydration skipped");
     }
   }
 
+  /** True if a profit_table transaction carries the display-critical details
+   *  (longcode → market/contract/barrier, underlying_symbol → market name).
+   *  Incomplete snapshots (from foreign/shared-socket profit_table responses)
+   *  must never be persisted over complete ones. */
+  private static hasFullDetail(t: any): boolean {
+    return typeof t?.longcode === "string" && t.longcode.length > 0 && !!t?.underlying_symbol;
+  }
+
   /**
    * Write transactions through to the durable journal.
    * Fire-and-forget: the UI must never wait on (or fail because of) persistence.
+   * Incomplete transactions (missing longcode/symbol) are SKIPPED — writing them
+   * would overwrite complete payloads already on disk (the reported "older
+   * journal rows lose their market/contract details"). A later fetch of the
+   * same transaction with full details upserts the complete payload instead.
    */
   private persistTransactions(sessionId: string | null, txs: any[]): void {
     if (!sessionId || txs.length === 0 || !this.accountId) return;
+    const complete = txs.filter((tx) => DerivJournalManager.hasFullDetail(tx));
+    if (complete.length === 0) return;
     const accountId = this.accountId;
     void (async () => {
       try {
         const { pool } = await import("@workspace/db");
-        for (const tx of txs) {
+        for (const tx of complete) {
           const transactionId = String(tx.transaction_id ?? tx.contract_id ?? "");
           if (!transactionId) continue;
           await pool.query(
@@ -2644,10 +2751,12 @@ class DerivJournalManager extends EventEmitter {
       return;
     }
 
-    // FULL INITIAL FETCH: paginated fetch of all trades (only on first connect)
+    // FULL INITIAL FETCH: paginated fetch of all trades (only on first connect).
+    // passthrough.chain marks every response as OURS so the message handler can
+    // distinguish it from foreign profit_table responses on the shared socket.
     this.isFetchingPages = true;
     this.fetchAccumulator = [];
-    this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT });
+    this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, passthrough: { chain: true } });
   }
 
   private stopTimers() {
@@ -2716,12 +2825,24 @@ class DerivJournalManager extends EventEmitter {
     // from a previous connection has time to cool down.
     if (this.firstFetchTimer) clearTimeout(this.firstFetchTimer);
     this.firstFetchTimer = setTimeout(() => {
-      if (this.sock?.isOpen() && !this.isFetchingPages) {
-        this.fetchAccumulator = [];
-        this.isFetchingPages = true;
-        this.lastRefreshSentMs = Date.now();
-        this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT });
+      if (!this.sock?.isOpen() || this.isFetchingPages) return;
+      // RECONNECT OPTIMIZATION: if this process has already completed a full
+      // paginated fetch, do NOT re-page the entire history on every reconnect.
+      // A full chain over ~26k trades is ~53 requests spaced 5 s apart (~4.5 min
+      // of continuous traffic) — after every WS drop/redeploy that burst tripped
+      // Deriv's general per-second rate limit and degraded live trading. The
+      // durable DB copy already holds history and the incremental refresh picks
+      // up new trades. Only a genuinely first fetch (no cache) paginates fully.
+      if (this.hasDoneInitialFetch && this.cachedTransactions.length > 0) {
+        // forceRefresh() applies its own rate-limit guard and, with the cache
+        // populated, uses the single-request incremental (limit:10) mode.
+        this.forceRefresh();
+        return;
       }
+      this.fetchAccumulator = [];
+      this.isFetchingPages = true;
+      this.lastRefreshSentMs = Date.now();
+      this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, passthrough: { chain: true } });
     }, 5_000);
   }
 
@@ -2730,32 +2851,59 @@ class DerivJournalManager extends EventEmitter {
     try {
       const msg = typeof raw === "string" ? JSON.parse(raw) : JSON.parse(JSON.stringify(raw));
       if (msg.msg_type === "profit_table" && msg.profit_table) {
-        const isQuick: boolean = msg.passthrough?.quick === true;
+        const isQuick: boolean = msg.passthrough?.quick === true || msg.passthrough?.incremental === true;
+        const isOurChain: boolean = msg.passthrough?.chain === true;
+        const isBackfill: boolean = msg.passthrough?.backfill === true;
         const batch: any[] = msg.profit_table.transactions ?? [];
         this.lastPongMs = Date.now();
 
-        if (isQuick) {
+        // A profit_table response on this POOLED socket may belong to another
+        // consumer (trade settlement, portfolio). Only treat a
+        // response as our own paginated chain when it carries our chain marker.
+        // Anything else (no marker) is merged smartly instead of being committed
+        // as a "full refresh" — that was corrupting the cache with truncated
+        // snapshots and persisting detail-less payloads over complete ones.
+        if (isQuick || isBackfill || (!isOurChain && !this.isFetchingPages)) {
           if (batch.length > 0) {
-            const batchIds = new Set(batch.map((t: any) => t.transaction_id));
             // Track the highest transaction_id for incremental refresh
             for (const t of batch) {
               const tid = Number(t.transaction_id ?? 0);
               if (tid > this.lastKnownTransactionId) this.lastKnownTransactionId = tid;
             }
-            const merged = [
-              ...batch,
-              ...this.cachedTransactions.filter((t: any) => !batchIds.has(t.transaction_id)),
-            ];
-            this.cachedTransactions = merged;
+            // Smart merge: a complete transaction (with longcode/symbol) always
+            // wins; an incomplete snapshot never replaces a complete one.
+            const byId = new Map(this.cachedTransactions.map((t: any) => [t.transaction_id, t]));
+            for (const t of batch) {
+              const existing = byId.get(t.transaction_id);
+              if (!existing || DerivJournalManager.hasFullDetail(t) || !DerivJournalManager.hasFullDetail(existing)) {
+                byId.set(t.transaction_id, t);
+              }
+            }
+            this.cachedTransactions = [...byId.values()].sort((a: any, b: any) =>
+              Number(b.transaction_id ?? 0) - Number(a.transaction_id ?? 0));
             this.lastFetchMs = Date.now();
             this.persistTransactions(this.sessionId, batch);
-            logger.info({ newInBatch: batch.length, total: merged.length }, "JournalManager: quick refresh merged — live trades updated");
+            logger.info({ newInBatch: batch.length, total: this.cachedTransactions.length }, "JournalManager: refresh merged — live trades updated");
             this.emit("refreshed", this.cachedTransactions);
           }
+          if (isBackfill) {
+            this.backfillInFlight = false;
+            // Progress check: if the backfill didn't reduce the healable count
+            // (e.g. Deriv returned the same incomplete snapshot), count it as a
+            // failed attempt so the retry loop eventually stops.
+            const healableNow = this.countHealable();
+            if (this.healableBeforeBackfill >= 0 && healableNow >= this.healableBeforeBackfill) {
+              this.backfillAttempts++;
+            } else {
+              this.backfillAttempts = 0;
+            }
+            this.healableBeforeBackfill = -1;
+          }
+          this.maybeScheduleBackfill();
           return;
         }
 
-        // Full paginated refresh
+        // Full paginated refresh (our own chain — marker verified)
         this.fetchAccumulator.push(...batch);
         this.persistTransactions(this.sessionId, batch);
         // Track the highest transaction_id for future incremental refreshes
@@ -2771,19 +2919,40 @@ class DerivJournalManager extends EventEmitter {
           logger.info({ received: batch.length, totalSoFar: offset }, "JournalManager: fetching next page");
           setTimeout(() => {
             if (this.sock?.isOpen()) {
-              this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, offset });
+              this.sock.send({ profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT, offset, passthrough: { chain: true } });
             } else {
               this.isFetchingPages = false;
             }
           }, 5_000);
         } else {
-          this.cachedTransactions = this.fetchAccumulator;
+          // Commit the page batch. MERGE with the existing cache (dedupe by
+          // transaction_id, preferring the most DETAILED copy of each trade)
+          // instead of a blind replace: a limit-10 incremental response that
+          // missed the quick flag must NEVER wipe the full cached history —
+          // engines read daily P&L/streaks from this cache, and a truncated
+          // cache corrupts those inputs.
+          if (this.hasDoneInitialFetch && this.cachedTransactions.length > this.fetchAccumulator.length) {
+            const byId = new Map(this.cachedTransactions.map((t: any) => [t.transaction_id, t]));
+            for (const t of this.fetchAccumulator) {
+              const existing = byId.get(t.transaction_id);
+              if (!existing || DerivJournalManager.hasFullDetail(t) || !DerivJournalManager.hasFullDetail(existing)) {
+                byId.set(t.transaction_id, t);
+              }
+            }
+            this.cachedTransactions = [...byId.values()].sort((a: any, b: any) =>
+              Number(b.transaction_id ?? 0) - Number(a.transaction_id ?? 0));
+          } else {
+            this.cachedTransactions = this.fetchAccumulator;
+          }
           this.fetchAccumulator = [];
           this.isFetchingPages = false;
           this.hasDoneInitialFetch = true;
           this.lastFetchMs = Date.now();
-          logger.info({ count: this.cachedTransactions.length, lastTxId: this.lastKnownTransactionId }, "JournalManager: full profit table refreshed — incremental mode active");
+          logger.info({ count: this.cachedTransactions.length, lastTxId: this.lastKnownTransactionId }, "JournalManager: profit table refreshed — incremental mode active");
           this.emit("refreshed", this.cachedTransactions);
+          // A completed full chain should leave the cache complete; this also
+          // resets the backfill attempt counter when nothing remains to heal.
+          this.maybeScheduleBackfill();
         }
       }
 
@@ -2791,6 +2960,9 @@ class DerivJournalManager extends EventEmitter {
       if (msg.msg_type === "transaction" && msg.transaction) {
         const actionType: string = msg.transaction.action ?? msg.transaction.action_type ?? "";
         if (actionType === "sell") {
+          // A contract just settled — bots (or the user) are actively trading.
+          // The backfill uses this to stay out of the way during live trading.
+          this.lastSellEventMs = Date.now();
           logger.info({ action: actionType, id: msg.transaction.contract_id }, "JournalManager: sell event — quick refresh + scheduled full refresh");
           this.forceQuickRefresh();
           this.scheduleTransactionRefresh();
@@ -3103,7 +3275,72 @@ export async function fetchDerivProfitTable(
   }
 }
 
-// ── Wait for contract result via OTP WebSocket ────────────────────────────────
+// ── Shared settlement-poll snapshot ──────────────────────────────────────────
+// Each settling trade used to run its OWN portfolio + profit_table poll loop
+// at a 1-2 s cadence — N open trades meant N× the requests per second on the
+// shared account socket, which tripped Deriv's per-second rate limit and
+// paused ALL outgoing traffic (bots' proposals/buys + journal refreshes) for
+// minutes at a time. Every poller now shares ONE throttled snapshot per
+// account: at most one poll pair every SETTLEMENT_POLL_INTERVAL_MS, with
+// concurrent pollers inside that window reusing the last snapshot for free.
+// While Deriv is rate-limiting the socket, the poller stands down entirely
+// instead of piling requests into the queue and re-tripping the limit.
+const SETTLEMENT_POLL_INTERVAL_MS = 4_000;
+const settlementPollState = new Map<string, {
+  lastDoneMs: number;
+  last: { portfolioMsg: any; profitTxs: any[] };
+  inFlight: Promise<{ portfolioMsg: any; profitTxs: any[] }> | null;
+}>();
+
+const EMPTY_SNAPSHOT = { portfolioMsg: null, profitTxs: [] as any[] };
+
+async function pollSettlementSnapshot(
+  bearerToken: string,
+  accountId: string,
+): Promise<{ portfolioMsg: any; profitTxs: any[] }> {
+  let state = settlementPollState.get(accountId);
+  if (!state) {
+    state = { lastDoneMs: 0, last: EMPTY_SNAPSHOT, inFlight: null };
+    settlementPollState.set(accountId, state);
+  }
+  const now = Date.now();
+  // Fresh-enough snapshot — reuse it for free (no Deriv request at all).
+  if (state.inFlight) return state.inFlight;
+  if (state.last && now - state.lastDoneMs < SETTLEMENT_POLL_INTERVAL_MS) return state.last;
+  // Deriv is rate-limiting this account — stand down instead of re-tripping.
+  let conn: DerivAccountConnection;
+  try {
+    conn = getAccountConnection(bearerToken, accountId);
+  } catch {
+    return EMPTY_SNAPSHOT;
+  }
+  if (conn.isRateLimitPaused()) return state.last;
+
+  const send = (async () => {
+    let profitTxs: any[] = [];
+    try {
+      const prof = await accountRequest(
+        bearerToken, accountId,
+        { profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT },
+        12_000,
+      );
+      if (prof && !prof.error) profitTxs = prof.profit_table?.transactions ?? [];
+    } catch {
+      /* transient socket problem — the caller's loop retries on its next tick */
+    }
+    state.last = { portfolioMsg: null, profitTxs };
+    state.lastDoneMs = Date.now();
+    return state.last;
+  })();
+  state.inFlight = send;
+  try {
+    return await send;
+  } finally {
+    state.inFlight = null;
+  }
+}
+
+
 /**
  * NOTE: proposal_open_contracts is unsupported for this account/app_id combination.
  * We poll `portfolio` (checks if contract is still open) then `profit_table`
@@ -3129,44 +3366,27 @@ export async function waitForContractResult(
   const deadline = Date.now() + timeoutMs + 5_000;
 
   while (Date.now() < deadline) {
-    let portfolioMsg: any = null;
-    let profitMsg: any = null;
-    try {
-      [portfolioMsg, profitMsg] = await Promise.all([
-        accountRequest(bearerToken, accountId, { portfolio: 1 }, 12_000),
-        accountRequest(bearerToken, accountId, { profit_table: 1, limit: 50, sort: "DESC" }, 12_000),
-      ]);
-    } catch {
-      // Transient socket problem — keep polling until the deadline instead of
-      // marking a healthy trade as failed.
-      await sleep(2_000);
-      continue;
+    // Shared, throttled snapshot — no direct per-trade requests here. Most
+    // results arrive from the journal's real-time sell events anyway; this
+    // poll is only the fallback, so it must never flood the shared socket.
+    const snap = await pollSettlementSnapshot(bearerToken, accountId);
+    const txs: any[] = snap.profitTxs;
+    const tx = txs.find((t) => Number(t.contract_id) === contractId);
+    if (tx) {
+      const buyPrice = Number(tx.buy_price ?? 0);
+      const sellPrice = Number(tx.sell_price ?? 0);
+      const profit = sellPrice - buyPrice;
+      return {
+        contractId,
+        won: profit > 0,
+        profit,
+        exitSpot: 0,
+        sellPrice,
+        entrySpot: buyPrice,
+        purchasedAtMs: toEpochMs(tx.purchase_time),
+        exitedAtMs: toEpochMs(tx.sell_time),
+      };
     }
-
-    if (profitMsg && !profitMsg.error) {
-      const txs: any[] = profitMsg.profit_table?.transactions ?? [];
-      const tx = txs.find((t) => Number(t.contract_id) === contractId);
-      if (tx) {
-        const buyPrice = Number(tx.buy_price ?? 0);
-        const sellPrice = Number(tx.sell_price ?? 0);
-        const profit = sellPrice - buyPrice;
-        return {
-          contractId,
-          won: profit > 0,
-          profit,
-          exitSpot: 0,
-          sellPrice,
-          entrySpot: buyPrice,
-          purchasedAtMs: toEpochMs(tx.purchase_time),
-          exitedAtMs: toEpochMs(tx.sell_time),
-        };
-      }
-    }
-
-    // Not settled yet. If the contract is no longer in the open portfolio and
-    // Deriv has not journalued it yet, keep polling — the journal entry is what
-    // gives us Deriv's exact profit.
-    void portfolioMsg;
     await sleep(2_000);
   }
 

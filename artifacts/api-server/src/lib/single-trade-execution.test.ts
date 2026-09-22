@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { afterEach, describe, it, mock } from "node:test";
+import { randomUUID } from "node:crypto";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import {
   closeAccountConnections,
   executeLiveTrade,
@@ -29,6 +30,12 @@ const purchase = {
   msg_type: "buy",
   buy: { contract_id: 1234, buy_price: 1, longcode: "One contract" },
 };
+
+beforeEach(() => {
+  // Settlement snapshots are now cached per account. Isolate each fixture so
+  // it actually reaches its own stub rather than reusing a prior test's data.
+  params.accountId = `single-trade-test-${randomUUID()}`;
+});
 
 afterEach(() => {
   mock.restoreAll();
@@ -104,25 +111,52 @@ describe("single-contract execution", () => {
 
   for (const [unit, factor] of [["seconds", 1], ["milliseconds", 1000]] as const) {
     it(`preserves single-contract settlement with broker timestamps in ${unit}`, async () => {
-      const sent = fakeTransport((m) => m.portfolio
-        ? { portfolio: { contracts: [] } }
-        : { profit_table: { transactions: [{
-            contract_id: 1234,
-            buy_price: 1,
-            sell_price: 1.63,
-            purchase_time: 1_750_000_000 * factor,
-            sell_time: 1_750_000_002 * factor,
-          }] } });
+      const sent = fakeTransport(() => ({
+        profit_table: { transactions: [{
+          contract_id: 1234,
+          buy_price: 1,
+          sell_price: 1.63,
+          purchase_time: 1_750_000_000 * factor,
+          sell_time: 1_750_000_002 * factor,
+        }] },
+      }));
       const result = await waitForContractResult(token, params.accountId, 1234);
       assert.equal(result.contractId, 1234);
       assert.equal(result.won, true);
       assert.ok(Math.abs(result.profit - 0.63) < 1e-10);
       assert.equal(result.purchasedAtMs, 1_750_000_000_000);
       assert.equal(result.exitedAtMs, 1_750_000_002_000);
-      assert.equal(sent.length, 2);
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].profit_table, 1);
+      assert.equal(sent[0].description, 1);
       assert.equal(sent.filter((m) => m.buy).length, 0);
     });
   }
+
+  it("shares one settlement snapshot across concurrent single-contract waiters", async () => {
+    const sent = fakeTransport(() => ({
+      profit_table: { transactions: [
+        { contract_id: 1234, buy_price: 1, sell_price: 1.63 },
+        { contract_id: 5678, buy_price: 1, sell_price: 0 },
+      ] },
+    }));
+    const [won, lost] = await Promise.all([
+      waitForContractResult(token, params.accountId, 1234),
+      waitForContractResult(token, params.accountId, 5678),
+    ]);
+    assert.equal(won.contractId, 1234);
+    assert.equal(won.won, true);
+    assert.equal(lost.contractId, 5678);
+    assert.equal(lost.won, false);
+    assert.equal(lost.profit, -1);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].profit_table, 1);
+
+    // A later waiter inside the snapshot window also reuses the result.
+    await waitForContractResult(token, params.accountId, 1234);
+    assert.equal(sent.length, 1);
+    assert.equal(sent.filter((m) => m.buy).length, 0);
+  });
 
   it("retains the shared single-order quote retry classification", () => {
     assert.equal(isRetryableDerivError({ error: { code: "RateLimit" } }), true);

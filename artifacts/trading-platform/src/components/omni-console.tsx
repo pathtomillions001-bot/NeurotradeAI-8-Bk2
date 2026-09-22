@@ -30,7 +30,9 @@ import type { BotSessionStatus } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
 import {
   OMNI_CONTRACTS,
+  OMNI_RECOVERY_RULE,
   omniConfigError,
+  omniRecoveryCoverageWarning,
   type OmniConfig,
   type OmniOpportunity,
   type OmniScan,
@@ -459,6 +461,11 @@ export function OmniConsole({
                   {watch?.ticksEvaluated ?? 0} ticks evaluated · Shared account
                   debt ledger
                 </p>
+                {status?.inRecovery && (
+                  <p className="mt-1 text-[9px] text-amber-200/90">
+                    {OMNI_RECOVERY_RULE}
+                  </p>
+                )}
               </div>
               <div
                 className="max-h-64 space-y-1.5 overflow-y-auto"
@@ -652,6 +659,9 @@ export function OmniConsole({
                             shot={chosen.recovery}
                             title="Recovery · one base-stake debt"
                           />
+                          <p className="mt-1.5 text-[9px] leading-relaxed text-slate-500">
+                            {OMNI_RECOVERY_RULE}
+                          </p>
                         </TabsContent>
                       </Tabs>
                       <details className="rounded-lg border border-white/10 p-2.5 text-[10px]">
@@ -819,9 +829,17 @@ export function OmniConsole({
                   })}
                 </div>
                 <p className="text-[9px] text-slate-500">
-                  {config.enabledContracts.length} of 8 enabled in both phases.
-                  Digits and barriers are automatic.
+                  {config.enabledContracts.length} of 8 enabled. Digits and
+                  barriers are automatic. {OMNI_RECOVERY_RULE}
                 </p>
+                {omniRecoveryCoverageWarning(config.enabledContracts) && (
+                  <p
+                    role="alert"
+                    className="rounded-lg border border-amber-400/25 bg-amber-400/5 p-2 text-[10px] leading-relaxed text-amber-100"
+                  >
+                    {omniRecoveryCoverageWarning(config.enabledContracts)}
+                  </p>
+                )}
               </section>
               <section className="rounded-xl border border-white/10 p-2.5 space-y-2.5">
                 <h3 className="text-[11px] font-semibold">

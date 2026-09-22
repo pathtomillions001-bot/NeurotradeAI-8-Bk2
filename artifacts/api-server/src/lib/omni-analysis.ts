@@ -132,6 +132,60 @@ export function omniContracts(
   return out;
 }
 
+/** Which leg of the session an opportunity is being ranked for. */
+export type OmniPhase = "normal" | "recovery";
+
+/**
+ * Recovery-phase instrument restriction (house rule).
+ *
+ * While a loss is being worked off, the engine must NOT use the far ends of the
+ * digit ladder or the "Differs" digit contracts:
+ *
+ *   • Over 0, Over 1, Over 2        → banned in recovery
+ *   • Under 7, Under 8, Under 9     → banned in recovery
+ *   • Differs (DIGITDIFF, any digit)→ banned in recovery
+ *
+ * Everything else stays available: recovery may use Over 3–8 and Under 1–6,
+ * plus Rise/Fall, Even/Odd and Matches.
+ *
+ * This is phase scoping, NOT post-loss tightening. The contracts are only
+ * skipped while the session carries debt; whenever they are enabled they keep
+ * trading normally, and no contract is ever banned after a loss in normal mode.
+ * Recovery therefore chooses from a smaller instrument set, which is why the
+ * blocked digits can never be re-introduced by a "best utility" argument.
+ */
+export const OMNI_RECOVERY_BLOCKED_OVER_BARRIERS = [0, 1, 2] as const;
+export const OMNI_RECOVERY_BLOCKED_UNDER_BARRIERS = [7, 8, 9] as const;
+export const OMNI_RECOVERY_BLOCKED_CONTRACT_TYPES = ["DIGITDIFF"] as const;
+
+/** True when `contract` is allowed to be selected during the given phase. */
+export function omniContractAllowedInPhase(
+  contract: Pick<OmniContract, "contractType" | "barrier">,
+  phase: OmniPhase,
+): boolean {
+  if (phase === "normal") return true;
+  if (
+    (OMNI_RECOVERY_BLOCKED_CONTRACT_TYPES as readonly string[]).includes(
+      contract.contractType,
+    )
+  )
+    return false;
+  if (contract.contractType === "DIGITOVER")
+    return !(
+      OMNI_RECOVERY_BLOCKED_OVER_BARRIERS as readonly number[]
+    ).includes(contract.barrier!);
+  if (contract.contractType === "DIGITUNDER")
+    return !(
+      OMNI_RECOVERY_BLOCKED_UNDER_BARRIERS as readonly number[]
+    ).includes(contract.barrier!);
+  return true;
+}
+
+/** Human-readable summary of the recovery restriction, for consoles/logs. */
+export function omniRecoveryRestrictionNote(): string {
+  return `Recovery skips Over ${OMNI_RECOVERY_BLOCKED_OVER_BARRIERS.join(", ")}, Under ${OMNI_RECOVERY_BLOCKED_UNDER_BARRIERS.join(", ")} and Differs — those stay available in normal mode.`;
+}
+
 export function omniWins(
   contract: OmniContract,
   before: OmniSample,
@@ -463,16 +517,24 @@ export function priceOmniOpportunity(
   };
 }
 
-/** One allowlist and one market scope for BOTH phases. Ineligible leaders cannot hide viable runners-up. */
+/**
+ * One allowlist and one market scope for BOTH phases, plus the recovery-phase
+ * instrument restriction (see `omniContractAllowedInPhase`). Ineligible leaders
+ * cannot hide viable runners-up: a contract blocked in recovery is filtered out
+ * here, so the recovery leg simply selects the best of the remaining markets and
+ * barriers instead of falling back to a banned digit.
+ */
 export function rankOmniOpportunities(
   opportunities: readonly OmniOpportunity[],
   enabled: readonly OmniContractType[],
   lockedSymbol?: string,
+  phase: OmniPhase = "normal",
 ): OmniOpportunity[] {
   return opportunities
     .filter(
       (c) =>
         enabled.includes(c.contract.contractType) &&
+        omniContractAllowedInPhase(c.contract, phase) &&
         (!lockedSymbol || c.symbol === lockedSymbol),
     )
     .sort(
@@ -522,6 +584,9 @@ export function measureOmniHistory(
       if (replayRisk.lossBudget < 0.35 || replayRisk.balance < 0.35)
         metrics.stoppedByRisk = true;
       if (!metrics.stoppedByRisk) {
+        // The replay must mirror production: once it carries debt it ranks the
+        // RECOVERY allowlist (no Over 0–2, no Under 7–9, no Differs).
+        const inRecovery = metrics.remainingDebt > 0;
         const ranked = rankOmniOpportunities(
           model
             .predict()
@@ -533,10 +598,12 @@ export function measureOmniHistory(
               ),
             ),
           enabled,
+          undefined,
+          inRecovery ? "recovery" : "normal",
         );
         const best = ranked[0];
         if (best?.ready) {
-          const recovery = metrics.remainingDebt > 0;
+          const recovery = inRecovery;
           const won = omniWins(best.contract, samples[i - 1]!, samples[i]!);
           const profit =
             Math.round(

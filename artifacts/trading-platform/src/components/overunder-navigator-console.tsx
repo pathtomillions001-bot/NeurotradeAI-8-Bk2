@@ -62,6 +62,23 @@ type ScanResult = {
   historyDepth: number;
 };
 
+/**
+ * Free-typing number field.
+ *
+ * The previous version clamped EVERY keystroke
+ * (`onChange(Math.max(min, Math.min(max, Number(value))))`), which made whole
+ * classes of entries impossible to type:
+ *   - Under digits (min 1): clearing the field produced "" → 0 → snapped back
+ *     to 1, so the next keystroke typed "15" → clamped to 9. Only the Over
+ *     digits (min 0) escaped it, which is exactly the asymmetry users hit.
+ *   - Budget figures: the first digit of "10" is 1, which is below the 0.35
+ *     stake minimum, so it snapped to 0.35 before the second digit arrived.
+ *
+ * Now the field keeps a local draft string while the user types, commits a
+ * value live whenever the draft is ALREADY inside the allowed range, and only
+ * clamps on commit (blur / Enter). A cleared or unparsable draft falls back to
+ * the last valid value instead of hijacking the caret.
+ */
 function NumInput({
   label,
   value,
@@ -69,6 +86,8 @@ function NumInput({
   min,
   max,
   accent,
+  integer = false,
+  step = 1,
 }: {
   label: string;
   value: number;
@@ -76,8 +95,25 @@ function NumInput({
   min: number;
   max: number;
   accent: AccentKey;
+  /** Round to a whole number on commit (digit barriers, recovery steps). */
+  integer?: boolean;
+  step?: number;
 }) {
   const a = ACCENTS[accent];
+  const [draft, setDraft] = useState<string | null>(null);
+  const shown = draft ?? String(value);
+  const commit = useCallback(
+    (raw: string | null) => {
+      if (raw === null) return;
+      setDraft(null);
+      const parsed = Number(raw);
+      if (raw.trim() === "" || !Number.isFinite(parsed)) return; // keep last valid value
+      const clamped = Math.min(max, Math.max(min, parsed));
+      const next = integer ? Math.round(clamped) : clamped;
+      if (next !== value) onChange(next);
+    },
+    [integer, max, min, onChange, value],
+  );
   return (
     <label
       className={`flex items-center justify-between gap-2 text-muted-foreground ${max < 10 ? "text-[10px]" : "text-xs"}`}
@@ -85,12 +121,32 @@ function NumInput({
       <span>{label}</span>
       <Input
         type="number"
+        inputMode={integer ? "numeric" : "decimal"}
         min={min}
         max={max}
-        value={value}
-        onChange={(e) =>
-          onChange(Math.max(min, Math.min(max, Number(e.target.value))))
-        }
+        step={step}
+        value={shown}
+        onChange={(e) => {
+          const raw = e.target.value;
+          setDraft(raw);
+          // Live-commit only what is already in range, so the plan updates as
+          // you type without the field snapping mid-keystroke.
+          const parsed = Number(raw);
+          if (
+            raw.trim() !== "" &&
+            Number.isFinite(parsed) &&
+            parsed >= min &&
+            parsed <= max
+          )
+            onChange(integer ? Math.round(parsed) : parsed);
+        }}
+        onBlur={(e) => commit(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            commit((e.target as HTMLInputElement).value);
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
         className={`${max < 10 ? "w-12 px-2" : "w-20"} shrink-0 h-7 text-xs text-right font-mono bg-black/30 border-white/10 ${a.focusBorder}`}
       />
     </label>
@@ -498,6 +554,7 @@ export function OverUnderNavigatorConsole({
                   min={0}
                   max={8}
                   accent="fuchsia"
+                  integer
                 />
                 <NumInput
                   label="Under digit"
@@ -506,6 +563,7 @@ export function OverUnderNavigatorConsole({
                   min={1}
                   max={9}
                   accent="fuchsia"
+                  integer
                 />
               </div>
               <SidePicker
@@ -542,6 +600,7 @@ export function OverUnderNavigatorConsole({
                   min={0}
                   max={8}
                   accent="fuchsia"
+                  integer
                 />
                 <NumInput
                   label="Under digit"
@@ -553,6 +612,7 @@ export function OverUnderNavigatorConsole({
                   min={1}
                   max={9}
                   accent="fuchsia"
+                  integer
                 />
               </div>
               <SidePicker
@@ -575,6 +635,7 @@ export function OverUnderNavigatorConsole({
               onChange={(v) => setRisk((r) => ({ ...r, stake: v }))}
               min={0.35}
               max={10000}
+              step={0.01}
               accent="fuchsia"
             />
             <NumInput
@@ -602,6 +663,7 @@ export function OverUnderNavigatorConsole({
               min={1}
               max={10}
               accent="fuchsia"
+              integer
             />
             <Button
               onClick={handleScan}

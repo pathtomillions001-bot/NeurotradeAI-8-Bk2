@@ -48,8 +48,10 @@ import {
   measureOmniHistory,
   priceOmniOpportunity,
   rankOmniOpportunities,
+  omniRecoveryRestrictionNote,
   omniWins,
   type OmniOpportunity,
+  type OmniPhase,
   type OmniReplay,
   type OmniRisk,
   type OmniSample,
@@ -517,7 +519,12 @@ export async function scanForOmni(configInput: OmniConfig): Promise<OmniScan> {
           rankOmniOpportunities(
             predictions.map((p) => priceOmniOpportunity(p, market, scanRisk)),
             config.enabledContracts,
+            undefined,
+            "normal",
           )[0] ?? null;
+        // The recovery preview must show the SAME instrument set the live
+        // recovery leg may use — otherwise the card advertises a barrier the
+        // engine would never buy.
         const recoveryShot =
           rankOmniOpportunities(
             predictions.map((p) =>
@@ -527,6 +534,8 @@ export async function scanForOmni(configInput: OmniConfig): Promise<OmniScan> {
               }),
             ),
             config.enabledContracts,
+            undefined,
+            "recovery",
           )[0] ?? null;
         cards.push({
           symbol: market.symbol,
@@ -553,7 +562,7 @@ export async function scanForOmni(configInput: OmniConfig): Promise<OmniScan> {
       marketsScanned: AUTOMATED_DERIV_MARKETS.length,
       currency: context.currency,
       reason: cards.length
-        ? "All enabled contracts ranked. Scan prices are indicative; live deployment reprices before every buy. Recovery cards illustrate one base-stake of debt."
+        ? `All enabled contracts ranked. Scan prices are indicative; live deployment reprices before every buy. Recovery cards illustrate one base-stake of debt and obey the recovery instrument rule: ${omniRecoveryRestrictionNote()}`
         : "Not enough uninterrupted tick history yet. Wait for the feed to warm up and scan again.",
     };
     session.scan = result;
@@ -715,7 +724,7 @@ export async function startSession(input: {
     session.running = true;
     registerLiveBot(OMNI_BOT_ID, getStatus);
     say(
-      `${config.executionMode === "paper" ? "PAPER · " : ""}${config.marketMode === "locked" ? "Market locked" : "All automated markets enabled"}; the same contract allowlist applies to recovery.`,
+      `${config.executionMode === "paper" ? "PAPER · " : ""}${config.marketMode === "locked" ? "Market locked" : "All automated markets enabled"}; ${omniRecoveryRestrictionNote()}`,
     );
     const runId = session.runId!;
     void runWithSession(owner, () => runLoop(config, context, runId));
@@ -788,7 +797,15 @@ function candidatesFor(config: OmniConfig, context: Context) {
     all,
     config.enabledContracts,
     config.marketMode === "locked" ? session.symbol! : undefined,
+    // Carrying debt = recovery leg: Over 0–2, Under 7–9 and Differs drop out of
+    // the tournament entirely (see omniContractAllowedInPhase).
+    phaseFor(risk),
   );
+}
+
+/** Which leg the CURRENT risk object represents: debt means recovery. */
+function phaseFor(risk: OmniRisk): OmniPhase {
+  return risk.debt > 0 ? "recovery" : "normal";
 }
 
 async function cancelPrepared(pending: PendingOrder, reason: string) {

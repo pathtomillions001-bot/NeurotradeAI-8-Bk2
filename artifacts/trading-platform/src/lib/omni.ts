@@ -117,6 +117,33 @@ export interface OmniSessionDetails {
   };
 }
 
+/**
+ * Recovery-phase instrument rule — mirror of the API's rule in
+ * `omni-analysis.ts` (OMNI_RECOVERY_BLOCKED_*). Kept here so the console can
+ * explain the allowlist before any scan exists and so the recovery preview is
+ * never mistaken for a normal-mode opportunity.
+ *
+ * Phase scoping, not post-loss tightening: these contracts keep trading in
+ * normal mode whenever they are enabled.
+ */
+export const OMNI_RECOVERY_RULE =
+  "Recovery skips Over 0–2, Under 7–9 and Differs; they still trade normally when enabled.";
+
+/** Contracts that keep at least one barrier during recovery. */
+export const OMNI_RECOVERY_INELIGIBLE: OmniContractType[] = ["DIGITDIFF"];
+
+/**
+ * Warning when the enabled set leaves recovery with nothing to trade — the
+ * engine will wait (it never falls back to a banned digit), so the user has to
+ * know before deploying.
+ */
+export function omniRecoveryCoverageWarning(
+  enabled: readonly OmniContractType[],
+): string | null {
+  if (enabled.some((c) => !OMNI_RECOVERY_INELIGIBLE.includes(c))) return null;
+  return "Only Differs is enabled. Recovery skips Differs, so a recovery leg would have nothing to trade — it would wait, not fall back. Enable Over, Under, Rise/Fall, Even/Odd or Matches as well.";
+}
+
 export function omniConfigError(config: OmniConfig): string | null {
   if (config.executionMode !== "live")
     return "Omni Sentinel trades the connected account.";

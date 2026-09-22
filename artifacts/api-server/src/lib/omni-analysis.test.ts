@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   OMNI_CONTRACT_TYPES,
+  OMNI_RECOVERY_BLOCKED_OVER_BARRIERS,
+  OMNI_RECOVERY_BLOCKED_UNDER_BARRIERS,
   OMNI_UTILITY_FLOOR,
   OmniModel,
   measureOmniHistory,
@@ -406,5 +408,111 @@ describe("Omni debt sizing uses existing policy and absolute funding caps", () =
     assert.equal(omniStake({ ...risk, balance: 0.9 }, 1.95), 0);
     for (const payout of [NaN, Infinity, 0, 1])
       assert.equal(omniStake(risk, payout), 0);
+  });
+});
+
+describe("Omni recovery instrument rule (phase scoping, not post-loss tightening)", () => {
+  const ready = (type: OmniContractType, barrier?: number, debt = 1) =>
+    priceOmniOpportunity(
+      { ...prediction(type, 0.9, barrier), samples: 500 },
+      market,
+      { ...risk, debt },
+    );
+  it("blocks Over 0–2, Under 7–9 and Differs while debt is outstanding", () => {
+    for (const barrier of OMNI_RECOVERY_BLOCKED_OVER_BARRIERS) {
+      const shot = ready("DIGITOVER", barrier);
+      assert.deepEqual(
+        rankOmniOpportunities([shot], ["DIGITOVER"], undefined, "recovery"),
+        [],
+        `Over ${barrier} must not be selected in recovery`,
+      );
+      assert.equal(
+        rankOmniOpportunities([shot], ["DIGITOVER"], undefined, "normal")[0],
+        shot,
+      );
+    }
+    for (const barrier of OMNI_RECOVERY_BLOCKED_UNDER_BARRIERS) {
+      const shot = ready("DIGITUNDER", barrier);
+      assert.deepEqual(
+        rankOmniOpportunities([shot], ["DIGITUNDER"], undefined, "recovery"),
+        [],
+        `Under ${barrier} must not be selected in recovery`,
+      );
+      assert.equal(
+        rankOmniOpportunities([shot], ["DIGITUNDER"], undefined, "normal")[0],
+        shot,
+      );
+    }
+    for (let digit = 0; digit < 10; digit++) {
+      const shot = ready("DIGITDIFF", digit);
+      assert.deepEqual(
+        rankOmniOpportunities([shot], ["DIGITDIFF"], undefined, "recovery"),
+        [],
+        `Differs ${digit} must not be selected in recovery`,
+      );
+      assert.equal(
+        rankOmniOpportunities([shot], ["DIGITDIFF"], undefined, "normal")[0],
+        shot,
+      );
+    }
+  });
+  it("keeps Over 3–8 and Under 1–6 available for recovery", () => {
+    for (const barrier of [3, 4, 5, 6, 7, 8]) {
+      const shot = ready("DIGITOVER", barrier);
+      assert.equal(
+        rankOmniOpportunities([shot], ["DIGITOVER"], undefined, "recovery")[0],
+        shot,
+        `Over ${barrier} must stay available`,
+      );
+    }
+    for (const barrier of [1, 2, 3, 4, 5, 6]) {
+      const shot = ready("DIGITUNDER", barrier);
+      assert.equal(
+        rankOmniOpportunities([shot], ["DIGITUNDER"], undefined, "recovery")[0],
+        shot,
+        `Under ${barrier} must stay available`,
+      );
+    }
+    for (const type of [
+      "CALL",
+      "PUT",
+      "DIGITEVEN",
+      "DIGITODD",
+      "DIGITMATCH",
+    ] as OmniContractType[]) {
+      const shot = ready(type, type === "DIGITMATCH" ? 4 : undefined);
+      assert.equal(
+        rankOmniOpportunities([shot], [type], undefined, "recovery")[0],
+        shot,
+        `${type} must stay available in recovery`,
+      );
+    }
+  });
+  it("picks the best remaining market/barrier instead of a banned leader", () => {
+    const banned = ready("DIGITOVER", 1); // 90% win, tiny payout — best raw utility
+    const allowed = priceOmniOpportunity(
+      { ...prediction("DIGITOVER", 4, 5), samples: 500 },
+      { symbol: "R_25", displayName: "Volatility 25" },
+      { ...risk, debt: 1 },
+    );
+    const ranked = rankOmniOpportunities(
+      [banned, allowed],
+      ["DIGITOVER"],
+      undefined,
+      "recovery",
+    );
+    assert.equal(ranked.length, 1);
+    assert.equal(ranked[0]!.contract.label, "Over 5");
+    assert.equal(ranked[0]!.symbol, "R_25");
+  });
+  it("never reports a blocked barrier in the recovery replay diagnostic", () => {
+    const { metrics } = measureOmniHistory(
+      samples(900),
+      ["DIGITOVER"], // Over 0–2 are the only contracts the model could lean on
+      { ...risk, debt: 0 },
+      1,
+    );
+    assert.equal(metrics.recoveryShots, 0);
+    assert.ok(metrics.ticks > 0);
   });
 });

@@ -262,7 +262,7 @@ paths:
     post:
       operationId: executeTrade
       tags: [trades]
-      summary: Execute a manual or AI-recommended trade
+      summary: Execute one manual or AI-recommended trade
       requestBody:
         required: true
         content:
@@ -276,36 +276,6 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Trade"
-        "400":
-          description: Trade rejected by risk controls
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ApiError"
-
-  /trades/bulk:
-    post:
-      operationId: executeBulkTrades
-      tags: [trades]
-      summary: Execute a bulk of identical trades — all legs open and settle simultaneously
-      description: >-
-        Places `count` identical contracts as ONE logical entry: a single shared
-        trading session opens every leg on the same tick and the batch is
-        settled in one sweep, so no individual order is delayed relative to the
-        others.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/BulkTradeInput"
-      responses:
-        "201":
-          description: Bulk trades executed
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/BulkTradeResult"
         "400":
           description: Trade rejected by risk controls
           content:
@@ -775,6 +745,8 @@ components:
 
     TradeInput:
       type: object
+      additionalProperties: false
+      description: One contract per request. Quantity and order arrays are not supported.
       required: [symbol, contractType, stake, direction]
       properties:
         symbol:
@@ -796,94 +768,6 @@ components:
         durationUnit:
           type: string
           enum: [t, s, m, h, d]
-
-    BulkTradeInput:
-      type: object
-      required: [symbol, contractType, stake, direction, count]
-      properties:
-        symbol:
-          type: string
-        contractType:
-          type: string
-        stake:
-          type: number
-        direction:
-          type: string
-          enum: [up, down]
-        barrier:
-          type: number
-          nullable: true
-        isAutonomous:
-          type: boolean
-        duration:
-          type: integer
-        durationUnit:
-          type: string
-          enum: [t, s, m, h, d]
-        count:
-          type: integer
-          minimum: 2
-          maximum: 10
-
-    BulkTradeResult:
-      type: object
-      required: [trades, count]
-      properties:
-        trades:
-          type: array
-          items:
-            $ref: "#/components/schemas/Trade"
-        count:
-          type: integer
-        sync:
-          allOf:
-            - $ref: "#/components/schemas/BulkSyncReport"
-          nullable: true
-          description: >-
-            Measured synchrony of the batch, derived from Deriv's own contract
-            start/sell times. `null` for paper/demo batches, which never reach
-            the exchange.
-
-    BulkSyncReport:
-      type: object
-      description: >-
-        Whether the legs really did open on one tick and close together. A
-        batch is only "synchronized" when every leg Deriv accepted reports the
-        same start time; anything unproven is reported as `unverified` rather
-        than assumed.
-      required: [requested, opened, confirmed, verdict, localConfirmSpreadMs, entryTimesMs, exitTimesMs, splitTickLegs, summary]
-      properties:
-        requested:
-          type: integer
-        opened:
-          type: integer
-        confirmed:
-          type: integer
-        verdict:
-          type: string
-          enum: [synchronized, split, partial, failed, unverified]
-        sameEntryTick:
-          type: boolean
-          nullable: true
-        sameExitTick:
-          type: boolean
-          nullable: true
-        entryTimesMs:
-          type: array
-          items:
-            type: integer
-        exitTimesMs:
-          type: array
-          items:
-            type: integer
-        localConfirmSpreadMs:
-          type: integer
-        splitTickLegs:
-          type: array
-          items:
-            type: integer
-        summary:
-          type: string
 
     TradeStats:
       type: object

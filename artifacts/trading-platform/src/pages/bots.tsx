@@ -160,6 +160,21 @@ function UnsupportedConsolePanel({ bot, consoleId }: { bot: BotCardData; console
 
 // ── Bot card ──────────────────────────────────────────────────────────────────
 
+/**
+ * Why the mobile grid declares `grid-cols-1` explicitly
+ * (`minmax(0, 1fr)`) instead of relying on the implicit column:
+ *
+ * A grid with no explicit tracks places every card in ONE implicit `auto`
+ * column, and an `auto` track is sized from its items' min/max-content. While a
+ * bot is idle the cards only contain wrapping text, so the column matches the
+ * screen. The moment a bot goes LIVE the running card gains the live P&L strip,
+ * whose market/status lines are `truncate` (white-space: nowrap) — a nowrap
+ * line's min-content width is the whole sentence, so the shared column grew to
+ * fit it (measured: 553px inside a 390px viewport) and EVERY card in that
+ * column expanded with it. Desktop was unaffected because `md:grid-cols-2`
+ * emits `minmax(0, 1fr)` tracks, whose minimum is 0 — so the same text simply
+ * truncates. `grid-cols-1` gives mobile that same 0-minimum track.
+ */
 function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpen, index }: {
   bot: BotCardData;
   isThisRunning: boolean;
@@ -226,8 +241,8 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
 
           {/* Live P&L strip when this bot is the one running */}
           {isThisRunning && s ? (
-            <div className={`rounded-lg border ${a.panelBorder} bg-black/25 px-3 py-2`}>
-              <div className="flex items-baseline justify-between">
+            <div className={`min-w-0 overflow-hidden rounded-lg border ${a.panelBorder} bg-black/25 px-3 py-2`}>
+              <div className="flex items-baseline justify-between gap-2">
                 <span className={`text-xl font-bold font-mono ${profit >= 0 ? "text-green-400" : "text-red-400"}`}>
                   {profit >= 0 ? "+" : "-"}${Math.abs(profit).toFixed(2)}
                 </span>
@@ -236,7 +251,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
                 </span>
               </div>
               {s.currentMarket && (
-                <p className="text-[10px] text-muted-foreground mt-1 truncate">
+                <p className="mt-1 truncate text-[10px] text-muted-foreground">
                   <span className={a.text}>{s.currentContractType}</span> on {s.currentMarket}
                 </p>
               )}
@@ -385,7 +400,9 @@ export default function Bots() {
 
       {/* ── Bot grid ───────────────────────────────────────────────────── */}
       {isLoading && (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        /* `grid-cols-1` = minmax(0, 1fr): the mobile column must not be sized
+           by its content (see the note above BotCard). */
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {[0, 1, 2, 3, 4, 5, 6].map(i => (
             <Card key={i} className="border-border bg-card">
               <CardContent className="p-4 space-y-3">
@@ -416,7 +433,9 @@ export default function Bots() {
       )}
 
       {!isLoading && !isError && (
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        /* Same reason as the skeleton grid: a content-sized mobile column blows
+           up every card the moment one bot card renders a nowrap live strip. */
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
           {bots.map((bot, i) => {
             const resolution = resolveConsole(bot);
             return (

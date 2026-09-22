@@ -8,7 +8,14 @@ A dedicated multi-contract bot, not a preset of the specialist engine. Existing 
 
 - Independently enable **Rise, Fall, Even, Odd, Matches, Differs, Over, Under**. Any non-empty combination is valid.
 - The **same allowlist** applies to normal **and** recovery trades. There is no hidden Matches → Differs fallback or recovery-side override.
-- The bot chooses digits and barriers itself: Matches/Differs 0–9, Over 0–8, Under 1–9. With all contracts enabled there are **42 candidates per market**. Orders are one tick long.
+- **Recovery instrument rule (phase scoping):** while the session carries recovery debt the engine skips the far ends of the digit ladder and the "Differs" contracts —
+  - **Over 0, 1, 2** and **Under 7, 8, 9** are excluded from recovery selection,
+  - **Differs** (`DIGITDIFF`, every digit) is excluded from recovery selection,
+  - recovery therefore uses **Over 3–8 / Under 1–6** plus Rise, Fall, Even, Odd and Matches.
+
+  This applies to *every* recovery trade, including the `Smart Switching` re-ranks, and it is enforced in one place (`omniContractAllowedInPhase` in `omni-analysis.ts`) so the scan previews, the live tournament and the walk-forward replay all agree. If the enabled set leaves recovery with nothing tradeable the bot **waits** — it never falls back to a barred digit.
+- The rule is *not* post-loss tightening. Those contracts keep trading normally whenever they are enabled; only the recovery leg skips them, because the phase is derived from the outstanding debt, not from a loss count. Normal-mode scoring, coefficients and the fixed zero utility floor are unchanged.
+- The bot chooses digits and barriers itself: Matches/Differs 0–9, Over 0–8, Under 1–9. With all contracts enabled there are **42 candidates per market**, of which **30** remain eligible for recovery (Over 3–8, Under 1–6, Matches 0–9, Rise, Fall, Even, Odd). Orders are one tick long.
 - Choose **Trade Locked** or **Smart Switching** only **after the market scan**. Setup contains only contract and risk controls.
 - **Switching:** continuously compare all markets in `AUTOMATED_DERIV_MARKETS`, even when the current market already has a positive opportunity. Both normal and recovery can change market and contract.
 - **Locked:** choose one measured market after the scan. Both phases stay there, but can change between enabled contracts/digits/barriers.
@@ -50,7 +57,7 @@ debtCoverage      = min(1, s*(r-1)/outstandingDebt)
 
 The candidate with the highest **positive** utility wins. Otherwise wait.
 
-The entry utility floor is **always zero**. The selector has no recovery-step, loss-run, loss-count, progressively longer cooldown, or post-loss threshold argument. Recovery's objective values the chance and extent of paying debt and prices repeated-loss exposure. Its coefficients are fixed; they do not tighten after a loss.
+The entry utility floor is **always zero**. The selector has no recovery-step, loss-run, loss-count, progressively longer cooldown, or post-loss threshold argument. The only recovery-specific restriction is the phase instrument rule above, which is a static allowlist derived from the debt flag — it does not shrink as losses accumulate. Recovery's objective values the chance and extent of paying debt and prices repeated-loss exposure. Its coefficients are fixed; they do not tighten after a loss.
 
 A larger debt may require a larger stake and therefore change expected log-return, affordability and ranking. That is exposure math, not a ratcheting entry threshold. Minimum history, valid quotes, fresh live ticks, account ownership and funding limits remain non-negotiable operational safeguards.
 
@@ -94,7 +101,7 @@ If a lost acknowledgement cannot be matched safely (for example, the broker omit
 
 ## Console and diagnostics
 
-The dedicated console uses the standard 336px, bottom-right bot panel with compact cards, responsive viewport limits and no wide tables. The heading and close control remain fixed above a separately scrollable, keyboard-focusable body with a visible scrollbar. Reopening the console or changing screens resets the body to the top. Navigator uses the same scrolling layout. A `vh` fallback keeps the height bounded on browsers without dynamic viewport-unit support. Setup contains eight contract toggles and risk inputs. After scanning, the user selects a market, acknowledges account-trading risk and explicitly chooses the full-width **Trade Locked** or **Smart Switching** action. Normal/recovery preview tabs and expandable diagnostics avoid a tall stack of panels. Running sessions show a compact opportunity radar and safe Stop state. No execution-mode or market-freedom controls are duplicated in setup.
+The dedicated console uses the standard 336px, bottom-right bot panel with compact cards, responsive viewport limits and no wide tables. The heading and close control remain fixed above a separately scrollable, keyboard-focusable body with a visible scrollbar. Reopening the console or changing screens resets the body to the top. Navigator uses the same scrolling layout. A `vh` fallback keeps the height bounded on browsers without dynamic viewport-unit support. Setup contains eight contract toggles, risk inputs, the recovery instrument rule and a warning when the enabled set would leave recovery with nothing tradeable. After scanning, the user selects a market, acknowledges account-trading risk and explicitly chooses the full-width **Trade Locked** or **Smart Switching** action. Normal/recovery preview tabs (the recovery tab states the instrument rule) and expandable diagnostics avoid a tall stack of panels. Running sessions show a compact opportunity radar and safe Stop state. No execution-mode or market-freedom controls are duplicated in setup.
 
 A scan warms the causal model on the first 60% of up to 2,400 ticks, then evaluates the same **single-market** selection rule chronologically on the last 40%, updating only from earlier outcomes. It reports normal/recovery wins and shots, consecutive recovery loss pairs, replay P&L, remaining debt, and risk-budget exhaustion. It is **not** a backtest of cross-market switching. It uses indicative payouts and ideal next-observed-tick fills, not historical executable quotes or broker latency. Comparing many replay cards introduces selection bias. Simulated feeds are prominently labelled and cannot authorize live deployment.
 
@@ -126,9 +133,9 @@ Unknown keys, empty/duplicate/unsupported selections, non-finite amounts, fracti
 
 ## Validation
 
-- `omni-analysis.test.ts`: 42-contract enumeration, subset sovereignty, payoff semantics, causal prefix forecasts, complementary probabilities, ties, fair-rate negative EV, replay, fixed recovery rules, market switching/locking and funding caps.
+- `omni-analysis.test.ts`: 42-contract enumeration, subset sovereignty, payoff semantics, causal prefix forecasts, complementary probabilities, ties, fair-rate negative EV, replay, fixed recovery rules, the recovery instrument rule (barred ends, allowed middle, best-remaining selection, replay agreement), market switching/locking and funding caps.
 - `omni-execution.test.ts`: live repricing, actual-stake re-quoting, stop/queue races, journaling failure, lost buy acknowledgements, strict reconciliation matching, tick identity and provenance.
-- `omni-engine.test.ts`: trusted scan binding, account isolation, concurrent starts, shared execution lease, real paper loss → recovery transitions, shared-live-debt isolation, same-price next ticks, stop draining, stop-loss preservation and ambiguous database-commit retries.
+- `omni-engine.test.ts`: trusted scan binding, account isolation, concurrent starts, shared execution lease, real paper loss → recovery transitions, recovery-leg instrument restriction on scan previews and live ranking, shared-live-debt isolation, same-price next ticks, stop draining, stop-loss preservation and ambiguous database-commit retries.
 - Web tests cover all contract controls, validation, dedicated-console handshake and global open/stop paths.
 - Browser smoke checks cover compact desktop/mobile sizing, subset selection, post-scan lock/switch actions, risk acknowledgement, account-only request payloads and all three shortened specialist button labels. Broker start responses are mocked; no live-money orders are placed during UI validation.
 

@@ -19,6 +19,7 @@ import {
   stopSession,
 } from "./omni-engine";
 import type { OmniConfig } from "./omni-config";
+import { omniContractAllowedInPhase } from "./omni-analysis";
 
 const config: OmniConfig = {
   enabledContracts: ["DIGITMATCH", "DIGITOVER"],
@@ -427,6 +428,68 @@ describe("Omni paper execution uses next-tick identity and isolated debt", () =>
     assert.equal(status.tradeCount, 1);
     assert.equal(status.unrecoveredAmount, 1);
     assert.equal(status.totalProfit, -1);
+  });
+});
+
+describe("Omni recovery leg obeys the recovery instrument rule", () => {
+  const wide: OmniConfig = {
+    ...config,
+    enabledContracts: ["DIGITOVER", "DIGITUNDER", "DIGITDIFF", "DIGITMATCH"],
+  };
+  const barred = (c: { contract: { contractType: string; barrier?: number } }) =>
+    !omniContractAllowedInPhase(c.contract as never, "recovery");
+  /** A digit that loses the given digit contract outright. */
+  const losingDigit = (type: string, barrier?: number) => {
+    const b = barrier ?? 0;
+    switch (type) {
+      case "DIGITOVER": return Math.max(0, b - 1);
+      case "DIGITUNDER": return Math.min(9, b + 1);
+      case "DIGITDIFF": return b;
+      default: return (b + 1) % 10; // DIGITMATCH
+    }
+  };
+  it("scan previews, live ranking and the message all honour the phase rule", async () => {
+    const a = owner();
+    const scan = await scoped(a, () => scanForOmni(wide));
+    assert.ok(scan.markets.length > 0);
+    for (const market of scan.markets)
+      if (market.recovery)
+        assert.ok(
+          omniContractAllowedInPhase(market.recovery.contract, "recovery"),
+          `${market.symbol} recovery preview offered ${market.recovery.contract.id}`,
+        );
+    assert.match(scan.reason, /Recovery skips Over 0, 1, 2, Under 7, 8, 9 and Differs/);
+    assert.match(scan.reason, /Differs/);
+    assert.ok(
+      (await scoped(a, () => startSession({ config: wide, scanId: scan.scanId, symbol: "R_10" }))).ok,
+    );
+    await until(
+      () => scoped(a, getStatus).omni?.pendingOrder === true,
+      "normal paper order prepared",
+    );
+    // Normal mode is untouched: the barred ends are still part of the tournament.
+    const normalCandidates = scoped(a, getStatus).omni!.watch.candidates;
+    assert.ok(
+      normalCandidates.some(barred),
+      "normal mode must still price Over 0–2 / Under 7–9 / Differs",
+    );
+    // Force a loss so the ledger carries debt, then inspect the recovery leg.
+    const open = (
+      await db.select().from(tradesTable).where(eq(tradesTable.sessionId, a))
+    ).find((row) => row.status === "open")!;
+    push("R_10", losingDigit(open.contractType, open.barrier ?? undefined));
+    await until(() => scoped(a, getStatus).inRecovery, "debt registered");
+    await until(
+      () => scoped(a, getStatus).omni!.watch.candidates.length > 0,
+      "recovery candidates ranked",
+    );
+    const recoveryCandidates = scoped(a, getStatus).omni!.watch.candidates;
+    assert.ok(recoveryCandidates.length > 0);
+    for (const candidate of recoveryCandidates)
+      assert.ok(
+        omniContractAllowedInPhase(candidate.contract, "recovery"),
+        `${candidate.contract.label} must not be selectable while recovering`,
+      );
   });
 });
 

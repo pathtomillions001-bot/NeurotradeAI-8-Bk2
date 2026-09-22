@@ -465,7 +465,7 @@ export const GetTradesResponse = zod.array(GetTradesResponseItem)
 
 
 /**
- * @summary Execute a manual or AI-recommended trade
+ * @summary Execute one manual or AI-recommended trade
  */
 export const ExecuteTradeBody = zod.object({
   "symbol": zod.string(),
@@ -476,29 +476,7 @@ export const ExecuteTradeBody = zod.object({
   "isAutonomous": zod.boolean().optional(),
   "duration": zod.number().optional(),
   "durationUnit": zod.enum(['t', 's', 'm', 'h', 'd']).optional()
-})
-
-
-/**
- * Places `count` identical contracts as ONE logical entry: a single shared trading session opens every leg on the same tick and the batch is settled in one sweep, so no individual order is delayed relative to the others.
- * @summary Execute a bulk of identical trades — all legs open and settle simultaneously
- */
-export const executeBulkTradesBodyCountMin = 2;
-export const executeBulkTradesBodyCountMax = 10;
-
-
-
-export const ExecuteBulkTradesBody = zod.object({
-  "symbol": zod.string(),
-  "contractType": zod.string(),
-  "stake": zod.number(),
-  "direction": zod.enum(['up', 'down']),
-  "barrier": zod.number().nullish(),
-  "isAutonomous": zod.boolean().optional(),
-  "duration": zod.number().optional(),
-  "durationUnit": zod.enum(['t', 's', 'm', 'h', 'd']).optional(),
-  "count": zod.number().min(executeBulkTradesBodyCountMin).max(executeBulkTradesBodyCountMax)
-})
+}).strict()
 
 
 /**

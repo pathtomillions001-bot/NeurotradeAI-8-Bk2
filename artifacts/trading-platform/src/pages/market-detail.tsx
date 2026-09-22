@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useGetMarketDetail, useExecuteTrade, useExecuteBulkTrades, useGetAiRecommendationForMarket, useGetAiEngineStatus } from "@workspace/api-client-react";
+import { useGetMarketDetail, useExecuteTrade, useGetAiRecommendationForMarket, useGetAiEngineStatus } from "@workspace/api-client-react";
 import { useParams, Link } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from "recharts";
 import { toast } from "sonner";
-import { ArrowLeft, TrendingUp, TrendingDown, AlertTriangle, Wifi, WifiOff, Activity, ArrowUp, ArrowDown, Brain, Zap, Layers, Copy, ShieldCheck } from "lucide-react";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { ArrowLeft, TrendingUp, TrendingDown, AlertTriangle, Wifi, WifiOff, Activity, ArrowUp, ArrowDown, Brain, Zap, Copy, ShieldCheck } from "lucide-react";
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -477,21 +477,18 @@ export default function MarketDetail() {
   const [liveTrendStats, setLiveTrendStats] = useState<any | null>(null);
   const [lastLiveDigit, setLastLiveDigit] = useState<number | null>(null);
   const [dialogCountdown, setDialogCountdown] = useState<number | null>(null);
-  const [bulkEnabled, setBulkEnabled] = useState(false);
-  const [bulkCount, setBulkCount] = useState(3);
   const [neuroAssist, setNeuroAssist] = useState(false);
-  const [bulkExecuting, setBulkExecuting] = useState(false);
   const [assistStatus, setAssistStatus] = useState<{ ready: boolean; label: string; detail: string } | null>(null);
   const [assistLoading, setAssistLoading] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
   const lastTickTimeRef = useRef<number>(Date.now());
+  const tradeSubmittingRef = useRef(false);
 
   const { data: market, isLoading, refetch } = useGetMarketDetail(symbol || "", { query: { refetchInterval: 8000, enabled: !!symbol } } as { query: any });
   const { data: rec, refetch: refetchRec } = useGetAiRecommendationForMarket(symbol || "", { query: { refetchInterval: 3000, enabled: !!symbol } } as { query: any });
   const { data: engineStatus } = useGetAiEngineStatus({ query: { refetchInterval: 5000 } } as { query: any });
   const isPaperMode = (engineStatus as any)?.paperTradeMode ?? false;
-  const executeTrade = useExecuteTrade();
-  const executeBulkTrades = useExecuteBulkTrades();
+  const executeTrade = useExecuteTrade({ mutation: { retry: false } });
 
   // ── SSE: live ticks + live market analysis ───────────────────────────────────
   useEffect(() => {
@@ -641,6 +638,7 @@ export default function MarketDetail() {
   const pipSize = pipSizeForSymbol(symbol);
 
   function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
+    if (tradeSubmittingRef.current || executeTrade.isPending) return;
     setTradeContract(contractType);
     setTradeDir(direction);
     setTradeBarrier(barrier);
@@ -659,112 +657,43 @@ export default function MarketDetail() {
   }
 
   async function handleExecuteTrade() {
-    if (!symbol || !stake) return;
-    const assist = getNeuroAssistStatus();
-    // When NeuroAI assist is ON, enforce Quantum timing for ALL trades (single + bulk)
-    // This makes assist actually helpful — it evaluates your exact barrier + ticks.
-    if (neuroAssist && assist?.state === "wait") {
-      const isBulk = bulkEnabled && bulkCount > 1;
-      toast.error(
-        isBulk
-          ? "AI suggests waiting — bulk trades require precise timing. Wait for Ready signal."
-          : `AI suggests waiting — ${assist.detail} Adjust ticks or wait for Ready.`
-      );
-      return;
-    }
-
+    // Guard synchronously as well as disabling the button: a double click can
+    // arrive before React renders the mutation's pending state.
+    if (!symbol || !stake || tradeSubmittingRef.current || executeTrade.isPending) return;
     const singleStake = Number(stake);
-    if (bulkEnabled && bulkCount > 1) {
-      const count = Math.min(10, Math.max(2, Math.floor(bulkCount)));
-      const totalStake = singleStake * count;
-      if (totalStake > 0 && singleStake <= 0) {
-        toast.error("Stake must be greater than 0");
-        return;
-      }
-      setBulkExecuting(true);
-      toast.info(`Executing ` + count + `× ` + (tradeContract || "trade") + ` @ $` + singleStake.toFixed(2) + ` — total $` + totalStake.toFixed(2) + ` (all at once)`);
-      try {
-        // ONE request → the server opens every leg on the same tick through a
-        // single shared trading session and settles the whole batch in one
-        // sweep. No per-order delay like the old N-parallel approach.
-        const bulkResult: any = await (executeBulkTrades as any).mutateAsync({
-          data: {
-            symbol,
-            contractType: tradeContract || (tradeDir === "up" ? "CALL" : "PUT"),
-            direction: tradeDir,
-            stake: singleStake,
-            duration: tradeDuration,
-            durationUnit: "t" as const,
-            barrier: tradeBarrier ?? null,
-            count,
-          },
-        });
-
-        const results: any[] = Array.isArray(bulkResult?.trades) ? bulkResult.trades : [];
-        // The server measures synchrony on Deriv's own contract start times and
-        // sends the verdict back. The UI reports what actually happened — it
-        // never claims a same-tick entry the broker did not confirm.
-        const sync: { verdict?: string; summary?: string; splitTickLegs?: number[] } | null =
-          bulkResult?.sync ?? null;
-
-        const wonCount = results.filter(r => r.status === "won").length;
-        const errorCount = results.filter(r => r.status === "error").length;
-        // `open` = bought on Deriv, settlement not journalled yet. It is NOT a
-        // failure, and saying so is what made healthy batches look dead.
-        const pendingCount = results.filter(r => r.status === "open").length;
-        const settled = results.filter(r => r.status === "won" || r.status === "lost");
-        const totalProfit = settled.reduce((sum, r) => sum + Number(r.profit ?? 0), 0);
-        const first = results[0];
-        const tickNote =
-          sync?.verdict === "synchronized"
-            ? " · same tick ✓"
-            : sync?.verdict === "split"
-              ? " · ⚠ entry ticks split"
-              : sync?.verdict === "unverified"
-                ? " · entry tick unverified"
-                : "";
-
-        if (results.length === 0) {
-          toast.error(sync?.summary ?? "Bulk trades failed to execute");
-        } else if (results.length === 1) {
-          toast.success(`Trade ` + (first.status === "won" ? "WON 🎉" : first.status === "open" ? "OPEN" : "LOST") + ` — ` + (first.status === "won" ? "+" : "") + `$` + Number(first.profit ?? 0).toFixed(2));
-        } else if (errorCount > 0) {
-          toast.error(`Bulk: ${wonCount}/${settled.length} won — $${totalProfit.toFixed(2)} · ${errorCount} leg(s) never reached your Deriv account${tickNote}`);
-        } else if (pendingCount > 0) {
-          toast.info(`Bulk placed: ${wonCount}/${results.length} settled${pendingCount ? `, ${pendingCount} awaiting Deriv confirmation` : ""} — $${totalProfit.toFixed(2)}${tickNote}`);
-        } else if (wonCount === results.length) {
-          toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` WON 🎉 — +$` + totalProfit.toFixed(2) + tickNote);
-        } else if (wonCount === 0) {
-          toast.error(`Bulk complete: 0/` + results.length + ` won — $` + totalProfit.toFixed(2) + tickNote);
-        } else {
-          toast.success(`Bulk complete: ` + wonCount + `/` + results.length + ` won — $` + totalProfit.toFixed(2) + tickNote);
-        }
-        if (sync?.verdict === "split" && sync.summary) {
-          toast.warning(sync.summary);
-        }
-        setTradeDialog(false);
-        queryClient.invalidateQueries();
-        refetch();
-      } catch (err: any) {
-        toast.error(err?.error || "Bulk trade failed");
-      } finally {
-        setBulkExecuting(false);
-      }
+    if (!Number.isFinite(singleStake) || singleStake <= 0) {
+      toast.error("Stake must be greater than 0");
+      return;
+    }
+    const assist = getNeuroAssistStatus();
+    if (neuroAssist && assist?.state === "wait") {
+      toast.error(`AI suggests waiting — ${assist.detail} Adjust ticks or wait for Ready.`);
       return;
     }
 
-    // Single trade path
-    executeTrade.mutate({
-      data: { symbol, contractType: tradeContract || (tradeDir === "up" ? "RISE" : "FALL"), direction: tradeDir, stake: singleStake, duration: tradeDuration, durationUnit: "t", barrier: tradeBarrier }
-    }, {
-      onSuccess: (result: any) => {
-        toast.success(`Trade ` + (result.status === "won" ? "WON 🎉" : "LOST") + ` — ` + (result.status === "won" ? "+" : "") + `$` + Number(result.profit ?? 0).toFixed(2));
-        setTradeDialog(false);
-        queryClient.invalidateQueries();
-        refetch();
-      },
-      onError: (err: any) => toast.error(err?.error || "Trade failed"),
-    });
+    tradeSubmittingRef.current = true;
+    try {
+      // One confirmation sends one order. Never retry a purchase automatically.
+      const result = await executeTrade.mutateAsync({
+        data: {
+          symbol,
+          contractType: tradeContract || (tradeDir === "up" ? "CALL" : "PUT"),
+          direction: tradeDir,
+          stake: singleStake,
+          duration: tradeDuration,
+          durationUnit: "t",
+          barrier: tradeBarrier,
+        },
+      });
+      toast.success(`Trade ` + (result.status === "won" ? "WON 🎉" : "LOST") + ` — ` + (result.status === "won" ? "+" : "") + `$` + Number(result.profit ?? 0).toFixed(2));
+      setTradeDialog(false);
+      queryClient.invalidateQueries();
+      refetch();
+    } catch (err: any) {
+      toast.error(err?.data?.error || err?.error || "Trade failed — check the journal before trying again");
+    } finally {
+      tradeSubmittingRef.current = false;
+    }
   }
 
   // RDBULL and RDBEAR fully support digit contracts (OVER/UNDER, EVEN/ODD, MATCH/DIFF)
@@ -1157,7 +1086,7 @@ export default function MarketDetail() {
         </Card>
       )}
 
-      {/* Trade dialog — Manual execution with Bulk & NeuroAI Assist */}
+      {/* Trade dialog — Single manual trade with optional NeuroAI Assist */}
       <Dialog open={tradeDialog} onOpenChange={setTradeDialog}>
         <DialogContent className="bg-card border-border max-w-sm max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -1167,6 +1096,7 @@ export default function MarketDetail() {
                 <span className="text-xs font-mono px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-400 border border-violet-500/30">{tradeBarrier}</span>
               )}
             </DialogTitle>
+            <DialogDescription>One confirmation places one trade at the stake below.</DialogDescription>
           </DialogHeader>
           {isPaperMode && (
             <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-medium">
@@ -1207,11 +1137,6 @@ export default function MarketDetail() {
               <div className="space-y-1.5">
                 <Label htmlFor="stake" className="text-xs">Stake (USD)</Label>
                 <Input id="stake" type="number" value={stake} min="0.35" step="0.5" onChange={(e) => setStake(e.target.value)} className="font-mono bg-secondary/50 h-8 text-sm" />
-                {bulkEnabled && bulkCount > 1 && stake && (
-                  <div className="text-[10px] font-mono text-muted-foreground">
-                    Total: <span className="text-amber-400 font-bold">${(Number(stake || 0) * bulkCount).toFixed(2)}</span> · {bulkCount}× ${Number(stake || 0).toFixed(2)}
-                  </div>
-                )}
               </div>
               <div className="space-y-1.5">
                 <Label htmlFor="ticks" className="text-xs">Duration (ticks)</Label>
@@ -1227,53 +1152,6 @@ export default function MarketDetail() {
                 />
                 <div className="text-[9px] text-muted-foreground">1 tick ≈ 1 sec</div>
               </div>
-            </div>
-
-            {/* ── Bulk Trades — manual only ── */}
-            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-6 h-6 rounded-md bg-amber-500/15 border border-amber-500/30 flex items-center justify-center">
-                    <Layers className="w-3.5 h-3.5 text-amber-400" />
-                  </div>
-                  <div>
-                    <p className="text-xs font-semibold leading-none">Bulk Trades</p>
-                    <p className="text-[10px] text-muted-foreground leading-none mt-0.5">Execute multiple at once</p>
-                  </div>
-                </div>
-                <Switch checked={bulkEnabled} onCheckedChange={setBulkEnabled} />
-              </div>
-              {bulkEnabled && (
-                <div className="space-y-2.5 pt-1">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs text-muted-foreground">Number of trades</span>
-                    <div className="flex items-center gap-1.5">
-                      <Button variant="outline" size="sm" className="h-7 w-7 p-0 border-white/10" onClick={() => setBulkCount(c => Math.max(2, c - 1))}>−</Button>
-                      <div className="w-12 h-7 rounded-md bg-secondary/50 border border-white/10 flex items-center justify-center font-mono text-sm font-bold">
-                        {bulkCount}
-                      </div>
-                      <Button variant="outline" size="sm" className="h-7 w-7 p-0 border-white/10" onClick={() => setBulkCount(c => Math.min(10, c + 1))}>+</Button>
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-5 gap-1">
-                    {[2,3,5,7,10].map(n => (
-                      <button
-                        key={n}
-                        onClick={() => setBulkCount(n)}
-                        className={`h-6 rounded text-xs font-mono font-medium border ${bulkCount === n ? "bg-amber-500/20 border-amber-500/50 text-amber-300" : "bg-white/5 border-white/10 text-muted-foreground hover:border-white/20"}`}
-                      >
-                        {n}×
-                      </button>
-                    ))}
-                  </div>
-                  <div className="flex items-start gap-1.5 p-2 rounded-lg bg-amber-500/5 border border-amber-500/15">
-                    <AlertTriangle className="w-3 h-3 text-amber-400 mt-0.5 shrink-0" />
-                    <p className="text-[10px] leading-relaxed text-amber-300/80">
-                      Bulk over-exposes your account. All {bulkCount} legs are quoted, then <span className="font-bold text-amber-300">committed in one burst inside a single tick</span> so they open on the same digit and close together. The server verifies it on Deriv's own start times and reports the result.
-                    </p>
-                  </div>
-                </div>
-              )}
             </div>
 
             {/* ── NeuroAI Quantum Assist — uses same engine as FAB, hides technical metrics ── */}
@@ -1306,9 +1184,6 @@ export default function MarketDetail() {
                     <div className="min-w-0">
                       <p className={`text-xs font-bold leading-none ${isReady ? "text-green-400" : "text-amber-400"}`}>{assist.label}</p>
                       <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">{assist.detail}</p>
-                      {!isReady && bulkEnabled && bulkCount > 1 && (
-                        <p className="text-[10px] font-medium text-amber-300 mt-1.5">Bulk trades are paused until timing is optimal.</p>
-                      )}
                     </div>
                   </div>
                 );
@@ -1325,16 +1200,14 @@ export default function MarketDetail() {
             <Button variant="outline" onClick={() => setTradeDialog(false)} className="flex-1">Cancel</Button>
             <Button
               onClick={handleExecuteTrade}
-              disabled={executeTrade.isPending || bulkExecuting || (neuroAssist && getNeuroAssistStatus()?.state === "wait")}
-              className={`flex-1 font-bold ${bulkEnabled && bulkCount > 1 ? "bg-amber-600 hover:bg-amber-500 text-white" : "bg-primary hover:bg-primary/90"}`}
+              disabled={executeTrade.isPending || (neuroAssist && getNeuroAssistStatus()?.state === "wait")}
+              className="flex-1 font-bold bg-primary hover:bg-primary/90"
             >
-              {bulkExecuting || executeTrade.isPending
-                ? (bulkEnabled && bulkCount > 1 ? `Executing ${bulkCount}×…` : "Executing…")
+              {executeTrade.isPending
+                ? "Executing…"
                 : neuroAssist && getNeuroAssistStatus()?.state === "wait"
                   ? "Waiting for AI…"
-                  : bulkEnabled && bulkCount > 1
-                    ? `Execute ${bulkCount}× ${tradeContract || "Trade"}`
-                    : `Execute ${tradeContract || "Trade"}`}
+                  : "Execute 1 Trade"}
             </Button>
           </DialogFooter>
         </DialogContent>

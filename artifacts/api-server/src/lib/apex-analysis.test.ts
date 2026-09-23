@@ -17,6 +17,7 @@ import { describe, it } from "node:test";
 import {
   APEX_BREAKEVEN,
   APEX_PACE_TARGET,
+  ApexPolicy,
   EchoScope,
   HawkesBank,
   PacingValve,
@@ -284,8 +285,21 @@ describe("apex pipeline on planted-edge streams", () => {
     assert.equal(w.length, 5, `weights=${w}`);
     assert.ok(Math.abs(w.reduce((a, b) => a + b, 0) - 1) < 1e-9, `sum=${w.reduce((a, b) => a + b, 0)}`);
     assert.ok(w.every(v => v > 0.03), `dead lens: ${w}`);
-    assert.ok(fit.params.tau >= 1 && fit.params.tau <= 2.6, `tau=${fit.params.tau}`);
+    // The τ grid spans 0.6–2.6 and the top-1 (selection) Brier term decides:
+    // a strong planted echo EARNS sub-1 sharpening (the old hard τ ≥ 1 cap
+    // under-claimed real structure); what matters is that the claim stays
+    // honest — asserted below via claimed-vs-realized on the fired shots.
+    assert.ok(fit.params.tau >= 0.6 && fit.params.tau <= 2.6, `tau=${fit.params.tau}`);
     assert.ok(fit.params.initBar > 0 && fit.params.initBar < 1, `bar=${fit.params.initBar}`);
+    const { metrics } = replayPolicy(digits, fit.params, { warmup: 300 });
+    // Decision calibration: on a structured tape the fired shots' claims must
+    // track reality (the old cap under-claimed by ~7 points). The band carries
+    // 3σ of binomial slack — 40-ish shots are noisy.
+    if (metrics.shots >= 10) {
+      const slack = 3 * Math.sqrt(Math.max(0.01, metrics.hitRate * (1 - metrics.hitRate)) / metrics.shots) + 0.02;
+      assert.ok(metrics.avgP > metrics.hitRate - slack, `under-claimed: avgP=${metrics.avgP} vs hit=${metrics.hitRate}`);
+      assert.ok(metrics.avgP < metrics.hitRate + slack, `over-claimed: avgP=${metrics.avgP} vs hit=${metrics.hitRate} (slack=${slack})`);
+    }
   });
 });
 
@@ -297,5 +311,136 @@ describe("digit lock", () => {
     assert.equal(read.params.lockedDigit, 7);
     const { metrics } = replayPolicy(digits.slice(1500), read.params, { warmup: 200 });
     assert.ok(metrics.shots >= 0);
+  });
+});
+
+// ── v3 upgrades: decision-calibrated fusion, EV selection, hedge, PPM ────────
+
+describe("decision-calibrated fusion (top-1 objective)", () => {
+  it("softens on fair tapes and sharpens only when the argmax event earns it", () => {
+    // Fair tape: the selected digit's claim must be softened toward honesty —
+    // the fitted τ should sit above 1 (the old pure-log-loss fit landed at 1).
+    const fair = fairStream(4000, 101);
+    const fairFit = fitApexParams(fair, "steady");
+    assert.ok(fairFit.params.tau > 1, `fair tau=${fairFit.params.tau} — top-1 objective not softening noise?`);
+
+    // Strong planted echo: sharpening is earned (τ below the old hard cap of 1).
+    const hot = echoStream(4000, 0.3, 103);
+    const hotFit = fitApexParams(hot, "steady");
+    assert.ok(hotFit.params.tau < fairFit.params.tau, `hot tau=${hotFit.params.tau} not < fair tau=${fairFit.params.tau}`);
+  });
+
+  it("per-digit payouts flow through the replay into measured EV", () => {
+    const digits = fairStream(3600, 107);
+    const params = defaultApexParams("brisk");
+    // A 13× quote on digit 0 vs 8.2× elsewhere dominates any realistic
+    // posterior concentration (the fused leader's p would need a >58%
+    // relative edge to win at 8.2 against 13×), so a replay that actually
+    // picks by EV must fire overwhelmingly on the fat quote.
+    const payouts = [13.0, 8.2, 8.2, 8.2, 8.2, 8.2, 8.2, 8.2, 8.2, 8.2];
+    const { metrics } = replayPolicy(digits, params, { warmup: 300, payouts });
+    if (metrics.shots > 0) {
+      // The flat 8.93 default is the baseline; with a 13× digit on the board
+      // the EV pick must pull the fired-shot mix well above it. (It will not
+      // be 13.0 — when the fat digit's fused p dips in a dry spell, argmax
+      // p·pay CORRECTLY prefers a concentrated 8.2 leader. EV is the
+      // contract, not exclusivity.)
+      assert.ok(metrics.meanPayout > 9.2, `meanPayout=${metrics.meanPayout} — EV pick ignoring the quote vector?`);
+      assert.ok(Math.abs(metrics.breakEven - 1 / metrics.meanPayout) < 1e-9);
+    }
+  });
+});
+
+describe("full-vector EV digit choice", () => {
+  it("scans the WHOLE payout vector — an EV-best tail digit wins over the top-3", () => {
+    const digits = fairStream(3000, 113);
+    const policy = new ApexPolicy(defaultApexParams("brisk"));
+    for (let i = 0; i < digits.length - 1; i++) policy.update(digits, i);
+    const fused = policy.peek(digits, digits.length - 1).fused;
+    // Give the LEAST-likely digit a quote so fat that its p·pay beats every
+    // top-3 candidate (synthetic 13× — the property under test is that the
+    // full vector is scanned, which a top-3-truncated implementation fails).
+    const tail = fused.indexOf(Math.min(...fused));
+    const payouts = new Array(10).fill(8.2);
+    payouts[tail] = 16.0;
+    const tailEV = fused[tail] * 16.0;
+    const bestTop3 = [...fused].sort((a, b) => b - a).slice(0, 3)
+      .reduce((m, p) => Math.max(m, p * 8.2), 0);
+    assert.ok(tailEV > bestTop3, "test premise failed — pick a fatter tail quote");
+    const dec = policy.decide(digits, digits.length - 1, { payouts });
+    assert.equal(dec.digit, tail, `digit=${dec.digit} (tail=${tail}) ev=${dec.evDigit}`);
+    assert.equal(dec.evPayout, 16.0);
+  });
+});
+
+describe("held-out EV digit pick in scoreMarket", () => {
+  it("selects the digit that measured hottest on UNSEEN ticks, not the in-sample argmax", () => {
+    // A single-digit lag-3 echo strongly favours one digit; the held-out
+    // accumulation must find it even though the full-data argmax could be
+    // polluted by the winner's curse.
+    const digits = echoStream(3600, 0.35, 127);
+    const read = scoreMarket(digits, "steady");
+    // The echo stream repeats whatever digit echoed — verify the pick earns a
+    // real edge on its own quote rather than being a random in-sample peak.
+    assert.ok(read.hitRate > 0.12, `hitRate=${read.hitRate}`);
+    assert.ok(read.edgePerDollar > 0, `edge=${read.edgePerDollar}`);
+    // The payout vector must flow into the read: with every digit quoted at
+    // 9.4 the pick's own quote is 9.4, and the schedule is echoed back.
+    const flat = fairStream(3600, 131);
+    const flatRead = scoreMarket(flat, "steady", { payouts: [9.4, 9.4, 9.4, 9.4, 9.4, 9.4, 9.4, 9.4, 9.4, 9.4] });
+    assert.equal(flatRead.payout, 9.4, `payout=${flatRead.payout}`);
+    assert.ok(flatRead.payouts !== undefined);
+    assert.equal(flatRead.payouts?.length, 10);
+    assert.ok(flatRead.digit >= 0 && flatRead.digit <= 9);
+  });
+});
+
+describe("online hedge between refits", () => {
+  it("re-aims the pool when a rhythm switches on mid-stream", () => {
+    // First half fair, second half a lag-3 echo — the fitted weights came
+    // from the fair half, so the hedge must lift the lenses that carry the
+    // new structure (echo/renewal/ctw vs their fitted share).
+    const first = fairStream(1800, 137);
+    const second = echoStream(1800, 0.3, 139);
+    const digits = [...first, ...second];
+    const fit = fitApexParams(first, "brisk");
+    const policy = new ApexPolicy(fit.params);
+    const fitted = policy.lensWeights();
+    for (let i = 0; i < digits.length - 1; i++) {
+      policy.update(digits, i);
+      policy.decide(digits, i);
+    }
+    const adapted = policy.lensWeights();
+    // The echo lens (index 0) must not lose share and should gain it once the
+    // structure arrives; the sum stays a simplex.
+    assert.ok(Math.abs(adapted.reduce((a, b) => a + b, 0) - 1) < 1e-9, `sum=${adapted}`);
+    assert.ok(adapted[0] >= fitted[0] * 0.9, `echo weight fell: ${fitted[0]} → ${adapted[0]}`);
+    assert.notDeepEqual(adapted, fitted, "hedge never moved the weights?");
+  });
+});
+
+describe("suffix memory PPM interpolation", () => {
+  it("keeps the planted continuation and stops bleeding on fair streams", () => {
+    const mem = new SuffixMemory();
+    const hot = echoStream(2000, 0.3, 149);
+    for (let i = 0; i < hot.length - 1; i++) {
+      mem.update(hot, i);
+    }
+    const pred = mem.predict(hot, hot.length - 1);
+    assert.ok(pred.probs[hot[hot.length - 1]] > 0.11, `echo tilt lost: p=${pred.probs[hot[hot.length - 1]]}`);
+
+    // The old hard longest-match cost ~0.22 nats of skill on fair tapes.
+    // The blended predictor must cut that bleed by at least half.
+    const fair = fairStream(3000, 151);
+    const mem2 = new SuffixMemory();
+    let ll = 0, n = 0;
+    for (let i = 0; i < fair.length - 1; i++) {
+      const p = mem2.predict(fair, i).probs;
+      ll += -Math.log(Math.max(1e-9, p[fair[i + 1]]));
+      n++;
+      mem2.update(fair, i);
+    }
+    const skill = Math.log(10) - ll / n;
+    assert.ok(skill > -0.09, `suffix still bleeding on fair tape: skill=${skill.toFixed(3)} nats`);
   });
 });

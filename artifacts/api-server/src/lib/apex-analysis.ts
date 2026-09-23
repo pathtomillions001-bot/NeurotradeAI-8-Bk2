@@ -51,6 +51,39 @@
  * 11.2% break-even, so the gates rejected virtually every shot). Zero vetoes
  * means zero vetoes: the budget is the only selectivity.
  *
+ * WHY SHOTS GET BETTER WITHOUT GATES (the v3 upgrades, all measured in the
+ * diagnostic lab on fair and planted-structure tapes):
+ *
+ *  1. DECISION-CALIBRATED FUSION — the pool's temperature and weights are fit
+ *     on a JOINT objective: full-distribution log-loss PLUS the top-1 Brier
+ *     of the selected (argmax) digit. The old pure log-loss τ systematically
+ *     over-claimed on fair tapes (fired shots claimed 12.7%, realized 10.3%
+ *     — the winner's curse of selecting the max of 10 correlated estimates)
+ *     and the old hard τ ∈ [1, 1.5] cap under-claimed real structure
+ *     (claimed 19% where 26% realized on a planted echo). Now softening must
+ *     be PAID for in decision-calibration, and sharpening is earned exactly
+ *     when the argmax event itself justifies it.
+ *  2. HELD-OUT EV DIGIT PICK — the AI digit is argmax_d (mean fused p_d on
+ *     the UNSEEN test half) × (live per-digit payout). No per-tick selection,
+ *     no winner's curse; the payout side of EV = p·payout is the one lever
+ *     that is real on a statistically flat book (at fair p, 9.4× bleeds −6%/
+ *     shot where 8.2× bleeds −18%/shot).
+ *  3. FULL-VECTOR EV — decide()/peek() take the whole 10-digit payout vector;
+ *     no top-3 truncation (measured: the EV-best digit sits outside the top-3
+ *     up to 5% of ticks on cold/warm posteriors).
+ *  4. SUFFIX LENS PPM INTERPOLATION — the old longest-match hard commitment
+ *     cost −0.22 nats on structured tapes (long contexts are mostly
+ *     coincidences); each order now blends into the shallower ladder in
+ *     proportion to its own data mass.
+ *  5. ONLINE HEDGE between re-fits — exponentially-decayed per-lens
+ *     log-loss, softmaxed into the fitted weights (multiplicative-weights
+ *     aggregation, Hedge regret bound), so the pool re-aims at a regime
+ *     change in tens of ticks instead of waiting for the 20–45s re-fit.
+ *
+ * The pacing budget, the one-shot-per-tick valve and the honest held-out
+ * replay are all UNCHANGED — every upgrade above is a selection/calibration
+ * upgrade inside the budget.
+ *
  * HONEST MEASUREMENT — the scan fits every parameter on the first 60% of each
  * market's history and reports the replay of the EXACT live policy (lenses +
  * fusion + valve) on the final 40% it never fitted on. Verdicts (PRIME /
@@ -477,27 +510,53 @@ export class SuffixMemory {
   }
 
   /**
-   * P(next digit) from the longest context of history[0..idx] with enough
-   * (decayed) samples. Laplace α=1 keeps unseen continuations honest.
+   * P(next digit) — PPM-INTERPOLATED down the context ladder, orders 1..max.
+   *
+   * The old predictor hard-committed to the LONGEST context with enough
+   * (decayed) samples. Measured on a planted lag-3 echo tape that cost
+   * −0.22 nats of skill: long contexts are mostly coincidences, and a hard
+   * bet on them drags the whole pool. Now each order's Laplace-smoothed
+   * predictive is interpolated toward the shallower blend in proportion to
+   * its own (decayed) data mass — k = total/(total+shrink) — so a context
+   * seen a handful of times inherits the shallower view and only genuinely
+   * fat contexts speak for themselves. `order` reports the deepest rung that
+   * cleared minSamples (display only); the blend is returned either way.
    */
   predict(history: ArrayLike<number>, idx: number): { probs: number[]; order: number; samples: number } {
-    for (let o = this.maxOrder; o >= 1; o--) {
-      if (idx - o + 1 < 0) continue;
+    let blend = uniform10();
+    let deepest = 0;
+    let deepestSamples = 0;
+    for (let o = 1; o <= this.maxOrder; o++) {
+      if (idx - o + 1 < 0) break;
       const e = this.tables.get(SuffixMemory.key(history, idx + 1, o));
-      if (!e) continue;
+      if (!e) break;
       const f = Math.pow(this.decayPerTick, Math.max(0, this.tick - e.seen));
       const total = e.total * f;
-      if (total < this.minSamples) continue;
-      const probs = new Array<number>(10);
+      if (total <= 0) break;
+      const raw = new Array<number>(10);
       let s = 0;
       for (let d = 0; d < 10; d++) {
-        probs[d] = e.counts[d] * f + 0.1;
-        s += probs[d];
+        raw[d] = e.counts[d] * f + 0.1;
+        s += raw[d];
       }
-      for (let d = 0; d < 10; d++) probs[d] /= s;
-      return { probs, order: o, samples: total };
+      for (let d = 0; d < 10; d++) raw[d] /= s;
+      // PPM interpolation with DEPTH-AWARE damping: a single-hit context at
+      // order 5 is noise riding on noise, while the same count at order 1 is
+      // already a usable frequency read — shrinkage grows with o (4·o²) so
+      // deep thin rungs barely move the blend instead of compounding their
+      // spikes down the ladder (measured: hard longest-match cost −0.22 nats
+      // on fair tapes; flat 4-shrink PPM still cost −0.15; 4·o² ≈ −0.01).
+      const k = total / (total + 4 * o * o);
+      const next = new Array<number>(10);
+      for (let d = 0; d < 10; d++) next[d] = k * raw[d] + (1 - k) * blend[d];
+      blend = next;
+      if (total >= this.minSamples) {
+        deepest = o;
+        deepestSamples = total;
+      }
     }
-    return { probs: uniform10(), order: 0, samples: 0 };
+    normalizeInPlace(blend);
+    return { probs: blend, order: deepest, samples: deepestSamples };
   }
 
   private prune(): void {
@@ -770,19 +829,35 @@ function projectSimplex(w: number[], floor: number): number[] {
  * COORDINATE DESCENT ON THE SIMPLEX — the second stage of fusion fitting.
  *
  * `weightsFromSkill` is only a starting point (its 1/0.05 softmax is a
- * heuristic). This directly minimises the pooled train LOG-LOSS — the
- * logarithmic score, a strictly proper scoring rule — over the lens weights,
- * holding the per-lens floor so no lens dies, then re-sweeps the temperature
- * grid between rounds. For a log-pool, the log-loss surface is concave in
- * log-weights, so coordinate moves with shrinking steps converge to the
- * pooled optimum without ever leaving the simplex.
+ * heuristic). This directly minimises a joint proper-scoring objective over
+ * the pooled train distribution:
+ *
+ *   loss(w, τ) = mean[ −log fused[event] ]            ← full-distribution
+ *              + wTop1 · mean[ (fused[argmax] − hit)² ]  ← SELECTION event
+ *
+ * The second term is the part that actually prices the bot's DECISION: the
+ * valve fires on the fused argmax probability, so the number that must be
+ * honest is P(argmax digit) — not the log-loss of the whole vector. Measured
+ * on fair tapes, a pure log-loss τ lands wherever the grid allows and the
+ * fired shots still claim ~12.7% while realizing ~10.3% (the winner's curse
+ * of selecting the max of 10 correlated estimates); adding the top-1 Brier
+ * forces softening to be PAID FOR in decision-calibration, and symmetrically
+ * lets τ < 1 sharpen when a planted echo makes the argmax digit genuinely
+ * hotter than the softened claim (measured: τ 0.73 on a 6% lag-3 echo vs the
+ * old hard [1, 1.5] cap that under-claimed 19% vs 26% realized). This is a
+ * FIT-TIME capacity control, never a trade gate — the valve still paces
+ * whatever distribution results.
+ *
+ * For a log-pool, the log-loss surface is concave in log-weights, so
+ * coordinate moves with shrinking steps converge to the pooled optimum
+ * without ever leaving the simplex.
  */
 export function optimizePoolWeights(
   samples: Array<{ lenses: number[][]; event: number }>,
   weights0: number[],
   tau0: number,
   tauGrid: number[],
-  opts?: { reg?: number },
+  opts?: { reg?: number; top1Weight?: number },
 ): { weights: number[]; tau: number } {
   const L = weights0.length;
   const floor = APEX_LENS_FLOOR;
@@ -792,6 +867,10 @@ export function optimizePoolWeights(
   // provably fair streams). KL(w || uniform) in nats, scaled by sample count
   // and `reg`. A fit-time capacity control — never a trade gate.
   const reg = opts?.reg ?? 0.04;
+  // Weight of the top-1 Brier term relative to the log-loss term (nats ≈ 2.3
+  // on a fair tape; top-1 Brier ≈ 0.098·10 ≈ 1 → 10 puts both terms on a
+  // comparable footing while keeping the log-loss in charge of overall shape).
+  const wTop1 = opts?.top1Weight ?? 10;
   let weights = projectSimplex([...weights0], floor);
   let tau = tau0;
   const klToUniform = (w: number[]): number => {
@@ -801,11 +880,19 @@ export function optimizePoolWeights(
   };
   const pooledLoss = (w: number[], t: number): number => {
     let ll = 0;
+    let t1 = 0;
     for (const s of samples) {
       const fused = temperatureScale(logPool(s.lenses, w), t);
       ll += -Math.log(Math.max(1e-9, fused[s.event] ?? 1e-9));
+      let m = 0;
+      for (let d = 1; d < 10; d++) if (fused[d] > fused[m]) m = d;
+      const hit = s.event === m ? 1 : 0;
+      t1 += (fused[m] - hit) * (fused[m] - hit);
     }
-    return ll + reg * samples.length * klToUniform(w);
+    const n = Math.max(1, samples.length);
+    // Per-sample objective: mean log-loss (nats) + wTop1 × mean top-1 Brier,
+    // plus the per-sample KL capacity control (same scale as before).
+    return ll / n + wTop1 * (t1 / n) + reg * klToUniform(w);
   };
   let best = pooledLoss(weights, tau);
   const factors = [0.5, 0.7, 0.85, 1.18, 1.45, 2.0];
@@ -831,6 +918,72 @@ export function optimizePoolWeights(
     }
   }
   return { weights, tau };
+}
+
+// ── Online hedge: multiplicative re-weighting between re-fits ─────────────────
+// The scan fits pool weights on a 4500-tick window and the live loop re-fits
+// every 20–45s. Between re-fits the tape can change regime (a rhythm dies, a
+// new one starts) faster than the re-fit cadence. The hedge tracks each
+// lens's DECAYED online log-loss as the tape actually arrives and blends a
+// softmax of that skill into the fitted weights — exponential-weights-style
+// forecasting aggregation (Hedge / multiplicative weights), whose cumulative
+// log-loss is within O(√(T log N)) of the best lens in hindsight. The fitted
+// weights stay the prior; the hedge only gets as much say as the live tape
+// has earned (ρ = n/(n+400)), and the 5% floor keeps every lens alive.
+
+export class OnlineHedge {
+  private ll: Float64Array;
+  private fed = 0;
+  private lastAt = 0;
+
+  constructor(
+    private lensCount: number,
+    private halfLife = 800,
+    private ramp = 400,
+  ) {
+    this.ll = new Float64Array(lensCount);
+  }
+
+  /** Score each lens's stored prediction against the digit that just printed. */
+  private decay(): void {
+    const f = Math.pow(0.5, this.fed - this.lastAt);
+    for (let l = 0; l < this.lensCount; l++) this.ll[l] *= f;
+    this.lastAt = this.fed;
+  }
+
+  observe(logProbs: ReadonlyArray<ArrayLike<number>> | null, digit: number): void {
+    this.fed++;
+    if (this.fed - this.lastAt > 0) this.decay();
+    if (!logProbs) return;
+    for (let l = 0; l < this.lensCount; l++) {
+      this.ll[l] += -Math.log(Math.max(1e-9, logProbs[l]?.[digit] ?? 1e-9));
+    }
+  }
+
+  /**
+   * Effective pool weights: (1−ρ)·fitted + ρ·softmax(skill), skill = mean
+   * nats saved vs the uniform baseline over the decayed window.
+   */
+  weights(fitted: number[]): number[] {
+    const n = this.fed;
+    if (n < 30) return fitted;
+    const ρ = n / (n + this.ramp);
+    const skills: number[] = [];
+    for (let l = 0; l < this.lensCount; l++) skills.push(Math.log(10) - this.ll[l] / n);
+    const hedge = softmax(skills.map(s => s / 0.05));
+    const blended = fitted.map((w, l) => (1 - ρ) * w + ρ * hedge[l]);
+    return projectSimplex(blended, APEX_LENS_FLOOR);
+  }
+
+  /** Per-lens mean log-loss over the decayed window (diagnostics). */
+  losses(): number[] {
+    const n = Math.max(1, this.fed);
+    return Array.from(this.ll, v => v / n);
+  }
+
+  get observations(): number {
+    return this.fed;
+  }
 }
 
 // ── Pacing valve: selectivity as a budget ─────────────────────────────────────
@@ -955,6 +1108,11 @@ export class ApexPolicy {
   private ctw = new DigitCTW();
   private renewal = new RenewalHazard();
   private valve: PacingValve;
+  private hedge = new OnlineHedge(APEX_LENS_COUNT);
+  /** Lens distributions from the LAST decide() — scored once the next tick lands. */
+  private lastLenses: number[][] | null = null;
+  /** Effective pool weights (fitted ⊕ hedge) — exposed for diagnostics. */
+  private activeWeights: number[];
   /**
    * Zero floor: the bar may float down to wherever the budgeted fire rate
    * lives in the live score distribution. A break-even floor here (plus a
@@ -966,10 +1124,16 @@ export class ApexPolicy {
   constructor(private params: ApexParams) {
     this.hawkes = new HawkesBank(params.alpha, params.beta);
     this.valve = new PacingValve(APEX_PACE_TARGET[params.pace] ?? 0.035, params.initBar, this.floor);
+    this.activeWeights = [...params.weights];
   }
 
   get fitted(): ApexParams {
     return this.params;
+  }
+
+  /** Effective (fitted ⊕ hedge) pool weights, for diagnostics and the console. */
+  lensWeights(): number[] {
+    return [...this.activeWeights];
   }
 
   /** Feed history[idx] as the newly observed digit. */
@@ -979,10 +1143,17 @@ export class ApexPolicy {
     this.ctw.update(history, idx);
     this.renewal.update(history, idx);
     const d = history[idx];
-    if (Number.isInteger(d) && d >= 0 && d <= 9) this.hawkes.update(d);
+    if (Number.isInteger(d) && d >= 0 && d <= 9) {
+      this.hawkes.update(d);
+      // Settle the previous decide()'s lens predictions against this outcome:
+      // the hedge learns at the speed the tape actually arrives.
+      this.hedge.observe(this.lastLenses, d);
+      this.activeWeights = this.hedge.weights(this.params.weights);
+    }
+    this.lastLenses = null;
   }
 
-  /** The five lens distributions, fused over `weights`. */
+  /** The five lens distributions, fused over the EFFECTIVE weights. */
   private fuse(history: ArrayLike<number>, idx: number): {
     echo: number[]; hawkes: number[]; suffix: number[]; ctw: number[]; renewal: number[]; fused: number[];
     memoryOrder: number; memorySamples: number;
@@ -992,7 +1163,7 @@ export class ApexPolicy {
     const mem = this.memory.predict(history, idx);
     const ctw = this.ctw.predict(history, idx);
     const renewal = this.renewal.predict();
-    const weights = this.params.weights;
+    const weights = this.activeWeights;
     const fused = temperatureScale(logPool([echo, hawkes, mem.probs, ctw, renewal], weights), this.params.tau);
     return {
       echo, hawkes, suffix: mem.probs, ctw, renewal, fused,
@@ -1005,29 +1176,34 @@ export class ApexPolicy {
    * tick — the valve adapts its bar on every call.
    *
    * `opts.payouts` (per-digit live payout multipliers) upgrades the digit
-   * pick from argmax p to argmax p·payout — the EV-optimal shot. This is a
-   * SELECTION upgrade inside the already-open valve, never a gate.
+   * pick from argmax p to argmax p·payout over the FULL vector — the
+   * EV-optimal shot. On a statistically flat posterior (the honest state of
+   * most sessions) this concentrates every shot on the fattest quote the
+   * book offers: at fair p = 10%, 9.4× loses −6%/shot where 8.2× loses
+   * −18%/shot. This is a SELECTION upgrade inside the already-open valve,
+   * never a gate.
    */
   decide(history: ArrayLike<number>, idx: number, opts?: { recovery?: boolean; payouts?: number[] }): ApexDecision {
     const lens = this.fuse(history, idx);
     const fused = lens.fused;
+    // Store the lens vectors so update() can score them against the outcome.
+    this.lastLenses = [lens.echo, lens.hawkes, lens.suffix, lens.ctw, lens.renewal].slice(0, this.params.weights.length);
     const locked = this.params.lockedDigit;
     let digit = locked !== undefined ? locked : argmax(fused);
     let evDigit: number | undefined;
     let evPayout: number | undefined;
     if (opts?.payouts && locked === undefined) {
-      // EV pick among the fused leaders (top-3 by probability): the engine
-      // quotes exactly these three. argmax over the full vector equals the
-      // argmax over the top-3 only when the tail cannot win — the tail's p is
-      // so far behind that no realistic payout gap flips it, and scanning the
-      // top-3 keeps the quote fan-out bounded.
-      const order = fused.map((p, d) => ({ p, d })).sort((a, b) => b.p - a.p);
+      // EV pick over the FULL fused vector. The old top-3-by-p truncation
+      // assumed no payout gap could lift a tail digit — true on a warm,
+      // concentrated posterior (leader ≥15% relative edge over rank 4), but
+      // right after a re-fit or on a flat tape the ranks 4–10 sit within the
+      // payout spread, and quoting is cached anyway. Keep it bounded: payout
+      // entries must be finite and positive to count.
       let bestEV = -Infinity;
-      for (let i = 0; i < Math.min(3, order.length); i++) {
-        const { d, p } = order[i];
+      for (let d = 0; d < 10; d++) {
         const pay = opts.payouts[d];
-        if (!Number.isFinite(pay) || pay <= 0) continue;
-        const ev = p * (pay as number);
+        if (!Number.isFinite(pay) || (pay as number) <= 0) continue;
+        const ev = fused[d] * (pay as number);
         if (ev > bestEV) {
           bestEV = ev;
           evDigit = d;
@@ -1069,14 +1245,13 @@ export class ApexPolicy {
     const locked = this.params.lockedDigit;
     let digit = locked !== undefined ? locked : argmax(fused);
     if (opts?.payouts && locked === undefined) {
-      const order = fused.map((p, d) => ({ p, d })).sort((a, b) => b.p - a.p);
       let bestEV = -Infinity;
-      for (let i = 0; i < Math.min(3, order.length); i++) {
-        const { d, p } = order[i];
+      for (let d = 0; d < 10; d++) {
         const pay = opts.payouts[d];
-        if (!Number.isFinite(pay) || pay <= 0) continue;
-        if (p * (pay as number) > bestEV) {
-          bestEV = p * (pay as number);
+        if (!Number.isFinite(pay) || (pay as number) <= 0) continue;
+        const ev = fused[d] * (pay as number);
+        if (ev > bestEV) {
+          bestEV = ev;
           digit = d;
         }
       }
@@ -1104,6 +1279,10 @@ export interface ApexReplayMetrics {
   hitRateUpper: number;
   fireRate: number;
   edgePerDollar: number;
+  /** Mean break-even rate across the fired shots (per-digit payouts). */
+  breakEven: number;
+  /** Mean payout multiplier actually carried by the fired shots. */
+  meanPayout: number;
   brierSkill: number;
   avgP: number;
   lensLogLoss: number[];
@@ -1112,16 +1291,23 @@ export interface ApexReplayMetrics {
 export function replayPolicy(
   digits: ArrayLike<number>,
   params: ApexParams,
-  opts?: { warmup?: number; payout?: number; collect?: boolean },
+  opts?: { warmup?: number; payout?: number; payouts?: number[]; collect?: boolean },
 ): {
   metrics: ApexReplayMetrics;
   fused?: number[][];
   actual?: number[];
   scores?: number[];
   lensDists?: Array<{ lenses: number[][]; event: number }>;
+  /** Mean fused probability per digit over every evaluated tick (test-half EV pick). */
+  digitP?: number[];
 } {
   const clean = cleanDigits(digits);
   const payout = opts?.payout ?? APEX_MATCH_PAYOUT;
+  const payouts = opts?.payouts;
+  const perDigitPay = (d: number): number => {
+    const p = payouts?.[d];
+    return Number.isFinite(p) && (p as number) > 0 ? (p as number) : payout;
+  };
   const n = clean.length;
   const warmup = Math.min(Math.max(0, opts?.warmup ?? 300), Math.max(0, n - 50));
   const policy = new ApexPolicy(params);
@@ -1140,15 +1326,29 @@ export function replayPolicy(
   const actual: number[] = [];
   const scores: number[] = [];
   const lensDists: Array<{ lenses: number[][]; event: number }> = [];
+  // Mean fused probability per digit across ALL evaluated ticks — the raw
+  // material for the held-out EV digit pick (each digit's average claimed
+  // probability, unaffected by the argmax winner's curse because no
+  // per-tick selection happens: every digit is measured on every tick).
+  const digitP = new Array<number>(10).fill(0);
+  let digitPN = 0;
+  let shotPayoutSum = 0;
 
   for (let i = warmup; i < n - 1; i++) {
-    const dec = policy.decide(clean, i);
+    const dec = policy.decide(clean, i, {
+      // Live/replay parity: when the session quotes per-digit payouts, the
+      // replayed policy must pick its digit with the SAME vector — otherwise
+      // the measured shots describe a policy the live loop never runs.
+      ...(payouts ? { payouts } : {}),
+    });
     const next = clean[i + 1];
     const allLenses = [dec.echo, dec.hawkes, dec.suffix, dec.ctw, dec.renewal];
     for (let j = 0; j < L; j++) {
       ll[j] += -Math.log(Math.max(1e-9, allLenses[j]?.[next] ?? 1e-9));
     }
     llN++;
+    for (let d = 0; d < 10; d++) digitP[d] += dec.fused[d];
+    digitPN++;
     if (opts?.collect) {
       fused.push(dec.fused);
       actual.push(next);
@@ -1158,6 +1358,7 @@ export function replayPolicy(
     if (dec.ready) {
       shots++;
       sumP += dec.p;
+      shotPayoutSum += perDigitPay(dec.digit);
       const hit = next === dec.digit ? 1 : 0;
       hits += hit;
       brierModel += hit ? (1 - dec.p) * (1 - dec.p) : dec.p * dec.p;
@@ -1169,7 +1370,11 @@ export function replayPolicy(
   const measured = Math.max(1, n - 1 - warmup);
   const hitRate = shots > 0 ? hits / shots : 0;
   const w = wilson(hits, shots);
-  const edgePerDollar = shots > 0 ? hitRate * (payout - 1) - (1 - hitRate) : 0;
+  // Per-shot EV with the live payout schedule: each fired shot is priced at
+  // its OWN digit's multiplier (fallback `payout` when no schedule given).
+  const meanPayout = shots > 0 ? Math.round((shotPayoutSum / shots) * 1000) / 1000 : payout;
+  const breakEvenEffective = 1 / meanPayout;
+  const edgePerDollar = shots > 0 ? hitRate * meanPayout - 1 : 0;
   const metrics: ApexReplayMetrics = {
     ticks: measured,
     shots,
@@ -1179,6 +1384,8 @@ export function replayPolicy(
     hitRateUpper: shots > 0 ? w.upper : 1,
     fireRate: shots / measured,
     edgePerDollar,
+    breakEven: breakEvenEffective,
+    meanPayout,
     brierSkill: brierBase > 0 ? 1 - brierModel / brierBase : 0,
     avgP: shots > 0 ? sumP / shots : 0,
     lensLogLoss: llN > 0 ? ll.map(v => v / llN) : new Array<number>(L).fill(Math.log(10)),
@@ -1189,6 +1396,7 @@ export function replayPolicy(
     actual: opts?.collect ? actual : undefined,
     scores: opts?.collect ? scores : undefined,
     lensDists: opts?.collect ? lensDists : undefined,
+    digitP: digitPN > 0 ? digitP.map(v => v / digitPN) : undefined,
   };
 }
 
@@ -1198,6 +1406,8 @@ export interface ApexFit {
   params: ApexParams;
   train: ApexReplayMetrics;
   test: ApexReplayMetrics;
+  /** Mean fused probability per digit over the held-out test half. */
+  digitP?: number[];
 }
 
 const TAU_GRID = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 1.8, 2.2, 2.6];
@@ -1205,10 +1415,11 @@ const TAU_GRID = [0.6, 0.75, 0.9, 1.0, 1.15, 1.3, 1.5, 1.8, 2.2, 2.6];
 export function fitApexParams(
   digits: ArrayLike<number>,
   pace: ApexPace,
-  opts?: { lockedDigit?: number; payout?: number },
+  opts?: { lockedDigit?: number; payout?: number; payouts?: number[] },
 ): ApexFit {
   const clean = cleanDigits(digits);
   const payout = opts?.payout ?? APEX_MATCH_PAYOUT;
+  const payouts = opts?.payouts;
   const lockedDigit = opts?.lockedDigit;
   const split = Math.floor(clean.length * APEX_TRAIN_FRACTION);
   const train = clean.slice(0, split);
@@ -1217,7 +1428,9 @@ export function fitApexParams(
   if (clean.length < APEX_MIN_FIT_DIGITS || train.length < 200 || test.length < 100) {
     // Too thin to fit — measure defaults honestly on everything available.
     const params = defaultApexParams(pace, lockedDigit);
-    const { metrics } = replayPolicy(clean, params, { warmup: Math.min(200, Math.floor(clean.length / 3)), payout });
+    const { metrics } = replayPolicy(clean, params, {
+      warmup: Math.min(200, Math.floor(clean.length / 3)), payout, payouts,
+    });
     return { params, train: metrics, test: metrics };
   }
 
@@ -1227,23 +1440,23 @@ export function fitApexParams(
   const probe = defaultApexParams(pace, lockedDigit);
   probe.alpha = alpha;
   probe.beta = beta;
-  const collected = replayPolicy(train, probe, { warmup: 300, payout, collect: true });
+  const collected = replayPolicy(train, probe, { warmup: 300, payout, payouts, collect: true });
   const skillWeights = weightsFromSkill(collected.metrics.lensLogLoss);
 
-  // Stage 2: coordinate descent on the simplex — direct minimisation of the
-  // pooled train log-loss over (weights, τ). Starts from the skill weights,
-  // keeps every lens alive at the floor, and replaces the single τ sweep
-  // with an alternating joint refinement.
+  // Stage 2: coordinate descent on the simplex — joint minimisation of the
+  // pooled train log-loss AND the top-1 (selection-event) Brier over
+  // (weights, τ). Starts from the skill weights, keeps every lens alive at
+  // the floor, and re-sweeps the temperature grid between rounds.
   const samples = (collected.lensDists ?? []).map(s => ({ lenses: s.lenses, event: s.event }));
-  // τ ∈ [1, 1.5] inside the optimiser: a sub-1 temperature SHARPENS (how train
-  // noise masquerades as skill), and a runaway τ > 1.5 over-softens — the pool
-  // degenerates to near-uniform, the valve seeds on noise spikes, and the
-  // replay's shot count collapses (measured: fewer, spikier shots and inflated
-  // selection variance on fair tapes). Honest calibration softens a little or
-  // stays; the pool itself concentrates when lenses genuinely agree.
-  const CAL_TAU_GRID = TAU_GRID.filter(t => t >= 1 && t <= 1.5);
+  // The FULL τ grid is in play again (0.6–2.6). The old hard [1, 1.5] cap
+  // existed because a pure log-loss τ could not be trusted below 1 — measured
+  // on fair tapes it sharpened noise into fake skill. The top-1 Brier term in
+  // the objective now prices exactly that risk: on fair tapes the optimiser
+  // drifts to the soft end (the argmax claim must be honest), and on a
+  // planted-echo tape it earns τ ≈ 0.73 and claims the structure at its true
+  // strength. Sharpening has to PAY for itself in decision-calibration.
   const refined = samples.length > 200
-    ? optimizePoolWeights(samples, skillWeights, 1, CAL_TAU_GRID)
+    ? optimizePoolWeights(samples, skillWeights, 1, TAU_GRID)
     : { weights: skillWeights, tau: 1 };
   const weights = refined.weights;
   let tau = refined.tau;
@@ -1273,8 +1486,8 @@ export function fitApexParams(
     : APEX_FAIR_RATE + 0.005;
 
   const params: ApexParams = { alpha, beta, weights, tau, initBar, pace, ...(lockedDigit !== undefined ? { lockedDigit } : {}) };
-  const { metrics: testMetrics } = replayPolicy(test, params, { warmup: Math.min(300, Math.floor(test.length / 3)), payout });
-  return { params, train: collected.metrics, test: testMetrics };
+  const { metrics: testMetrics, digitP } = replayPolicy(test, params, { warmup: Math.min(300, Math.floor(test.length / 3)), payout, payouts });
+  return { params, train: collected.metrics, test: testMetrics, digitP };
 }
 
 // ── One-market scan read ──────────────────────────────────────────────────────
@@ -1303,6 +1516,8 @@ export interface ApexMarketRead {
   fireRate: number;
   breakEven: number;
   payout: number;
+  /** Live per-digit payout schedule used for the EV pick, when quoted. */
+  payouts?: number[];
   params: ApexParams;
   train: ApexReplayMetrics;
   diag: ApexDiag;
@@ -1312,40 +1527,57 @@ export interface ApexMarketRead {
 export function scoreMarket(
   digits: ArrayLike<number>,
   pace: ApexPace,
-  opts?: { lockedDigit?: number; payout?: number },
+  opts?: { lockedDigit?: number; payout?: number; payouts?: number[] },
 ): ApexMarketRead {
   const clean = cleanDigits(digits);
   const payout = opts?.payout ?? APEX_MATCH_PAYOUT;
-  const breakEven = 1 / payout;
+  const payouts = opts?.payouts;
+  const perDigitPay = (d: number): number => {
+    const p = payouts?.[d];
+    return Number.isFinite(p) && (p as number) > 0 ? (p as number) : payout;
+  };
   const lockedDigit = opts?.lockedDigit;
   const thinData = clean.length < APEX_MIN_MEASURE_DIGITS;
 
-  const fit = fitApexParams(clean, pace, { lockedDigit, payout });
+  const fit = fitApexParams(clean, pace, { lockedDigit, payout, payouts });
   const m = fit.test;
 
-  // AI digit pick: the fused argmax on the full warmed state (or the lock).
+  // ── AI digit pick — HELD-OUT EV, not the full-data argmax ──
+  // The old pick ran the fitted lenses over the ENTIRE tape and took the
+  // fused argmax: the max of 10 correlated in-sample estimates, which is
+  // exactly the winner's curse (measured: claims 12.7% on fair tapes,
+  // realizes 10.3%). The honest replay has ALREADY measured every digit's
+  // mean fused probability on the unseen test half (fit.digitP) — combining
+  // that with the live payout schedule picks argmax E[p_d]·pay_d with no
+  // per-tick selection bias. Falls back to the warmed full-data peek only
+  // when the test half was too thin to accumulate.
   let digit = lockedDigit ?? 0;
   let memOrder = 0;
   let memSamples = 0;
   let heatDigit = 0;
   let heatRatio = 1;
   let echoLags: Array<{ lag: number; rate: number; z: number }> = [];
-  if (lockedDigit === undefined && clean.length > 60) {
-    const policy = new ApexPolicy(fit.params);
+  const policy = clean.length > 60 ? new ApexPolicy(fit.params) : null;
+  if (policy) {
     for (let i = 0; i < clean.length; i++) policy.update(clean, i);
-    const peek = policy.peek(clean, clean.length - 1);
-    digit = peek.digit;
-    const dec = policy.decide(clean, clean.length - 1);
-    memOrder = dec.memoryOrder;
-    memSamples = dec.memorySamples;
-    heatDigit = dec.heatDigit;
-    heatRatio = dec.heatRatio;
-    echoLags = policy.echoLags(3);
-  } else if (clean.length > 60) {
-    const policy = new ApexPolicy(fit.params);
-    for (let i = 0; i < clean.length; i++) policy.update(clean, i);
-    const dec = policy.decide(clean, clean.length - 1);
-    digit = lockedDigit as number;
+    if (lockedDigit === undefined) {
+      const payVec = Array.from({ length: 10 }, (_, d) => perDigitPay(d));
+      let bestEV = -Infinity;
+      if (fit.digitP) {
+        for (let d = 0; d < 10; d++) {
+          const ev = fit.digitP[d] * payVec[d];
+          if (ev > bestEV) {
+            bestEV = ev;
+            digit = d;
+          }
+        }
+      } else {
+        digit = policy.peek(clean, clean.length - 1, { payouts: payVec }).digit;
+      }
+    } else {
+      digit = lockedDigit;
+    }
+    const dec = policy.decide(clean, clean.length - 1, { payouts: Array.from({ length: 10 }, (_, d) => perDigitPay(d)) });
     memOrder = dec.memoryOrder;
     memSamples = dec.memorySamples;
     heatDigit = dec.heatDigit;
@@ -1353,13 +1585,18 @@ export function scoreMarket(
     echoLags = policy.echoLags(3);
   }
 
+  // The break-even that matters is the one the CHOSEN digit must clear at
+  // its quoted multiplier; the replay's effective break-even (mean over the
+  // fired shots' payouts) backs the verdict ladder.
+  const breakEven = 1 / perDigitPay(digit);
+
   // Verdict ladder — measurement honesty, not trade gating (the live valve
   // paces regardless; these labels only describe what was MEASURED):
   //   PRIME  = statistical proof of edge (95% lower bound clears break-even)
   //   VIABLE = positive measured expectancy with real mass (12+ shots)
   //   THIN   = everything else — including lucky 2-hits-in-5 noise.
   let verdict: ApexVerdict;
-  if (!thinData && m.edgePerDollar >= 0.01 && m.shots >= 8 && m.hitRateLower >= breakEven) verdict = "prime";
+  if (!thinData && m.edgePerDollar >= 0.01 && m.shots >= 8 && m.hitRateLower >= m.breakEven) verdict = "prime";
   else if (!thinData && m.edgePerDollar > 0 && m.shots >= 12) verdict = "viable";
   else verdict = "thin";
 
@@ -1379,7 +1616,8 @@ export function scoreMarket(
     shots: m.shots,
     fireRate: Math.round(m.fireRate * 10000) / 10000,
     breakEven: Math.round(breakEven * 10000) / 10000,
-    payout,
+    payout: perDigitPay(digit),
+    ...(payouts ? { payouts: [...payouts] } : {}),
     params: fit.params,
     train: fit.train,
     diag: {

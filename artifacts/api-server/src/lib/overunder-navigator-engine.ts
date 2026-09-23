@@ -20,6 +20,15 @@
  * cross-market setup immediately, or migrates to the best recovery tape even
  * before a setup exists). The scout adds no veto: when it says "stay", the
  * policy trades exactly like the legacy bot. Locked mode never switches.
+ *
+ * NO FORCED TRADES — the normal valve floors at each contract's break-even
+ * (see NavigatorPolicy), and two conditions on the ACTIVE tape make the scout
+ * URGENT (dwell waived, cooldown/margin shrunk, and — when high — a full
+ * cross-market NORMAL HUNT, the twin of the recovery hunt):
+ *   STARVING — the valve has been pinned at its floor (no fair setup here)
+ *   BLEEDING — a fresh normal-mode loss streak on this market, which also
+ *              earns the market a decaying scout penalty.
+ * The bot moves to where its bar is met instead of lowering the bar.
  */
 
 import {
@@ -142,7 +151,11 @@ export interface NavigatorDeployed {
 
 export interface NavigatorWatchScout {
   active: string;
-  top: Array<{ name: string; score: number; live: number }>;
+  top: Array<{ name: string; score: number; live: number; penalty?: number }>;
+  /** 0..1 — how hard the scout is currently looking for a way out. */
+  urgency?: number;
+  /** Why the scout is urgent (starving / bleeding), when it is. */
+  urgencyReason?: string;
 }
 
 export interface NavigatorWatch {
@@ -686,6 +699,58 @@ async function runLoop(config: NavigatorConfig) {
   let pendingFire: NavigatorDecision | null = null;
   /** Cheap composite-only switch check (no re-fit) in normal mode. */
   const NORMAL_SCOUT_MS = 10_000;
+  /** …but when the active tape is starving/bleeding us, look every 2 s. */
+  const URGENT_SCOUT_MS = 2_000;
+  /** Starvation ramp: urgency 0 after this long at the floor … */
+  const STARVE_RAMP_START_MS = 20_000;
+  /** … 1 after this long. */
+  const STARVE_RAMP_FULL_MS = 90_000;
+  /** Consecutive normal-mode losses on ONE market before it is penalised. */
+  const BLEED_STREAK = 2;
+  /** How long a fresh loss streak keeps the scout urgent. */
+  const BLEED_URGENT_MS = 45_000;
+  /** Full cross-market normal hunt cadence while starving. */
+  const NORMAL_HUNT_MS = 6_000;
+
+  // ── WHY the Navigator used to force trades ────────────────────────────────
+  // Its normal-mode pacing valve had a floor of 0: on a tape with no fair
+  // setup the bar sank until the bot fired anyway, and the scout's anti-flap
+  // clocks (90 s dwell, 60 s cooldown, 0.012 $/$ margin) kept it on that tape.
+  // Now the valve floors at break-even (analysis), and the engine converts
+  // "no fair setup here" (STARVING) and "this tape just punished us"
+  // (BLEEDING) into scout URGENCY, which waives the clocks and, when high,
+  // runs a full cross-market hunt exactly like recovery already does. The
+  // bot never lowers its bar to trade — it moves to where the bar is met.
+  let starvedSince = 0;
+  let bleedingUntil = 0;
+  let bleedReason = "";
+  /** Consecutive normal-mode losses on the ACTIVE market. */
+  let activeLossRun = 0;
+  let lastNormalHunt = 0;
+
+  const scoutUrgency = (now: number): { level: number; reason: string } => {
+    let level = 0;
+    let reason = "";
+    if (starvedSince > 0) {
+      const t = now - starvedSince;
+      const starve = Math.min(
+        1,
+        Math.max(0, (t - STARVE_RAMP_START_MS) / (STARVE_RAMP_FULL_MS - STARVE_RAMP_START_MS)),
+      );
+      if (starve > 0) {
+        level = starve;
+        reason = `starving — no fair setup on ${activeName} for ${Math.round(t / 1000)}s`;
+      }
+    }
+    if (now < bleedingUntil) {
+      const bleed = 0.6 + 0.4 * ((bleedingUntil - now) / BLEED_URGENT_MS);
+      if (bleed > level) {
+        level = Math.min(1, bleed);
+        reason = bleedReason;
+      }
+    }
+    return { level, reason };
+  };
 
   const scoutPanel = (mode: "normal" | "recovery") => {
     if (locked) {
@@ -693,14 +758,29 @@ async function runLoop(config: NavigatorConfig) {
       return;
     }
     const now = Date.now();
+    const u = scoutUrgency(now);
     session.watch.scout = {
       active: activeName,
       top: scout.top(mode, bufferReader, now).map((s) => ({
         name: s.displayName,
         score: Math.round(s.composite * 10000) / 10000,
         live: Math.round(s.live * 10000) / 10000,
+        penalty: s.penalty > 0 ? Math.round(s.penalty * 10000) / 10000 : undefined,
       })),
+      urgency: mode === "normal" ? Math.round(u.level * 100) / 100 : undefined,
+      urgencyReason: mode === "normal" && u.level > 0 ? u.reason : undefined,
     };
+  };
+
+  /** Move the session onto another market (bookkeeping shared by every switch path). */
+  const moveTo = (symbol: string, name: string) => {
+    activeSymbol = symbol;
+    activeName = name;
+    scout.markSwitch(Date.now());
+    scout.enter(activeSymbol, Date.now());
+    session.watch.switched = true;
+    starvedSince = 0;
+    activeLossRun = 0;
   };
 
   async function refit() {
@@ -761,6 +841,52 @@ async function runLoop(config: NavigatorConfig) {
       }
       return;
     }
+  }
+  /**
+   * NORMAL HUNT (switching mode, only while STARVING) — the normal-mode twin
+   * of the recovery hunt. Fits every allowed market and asks each one, on its
+   * latest tick, whether a normal setup clears that market's OWN initial bar
+   * (the strict 80th-percentile seed — a hunt fire must be a genuinely strong
+   * read, never a marginal one) AND break-even. Best utility wins and is
+   * fired immediately; otherwise the scout's composite decides whether to
+   * migrate to a better normal tape and let its valve time the shot there.
+   */
+  async function huntNormal(urgency: { level: number; reason: string }): Promise<{
+    fire: { symbol: string; name: string; decision: NavigatorDecision } | null;
+    migrate: { symbol: string; name: string } | null;
+  }> {
+    let best: { symbol: string; name: string; decision: NavigatorDecision } | null = null;
+    for (const m of AUTOMATED_DERIV_MARKETS.filter((x) => x.digitEnabled)) {
+      if (m.symbol === activeSymbol) continue;
+      const d = await readDigits(m.symbol, HUNT_DIGITS);
+      if (d.length < 150) continue;
+      const read = scoreNavigatorMarket(d, config.plan);
+      scout.setCard(m.symbol, {
+        edge: read.paperEdgePerDollar,
+        recoveryHitRate: read.metrics.recoveryHitRate,
+        recoveryShots: read.metrics.recoveryShots,
+        at: Date.now(),
+      });
+      // A market whose own walk-forward says "not tradeable" is not a rescue.
+      if (read.paperEdgePerDollar <= 0) continue;
+      const p = new NavigatorPolicy(
+        read.params,
+        contracts.normal,
+        contracts.recovery,
+        buildNavigatorHMMWindows(d, contracts.all),
+      );
+      for (let i = 0; i < d.length - 1; i++) p.update(d, i);
+      p.update(d, d.length - 1);
+      const dec = p.decideNormal(d, d.length - 1);
+      if (dec.ready && dec.read && (!best || dec.read.utility > best.decision.read!.utility))
+        best = { symbol: m.symbol, name: m.displayName, decision: dec };
+    }
+    if (best) return { fire: best, migrate: null };
+    const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now(), urgency);
+    return {
+      fire: null,
+      migrate: challenger ? { symbol: challenger.symbol, name: challenger.displayName } : null,
+    };
   }
   /**
    * RECOVERY HUNT (switching mode) — two outcomes:
@@ -849,7 +975,9 @@ async function runLoop(config: NavigatorConfig) {
       // up to every 10s (the legacy bot had NO normal-mode switching at all);
       // hysteresis (margin + cooldown + dwell) keeps it from flapping, and it
       // never vetoes a shot.
-      if (!locked && !inRecovery && policy && Date.now() - lastScout >= NORMAL_SCOUT_MS) {
+      const urgency = scoutUrgency(Date.now());
+      const scoutEvery = urgency.level > 0 ? URGENT_SCOUT_MS : NORMAL_SCOUT_MS;
+      if (!locked && !inRecovery && policy && Date.now() - lastScout >= scoutEvery) {
         lastScout = Date.now();
         scoutPanel("normal");
         const challenger = scout.bestChallenger(
@@ -857,19 +985,23 @@ async function runLoop(config: NavigatorConfig) {
           bufferReader,
           activeSymbol,
           Date.now(),
+          urgency.level > 0 ? urgency : undefined,
         );
         if (challenger) {
-          activeSymbol = challenger.symbol;
-          activeName = challenger.displayName;
-          scout.markSwitch(Date.now());
-          scout.enter(activeSymbol, Date.now());
-          session.watch.switched = true;
+          const from = activeName;
+          moveTo(challenger.symbol, challenger.displayName);
           if (!(await refit())) {
             await sleep(500);
             continue;
           }
           lastRefit = Date.now();
-          session.message = `🔁 Scout — ${activeName} shows the better tape (${challenger.composite.toFixed(3)} vs ${challenger.activeComposite.toFixed(3)} $/$${challenger.flee ? " · active tape dead" : ""})`;
+          const why =
+            challenger.via === "urgent"
+              ? ` · ${urgency.reason}`
+              : challenger.flee
+                ? " · active tape dead"
+                : "";
+          session.message = `🔁 Scout — left ${from} for ${activeName} (${challenger.composite.toFixed(3)} vs ${challenger.activeComposite.toFixed(3)} $/$${why})`;
           broadcast();
           await sleep(200);
           continue;
@@ -910,7 +1042,47 @@ async function runLoop(config: NavigatorConfig) {
         continue;
       }
       applyDecision(lastDecision, radarOf(policy, digits, digits.length - 1));
+      // Starvation clock: runs while the normal valve is pinned at break-even
+      // on this tape; any ready setup (or a switch) resets it.
+      if (!inRecovery && lastDecision.mode === "normal") {
+        if (lastDecision.ready) starvedSince = 0;
+        else if (lastDecision.starved && starvedSince === 0) starvedSince = Date.now();
+        else if (!lastDecision.starved) starvedSince = 0;
+      }
       if (!lastDecision.ready) {
+        if (
+          !inRecovery &&
+          !locked &&
+          urgency.level >= 0.5 &&
+          Date.now() - lastNormalHunt >= NORMAL_HUNT_MS
+        ) {
+          lastNormalHunt = Date.now();
+          session.watch.phase = "hunting";
+          session.watch.reason = `hunting every allowed market — ${urgency.reason}`;
+          session.message = `🔎 ${activeName} offers no fair setup — hunting other markets instead of forcing one here`;
+          broadcast();
+          const hunt = await huntNormal(urgency);
+          scoutPanel("normal");
+          if (hunt.fire) {
+            const from = activeName;
+            moveTo(hunt.fire.symbol, hunt.fire.name);
+            pendingFire = hunt.fire.decision;
+            session.message = `🔁 Left ${from} — ${activeName} has a timed ${hunt.fire.decision.side!.label} at ${((hunt.fire.decision.read?.p ?? 0) * 100).toFixed(1)}%, firing now`;
+            broadcast();
+            continue;
+          }
+          if (hunt.migrate) {
+            const from = activeName;
+            moveTo(hunt.migrate.symbol, hunt.migrate.name);
+            await refit();
+            lastRefit = Date.now();
+            session.message = `🔁 Left ${from} for ${activeName} — better normal tape; its valve will time the shot`;
+            broadcast();
+            await sleep(250);
+            continue;
+          }
+          if (!session.running || session.stopRequested) break;
+        }
         if (inRecovery && !locked && Date.now() - lastHunt >= HUNT_MS) {
           lastHunt = Date.now();
           session.watch.phase = "hunting";
@@ -924,11 +1096,7 @@ async function runLoop(config: NavigatorConfig) {
           if (hunt.fire) {
             // A bar-clearing setup exists on another market RIGHT NOW —
             // capture it and fire immediately (no refit round-trip).
-            activeSymbol = hunt.fire.symbol;
-            activeName = hunt.fire.name;
-            scout.markSwitch(Date.now());
-            scout.enter(activeSymbol, Date.now());
-            session.watch.switched = true;
+            moveTo(hunt.fire.symbol, hunt.fire.name);
             pendingFire = hunt.fire.decision;
             session.message = `🔁 Recovery setup on ${activeName} — firing ${hunt.fire.decision.side!.label} now`;
             broadcast();
@@ -937,11 +1105,7 @@ async function runLoop(config: NavigatorConfig) {
           if (hunt.migrate) {
             // No setup anywhere yet — move to the best recovery tape; the
             // STATIC bar times the shot when the tilt appears.
-            activeSymbol = hunt.migrate.symbol;
-            activeName = hunt.migrate.name;
-            scout.markSwitch(Date.now());
-            scout.enter(activeSymbol, Date.now());
-            session.watch.switched = true;
+            moveTo(hunt.migrate.symbol, hunt.migrate.name);
             await refit();
             lastRefit = Date.now();
             session.message = `🔁 Recovery scout — migrating to ${activeName} (better recovery tape)`;
@@ -1121,6 +1285,18 @@ async function runLoop(config: NavigatorConfig) {
       );
       // The scout's experienced-edge term: this bot's own record per market.
       scout.recordOutcome(activeSymbol, inRecovery ? "recovery" : "normal", won);
+      // BLEEDING: a normal-mode loss streak on THIS tape. Penalise the market
+      // in the scout (decaying, so it must earn the seat back) and make the
+      // scout urgent — "no falling knives" applied to WHERE, not just WHEN.
+      if (!inRecovery && !locked) {
+        activeLossRun = won ? 0 : activeLossRun + 1;
+        if (activeLossRun >= BLEED_STREAK) {
+          scout.penalize(activeSymbol, 0.01 * activeLossRun, Date.now());
+          bleedingUntil = Date.now() + BLEED_URGENT_MS;
+          bleedReason = `bleeding — ${activeLossRun} straight losses on ${activeName}`;
+          lastScout = 0; // look immediately on the next pass
+        }
+      }
       try {
         await db
           .update(tradesTable)

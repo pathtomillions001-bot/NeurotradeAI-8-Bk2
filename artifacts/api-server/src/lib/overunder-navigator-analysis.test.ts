@@ -64,3 +64,45 @@ test("Navigator recovery bars are contract-specific and do not depend on loss ru
   assert.ok(afterSide, "a recovery side must still be chosen");
   assert.equal(after.bar, NavigatorPolicy.recoveryBarFor(afterSide!));
 });
+
+test("Navigator normal valve floors at break-even and reports starvation instead of forcing a trade", () => {
+  const plan = {
+    normalOver: 1,
+    normalUnder: 8,
+    recoveryOver: 6,
+    recoveryUnder: 3,
+    normalSide: "both" as const,
+    recoverySide: "both" as const,
+  };
+  const contracts = contractsForPlan(plan);
+  const params: NavigatorParams = {
+    weights: [0.25, 0.25, 0.25, 0.25, 0, 0],
+    tau: 1,
+    normalInitBar: 0.9,
+  };
+  const policy = new NavigatorPolicy(params, contracts.normal, contracts.recovery);
+  const floor = Math.min(...contracts.normal.map(c => NavigatorPolicy.normalBreakEven(c)));
+  // A tape that is hostile to BOTH normal sides (Over 1 loses on 0/1, Under 8
+  // loses on 8/9): random draws from {0,1,8,9} only, so neither side can get
+  // above ~50% however the lenses read it. Pre-fix the valve would sink to 0
+  // and eventually "time" a shot here; now it must pin at break-even and
+  // flag starvation, never firing below the floor.
+  let seed = 12345;
+  const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+  const hostile = [0, 1, 8, 9];
+  const digits: number[] = [];
+  let firedBelowFloor = 0;
+  let starvedSeen = false;
+  for (let i = 0; i < 1500; i++) {
+    digits.push(hostile[Math.floor(rnd() * 4)]!);
+    policy.update(digits, i);
+    if (i < 40) continue;
+    const d = policy.decideNormal(digits, i);
+    if (d.ready && (d.read?.p ?? 0) < floor) firedBelowFloor++;
+    if (d.starved) starvedSeen = true;
+    assert.ok(policy.normalBar >= floor - 1e-12, `bar ${policy.normalBar} sank below floor ${floor}`);
+  }
+  assert.equal(firedBelowFloor, 0, "must never fire below break-even");
+  assert.ok(starvedSeen, "a hostile tape must surface as starvation");
+  assert.ok(policy.normalStarved, "the valve should be pinned at the floor by now");
+});

@@ -109,6 +109,13 @@ export interface NavigatorDecision {
   ready: boolean;
   bar: number;
   reason: string;
+  /**
+   * Normal mode only: true when the pacing valve has sunk all the way to its
+   * break-even floor — i.e. this tape has not offered a fair setup for long
+   * enough that the valve would (pre-floor) have started forcing trades. The
+   * engine's market scout treats this as STARVATION and looks elsewhere.
+   */
+  starved?: boolean;
 }
 
 export interface NavigatorReplayMetrics {
@@ -288,6 +295,7 @@ export class NavigatorPolicy {
   private holes = new Map<string, HoleHazard>();
   private regimes = new Map<string, BandRegimeHMM>();
   private valve: PacingValve;
+  private readonly normalFloor: number;
   /** Normalized 6-lens weights (legacy 4-lens vectors expand to 6 here). */
   private readonly weights6: [number, number, number, number, number, number];
 
@@ -308,7 +316,24 @@ export class NavigatorPolicy {
       if (window && window.length >= 40) hmm.load(fitRegimeHMM(window), window);
       this.regimes.set(c.id, hmm);
     }
-    this.valve = new PacingValve(NORMAL_PACE, params.normalInitBar, 0);
+    // The valve floor is the cheapest armed normal contract's break-even.
+    // Below it a "timed" shot is negative-EV by construction; a floor of 0
+    // (the legacy setting) let a dead tape drag the bar down until the bot
+    // fired anyway — the "forced trade" that market switching is meant to
+    // replace. The pacing target is unchanged above the floor.
+    this.normalFloor = normalContracts.length
+      ? Math.min(...normalContracts.map((c) => NavigatorPolicy.normalBreakEven(c)))
+      : 0;
+    this.valve = new PacingValve(NORMAL_PACE, params.normalInitBar, this.normalFloor);
+  }
+
+  /** Payout-aware break-even for a normal contract (with a hair of margin). */
+  static normalBreakEven(contract: NavigatorContract): number {
+    return Math.min(0.95, 1 / Math.max(1.001, contract.payout) + 0.005);
+  }
+  /** True when the valve bar is pinned at its break-even floor. */
+  get normalStarved(): boolean {
+    return this.normalFloor > 0 && this.valve.bar <= this.normalFloor + 1e-9;
   }
 
   get normalBar() {
@@ -416,17 +441,27 @@ export class NavigatorPolicy {
         bar: this.valve.bar,
         reason: "no normal side armed",
       };
-    const ready = this.valve.observe(best.p);
+    const timed = this.valve.observe(best.p);
+    // The chosen side must also clear ITS OWN break-even (the valve floor is
+    // the cheapest side's, which may be the other contract).
+    const be = NavigatorPolicy.normalBreakEven(best.contract);
+    const ready = timed && best.p >= be;
+    const starved = this.normalStarved;
     return {
       mode: "normal",
       side: best.contract,
       read: best,
       alt,
       ready,
-      bar: this.valve.bar,
+      bar: Math.max(this.valve.bar, timed ? be : 0),
+      starved,
       reason: ready
         ? `timed ${best.contract.label} at ${(best.p * 100).toFixed(1)}%`
-        : `timing valve holding (${(best.p * 100).toFixed(1)}% vs ${(this.valve.bar * 100).toFixed(1)}%)`,
+        : timed
+          ? `${best.contract.label} below break-even (${(best.p * 100).toFixed(1)}% vs ${(be * 100).toFixed(1)}%) — not forcing it`
+          : starved
+            ? `no fair setup here — valve at break-even floor (${(best.p * 100).toFixed(1)}% vs ${(this.valve.bar * 100).toFixed(1)}%)`
+            : `timing valve holding (${(best.p * 100).toFixed(1)}% vs ${(this.valve.bar * 100).toFixed(1)}%)`,
     };
   }
   decideRecovery(history: ArrayLike<number>, idx: number): NavigatorDecision {

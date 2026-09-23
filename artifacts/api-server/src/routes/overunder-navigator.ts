@@ -47,7 +47,7 @@ function parseParams(raw: any): NavigatorParams | null {
     !raw ||
     typeof raw !== "object" ||
     !Array.isArray(raw.weights) ||
-    raw.weights.length !== 4
+    (raw.weights.length !== 4 && raw.weights.length !== 6)
   )
     return null;
   const weights: number[] = raw.weights.map((value: unknown) => Number(value));
@@ -61,8 +61,11 @@ function parseParams(raw: any): NavigatorParams | null {
     return null;
   const sum = weights.reduce((a: number, b: number) => a + b, 0);
   if (!(sum > 0) || tau < 0.3 || tau > 3) return null;
+  // 6-lens weights (current) or legacy 4-lens (old scan cards) accepted.
+  const expanded: number[] = [0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < weights.length; i++) expanded[i] = weights[i]! / sum;
   return {
-    weights: weights.map((v: number) => v / sum) as NavigatorParams["weights"],
+    weights: expanded as unknown as NavigatorParams["weights"],
     tau,
     normalInitBar: Math.min(0.95, Math.max(0, normalInitBar)),
   };

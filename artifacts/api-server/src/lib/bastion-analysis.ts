@@ -19,29 +19,47 @@
  *  2. BAND MARKOV — the band's own 2-state win/loss indicator chain (order
  *     1..2). Roughly 5× the effective samples per state of the 10-state digit
  *     matrix, and its q_LL = P(loss | loss) is the clustering estimate the
- *     pair-risk penalty uses.
+ *     pair-risk penalty uses. The penalty itself is now CONTEXTUAL: the
+ *     order-2 chain's P(loss | last two band states), blended with order-1 by
+ *     count — the side/market clustering losses RIGHT NOW loses arbitration.
  *  3. HOLE HAZARD — the band's losing set is a "hole" (e.g. {0,1} for Over 1).
  *     A Kaplan–Meier-style discrete hazard over the hole's censored gap history
  *     says how due the hole is to print; P(win) = 1 − h(age).
  *  4. SUFFIX MEMORY — decayed longest-match continuation (orders 1–5) over
  *     exact digit contexts, Laplace-smoothed: what followed THIS context before.
+ *  5. EW DRIFT — recency-weighted win rate shrunk toward the band's fair rate
+ *     (Bayesian EWMA, informative Beta prior). The lens that sees slow regime
+ *     drift — "this tape has been running hot for five minutes" — which
+ *     order-1/2 contexts structurally cannot.
+ *  6. REGIME HMM — a 2-state hidden Markov model (Bernoulli emissions) fitted
+ *     by Baum–Welch on a rolling window of the band indicator; the forward
+ *     filter's posterior predictive Σ γ(s)·B_s is persistence-aware regime
+ *     estimation.
  *
  * The lenses fuse through a LOGARITHMIC OPINION POOL in logit space (externally
  * Bayesian for Bernoulli events) with skill-weighted lenses + one temperature
- * calibration — agreement across lenses is what makes a shot safe.
+ * calibration — agreement across lenses is what makes a shot safe. Lens skill
+ * is averaged over THREE overlapping fit windows (model-averaged weights) so
+ * one unlucky window cannot dominate the policy.
  *
  * SELECTION (the recovery-first policy):
- *  - The side is chosen by utility = (p·payout − 1) − λ·P(loss)·min(q_LL, .95),
+ *  - The side is chosen by utility = (p·payout − 1) − λ·P(loss)·min(q_LLctx, .95),
  *    where λ is bigger in recovery: a loss pair is exactly what deepens the
  *    shared recovery ladder, so the penalty targets consecutive recovery losses.
  *  - Normal shots ride a two-way pacing VALVE (budget 0.20 shots/tick, zero
  *    floor): selectivity is a budget, never a stack of vetoes.
- *  - Recovery shots use ONE static quality bar (the band's combinatorial fair
- *    rate): the best available shot fires THE NEXT TICK it clears the bar —
- *    THERE IS NO POST-LOSS TIGHTENING ANYWHERE IN THIS FILE. No function on the
- *    recovery path even accepts a loss-run argument; the bar cannot harden
- *    after a recovery loss because it is a frozen constant. If no side clears
- *    the bar the bot waits (and, in switching mode, hunts a better market).
+ *  - Recovery shots use ONE static quality bar: the payout-aware break-even
+ *    rate (1/payout) clamped into [fair, fair + 0.02] — a function of the
+ *    contract and its payout ONLY. The best available shot fires THE NEXT TICK
+ *    it clears the bar — THERE IS NO POST-LOSS TIGHTENING ANYWHERE IN THIS
+ *    FILE. No function on the recovery path even accepts a loss-run argument;
+ *    the bar cannot harden after a recovery loss because it is a frozen
+ *    constant of (contract, payout). The clamp keeps the bar within +2pp of
+ *    the legacy combinatorial fair rate, so the fire rate barely moves while
+ *    bar-level shots stop leaking stake to the house edge. If no side clears
+ *    the bar the bot waits (and, in switching mode, the Market Scout hunts a
+ *    better market — by composite live/measured/experienced edge, even before
+ *    a bar-clearing setup exists).
  *
  * HONEST MEASUREMENT — `fitBastionParams` fits weights/τ on the first 60% and
  * `replayBastion` replays the EXACT live policy (paper session, normal → loss →
@@ -51,6 +69,16 @@
  *
  * Everything here is pure and synchronous: no Deriv imports, no DB, no clock.
  */
+
+import {
+  BandRegimeHMM,
+  bandIndicators,
+  calibratedRecoveryBar,
+  expandPoolWeights,
+  ewBandRate,
+  fitRegimeHMM,
+  type RegimeHMMParams,
+} from "./band-regime.js";
 
 // ── Frozen contracts ─────────────────────────────────────────────────────────
 
@@ -126,6 +154,9 @@ export const BASTION_NORMAL_PAIR_WEIGHT = 0.15;
 export const BASTION_TRAIN_FRACTION = 0.6;
 export const BASTION_MIN_FIT_DIGITS = 600;
 export const BASTION_MIN_MEASURE_DIGITS = 300;
+
+/** Rolling window (band-indicator ticks) the regime HMM is fitted on. */
+export const BASTION_HMM_WINDOW = 600;
 
 // ── Small math helpers ────────────────────────────────────────────────────────
 
@@ -298,6 +329,25 @@ export class BandMarkov {
     const n = this.n1[0]!;
     return (this.c1[0]! + JEFFREYS) / (n + 2 * JEFFREYS); // P(L|L) with smoothing
   }
+
+  /**
+   * CONTEXTUAL pair-risk input: P(next band loss | the last two band states
+   * at idx-1, idx), blending the order-2 estimate with the order-1 estimate
+   * by count (w = n2/(n2+4)). A function of the TAPE state only — never of
+   * the loss run — so it sharpens arbitration without ratcheting.
+   */
+  pLossGiven(history: ArrayLike<number>, idx: number): number {
+    const a = this.wAt(history, idx);
+    const z = idx >= 1 ? this.wAt(history, idx - 1) : a;
+    const n1 = this.n1[a]!;
+    const q1 = (this.c1[a * 2]! + JEFFREYS) / (n1 + 2 * JEFFREYS); // P(L|a)
+    const pair = z * 2 + a;
+    const n2 = this.n2[pair]!;
+    const w2 = n2 / (n2 + 4);
+    if (w2 <= 0) return q1;
+    const q2 = (this.c2[pair * 2]! + JEFFREYS) / (n2 + 2 * JEFFREYS); // P(L|z,a)
+    return (1 - w2) * q1 + w2 * q2;
+  }
 }
 
 // ── Lens 3: hole hazard (Kaplan–Meier over censored hole gaps) ────────────────
@@ -423,9 +473,16 @@ export class PacingValve {
 
 // ── Policy: four lenses + fusion + the recovery-first selection ───────────────
 
+export type BastionWeightVec = [number, number, number, number, number, number];
+
 export interface BastionParams {
-  /** Log-pool weights over [digitMarkov, bandMarkov, holeHazard, suffix]. */
-  weights: [number, number, number, number];
+  /**
+   * Log-pool weights over the six lenses:
+   * [digitMarkov, bandMarkov, holeHazard, suffix, ewDrift, regimeHMM].
+   * Legacy 4-lens vectors (old scan cards) are accepted at runtime and mapped
+   * to the same four lenses with the regime lenses at zero.
+   */
+  weights: BastionWeightVec;
   tau: number;
   normalInitBar: number;
 }
@@ -435,12 +492,18 @@ export interface BastionSideRead {
   p: number;
   /** Fused win probability BEFORE temperature calibration. */
   pRaw: number;
-  lenses: [number, number, number, number];
+  lenses: [number, number, number, number, number, number];
+  /** Order-1 loss clustering P(L|L) — display + legacy comparator. */
   qLL: number;
+  /** Contextual pair-risk input: P(loss | last two band states). */
+  qLL2: number;
   pairRisk: number;
   utility: number;
   breakEven: number;
 }
+
+/** Per-contract rolling HMM windows (band indicators) for a warmed policy. */
+export type BastionHMMWindows = Partial<Record<BastionContractId, readonly number[]>>;
 
 export interface BastionDecision {
   mode: BastionMode;
@@ -480,12 +543,34 @@ export class BastionPolicy {
   private suffix = new SuffixMemory();
   private bands = new Map<BastionContractId, BandMarkov>();
   private holes = new Map<BastionContractId, HoleHazard>();
+  private regimes = new Map<BastionContractId, BandRegimeHMM>();
   private normalValve: PacingValve;
+  /** Normalized 6-lens weights (legacy 4-lens vectors expand to 6 here). */
+  private readonly weights6: [number, number, number, number, number, number];
 
-  constructor(private readonly params: BastionParams) {
+  /**
+   * @param params fitted policy parameters (4- or 6-lens weights accepted).
+   * @param hmmWindows optional per-contract rolling windows of PAST band
+   *   indicators; each window is Baum–Welch-fitted and forward-initialized so
+   *   the regime lens is live from the first read. Omit for a neutral (0.5)
+   *   regime lens — e.g. legacy params whose fit predates the lens.
+   */
+  constructor(
+    private readonly params: BastionParams,
+    hmmWindows?: BastionHMMWindows,
+  ) {
+    this.weights6 = expandPoolWeights(params.weights, 6) as [
+      number, number, number, number, number, number,
+    ];
     for (const c of BASTION_ALL_CONTRACTS) {
       this.bands.set(c.id, new BandMarkov(c.wins));
       this.holes.set(c.id, new HoleHazard(c.wins.map(w => !w)));
+      const hmm = new BandRegimeHMM(c.wins);
+      const window = hmmWindows?.[c.id];
+      if (window && window.length >= 40) {
+        hmm.load(fitRegimeHMM(window), window);
+      }
+      this.regimes.set(c.id, hmm);
     }
     this.normalValve = new PacingValve(
       BASTION_NORMAL_PACE_TARGET,
@@ -502,17 +587,28 @@ export class BastionPolicy {
     return this.normalValve.bar;
   }
 
+  /** Regime belief (hot state, 0..1) per contract — diagnostics. */
+  regimeBeliefs(): Partial<Record<BastionContractId, number>> {
+    const out: Partial<Record<BastionContractId, number>> = {};
+    for (const c of BASTION_ALL_CONTRACTS) {
+      out[c.id] = this.regimes.get(c.id)!.hotBelief;
+    }
+    return out;
+  }
+
   /** Feed history[idx] as the newly observed digit. */
   update(history: ArrayLike<number>, idx: number): void {
+    const d = history[idx]!;
     this.digits.update(history, idx);
     this.suffix.update(history, idx);
     for (const c of BASTION_ALL_CONTRACTS) {
       this.bands.get(c.id)!.update(history, idx);
       this.holes.get(c.id)!.update(history, idx);
+      this.regimes.get(c.id)!.update(d);
     }
   }
 
-  /** Read one contract's fused win probability + its four lens components. */
+  /** Read one contract's fused win probability + its six lens components. */
   readSide(history: ArrayLike<number>, idx: number, contract: BastionContract): BastionSideRead {
     const dDist = this.digits.dist(history, idx);
     const sDist = this.suffix.dist(history, idx);
@@ -527,18 +623,36 @@ export class BastionPolicy {
     const band = this.bands.get(contract.id)!;
     const pB = band.p(history, idx);
     const pH = this.holes.get(contract.id)!.p(history, idx);
-    const lenses: [number, number, number, number] = [pD, pB, pH, pS];
-    const pRaw = clamp01(logPoolBinary(lenses, this.params.weights));
+    // Lens 5 — EW drift: stateless recency-weighted rate on the tape tail.
+    const tailStart = Math.max(0, idx - 239);
+    const tail: number[] = new Array(idx - tailStart + 1);
+    for (let i = 0; i < tail.length; i++) tail[i] = history[tailStart + i]!;
+    const pEW = ewBandRate(tail, contract.wins, contract.fair);
+    // Lens 6 — regime HMM posterior predictive.
+    const pHMM = this.regimes.get(contract.id)!.p();
+    const lenses: [number, number, number, number, number, number] = [pD, pB, pH, pS, pEW, pHMM];
+    const pRaw = clamp01(logPoolBinary(lenses, this.weights6));
     const p = clamp01(temperatureScaleBinary(pRaw, this.params.tau));
     const qLL = band.qLL();
+    // Contextual pair risk: P(loss | last two band states), count-blended.
+    const qLL2 = band.pLossGiven(history, idx);
     const pairWeight = contract.mode === "recovery"
       ? BASTION_RECOVERY_PAIR_WEIGHT
       : BASTION_NORMAL_PAIR_WEIGHT;
-    const { utility, pairRisk } = sideUtility(p, contract.payout, qLL, pairWeight);
+    const { utility, pairRisk } = sideUtility(p, contract.payout, qLL2, pairWeight);
     return {
-      contract, p, pRaw, lenses, qLL, pairRisk, utility,
+      contract, p, pRaw, lenses, qLL, qLL2, pairRisk, utility,
       breakEven: 1 / contract.payout,
     };
+  }
+
+  /**
+   * THE static recovery bar for a contract: payout-aware break-even clamped
+   * into [fair, fair + 0.02]. Depends on the contract and its payout ONLY —
+   * never on the loss run (see calibratedRecoveryBar).
+   */
+  static recoveryBarFor(contract: BastionContract): number {
+    return calibratedRecoveryBar(contract.fair, contract.payout);
   }
 
   private best(
@@ -584,27 +698,30 @@ export class BastionPolicy {
 
   /**
    * RECOVERY tick: the BEST available recovery shot in the armed market set —
-   * fired the next tick it clears the STATIC fair-rate bar. This function takes
-   * NO loss-run / step / debt argument: the bar cannot harden after a recovery
-   * loss because nothing here is allowed to depend on one.
+   * fired the next tick it clears the STATIC bar (payout-aware break-even,
+   * clamped to [fair, fair + 0.02]). This function takes NO loss-run / step /
+   * debt argument: the bar cannot harden after a recovery loss because nothing
+   * here is allowed to depend on one — it is a frozen constant of (contract,
+   * payout).
    */
   decideRecovery(history: ArrayLike<number>, idx: number): BastionDecision {
     const { best, alt } = this.best(history, idx, BASTION_RECOVERY_CONTRACTS);
     if (!best) {
       return { mode: "recovery", side: null, read: null, alt: null, ready: false, bar: BASTION_RECOVERY_BAR, reason: "no recovery side armed" };
     }
-    // STATIC bar — BASTION_RECOVERY_BAR, the combinatorial fair rate. Frozen.
-    const ready = best.p >= BASTION_RECOVERY_BAR;
+    // STATIC bar — a function of the contract and its payout ONLY. Frozen.
+    const bar = BastionPolicy.recoveryBarFor(best.contract);
+    const ready = best.p >= bar;
     return {
       mode: "recovery",
       side: best.contract,
       read: best,
       alt,
       ready,
-      bar: BASTION_RECOVERY_BAR,
+      bar,
       reason: ready
         ? `best recovery shot — ${best.contract.label} at ${(best.p * 100).toFixed(1)}% (pair-risk ${(best.pairRisk * 100).toFixed(0)}%)`
-        : `no tilt yet (${(best.p * 100).toFixed(1)}% vs ${(BASTION_RECOVERY_BAR * 100).toFixed(0)}%) — holding for a better recovery opportunity`,
+        : `no tilt yet (${(best.p * 100).toFixed(1)}% vs ${(bar * 100).toFixed(1)}% static bar) — holding for a better recovery opportunity`,
     };
   }
 }
@@ -642,6 +759,7 @@ export function replayBastion(
   digits: ArrayLike<number>,
   params: BastionParams,
   opts?: { warmup?: number; normalPayout?: number; recoveryPayout?: number; sideMode?: BastionSideMode },
+  hmmWindows?: BastionHMMWindows,
 ): { metrics: BastionReplayMetrics; policy: BastionPolicy } {
   const clean = cleanDigits(digits);
   const n = clean.length;
@@ -649,7 +767,7 @@ export function replayBastion(
   const nPay = opts?.normalPayout ?? BASTION_NORMAL_CONTRACTS[0]!.payout;
   const rPay = opts?.recoveryPayout ?? BASTION_RECOVERY_CONTRACTS[0]!.payout;
   const sideMode = opts?.sideMode ?? "both";
-  const policy = new BastionPolicy(params);
+  const policy = new BastionPolicy(params, hmmWindows);
 
   for (let i = 0; i < warmup; i++) policy.update(clean, i);
 
@@ -729,6 +847,35 @@ export interface BastionFit {
   test: BastionReplayMetrics;
 }
 
+/**
+ * Rolling HMM windows (per contract, the tail of the supplied PAST tape) used
+ * to warm a live policy's regime lenses. The engine calls this on the full
+ * tape it has at refit time (everything is past — causal); the honest replays
+ * call it on the TRAIN segment's tail only.
+ */
+export function buildHMMWindows(digits: ArrayLike<number>): BastionHMMWindows {
+  const out: BastionHMMWindows = {};
+  for (const c of BASTION_ALL_CONTRACTS) {
+    const w = bandIndicators(digits, c.wins, BASTION_HMM_WINDOW);
+    if (w.length >= 40) out[c.id] = w;
+  }
+  return out;
+}
+
+/** HMM windows (per contract, tail of the TRAIN segment) for honest replays. */
+function trainHMMWindows(train: number[]): BastionHMMWindows {
+  return buildHMMWindows(train);
+}
+
+/**
+ * MODEL-AVERAGED FIT — per-lens binary log-loss is collected over THREE
+ * overlapping training windows ([0,60%), [20%,80%), [40%,100%]); the skill
+ * weights are the (renormalized) MEAN of the three window weight vectors, so
+ * one unlucky window cannot dominate the policy. τ is selected on the pooled
+ * union of all collected lens vectors; the valve seed is the MEDIAN of the
+ * three window quantiles. Each window's regime-HMM probe is fitted strictly on
+ * that window's first ticks (before the collection region) — causal.
+ */
 export function fitBastionParams(
   digits: ArrayLike<number>,
   opts?: { normalPayout?: number; recoveryPayout?: number },
@@ -739,47 +886,80 @@ export function fitBastionParams(
   const test = clean.slice(split);
 
   if (clean.length < BASTION_MIN_FIT_DIGITS || train.length < 250 || test.length < 120) {
-    const params: BastionParams = { weights: [0.3, 0.3, 0.2, 0.2], tau: 1, normalInitBar: 0.81 };
+    const params: BastionParams = { weights: [0.3, 0.3, 0.2, 0.2, 0, 0] as BastionWeightVec, tau: 1, normalInitBar: 0.81 };
     const { metrics } = replayBastion(clean, params, { warmup: Math.min(200, Math.floor(clean.length / 3)), ...opts });
     return { params, train: metrics, test: metrics };
   }
 
-  // ── Train pass: per-lens binary log-loss (pooled over all 4 contracts) + τ.
-  const probe = new BastionPolicy({ weights: [0.25, 0.25, 0.25, 0.25], tau: 1, normalInitBar: 0.81 });
-  for (let i = 0; i < 300 && i < train.length; i++) probe.update(train, i);
+  const N = clean.length;
+  const windowBounds: Array<[number, number]> = [
+    [0, split],
+    [Math.floor(N * 0.2), Math.floor(N * 0.8)],
+    [Math.floor(N * 0.4), N],
+  ];
 
-  const ll = [0, 0, 0, 0];
-  const pooled: Array<{ lenses: [number, number, number, number]; event: number }> = [];
-  const normalScores: number[] = [];
-  let llN = 0;
+  const pooled: Array<{ lenses: [number, number, number, number, number, number]; event: number }> = [];
+  const windowWeights: number[][] = [];
+  const windowSeeds: number[] = [];
+  const baseline = Math.log(2);
 
-  for (let i = 300; i < train.length - 1; i++) {
-    const next = train[i + 1]!;
+  for (const [ws, we] of windowBounds) {
+    const win = clean.slice(ws, we);
+    if (win.length < 300) continue;
+    const warm = Math.min(600, Math.max(20, win.length - 50));
+    // Regime HMM fitted on the window's FIRST ticks only — causal w.r.t. the
+    // collection region that starts at `warm`.
+    const hmmWin: BastionHMMWindows = {};
     for (const c of BASTION_ALL_CONTRACTS) {
-      const read = probe.readSide(train, i, c);
-      const event = c.wins[next] ? 1 : 0;
-      for (let j = 0; j < 4; j++) {
-        const pj = Math.min(1 - 1e-9, Math.max(1e-9, read.lenses[j]!));
-        ll[j]! += -(event ? Math.log(pj) : Math.log(1 - pj));
-      }
-      pooled.push({ lenses: read.lenses, event });
-      llN++;
+      const w = win.slice(0, warm);
+      if (w.length >= 40) hmmWin[c.id] = bandIndicators(w, c.wins, w.length);
     }
-    // Normal side best score (both sides, utility order) for the valve seed.
-    const reads = BASTION_NORMAL_CONTRACTS.map(c => probe.readSide(train, i, c));
-    reads.sort((a, b) => b.utility - a.utility);
-    if (reads[0]) normalScores.push(reads[0].p);
-    probe.update(train, i + 1);
+    const probe = new BastionPolicy(
+      { weights: [1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 6] as BastionWeightVec, tau: 1, normalInitBar: 0.81 },
+      hmmWin,
+    );
+    for (let i = 0; i < warm; i++) probe.update(win, i);
+
+    const ll = [0, 0, 0, 0, 0, 0];
+    const normalScores: number[] = [];
+    let llN = 0;
+
+    for (let i = warm; i < win.length - 1; i++) {
+      const next = win[i + 1]!;
+      for (const c of BASTION_ALL_CONTRACTS) {
+        const read = probe.readSide(win, i, c);
+        const event = c.wins[next] ? 1 : 0;
+        for (let j = 0; j < 6; j++) {
+          const pj = Math.min(1 - 1e-9, Math.max(1e-9, read.lenses[j]!));
+          ll[j]! += -(event ? Math.log(pj) : Math.log(1 - pj));
+        }
+        pooled.push({ lenses: read.lenses, event });
+        llN++;
+      }
+      const reads = BASTION_NORMAL_CONTRACTS.map(c => probe.readSide(win, i, c));
+      reads.sort((a, b) => b.utility - a.utility);
+      if (reads[0]) normalScores.push(reads[0].p);
+      probe.update(win, i + 1);
+    }
+
+    windowWeights.push(
+      weightsFromSkillN(llN > 0 ? ll.map(v => v / llN) : Array.from({ length: 6 }, () => baseline), baseline),
+    );
+    if (normalScores.length > 0) {
+      normalScores.sort((a, b) => a - b);
+      windowSeeds.push(quantile(normalScores, 1 - BASTION_NORMAL_PACE_TARGET));
+    }
   }
 
-  const baseline = Math.log(2);
-  const weightsArr = weightsFromSkillN(
-    llN > 0 ? ll.map(v => v / llN) : [baseline, baseline, baseline, baseline],
-    baseline,
-  );
-  const weights = [weightsArr[0]!, weightsArr[1]!, weightsArr[2]!, weightsArr[3]!] as [number, number, number, number];
+  // Model-averaged lens weights: mean of the window vectors, renormalized.
+  const avg = new Array<number>(6).fill(0);
+  for (const wv of windowWeights) {
+    for (let j = 0; j < 6; j++) avg[j]! += wv[j]! / windowWeights.length;
+  }
+  const wSum = avg.reduce((a, b) => a + b, 0) || 1;
+  const weights = avg.map(v => v / wSum) as BastionWeightVec;
 
-  // ── τ on the skill-weighted pool of the collected lens vectors.
+  // ── τ on the skill-weighted pool of ALL collected lens vectors.
   let tau = 1;
   let bestLL = Infinity;
   for (const t of TAU_GRID_B) {
@@ -795,27 +975,30 @@ export function fitBastionParams(
     }
   }
 
-  // Valve seed: the train quantile of BEST normal-side scores at (1 − budget).
-  normalScores.sort((a, b) => a - b);
-  const normalInitBar = normalScores.length > 0
-    ? quantile(normalScores, 1 - BASTION_NORMAL_PACE_TARGET)
+  // Valve seed: MEDIAN of the per-window quantiles (robust to one noisy window).
+  const normalInitBar = windowSeeds.length
+    ? quantile([...windowSeeds].sort((a, b) => a - b), 0.5)
     : 0.81;
 
   const params: BastionParams = { weights, tau, normalInitBar };
-  const trainReplay = replayBastion(train, params, { warmup: 250, ...opts }).metrics;
-  const testReplay = replayBastion(test, params, { warmup: Math.min(250, Math.floor(test.length / 3)), ...opts }).metrics;
+  // Honest replays use regime HMMs fitted on the TRAIN segment only.
+  const hmmWindows = trainHMMWindows(train);
+  const trainReplay = replayBastion(train, params, { warmup: 250, ...opts }, hmmWindows).metrics;
+  const testReplay = replayBastion(test, params, { warmup: Math.min(250, Math.floor(test.length / 3)), ...opts }, hmmWindows).metrics;
   return { params, train: trainReplay, test: testReplay };
 }
 
 // ── One-market scan read ──────────────────────────────────────────────────────
 
 export interface BastionDiag {
-  weights: [number, number, number, number];
+  weights: BastionWeightVec;
   tau: number;
   normalInitBar: number;
   historyUsed: number;
   /** q_LL per recovery side — the clustering estimates behind pair-risk. */
   qLL: { over3: number; under6: number };
+  /** Regime-HMM belief in the hot state per recovery side (0..1). */
+  regime: { over3: number; under6: number };
   fireRatePer100: number;
 }
 
@@ -846,19 +1029,26 @@ export function scoreBastionMarket(
   const fit = fitBastionParams(clean, { normalPayout: nPay, recoveryPayout: rPay });
   const m = fit.test;
 
-  // Live q_LL per recovery side on the full warmed state (display + pair-risk).
-  const probe = new BastionPolicy(fit.params);
+  // Live q_LL + regime belief per recovery side on the full warmed state
+  // (display + pair-risk). The probe's regime HMMs are fitted on the TRAIN
+  // segment's tail and advanced over the whole tape — causal.
+  const trainTail = clean.slice(0, Math.floor(clean.length * BASTION_TRAIN_FRACTION));
+  const probe = new BastionPolicy(fit.params, trainHMMWindows(trainTail));
   for (let i = 0; i < clean.length; i++) probe.update(clean, i);
+  const beliefs = probe.regimeBeliefs();
   const r3 = probe.readSide(clean, clean.length - 1, BASTION_RECOVERY_CONTRACTS[0]!);
   const r6 = probe.readSide(clean, clean.length - 1, BASTION_RECOVERY_CONTRACTS[1]!);
 
   // Verdict ladder — measurement honesty ONLY, never a deploy gate:
-  //   PRIME  = the exact live policy made money on unseen ticks AND the
+  //   PRIME  = the exact live policy made money on unseen ticks AND its train
+  //            edge was not negative (a train-negative / test-positive result
+  //            on a ~40% hold-out is overfit noise, not edge) AND the
   //            recovery band held its face-up win rate (the ladder survives)
   //   VIABLE = positive paper expectancy with real recovery mass
   //   THIN   = everything else
+  const trainEdge = fit.train.paperEdgePerDollar;
   let verdict: BastionVerdict;
-  if (!thinData && m.paperEdgePerDollar >= 0.02 && m.recoveryShots >= 6 && m.recoveryHitRate >= 0.58 && m.normalShots >= 6) {
+  if (!thinData && m.paperEdgePerDollar >= 0.02 && trainEdge > -0.02 && m.recoveryShots >= 6 && m.recoveryHitRate >= 0.58 && m.normalShots >= 6) {
     verdict = "prime";
   } else if (!thinData && m.paperEdgePerDollar > 0 && m.recoveryShots >= 4) {
     verdict = "viable";
@@ -888,6 +1078,10 @@ export function scoreBastionMarket(
       qLL: {
         over3: Math.round(r3.qLL * 1000) / 1000,
         under6: Math.round(r6.qLL * 1000) / 1000,
+      },
+      regime: {
+        over3: Math.round((beliefs["over3"] ?? 0.5) * 1000) / 1000,
+        under6: Math.round((beliefs["under6"] ?? 0.5) * 1000) / 1000,
       },
       fireRatePer100: Math.round(m.fireRatePer100 * 100) / 100,
     },

@@ -36,13 +36,16 @@ function parseParams(raw: any): BastionParams | null {
   const w = Array.isArray(raw.weights) ? raw.weights.map(num) : null;
   const tau = num(raw.tau);
   const normalInitBar = num(raw.normalInitBar);
-  if (!w || w.length !== 4 || w.some((v: number | null) => v === null)) return null;
+  // 6-lens weights (current) or legacy 4-lens (old scan cards) accepted.
+  if (!w || (w.length !== 4 && w.length !== 6) || w.some((v: number | null) => v === null)) return null;
   if (tau === null || normalInitBar === null) return null;
   if (tau < 0.3 || tau > 3) return null;
-  const sum = (w[0] as number) + (w[1] as number) + (w[2] as number) + (w[3] as number);
+  const sum = w.reduce((a: number, v: number | null) => a + (v as number), 0);
   if (!(sum > 0)) return null;
+  const expanded = [0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < w.length; i++) expanded[i] = (w[i] as number) / sum;
   return {
-    weights: [(w[0] as number) / sum, (w[1] as number) / sum, (w[2] as number) / sum, (w[3] as number) / sum],
+    weights: expanded as BastionParams["weights"],
     tau,
     normalInitBar: Math.min(0.95, Math.max(0, normalInitBar)),
   };

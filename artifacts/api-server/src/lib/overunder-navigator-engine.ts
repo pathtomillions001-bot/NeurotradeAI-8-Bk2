@@ -3,10 +3,23 @@
  *
  * This is a dedicated engine rather than a generic barrier preset. The plan
  * carries four user-selected barriers: normal Over/Under and recovery
- * Over/Under. The recovery selector is always evaluated against both armed
- * recovery contracts and uses a frozen fair-rate bar; the loss-run is never
- * used to make the bar stricter. In switching mode, a recovery hunt can move
- * to another digit market when the current tape has no good setup.
+ * Over/Under. SIX statistical lenses (digit Markov, band Markov, hole hazard,
+ * suffix memory, EW drift, 2-state regime HMM) are fused in a calibrated log
+ * opinion pool with model-averaged skill weights; side arbitration prices
+ * CONTEXTUAL loss-pair risk (order-2 band chain). The recovery selector is
+ * always evaluated against both armed recovery contracts against a STATIC
+ * payout-aware bar (break-even clamped to [fair, fair+0.02]) — the loss-run
+ * is never used to make the bar stricter.
+ *
+ * MARKET SWITCHING — the MARKET SCOUT (./band-regime) scores every allowed
+ * market on a composite of live EW band edge + held-out walk-forward edge
+ * (age-decayed) + this bot's own fired outcomes (Beta-shrunk), with
+ * hysteresis (margin + cooldown + min dwell). In switching mode it redirects
+ * the fire budget to a measurably better tape in NORMAL mode (the legacy bot
+ * had none) AND in RECOVERY mode (the hunt fires an instantly-ready
+ * cross-market setup immediately, or migrates to the best recovery tape even
+ * before a setup exists). The scout adds no veto: when it says "stay", the
+ * policy trades exactly like the legacy bot. Locked mode never switches.
  */
 
 import {
@@ -36,6 +49,7 @@ import {
 import { runWithSession } from "./session";
 import { registerLiveBot, unregisterLiveBot } from "./live-registry";
 import {
+  buildNavigatorHMMWindows,
   contractsForPlan,
   scoreNavigatorMarket,
   NavigatorPolicy,
@@ -49,6 +63,7 @@ import {
   validateNavigatorPlan,
   NAVIGATOR_MIN_MEASURE_DIGITS,
 } from "./overunder-navigator-analysis";
+import { MarketScout } from "./band-regime.js";
 
 export const NAVIGATOR_BOT_ID = "overunder-navigator";
 export const NAVIGATOR_BOT_NAME = "Over/Under Navigator";
@@ -125,6 +140,11 @@ export interface NavigatorDeployed {
   breakEvenRecovery: number;
 }
 
+export interface NavigatorWatchScout {
+  active: string;
+  top: Array<{ name: string; score: number; live: number }>;
+}
+
 export interface NavigatorWatch {
   phase: "watching" | "armed" | "firing" | "settling" | "hunting";
   mode: "normal" | "recovery";
@@ -136,7 +156,8 @@ export interface NavigatorWatch {
   ready: boolean;
   pairRisk: number;
   qLL: number;
-  lenses: [number, number, number, number];
+  /** Six lenses: [digitMarkov, bandMarkov, holeHazard, suffix, ewDrift, regimeHMM]. */
+  lenses: [number, number, number, number, number, number];
   recoveryRadar: Array<{
     label: string;
     p: number;
@@ -144,6 +165,8 @@ export interface NavigatorWatch {
     bar: number;
     ready: boolean;
   }>;
+  /** Market Scout leaderboard (switching mode only). */
+  scout?: NavigatorWatchScout;
   reason: string;
   switched: boolean;
   ticksWatched: number;
@@ -210,7 +233,7 @@ function freshWatch(): NavigatorWatch {
     ready: false,
     pairRisk: 0,
     qLL: 0,
-    lenses: [0, 0, 0, 0],
+    lenses: [0, 0, 0, 0, 0, 0],
     recoveryRadar: [],
     reason: "",
     switched: false,
@@ -536,12 +559,13 @@ function radarOf(policy: NavigatorPolicy, digits: number[], idx: number) {
   return policy.recoveryContracts
     .map((c) => {
       const r = policy.readSide(digits, idx, c);
+      const bar = NavigatorPolicy.recoveryBarFor(c);
       return {
         label: c.label,
         p: r.p,
         utility: r.utility,
-        bar: c.fair,
-        ready: r.p >= c.fair,
+        bar,
+        ready: r.p >= bar,
       };
     })
     .sort((a, b) => b.utility - a.utility);
@@ -559,7 +583,7 @@ function applyDecision(
   session.watch.ready = dec.ready;
   session.watch.pairRisk = dec.read?.pairRisk ?? 0;
   session.watch.qLL = dec.read?.qLL ?? 0;
-  session.watch.lenses = dec.read?.lenses ?? [0, 0, 0, 0];
+  session.watch.lenses = dec.read?.lenses ?? [0, 0, 0, 0, 0, 0];
   session.watch.recoveryRadar = radar;
   session.watch.reason = dec.reason;
 }
@@ -624,12 +648,60 @@ async function runLoop(config: NavigatorConfig) {
   let policy: NavigatorPolicy | null = null;
   let candidate: NavigatorCandidate | null = config.lockedAnalysis ?? null;
   let digits: number[] = [];
+  let digitsSymbol = activeSymbol;
   let fedLen = 0;
   let lastDecision: NavigatorDecision | null = null;
   let lastRefit = 0;
   let lastHunt = 0;
+  let lastScout = 0;
   let consecutiveErrors = 0;
   let lastDigitCount = 0;
+
+  // ── MARKET SCOUT — live/measured/experienced edge per market, hysteresis-
+  // protected. It redirects WHERE the fire budget lands; it never vetoes a
+  // shot (no new gate: when the scout says "stay", behaviour is legacy-exact).
+  const scout = new MarketScout(
+    AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map((m) => ({
+      symbol: m.symbol,
+      displayName: m.displayName,
+    })),
+    {
+      normal: contracts.normal.map((c) => ({
+        wins: c.wins,
+        fair: c.fair,
+        payout: c.payout,
+      })),
+      recovery: contracts.recovery.map((c) => ({
+        wins: c.wins,
+        fair: c.fair,
+        payout: c.payout,
+      })),
+    },
+  );
+  const bufferReader = (symbol: string): number[] =>
+    tickManager.getDigits(symbol, 300);
+  scout.enter(activeSymbol, Date.now());
+  let cardCursor = 0;
+  /** A cross-market setup captured by the hunt — fired on the next pass. */
+  let pendingFire: NavigatorDecision | null = null;
+  /** Cheap composite-only switch check (no re-fit) in normal mode. */
+  const NORMAL_SCOUT_MS = 10_000;
+
+  const scoutPanel = (mode: "normal" | "recovery") => {
+    if (locked) {
+      session.watch.scout = undefined;
+      return;
+    }
+    const now = Date.now();
+    session.watch.scout = {
+      active: activeName,
+      top: scout.top(mode, bufferReader, now).map((s) => ({
+        name: s.displayName,
+        score: Math.round(s.composite * 10000) / 10000,
+        live: Math.round(s.live * 10000) / 10000,
+      })),
+    };
+  };
 
   async function refit() {
     const next = await readDigits(activeSymbol);
@@ -640,9 +712,12 @@ async function runLoop(config: NavigatorConfig) {
       read.params,
       contracts.normal,
       contracts.recovery,
+      // Regime HMMs warm on the full PAST tape (causal at refit time).
+      buildNavigatorHMMWindows(next, contracts.all),
     );
     for (let i = 0; i < next.length; i++) policy.update(next, i);
     digits = next;
+    digitsSymbol = activeSymbol;
     fedLen = next.length;
     lastDigitCount = next.length;
     lastDecision = null;
@@ -650,9 +725,56 @@ async function runLoop(config: NavigatorConfig) {
     session.currentMarket = activeName;
     session.watch.confidence = candidate.confidence;
     session.watch.verdict = candidate.verdict;
+    // The active market's scout card refreshes with every re-fit.
+    scout.setCard(activeSymbol, {
+      edge: read.paperEdgePerDollar,
+      recoveryHitRate: read.metrics.recoveryHitRate,
+      recoveryShots: read.metrics.recoveryShots,
+      at: Date.now(),
+    });
     return true;
   }
-  async function huntRecovery() {
+  /**
+   * Rotating background re-fit: one non-active market per refit cycle gets a
+   * fresh full walk-forward card (all markets covered in ~10 min) so the
+   * scout's "measured" evidence stays current without re-scanning everything.
+   */
+  async function rotateOneCard() {
+    const markets = AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled);
+    if (markets.length < 2) return;
+    for (let step = 0; step < markets.length; step++) {
+      const m = markets[(cardCursor + step) % markets.length]!;
+      if (m.symbol === activeSymbol) continue;
+      cardCursor = (cardCursor + step + 1) % markets.length;
+      try {
+        const d = await readDigits(m.symbol);
+        if (d.length < NAVIGATOR_MIN_MEASURE_DIGITS) return;
+        const read = scoreNavigatorMarket(d, config.plan);
+        scout.setCard(m.symbol, {
+          edge: read.paperEdgePerDollar,
+          recoveryHitRate: read.metrics.recoveryHitRate,
+          recoveryShots: read.metrics.recoveryShots,
+          at: Date.now(),
+        });
+      } catch {
+        /* the scout lives without cards */
+      }
+      return;
+    }
+  }
+  /**
+   * RECOVERY HUNT (switching mode) — two outcomes:
+   *  - FIRE: a bar-clearing recovery setup exists RIGHT NOW on another
+   *    market → returned; the loop fires it immediately (at most one tick
+   *    old — no refit round-trip).
+   *  - MIGRATE: no setup ready anywhere, but the scout's composite shows
+   *    another market has the better recovery tape → returned; the bot moves
+   *    there and the STATIC bar times the shot when the tilt appears.
+   */
+  async function huntRecovery(): Promise<{
+    fire: { symbol: string; name: string; decision: NavigatorDecision } | null;
+    migrate: { symbol: string; name: string } | null;
+  }> {
     let best: {
       symbol: string;
       name: string;
@@ -662,10 +784,18 @@ async function runLoop(config: NavigatorConfig) {
       const d = await readDigits(m.symbol, HUNT_DIGITS);
       if (d.length < 150) continue;
       const read = scoreNavigatorMarket(d, config.plan);
+      // The hunt's full fits double as fresh scout cards for every market.
+      scout.setCard(m.symbol, {
+        edge: read.paperEdgePerDollar,
+        recoveryHitRate: read.metrics.recoveryHitRate,
+        recoveryShots: read.metrics.recoveryShots,
+        at: Date.now(),
+      });
       const p = new NavigatorPolicy(
         read.params,
         contracts.normal,
         contracts.recovery,
+        buildNavigatorHMMWindows(d, contracts.all),
       );
       for (let i = 0; i < d.length; i++) p.update(d, i);
       const dec = p.decideRecovery(d, d.length - 1);
@@ -676,7 +806,21 @@ async function runLoop(config: NavigatorConfig) {
       )
         best = { symbol: m.symbol, name: m.displayName, decision: dec };
     }
-    return best;
+    if (best && best.symbol !== activeSymbol)
+      return { fire: best, migrate: null };
+    const challenger = scout.bestChallenger(
+      "recovery",
+      bufferReader,
+      activeSymbol,
+      Date.now(),
+    );
+    return {
+      fire: null,
+      migrate:
+        challenger && challenger.symbol !== activeSymbol
+          ? { symbol: challenger.symbol, name: challenger.displayName }
+          : null,
+    };
   }
 
   while (session.running && !session.stopRequested) {
@@ -697,9 +841,45 @@ async function runLoop(config: NavigatorConfig) {
           continue;
         }
         lastRefit = Date.now();
+        if (!locked) await rotateOneCard();
+      }
+
+      // ── NORMAL-MODE SCOUT (fast, composite-only — no re-fit) ─────────────
+      // Switching mode redirects the fire budget to a measurably better tape
+      // up to every 10s (the legacy bot had NO normal-mode switching at all);
+      // hysteresis (margin + cooldown + dwell) keeps it from flapping, and it
+      // never vetoes a shot.
+      if (!locked && !inRecovery && policy && Date.now() - lastScout >= NORMAL_SCOUT_MS) {
+        lastScout = Date.now();
+        scoutPanel("normal");
+        const challenger = scout.bestChallenger(
+          "normal",
+          bufferReader,
+          activeSymbol,
+          Date.now(),
+        );
+        if (challenger) {
+          activeSymbol = challenger.symbol;
+          activeName = challenger.displayName;
+          scout.markSwitch(Date.now());
+          scout.enter(activeSymbol, Date.now());
+          session.watch.switched = true;
+          if (!(await refit())) {
+            await sleep(500);
+            continue;
+          }
+          lastRefit = Date.now();
+          session.message = `🔁 Scout — ${activeName} shows the better tape (${challenger.composite.toFixed(3)} vs ${challenger.activeComposite.toFixed(3)} $/$${challenger.flee ? " · active tape dead" : ""})`;
+          broadcast();
+          await sleep(200);
+          continue;
+        }
       }
       const latest = await readDigits(activeSymbol, SCAN_DIGITS);
-      if (latest.length > digits.length) {
+      // A pending cross-market fire (captured by the hunt) bypasses the feed:
+      // the live policy still belongs to the previous market until the
+      // post-trade re-fit.
+      if (latest.length > digits.length && !pendingFire) {
         for (let i = digits.length; i < latest.length; i++)
           policy!.update(latest, i);
         digits = latest;
@@ -710,6 +890,16 @@ async function runLoop(config: NavigatorConfig) {
         lastDecision = inRecovery
           ? policy!.decideRecovery(latest, idx)
           : policy!.decideNormal(latest, idx);
+      }
+      if (pendingFire) {
+        // Fire the hunt-captured setup NOW (at most one tick old).
+        if (digitsSymbol !== activeSymbol) {
+          digits = latest;
+          digitsSymbol = activeSymbol;
+          lastDigitCount = digits.length;
+        }
+        lastDecision = pendingFire;
+        pendingFire = null;
       }
       if (!lastDecision || !policy) {
         session.watch.phase = "watching";
@@ -730,18 +920,38 @@ async function runLoop(config: NavigatorConfig) {
             "🔎 Recovery hunt — checking other markets without hardening the bar";
           broadcast();
           const hunt = await huntRecovery();
-          if (hunt && hunt.symbol !== activeSymbol) {
-            activeSymbol = hunt.symbol;
-            activeName = hunt.name;
+          scoutPanel("recovery");
+          if (hunt.fire) {
+            // A bar-clearing setup exists on another market RIGHT NOW —
+            // capture it and fire immediately (no refit round-trip).
+            activeSymbol = hunt.fire.symbol;
+            activeName = hunt.fire.name;
+            scout.markSwitch(Date.now());
+            scout.enter(activeSymbol, Date.now());
+            session.watch.switched = true;
+            pendingFire = hunt.fire.decision;
+            session.message = `🔁 Recovery setup on ${activeName} — firing ${hunt.fire.decision.side!.label} now`;
+            broadcast();
+            continue;
+          }
+          if (hunt.migrate) {
+            // No setup anywhere yet — move to the best recovery tape; the
+            // STATIC bar times the shot when the tilt appears.
+            activeSymbol = hunt.migrate.symbol;
+            activeName = hunt.migrate.name;
+            scout.markSwitch(Date.now());
+            scout.enter(activeSymbol, Date.now());
             session.watch.switched = true;
             await refit();
             lastRefit = Date.now();
-            session.message = `🔁 Recovery setup found on ${activeName}`;
+            session.message = `🔁 Recovery scout — migrating to ${activeName} (better recovery tape)`;
             broadcast();
             await sleep(250);
             continue;
           }
         }
+        if (!session.watch.scout && !locked)
+          scoutPanel(inRecovery ? "recovery" : "normal");
         session.watch.phase = "watching";
         session.watch.reason = lastDecision.reason;
         session.message = inRecovery
@@ -909,6 +1119,8 @@ async function runLoop(config: NavigatorConfig) {
         fire.contractType,
         payout,
       );
+      // The scout's experienced-edge term: this bot's own record per market.
+      scout.recordOutcome(activeSymbol, inRecovery ? "recovery" : "normal", won);
       try {
         await db
           .update(tradesTable)

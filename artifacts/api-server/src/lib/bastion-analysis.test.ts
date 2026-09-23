@@ -70,7 +70,12 @@ function tiltedStream(n: number, seed: number, anchor: number, hot: number[], ti
   return out;
 }
 
-const FLAT: BastionParams = { weights: [0.25, 0.25, 0.25, 0.25], tau: 1, normalInitBar: 0.81 };
+/** Legacy-shaped params: 4 classic lenses, the two regime lenses at zero. */
+const FLAT: BastionParams = {
+  weights: [0.25, 0.25, 0.25, 0.25, 0, 0],
+  tau: 1,
+  normalInitBar: 0.81,
+};
 
 describe("frozen contract geometry", () => {
   it("locks the specified bands: Over 1 / Under 8 normal, Over 3 / Under 6 recovery", () => {
@@ -92,10 +97,20 @@ describe("frozen contract geometry", () => {
     assert.ok(over3.wins[5] && under6.wins[5], "digit 5 must be the double-win overlap");
   });
 
-  it("the recovery bar is exactly the combinatorial fair rate — and is a constant", () => {
+  it("the recovery bar is the payout-aware break-even clamped to [fair, fair+0.02] — a constant", () => {
+    // The legacy combinatorial constant remains the floor of the bar.
     assert.equal(BASTION_RECOVERY_BAR, 0.6);
     assert.equal(BASTION_RECOVERY_BAR, BASTION_RECOVERY_CONTRACTS[0]!.fair);
-    for (const c of BASTION_ALL_CONTRACTS) assert.equal(c.fair, c.wins.filter(Boolean).length / 10);
+    for (const c of BASTION_ALL_CONTRACTS) {
+      assert.equal(c.fair, c.wins.filter(Boolean).length / 10);
+      const bar = BastionPolicy.recoveryBarFor(c);
+      // Never below combinatorial fair, never more than +2pp above it, and
+      // exactly the break-even rate when that sits inside the clamp.
+      assert.ok(bar >= c.fair && bar <= c.fair + 0.02 + 1e-12, `${c.id}: ${bar}`);
+      const breakEven = 1 / c.payout;
+      const expected = breakEven >= c.fair ? Math.min(c.fair + 0.02, breakEven) : c.fair;
+      assert.ok(Math.abs(bar - expected) < 1e-12, `${c.id}: ${bar} vs ${expected}`);
+    }
   });
 });
 
@@ -140,8 +155,13 @@ describe("THE NO-RATCHET GUARANTEE", () => {
       policy.update(tape, tape.length - 1);
     }
     const after5 = policy.decideRecovery(tape, tape.length - 1);
-    assert.equal(before.bar, BASTION_RECOVERY_BAR, "bar must be the static fair rate");
-    assert.equal(after5.bar, BASTION_RECOVERY_BAR, "the bar must NOT move after 5 recovery losses");
+    // The bar is a frozen constant of (contract, payout): it sits at the
+    // payout-aware break-even clamped to [fair, fair+0.02], and it is
+    // IDENTICAL before and after a brutal loss run.
+    const bar0 = BastionPolicy.recoveryBarFor(BASTION_RECOVERY_CONTRACTS[0]!);
+    assert.ok(before.bar >= 0.6 && before.bar <= 0.62, `bar ${before.bar}`);
+    assert.equal(before.bar, bar0, "bar must be the static payout-aware rate");
+    assert.equal(after5.bar, before.bar, "the bar must NOT move after 5 recovery losses");
   });
 
   it("a shot that clears the bar fires at loss-run depth 5 exactly as at depth 0", () => {
@@ -161,11 +181,12 @@ describe("THE NO-RATCHET GUARANTEE", () => {
     policy.update(tape, tape.length - 1);
     const dec = policy.decideRecovery(tape, tape.length - 1);
     assert.ok(dec.side, "a side must be chosen");
-    if (dec.read && dec.read.p >= BASTION_RECOVERY_BAR) {
+    if (dec.read && dec.read.p >= dec.bar) {
       assert.equal(dec.ready, true, "a bar-clearing shot MUST fire at loss-run depth 5");
     }
-    // And the bar is still frozen regardless:
-    assert.equal(dec.bar, BASTION_RECOVERY_BAR);
+    // And the bar is still frozen regardless (constant of contract+payout):
+    assert.equal(dec.bar, BastionPolicy.recoveryBarFor(dec.side!));
+    assert.ok(dec.bar >= 0.6 && dec.bar <= 0.62, `bar ${dec.bar}`);
   });
 });
 

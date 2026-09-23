@@ -53,7 +53,8 @@ interface Candidate {
   breakEvenRecovery: number;
   params: any;
   diag: {
-    weights: [number, number, number, number];
+    /** Six lenses (legacy scans may still carry four — the bar renders what exists). */
+    weights: number[];
     tau: number;
     normalInitBar: number;
     historyUsed: number;
@@ -344,13 +345,19 @@ export function BastionConsole({ bot, open, onOpenChange, session, onSession }: 
       <div className="flex items-center gap-1.5">
         <span className="text-[8px] uppercase tracking-wider text-muted-foreground/60">lens mix</span>
         <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-black/40 flex">
-          <div className="bg-sky-400" style={{ width: `${c.diag.weights[0] * 100}%` }} title="digit markov" />
-          <div className="bg-emerald-400" style={{ width: `${c.diag.weights[1] * 100}%` }} title="band markov" />
-          <div className="bg-amber-400" style={{ width: `${c.diag.weights[2] * 100}%` }} title="hole hazard" />
-          <div className="bg-fuchsia-400" style={{ width: `${c.diag.weights[3] * 100}%` }} title="suffix" />
+          <div className="bg-sky-400" style={{ width: `${(c.diag.weights[0] ?? 0) * 100}%` }} title="digit markov" />
+          <div className="bg-emerald-400" style={{ width: `${(c.diag.weights[1] ?? 0) * 100}%` }} title="band markov" />
+          <div className="bg-amber-400" style={{ width: `${(c.diag.weights[2] ?? 0) * 100}%` }} title="hole hazard" />
+          <div className="bg-fuchsia-400" style={{ width: `${(c.diag.weights[3] ?? 0) * 100}%` }} title="suffix" />
+          {(c.diag.weights[4] ?? 0) > 0 && (
+            <div className="bg-violet-400" style={{ width: `${(c.diag.weights[4] ?? 0) * 100}%` }} title="EW drift (recency-weighted band rate)" />
+          )}
+          {(c.diag.weights[5] ?? 0) > 0 && (
+            <div className="bg-rose-400" style={{ width: `${(c.diag.weights[5] ?? 0) * 100}%` }} title="regime HMM (2-state hidden Markov)" />
+          )}
         </div>
         <span className="text-[8px] font-mono text-muted-foreground/70">
-          {c.diag.weights.map(w => (w * 100).toFixed(0)).join("/")}
+          {c.diag.weights.map(w => ((w ?? 0) * 100).toFixed(0)).join("/")}
         </span>
       </div>
     </div>
@@ -610,11 +617,36 @@ export function BastionConsole({ bot, open, onOpenChange, session, onSession }: 
                         </div>
                       )}
 
-                      <div className="grid grid-cols-4 gap-1 pt-1 border-t border-white/5">
-                        {(["digit Mkv", "band Mkv", "hole hz", "suffix"] as const).map((lbl, i) => (
+                      <div className="grid grid-cols-6 gap-1 pt-1 border-t border-white/5">
+                        {(["digit Mkv", "band Mkv", "hole hz", "suffix", "EW drift", "regime HMM"] as const).map((lbl, i) => (
                           <Stat key={lbl} label={lbl} value={`${((watch.lenses[i] ?? 0) * 100).toFixed(0)}%`} />
                         ))}
                       </div>
+
+                      {/* MARKET SCOUT — the switching engine's live leaderboard */}
+                      {watch.scout && watch.scout.top.length > 0 && (
+                        <div className="space-y-1 pt-1 border-t border-white/5">
+                          <p className="text-[9px] uppercase tracking-widest text-muted-foreground/70 flex items-center gap-1">
+                            <Shuffle className="w-2.5 h-2.5" /> Market scout · {watch.mode}
+                          </p>
+                          {watch.scout.top.map((s, i) => (
+                            <div key={s.name} className="flex items-center gap-2 text-[10px]">
+                              <span className="font-mono text-muted-foreground/60 w-3">{i + 1}</span>
+                              <span className={`flex-1 font-medium ${s.name === watch.scout!.active ? "text-green-400" : "text-white/80"}`}>
+                                {s.name}{s.name === watch.scout!.active ? " · on watch" : ""}
+                              </span>
+                              <span className="font-mono text-muted-foreground">{(s.score * 100).toFixed(1)}</span>
+                              <span className={`font-mono w-12 text-right ${(s.live ?? 0) >= 0 ? "text-green-400/80" : "text-red-400/80"}`}>
+                                live {(s.live >= 0 ? "+" : "") + (s.live * 100).toFixed(1)}
+                              </span>
+                            </div>
+                          ))}
+                          <p className="text-[8px] text-muted-foreground/60 leading-relaxed">
+                            composite edge per $ — live tape · held-out re-fit card · own fired outcomes.
+                            The scout only redirects the fire budget; it never vetoes a shot.
+                          </p>
+                        </div>
+                      )}
                     </div>
                   </>
                 )}

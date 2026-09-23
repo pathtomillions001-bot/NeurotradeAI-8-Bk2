@@ -114,6 +114,12 @@ export interface BastionDeployedStatus {
   breakEvenRecovery: number;
 }
 
+/** Market Scout leaderboard — the switching engine's top markets right now. */
+export interface BotScoutStatus {
+  active: string;
+  top: Array<{ name: string; score: number; live: number }>;
+}
+
 export interface BastionWatchStatus {
   phase: "watching" | "armed" | "firing" | "settling" | "hunting";
   mode: "normal" | "recovery";
@@ -125,8 +131,11 @@ export interface BastionWatchStatus {
   ready: boolean;
   pairRisk: number;
   qLL: number;
-  lenses: [number, number, number, number];
+  /** Six lenses: [digitMarkov, bandMarkov, holeHazard, suffix, ewDrift, regimeHMM]. */
+  lenses: [number, number, number, number, number, number];
   recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
+  /** Present in switching mode (suppressed when the market is locked). */
+  scout?: BotScoutStatus;
   reason: string;
   switched: boolean;
   ticksWatched: number;
@@ -230,8 +239,11 @@ export interface NavigatorWatchStatus {
   ready: boolean;
   pairRisk: number;
   qLL: number;
-  lenses: [number, number, number, number];
+  /** Six lenses: [digitMarkov, bandMarkov, holeHazard, suffix, ewDrift, regimeHMM]. */
+  lenses: [number, number, number, number, number, number];
   recoveryRadar: Array<{ label: string; p: number; utility: number; bar: number; ready: boolean }>;
+  /** Present in switching mode (suppressed when the market is locked). */
+  scout?: BotScoutStatus;
   reason: string;
   switched: boolean;
   ticksWatched: number;

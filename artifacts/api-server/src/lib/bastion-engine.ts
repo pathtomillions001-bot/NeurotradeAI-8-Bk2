@@ -15,16 +15,28 @@
  * - live payouts from `./recovery-payout` (barrier-specific quotes)
  * - one owner-scoped SSE broadcast (`./sse`)
  *
+ * SIX-LENS POLICY — the brain in `./bastion-analysis` fuses digit Markov,
+ * band Markov, hole hazard, suffix memory, EW drift (recency-weighted rate)
+ * and a 2-state regime HMM (Baum–Welch) in a calibrated log opinion pool;
+ * side arbitration prices CONTEXTUAL loss-pair risk (order-2 band chain);
+ * the recovery bar is the payout-aware break-even clamped to [fair, fair+0.02]
+ * — still a frozen constant of (contract, payout): NO post-loss tightening,
+ * NO cool-down ladder, NO gate that hardens as debt grows.
+ *
  * RECOVERY-FIRST LOOP (the whole point of this bot):
  *   - a normal loss drops straight into recovery mode;
  *   - recovery evaluates BOTH sides every tick and fires the BEST shot the
- *     moment its fused win probability clears the STATIC fair-rate bar —
- *     there is NO post-loss tightening, NO cool-down ladder, NO gate that
- *     hardens as debt grows (see bastion-analysis: the bar is a frozen const
- *     and `decideRecovery` cannot even receive a loss run);
- *   - if no side shows tilt the bot waits — and in SWITCHING mode it HUNTS
- *     across every digit market and migrates to the first/best market with a
- *     bar-clearing recovery shot. LOCKED mode stays and waits on its market.
+ *     moment its fused win probability clears the STATIC bar;
+ *   - the MARKET SCOUT (./band-regime) scores every allowed market on a
+ *     composite of live EW band edge + held-out walk-forward edge (age-decayed)
+ *     + this bot's own fired outcomes on that market (Beta-shrunk), with
+ *     hysteresis (margin + cooldown + min dwell). In SWITCHING mode it
+ *     redirects the fire budget to a measurably better tape — in NORMAL mode
+ *     and in RECOVERY mode (the recovery hunt migrates to the market with the
+ *     best recovery tape even before a bar-clearing setup exists, and fires
+ *     an instantly-ready setup cross-market without a refit round-trip).
+ *     The scout adds no veto: when it says "stay", the policy trades exactly
+ *     like the legacy bot. LOCKED mode never switches.
  *
  * Deploy flow (scan-first): `scanForBastion` measures all digit markets with
  * an honest walk-forward of the exact live policy (including the recovery
@@ -64,14 +76,17 @@ import {
   BASTION_RECOVERY_BAR,
   BASTION_RECOVERY_CONTRACTS,
   BastionPolicy,
+  buildHMMWindows,
   scoreBastionMarket,
   type BastionContract,
   type BastionDecision,
+  type BastionDiag,
   type BastionParams,
   type BastionReplayMetrics,
   type BastionSideMode,
   type BastionVerdict,
 } from "./bastion-analysis";
+import { MarketScout } from "./band-regime.js";
 
 export const BASTION_BOT_ID = "bastion";
 export const BASTION_BOT_NAME = "Barrier Bastion";
@@ -85,8 +100,6 @@ const HUNT_DIGITS = 2500;
 /** Re-measure cadence — live never trusts a stale fit for long. */
 const REFIT_LOCKED_MS = 25_000;
 const REFIT_SWITCHING_MS = 45_000;
-/** Switching migrates only for a MEANINGFULLY better edge (anti-flip). */
-const SWITCH_MARGIN = 0.015;
 /** In recovery (switching mode) hunt a better market this often. */
 const RECOVERY_HUNT_MS = 3_000;
 /** Minimum digits before the live policy is allowed to exist. */
@@ -117,14 +130,7 @@ export interface BastionCandidate {
   breakEvenNormal: number;
   breakEvenRecovery: number;
   params: BastionParams;
-  diag: {
-    weights: [number, number, number, number];
-    tau: number;
-    normalInitBar: number;
-    historyUsed: number;
-    qLL: { over3: number; under6: number };
-    fireRatePer100: number;
-  };
+  diag: BastionDiag;
   thinData: boolean;
   metrics: BastionReplayMetrics;
 }
@@ -169,6 +175,11 @@ export interface BastionDeployed {
   breakEvenRecovery: number;
 }
 
+export interface BastionWatchScout {
+  active: string;
+  top: Array<{ name: string; score: number; live: number }>;
+}
+
 export interface BastionWatch {
   phase: "watching" | "armed" | "firing" | "settling" | "hunting";
   mode: "normal" | "recovery";
@@ -180,9 +191,12 @@ export interface BastionWatch {
   ready: boolean;
   pairRisk: number;
   qLL: number;
-  lenses: [number, number, number, number];
+  /** Six lenses: [digitMarkov, bandMarkov, holeHazard, suffix, ewDrift, regimeHMM]. */
+  lenses: [number, number, number, number, number, number];
   /** Always-on recovery radar: the best recovery shot right now. */
   recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
+  /** Market Scout leaderboard (switching mode only). */
+  scout?: BastionWatchScout;
   reason: string;
   switched: boolean;
   ticksWatched: number;
@@ -258,7 +272,7 @@ function freshWatch(): BastionWatch {
     ready: false,
     pairRisk: 0,
     qLL: 0,
-    lenses: [0, 0, 0, 0],
+    lenses: [0, 0, 0, 0, 0, 0],
     recoveryRadar: [],
     reason: "",
     switched: false,
@@ -562,7 +576,7 @@ export async function startSession(config: BastionConfig): Promise<{ ok: boolean
 function radarOf(policy: BastionPolicy, digits: number[], idx: number) {
   return BASTION_RECOVERY_CONTRACTS.map(c => {
     const r = policy.readSide(digits, idx, c);
-    return { label: c.label, p: r.p, utility: r.utility, ready: r.p >= BASTION_RECOVERY_BAR };
+    return { label: c.label, p: r.p, utility: r.utility, ready: r.p >= BastionPolicy.recoveryBarFor(c) };
   }).sort((a, b) => b.utility - a.utility);
 }
 
@@ -576,7 +590,7 @@ function applyDecisionToWatch(dec: BastionDecision, radar: BastionWatch["recover
   session.watch.ready = dec.ready;
   session.watch.pairRisk = dec.read?.pairRisk ?? 0;
   session.watch.qLL = dec.read?.qLL ?? 0;
-  session.watch.lenses = dec.read?.lenses ?? [0, 0, 0, 0];
+  session.watch.lenses = dec.read?.lenses ?? [0, 0, 0, 0, 0, 0];
   session.watch.recoveryRadar = radar;
   session.watch.reason = dec.reason;
 }
@@ -617,6 +631,8 @@ async function runLoop(config: BastionConfig) {
   const SPEC = config.spec;
   const LOCKED = config.marketMode === "locked";
   const REANALYZE_MS = LOCKED ? REFIT_LOCKED_MS : REFIT_SWITCHING_MS;
+  /** Cheap composite-only switch check (no re-fit) in normal mode. */
+  const NORMAL_SCOUT_MS = 10_000;
 
   let activeSymbol = config.symbol;
   let activeName = config.displayName;
@@ -630,7 +646,37 @@ async function runLoop(config: BastionConfig) {
   let lastRadar: BastionWatch["recoveryRadar"] = [];
   let lastReanalyzeAt = 0;
   let lastHuntAt = 0;
+  let lastScoutAt = 0;
   let consecutiveErrors = 0;
+
+  // ── MARKET SCOUT — live/measured/experienced edge per market, hysteresis-
+  // protected. It redirects WHERE the fire budget lands; it never vetoes a
+  // shot (no new gate: when the scout says "stay", behaviour is legacy-exact).
+  const scout = new MarketScout(
+    AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled).map(m => ({ symbol: m.symbol, displayName: m.displayName })),
+    {
+      normal: BASTION_NORMAL_CONTRACTS.map(c => ({ wins: c.wins, fair: c.fair, payout: c.payout })),
+      recovery: BASTION_RECOVERY_CONTRACTS.map(c => ({ wins: c.wins, fair: c.fair, payout: c.payout })),
+    },
+  );
+  const bufferReader = (symbol: string): number[] => tickManager.getDigits(symbol, 300);
+  scout.enter(activeSymbol, Date.now());
+  let cardCursor = 0;
+  /** A cross-market setup captured by the hunt — fired on the next pass. */
+  let pendingFire: BastionDecision | null = null;
+
+  const scoutPanel = (mode: "normal" | "recovery") => {
+    if (LOCKED) { session.watch.scout = undefined; return; }
+    const now = Date.now();
+    session.watch.scout = {
+      active: activeName,
+      top: scout.top(mode, bufferReader, now).map(s => ({
+        name: s.displayName,
+        score: Math.round(s.composite * 10000) / 10000,
+        live: Math.round(s.live * 10000) / 10000,
+      })),
+    };
+  };
 
   async function readDigits(symbol: string, count = SCAN_DIGITS): Promise<number[]> {
     try {
@@ -651,6 +697,8 @@ async function runLoop(config: BastionConfig) {
       prevBar !== undefined
         ? { ...read.params, normalInitBar: prevBar }
         : read.params,
+      // Regime HMMs warm on the full PAST tape (causal at refit time).
+      buildHMMWindows(digits),
     );
     for (let i = 0; i < digits.length; i++) policy.update(digits, i);
     lastDigitCount = digits.length;
@@ -664,47 +712,84 @@ async function runLoop(config: BastionConfig) {
     session.currentMarket = activeName;
     session.watch.confidence = candidate.confidence;
     session.watch.verdict = candidate.verdict;
+    // The active market's scout card refreshes with every re-fit.
+    scout.setCard(activeSymbol, {
+      edge: read.paperEdgePerDollar,
+      recoveryHitRate: read.metrics.recoveryHitRate,
+      recoveryShots: read.metrics.recoveryShots,
+      at: Date.now(),
+    });
     return candidate;
   }
 
-  /** Switching only: re-measure every market; migrate past the margin. */
-  async function maybeMigrate(): Promise<{ migrated: boolean }> {
-    if (LOCKED) {
-      await refitActive();
-      return { migrated: false };
-    }
+  /**
+   * Rotating background re-fit: one non-active market per re-analyze cycle
+   * gets a fresh full walk-forward card (all markets covered in ~10–20 min).
+   * Keeps the scout's "measured" evidence current without re-scanning every
+   * market on every cycle.
+   */
+  async function rotateOneCard(): Promise<void> {
     const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
-    let best: BastionCandidate | null = null;
-    let incumbentEdge = Number.NEGATIVE_INFINITY;
-    for (const m of markets) {
-      const digits = await readDigits(m.symbol);
-      if (digits.length < MIN_LIVE_DIGITS) continue;
-      const c = toCandidate(m.symbol, m.displayName, scoreBastionMarket(digits));
-      if (m.symbol === activeSymbol) incumbentEdge = c.paperEdgePerDollar;
-      if (!best || VERDICT_RANK[c.verdict] < VERDICT_RANK[best.verdict]
-          || (c.verdict === best.verdict && c.paperEdgePerDollar > best.paperEdgePerDollar)) best = c;
+    if (markets.length < 2) return;
+    for (let step = 0; step < markets.length; step++) {
+      const m = markets[(cardCursor + step) % markets.length]!;
+      if (m.symbol === activeSymbol) continue;
+      cardCursor = (cardCursor + step + 1) % markets.length;
+      try {
+        const digits = await readDigits(m.symbol);
+        if (digits.length < MIN_LIVE_DIGITS) return;
+        const read = scoreBastionMarket(digits);
+        scout.setCard(m.symbol, {
+          edge: read.paperEdgePerDollar,
+          recoveryHitRate: read.metrics.recoveryHitRate,
+          recoveryShots: read.metrics.recoveryShots,
+          at: Date.now(),
+        });
+      } catch { /* the scout lives without cards */ }
+      return;
     }
-    if (best && best.symbol !== activeSymbol
-        && best.verdict !== "thin"
-        && best.paperEdgePerDollar - incumbentEdge > SWITCH_MARGIN) {
-      activeSymbol = best.symbol;
-      activeName = best.displayName;
+  }
+
+  /**
+   * Switching only: re-measure the active market (+ one rotating card) and
+   * let the MARKET SCOUT decide migration — composite live + measured +
+   * experienced edge with hysteresis (margin + cooldown + min dwell), and a
+   * flee clause when the active tape's live edge is dead.
+   */
+  async function maybeMigrate(): Promise<{ migrated: boolean }> {
+    await refitActive();
+    if (!LOCKED) await rotateOneCard();
+    if (LOCKED) return { migrated: false };
+    const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now());
+    if (challenger) {
+      activeSymbol = challenger.symbol;
+      activeName = challenger.displayName;
+      scout.markSwitch(Date.now());
+      scout.enter(activeSymbol, Date.now());
+      lastReanalyzeAt = Date.now();
       await refitActive();
       return { migrated: true };
     }
-    await refitActive();
     return { migrated: false };
   }
 
   /**
-   * RECOVERY HUNT (switching mode): find the best bar-clearing recovery shot
-   * ACROSS markets right now. The active market reads the live policy; every
-   * other market gets a transient warmed on its own tape. The shot that exists
-   * somewhere is the shot this bot takes.
+   * RECOVERY HUNT (switching mode) — two outcomes:
+   *  - FIRE: a bar-clearing recovery setup exists RIGHT NOW on another
+   *    market → return it; the loop fires immediately from the hunt's warmed
+   *    policy (no refit round-trip — the setup is at most one tick old).
+   *  - MIGRATE: no setup is ready anywhere, but the scout's composite scores
+   *    show another market has the better RECOVERY tape → return it; the bot
+   *    moves there and the STATIC bar times the shot when it appears.
+   * The active market reads the live policy; every other market gets a
+   * transient policy warmed on its own tape (with regime HMMs).
    */
-  async function huntRecoveryShot(): Promise<{ symbol: string; name: string; dec: BastionDecision } | null> {
+  async function huntRecoveryShot(): Promise<{
+    fire: { symbol: string; name: string; dec: BastionDecision } | null;
+    migrate: { symbol: string; name: string } | null;
+  }> {
     const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
-    let best: { symbol: string; name: string; dec: BastionDecision } | null = null;
+    let bestReady: { symbol: string; name: string; dec: BastionDecision } | null = null;
     for (const m of markets) {
       const digits = await readDigits(m.symbol, HUNT_DIGITS);
       if (digits.length < MIN_LIVE_DIGITS) continue;
@@ -712,15 +797,26 @@ async function runLoop(config: BastionConfig) {
       if (policy && m.symbol === activeSymbol) {
         scan = policy;
       } else {
-        scan = new BastionPolicy(config.params);
+        scan = new BastionPolicy(config.params, buildHMMWindows(digits));
         for (let i = 0; i < digits.length; i++) scan.update(digits, i);
       }
       const dec = scan.decideRecovery(digits, digits.length - 1);
-      if (dec.ready && dec.side && dec.read && (!best || (dec.read.utility > best.dec.read!.utility))) {
-        best = { symbol: m.symbol, name: m.displayName, dec };
+      if (dec.ready && dec.side && dec.read && (!bestReady || dec.read.utility > bestReady.dec.read!.utility)) {
+        bestReady = { symbol: m.symbol, name: m.displayName, dec };
       }
     }
-    return best;
+    if (bestReady && bestReady.symbol !== activeSymbol) {
+      return { fire: bestReady, migrate: null };
+    }
+    // No cross-market setup right now — migrate to the best recovery tape so
+    // the static bar has the most fertile ground to clear on.
+    const challenger = scout.bestChallenger("recovery", bufferReader, activeSymbol, Date.now());
+    return {
+      fire: null,
+      migrate: challenger && challenger.symbol !== activeSymbol
+        ? { symbol: challenger.symbol, name: challenger.displayName }
+        : null,
+    };
   }
 
   while (session.running && !session.stopRequested) {
@@ -760,7 +856,29 @@ async function runLoop(config: BastionConfig) {
         }
         if (migrated && before !== activeSymbol) {
           session.watch.switched = true;
-          session.message = `🔁 Migrated to ${activeName} — it measured better`;
+          session.message = `🔁 Migrated to ${activeName} — the scout scored it better`;
+        }
+      }
+
+      // ── NORMAL-MODE SCOUT (fast, composite-only — no re-fit) ─────────────
+      // Switching mode redirects the fire budget to a measurably better tape
+      // up to every 10s; the scout's hysteresis (margin + cooldown + dwell)
+      // keeps it from flapping, and it never vetoes a shot.
+      if (!LOCKED && !inRecovery && policy && Date.now() - lastScoutAt >= NORMAL_SCOUT_MS) {
+        lastScoutAt = Date.now();
+        scoutPanel("normal");
+        const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now());
+        if (challenger) {
+          activeSymbol = challenger.symbol;
+          activeName = challenger.displayName;
+          scout.markSwitch(Date.now());
+          scout.enter(activeSymbol, Date.now());
+          await refitActive();
+          session.watch.switched = true;
+          session.message = `🔁 Scout — ${activeName} shows the better tape (${challenger.composite.toFixed(3)} vs ${challenger.activeComposite.toFixed(3)} $/$${challenger.flee ? " · active tape dead" : ""})`;
+          broadcast();
+          await sleep(200);
+          continue;
         }
       }
 
@@ -787,7 +905,10 @@ async function runLoop(config: BastionConfig) {
 
       const live = policy as BastionPolicy | null;
       let newTicks = 0;
-      if (live && tailIdx >= 0) {
+      // A pending cross-market fire (captured by the hunt) bypasses the feed:
+      // the live policy still belongs to the previous market until the
+      // post-trade re-fit.
+      if (live && !pendingFire && tailIdx >= 0) {
         const junction = fedLen > 0 ? digits.slice(Math.max(0, fedLen - 3), fedLen).join(",") : "";
         if (digits.length > fedLen && (fedLen === 0 || junction === fedTail)) {
           for (let i = fedLen; i <= tailIdx; i++) live.update(digits, i);
@@ -802,7 +923,12 @@ async function runLoop(config: BastionConfig) {
         }
       }
 
-      if (live && newTicks > 0) {
+      if (pendingFire) {
+        // Fire the hunt-captured setup NOW (at most one tick old).
+        lastEntry = pendingFire;
+        lastRadar = [];
+        pendingFire = null;
+      } else if (live && newTicks > 0) {
         // ONE decision per tick. Recovery and normal have separate selectors;
         // neither of them can see the loss run (see bastion-analysis).
         const dec = inRecovery
@@ -827,7 +953,9 @@ async function runLoop(config: BastionConfig) {
 
       if (!entry.ready) {
         // Recovery has ONE wait reason: no tilt anywhere armed. In switching
-        // mode that triggers the cross-market HUNT instead of a passive wait.
+        // mode that triggers the cross-market HUNT instead of a passive wait:
+        // fire an instantly-ready setup elsewhere, or migrate to the market
+        // with the best measured recovery tape.
         if (inRecovery && !LOCKED && Date.now() - lastHuntAt >= RECOVERY_HUNT_MS) {
           lastHuntAt = Date.now();
           session.watch.phase = "hunting";
@@ -835,23 +963,37 @@ async function runLoop(config: BastionConfig) {
           session.message = `🔎 Recovery hunt — scanning all markets for a clean Over 3 / Under 6 shot`;
           broadcast();
           const hunt = await huntRecoveryShot();
-          if (hunt && hunt.symbol !== activeSymbol) {
-            activeSymbol = hunt.symbol;
-            activeName = hunt.name;
+          scoutPanel("recovery");
+          if (hunt.fire) {
+            // A bar-clearing setup exists on another market RIGHT NOW —
+            // capture it and fire immediately (no refit round-trip).
+            activeSymbol = hunt.fire.symbol;
+            activeName = hunt.fire.name;
+            scout.markSwitch(Date.now());
+            scout.enter(activeSymbol, Date.now());
+            session.watch.switched = true;
+            pendingFire = hunt.fire.dec;
+            session.message = `🔁 Recovery setup on ${activeName} — firing ${hunt.fire.dec.side!.label} now`;
+            broadcast();
+            continue;
+          }
+          if (hunt.migrate) {
+            // No setup anywhere yet — move to the best recovery tape; the
+            // STATIC bar times the shot when the tilt appears.
+            activeSymbol = hunt.migrate.symbol;
+            activeName = hunt.migrate.name;
+            scout.markSwitch(Date.now());
+            scout.enter(activeSymbol, Date.now());
             session.watch.switched = true;
             await refitActive();
-            session.message = `🔁 Recovery shot found on ${activeName} — firing ${hunt.dec.side!.label}`;
+            lastReanalyzeAt = Date.now();
+            session.message = `🔁 Recovery scout — migrating to ${activeName} (better recovery tape)`;
             broadcast();
-            await sleep(300);
-            continue; // next pass fires with the migrated, fitted policy
-          }
-          if (hunt) {
-            // Same market had it after all (or hunt confirmed local) — loop will fire.
-            session.watch.reason = hunt.dec.reason;
             await sleep(300);
             continue;
           }
         }
+        if (!session.watch.scout && !LOCKED) scoutPanel(inRecovery ? "recovery" : "normal");
         session.watch.phase = "watching";
         session.watch.reason = entry.reason;
         session.message = inRecovery
@@ -999,6 +1141,8 @@ async function runLoop(config: BastionConfig) {
       }
 
       recoveryEngine.recordOutcome(won, profit, stake, config.maxRecoverySteps, fireContract.contractType, payout);
+      // The scout's experienced-edge term: this bot's own record per market.
+      scout.recordOutcome(activeSymbol, inRecovery ? "recovery" : "normal", won);
 
       try {
         await db.update(tradesTable).set({

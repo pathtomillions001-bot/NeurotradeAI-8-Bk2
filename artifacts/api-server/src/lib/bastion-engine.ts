@@ -177,7 +177,11 @@ export interface BastionDeployed {
 
 export interface BastionWatchScout {
   active: string;
-  top: Array<{ name: string; score: number; live: number }>;
+  top: Array<{ name: string; score: number; live: number; penalty?: number }>;
+  /** 0..1 — how hard the scout is currently looking for a way out. */
+  urgency?: number;
+  /** Why the scout is urgent (starving / bleeding), when it is. */
+  urgencyReason?: string;
 }
 
 export interface BastionWatch {
@@ -665,16 +669,70 @@ async function runLoop(config: BastionConfig) {
   /** A cross-market setup captured by the hunt — fired on the next pass. */
   let pendingFire: BastionDecision | null = null;
 
+  // ── NO FORCED TRADES ──────────────────────────────────────────────────────
+  // The normal valve floors at break-even (bastion-analysis). Two conditions
+  // on the ACTIVE tape make the scout URGENT — dwell waived, cooldown/margin
+  // shrunk, faster passes and, when high, a full cross-market NORMAL HUNT
+  // (twin of the recovery hunt):
+  //   STARVING — the valve pinned at its floor (no fair setup here)
+  //   BLEEDING — a fresh normal-mode loss streak on this market, which also
+  //              earns it a decaying scout penalty.
+  // The bot moves to where its bar is met instead of lowering the bar.
+  const URGENT_SCOUT_MS = 2_000;
+  const STARVE_RAMP_START_MS = 20_000;
+  const STARVE_RAMP_FULL_MS = 90_000;
+  const BLEED_STREAK = 2;
+  const BLEED_URGENT_MS = 45_000;
+  const NORMAL_HUNT_MS = 6_000;
+  let starvedSince = 0;
+  let bleedingUntil = 0;
+  let bleedReason = "";
+  let activeLossRun = 0;
+  let lastNormalHuntAt = 0;
+
+  const scoutUrgency = (now: number): { level: number; reason: string } => {
+    let level = 0;
+    let reason = "";
+    if (starvedSince > 0) {
+      const t = now - starvedSince;
+      const starve = Math.min(1, Math.max(0, (t - STARVE_RAMP_START_MS) / (STARVE_RAMP_FULL_MS - STARVE_RAMP_START_MS)));
+      if (starve > 0) {
+        level = starve;
+        reason = `starving — no fair setup on ${activeName} for ${Math.round(t / 1000)}s`;
+      }
+    }
+    if (now < bleedingUntil) {
+      const bleed = Math.min(1, 0.6 + 0.4 * ((bleedingUntil - now) / BLEED_URGENT_MS));
+      if (bleed > level) { level = bleed; reason = bleedReason; }
+    }
+    return { level, reason };
+  };
+
+  /** Move the session onto another market (bookkeeping shared by every switch path). */
+  const moveTo = (symbol: string, name: string) => {
+    activeSymbol = symbol;
+    activeName = name;
+    scout.markSwitch(Date.now());
+    scout.enter(activeSymbol, Date.now());
+    session.watch.switched = true;
+    starvedSince = 0;
+    activeLossRun = 0;
+  };
+
   const scoutPanel = (mode: "normal" | "recovery") => {
     if (LOCKED) { session.watch.scout = undefined; return; }
     const now = Date.now();
+    const u = scoutUrgency(now);
     session.watch.scout = {
       active: activeName,
       top: scout.top(mode, bufferReader, now).map(s => ({
         name: s.displayName,
         score: Math.round(s.composite * 10000) / 10000,
         live: Math.round(s.live * 10000) / 10000,
+        penalty: s.penalty > 0 ? Math.round(s.penalty * 10000) / 10000 : undefined,
       })),
+      urgency: mode === "normal" ? Math.round(u.level * 100) / 100 : undefined,
+      urgencyReason: mode === "normal" && u.level > 0 ? u.reason : undefined,
     };
   };
 
@@ -760,17 +818,57 @@ async function runLoop(config: BastionConfig) {
     await refitActive();
     if (!LOCKED) await rotateOneCard();
     if (LOCKED) return { migrated: false };
-    const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now());
+    const u = scoutUrgency(Date.now());
+    const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now(), u.level > 0 ? u : undefined);
     if (challenger) {
-      activeSymbol = challenger.symbol;
-      activeName = challenger.displayName;
-      scout.markSwitch(Date.now());
-      scout.enter(activeSymbol, Date.now());
+      moveTo(challenger.symbol, challenger.displayName);
       lastReanalyzeAt = Date.now();
       await refitActive();
       return { migrated: true };
     }
     return { migrated: false };
+  }
+
+  /**
+   * NORMAL HUNT (switching mode, only while STARVING) — the normal-mode twin
+   * of the recovery hunt. Every other market gets a transient policy warmed on
+   * its own tape and is asked whether a normal setup clears the STRICT
+   * fitted initial bar (never the adapted one) AND break-even right now. The
+   * best utility fires immediately; otherwise the scout's composite decides
+   * whether to migrate to a better normal tape and let its valve time the shot.
+   */
+  async function huntNormalShot(urgency: { level: number; reason: string }): Promise<{
+    fire: { symbol: string; name: string; dec: BastionDecision } | null;
+    migrate: { symbol: string; name: string } | null;
+  }> {
+    const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
+    let bestReady: { symbol: string; name: string; dec: BastionDecision } | null = null;
+    for (const m of markets) {
+      if (m.symbol === activeSymbol) continue;
+      const digits = await readDigits(m.symbol, HUNT_DIGITS);
+      if (digits.length < MIN_LIVE_DIGITS) continue;
+      const read = scoreBastionMarket(digits);
+      scout.setCard(m.symbol, {
+        edge: read.paperEdgePerDollar,
+        recoveryHitRate: read.metrics.recoveryHitRate,
+        recoveryShots: read.metrics.recoveryShots,
+        at: Date.now(),
+      });
+      // A market whose own walk-forward says "not tradeable" is not a rescue.
+      if (read.paperEdgePerDollar <= 0) continue;
+      const scan = new BastionPolicy(read.params, buildHMMWindows(digits));
+      for (let i = 0; i < digits.length; i++) scan.update(digits, i);
+      const dec = scan.decideNormal(digits, digits.length - 1, SPEC.sideMode);
+      if (dec.ready && dec.side && dec.read && (!bestReady || dec.read.utility > bestReady.dec.read!.utility)) {
+        bestReady = { symbol: m.symbol, name: m.displayName, dec };
+      }
+    }
+    if (bestReady) return { fire: bestReady, migrate: null };
+    const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now(), urgency);
+    return {
+      fire: null,
+      migrate: challenger ? { symbol: challenger.symbol, name: challenger.displayName } : null,
+    };
   }
 
   /**
@@ -864,18 +962,18 @@ async function runLoop(config: BastionConfig) {
       // Switching mode redirects the fire budget to a measurably better tape
       // up to every 10s; the scout's hysteresis (margin + cooldown + dwell)
       // keeps it from flapping, and it never vetoes a shot.
-      if (!LOCKED && !inRecovery && policy && Date.now() - lastScoutAt >= NORMAL_SCOUT_MS) {
+      const urgency = scoutUrgency(Date.now());
+      const scoutEvery = urgency.level > 0 ? URGENT_SCOUT_MS : NORMAL_SCOUT_MS;
+      if (!LOCKED && !inRecovery && policy && Date.now() - lastScoutAt >= scoutEvery) {
         lastScoutAt = Date.now();
         scoutPanel("normal");
-        const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now());
+        const challenger = scout.bestChallenger("normal", bufferReader, activeSymbol, Date.now(), urgency.level > 0 ? urgency : undefined);
         if (challenger) {
-          activeSymbol = challenger.symbol;
-          activeName = challenger.displayName;
-          scout.markSwitch(Date.now());
-          scout.enter(activeSymbol, Date.now());
+          const from = activeName;
+          moveTo(challenger.symbol, challenger.displayName);
           await refitActive();
-          session.watch.switched = true;
-          session.message = `🔁 Scout — ${activeName} shows the better tape (${challenger.composite.toFixed(3)} vs ${challenger.activeComposite.toFixed(3)} $/$${challenger.flee ? " · active tape dead" : ""})`;
+          const why = challenger.via === "urgent" ? ` · ${urgency.reason}` : challenger.flee ? " · active tape dead" : "";
+          session.message = `🔁 Scout — left ${from} for ${activeName} (${challenger.composite.toFixed(3)} vs ${challenger.activeComposite.toFixed(3)} $/$${why})`;
           broadcast();
           await sleep(200);
           continue;
@@ -950,8 +1048,42 @@ async function runLoop(config: BastionConfig) {
 
       session.watch.phase = "armed";
       applyDecisionToWatch(entry, lastRadar);
+      // Starvation clock: runs while the normal valve is pinned at break-even
+      // on this tape; any ready setup (or a switch) resets it.
+      if (!inRecovery && entry.mode === "normal") {
+        if (entry.ready || !entry.starved) starvedSince = 0;
+        else if (starvedSince === 0) starvedSince = Date.now();
+      }
 
       if (!entry.ready) {
+        if (!inRecovery && !LOCKED && urgency.level >= 0.5 && Date.now() - lastNormalHuntAt >= NORMAL_HUNT_MS) {
+          lastNormalHuntAt = Date.now();
+          session.watch.phase = "hunting";
+          session.watch.reason = `hunting every allowed market — ${urgency.reason}`;
+          session.message = `🔎 ${activeName} offers no fair setup — hunting other markets instead of forcing one here`;
+          broadcast();
+          const hunt = await huntNormalShot(urgency);
+          scoutPanel("normal");
+          if (hunt.fire) {
+            const from = activeName;
+            moveTo(hunt.fire.symbol, hunt.fire.name);
+            pendingFire = hunt.fire.dec;
+            session.message = `🔁 Left ${from} — ${activeName} has ${hunt.fire.dec.side!.label} at ${((hunt.fire.dec.read?.p ?? 0) * 100).toFixed(1)}%, firing now`;
+            broadcast();
+            continue;
+          }
+          if (hunt.migrate) {
+            const from = activeName;
+            moveTo(hunt.migrate.symbol, hunt.migrate.name);
+            await refitActive();
+            lastReanalyzeAt = Date.now();
+            session.message = `🔁 Left ${from} for ${activeName} — better normal tape; its valve will time the shot`;
+            broadcast();
+            await sleep(300);
+            continue;
+          }
+          if (!session.running || session.stopRequested) break;
+        }
         // Recovery has ONE wait reason: no tilt anywhere armed. In switching
         // mode that triggers the cross-market HUNT instead of a passive wait:
         // fire an instantly-ready setup elsewhere, or migrate to the market
@@ -967,11 +1099,7 @@ async function runLoop(config: BastionConfig) {
           if (hunt.fire) {
             // A bar-clearing setup exists on another market RIGHT NOW —
             // capture it and fire immediately (no refit round-trip).
-            activeSymbol = hunt.fire.symbol;
-            activeName = hunt.fire.name;
-            scout.markSwitch(Date.now());
-            scout.enter(activeSymbol, Date.now());
-            session.watch.switched = true;
+            moveTo(hunt.fire.symbol, hunt.fire.name);
             pendingFire = hunt.fire.dec;
             session.message = `🔁 Recovery setup on ${activeName} — firing ${hunt.fire.dec.side!.label} now`;
             broadcast();
@@ -980,11 +1108,7 @@ async function runLoop(config: BastionConfig) {
           if (hunt.migrate) {
             // No setup anywhere yet — move to the best recovery tape; the
             // STATIC bar times the shot when the tilt appears.
-            activeSymbol = hunt.migrate.symbol;
-            activeName = hunt.migrate.name;
-            scout.markSwitch(Date.now());
-            scout.enter(activeSymbol, Date.now());
-            session.watch.switched = true;
+            moveTo(hunt.migrate.symbol, hunt.migrate.name);
             await refitActive();
             lastReanalyzeAt = Date.now();
             session.message = `🔁 Recovery scout — migrating to ${activeName} (better recovery tape)`;
@@ -1143,6 +1267,17 @@ async function runLoop(config: BastionConfig) {
       recoveryEngine.recordOutcome(won, profit, stake, config.maxRecoverySteps, fireContract.contractType, payout);
       // The scout's experienced-edge term: this bot's own record per market.
       scout.recordOutcome(activeSymbol, inRecovery ? "recovery" : "normal", won);
+      // BLEEDING: a normal-mode loss streak on THIS tape → decaying scout
+      // penalty + urgency ("no falling knives" applied to WHERE, not just WHEN).
+      if (!inRecovery && !LOCKED) {
+        activeLossRun = won ? 0 : activeLossRun + 1;
+        if (activeLossRun >= BLEED_STREAK) {
+          scout.penalize(activeSymbol, 0.01 * activeLossRun, Date.now());
+          bleedingUntil = Date.now() + BLEED_URGENT_MS;
+          bleedReason = `bleeding — ${activeLossRun} straight losses on ${activeName}`;
+          lastScoutAt = 0;
+        }
+      }
 
       try {
         await db.update(tradesTable).set({

@@ -244,6 +244,32 @@ describe("normal valve", () => {
     assert.ok(metrics.fireRatePer100 > 5, `fireRatePer100=${metrics.fireRatePer100}`);
   });
 
+  it("floors at break-even on a hostile tape and reports starvation instead of forcing a shot", () => {
+    // Over 1 loses on {0,1}, Under 8 loses on {8,9}: draw only from those, so
+    // neither side can get above ~50%. The legacy zero-floor valve would sink
+    // until it "opened" here; now it must pin at break-even and flag starved.
+    let seed = 4242;
+    const rnd = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296);
+    const hostile = [0, 1, 8, 9];
+    const policy = new BastionPolicy(FLAT);
+    const floor = Math.min(...BASTION_NORMAL_CONTRACTS.map(c => BastionPolicy.normalBreakEven(c)));
+    const digits: number[] = [];
+    let firedBelowFloor = 0;
+    let starvedSeen = false;
+    for (let i = 0; i < 1500; i++) {
+      digits.push(hostile[Math.floor(rnd() * 4)]!);
+      policy.update(digits, i);
+      if (i < 40) continue;
+      const dec = policy.decideNormal(digits, i);
+      if (dec.ready && (dec.read?.p ?? 0) < floor) firedBelowFloor++;
+      if (dec.starved) starvedSeen = true;
+      assert.ok(policy.normalBar >= floor - 1e-12, `bar ${policy.normalBar} sank below floor ${floor}`);
+    }
+    assert.equal(firedBelowFloor, 0, "must never fire below break-even");
+    assert.ok(starvedSeen, "a hostile tape must surface as starvation");
+    assert.ok(policy.normalStarved);
+  });
+
   it("honours the side mode", () => {
     const digits = fairStream(4000, 33);
     const policy = new BastionPolicy(FLAT);

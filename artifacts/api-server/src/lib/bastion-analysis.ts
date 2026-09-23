@@ -46,8 +46,8 @@
  *  - The side is chosen by utility = (p·payout − 1) − λ·P(loss)·min(q_LLctx, .95),
  *    where λ is bigger in recovery: a loss pair is exactly what deepens the
  *    shared recovery ladder, so the penalty targets consecutive recovery losses.
- *  - Normal shots ride a two-way pacing VALVE (budget 0.20 shots/tick, zero
- *    floor): selectivity is a budget, never a stack of vetoes.
+ *  - Normal shots ride a two-way pacing VALVE (budget 0.20 shots/tick,
+ *    floored at break-even): selectivity is a budget, never a stack of vetoes.
  *  - Recovery shots use ONE static quality bar: the payout-aware break-even
  *    rate (1/payout) clamped into [fair, fair + 0.02] — a function of the
  *    contract and its payout ONLY. The best available shot fires THE NEXT TICK
@@ -514,6 +514,13 @@ export interface BastionDecision {
   ready: boolean;
   bar: number;
   reason: string;
+  /**
+   * Normal mode only: true when the pacing valve is pinned at its break-even
+   * floor — this tape has offered no fair setup for long enough that the
+   * (pre-floor) valve would have started forcing trades. The engine's market
+   * scout treats this as STARVATION and looks elsewhere.
+   */
+  starved?: boolean;
 }
 
 /**
@@ -572,11 +579,29 @@ export class BastionPolicy {
       }
       this.regimes.set(c.id, hmm);
     }
+    // Floor = the cheapest normal contract's break-even. Below it a "valve
+    // open" shot is negative-EV by construction; the legacy zero floor let a
+    // dead tape drag the bar down until the bot fired anyway — the forced
+    // trade that market switching exists to replace. Pacing above the floor
+    // is unchanged.
+    this.normalFloor = Math.min(
+      ...BASTION_NORMAL_CONTRACTS.map(c => BastionPolicy.normalBreakEven(c)),
+    );
     this.normalValve = new PacingValve(
       BASTION_NORMAL_PACE_TARGET,
       params.normalInitBar,
-      0,
+      this.normalFloor,
     );
+  }
+  private readonly normalFloor: number;
+
+  /** Payout-aware break-even for a normal contract (with a hair of margin). */
+  static normalBreakEven(contract: BastionContract): number {
+    return Math.min(0.95, 1 / Math.max(1.001, contract.payout) + 0.005);
+  }
+  /** True when the valve bar is pinned at its break-even floor. */
+  get normalStarved(): boolean {
+    return this.normalValve.bar <= this.normalFloor + 1e-9;
   }
 
   get fitted(): BastionParams {
@@ -667,7 +692,8 @@ export class BastionPolicy {
 
   /**
    * NORMAL tick: pick the better band side by utility and let the pacing valve
-   * decide WHEN (budget 0.20/tick, zero floor — never starved).
+   * decide WHEN (budget 0.20/tick, floored at break-even — a tape that cannot
+   * meet the floor is reported as STARVED rather than traded anyway).
    */
   decideNormal(
     history: ArrayLike<number>,
@@ -682,17 +708,26 @@ export class BastionPolicy {
     if (!best) {
       return { mode: "normal", side: null, read: null, alt: null, ready: false, bar: this.normalValve.bar, reason: "no side armed" };
     }
-    const ready = this.normalValve.observe(best.p);
+    const timed = this.normalValve.observe(best.p);
+    // The chosen side must also clear ITS OWN break-even.
+    const be = BastionPolicy.normalBreakEven(best.contract);
+    const ready = timed && best.p >= be;
+    const starved = this.normalStarved;
     return {
       mode: "normal",
       side: best.contract,
       read: best,
       alt,
       ready,
-      bar: this.normalValve.bar,
+      bar: Math.max(this.normalValve.bar, timed ? be : 0),
+      starved,
       reason: ready
         ? `valve open — ${best.contract.label} at ${(best.p * 100).toFixed(1)}%`
-        : `pacing valve between normal shots (${best.p.toFixed(3)} vs bar ${this.normalValve.bar.toFixed(3)})`,
+        : timed
+          ? `${best.contract.label} below break-even (${(best.p * 100).toFixed(1)}% vs ${(be * 100).toFixed(1)}%) — not forcing it`
+          : starved
+            ? `no fair setup here — valve at break-even floor (${best.p.toFixed(3)} vs ${this.normalValve.bar.toFixed(3)})`
+            : `pacing valve between normal shots (${best.p.toFixed(3)} vs bar ${this.normalValve.bar.toFixed(3)})`,
     };
   }
 

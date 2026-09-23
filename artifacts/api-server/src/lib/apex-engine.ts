@@ -839,7 +839,7 @@ async function runLoop(config: ApexConfig) {
       }
 
       // ── DIGITMATCH sovereignty — re-asserted immediately before every buy ──
-      const fireDigit = entry.digit;
+      let fireDigit = entry.digit;
       if (!isAutomatedMarket(activeSymbol) || fireDigit < 0 || fireDigit > 9
           || (SPEC.digit !== undefined && fireDigit !== SPEC.digit)) {
         session.running = false;
@@ -849,15 +849,54 @@ async function runLoop(config: ApexConfig) {
         return;
       }
 
-      const payoutQuote = await resolveRecoveryPayout({
-        symbol: activeSymbol,
-        contractType: APEX_CONTRACT_TYPE,
-        barrier: fireDigit,
-        duration: 1,
-        durationUnit: "t",
-        currency,
-      });
-      const payout = payoutQuote.payoutMultiplier || APEX_MATCH_PAYOUT;
+      // ── EV-AWARE DIGIT CHOICE (selection upgrade, never a gate) ──
+      // The valve already opened on the fused probability — this block cannot
+      // un-fire the shot, it can only point it better. Deriv quotes per-digit
+      // Matches payouts (8.2×–9.4× typical), so the SAME probability buys
+      // different edge on different digits: quote the top-3 fused candidates
+      // in parallel and fire the digit with the highest p·payout. Only in
+      // AI-digit mode — a user-locked digit is sovereign and never overridden.
+      let payout = APEX_MATCH_PAYOUT;
+      let firedP = entry.p;
+      if (SPEC.digit === undefined) {
+        const leaders = entry.fused
+          .map((p, d) => ({ p, d }))
+          .sort((a, b) => b.p - a.p)
+          .slice(0, 3);
+        const quoted = await Promise.all(leaders.map(c =>
+          resolveRecoveryPayout({
+            symbol: activeSymbol,
+            contractType: APEX_CONTRACT_TYPE,
+            barrier: c.d,
+            duration: 1,
+            durationUnit: "t",
+            currency,
+          }).then(q => ({ ...c, pay: q.payoutMultiplier || APEX_MATCH_PAYOUT }))
+            .catch(() => ({ ...c, pay: APEX_MATCH_PAYOUT }))
+        ));
+        let best = quoted[0];
+        if (best) {
+          for (const q of quoted) {
+            if (q.p * q.pay > best.p * best.pay) best = q;
+          }
+          if (best.d !== fireDigit) {
+            logger.info({ from: fireDigit, to: best.d, p: best.p, pay: best.pay }, "Echo Apex EV digit upgrade");
+          }
+          fireDigit = best.d;
+          payout = best.pay;
+          firedP = best.p;
+        }
+      } else {
+        const payoutQuote = await resolveRecoveryPayout({
+          symbol: activeSymbol,
+          contractType: APEX_CONTRACT_TYPE,
+          barrier: fireDigit,
+          duration: 1,
+          durationUnit: "t",
+          currency,
+        });
+        payout = payoutQuote.payoutMultiplier || APEX_MATCH_PAYOUT;
+      }
 
       if (inRecovery) {
         try {
@@ -877,7 +916,7 @@ async function runLoop(config: ApexConfig) {
 
       const sharedStep = recoveryEngine.getState().recoveryStep;
       session.watch.phase = "firing";
-      session.watch.reason = `firing Matches ${fireDigit} on ${activeName}`;
+      session.watch.reason = `firing Matches ${fireDigit} on ${activeName} (EV-quoted ${payout.toFixed(2)}×)`;
       session.currentStake = stake;
       session.currentMarket = activeName;
       session.currentContractType = APEX_CONTRACT_TYPE;
@@ -888,8 +927,9 @@ async function runLoop(config: ApexConfig) {
 
       const reason = `[Echo Apex${inRecovery ? " RECOVERY" : ""}] Matches ${fireDigit} on ${activeName} · ` +
         `measured ${(activeEdge * 100).toFixed(1)}% edge/$1 · ` +
-        `P(${(entry.p * 100).toFixed(1)}%) vs bar(${(entry.bar * 100).toFixed(1)}%) · ` +
-        `single mode · memory ord-${entry.memoryOrder} · heat ${entry.heatDigit}×${entry.heatRatio}`;
+        `P(${(firedP * 100).toFixed(1)}%) vs bar(${(entry.bar * 100).toFixed(1)}%) · ` +
+        `EV-quoted payout ${payout.toFixed(2)}× · ` +
+        `memory ord-${entry.memoryOrder} · heat ${entry.heatDigit}×${entry.heatRatio}`;
 
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
@@ -900,7 +940,7 @@ async function runLoop(config: ApexConfig) {
         stake: String(Math.round(stake * 100) / 100),
         direction: "hold",
         status: "open",
-        aiConfidence: String(Math.round(entry.p * 100)),
+        aiConfidence: String(Math.round(firedP * 100)),
         aiRiskScore: "15",
         isAutonomous: true,
         agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${reason}`,

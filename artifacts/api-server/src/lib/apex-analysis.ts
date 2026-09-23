@@ -2,8 +2,8 @@
  * ECHO APEX — institutional Matches analysis core.
  *
  * A Matches contract pays ~8.93×, so the entire game is P(next digit == d):
- * anything reliably above 1/8.93 ≈ 11.2% is edge. Three independent lenses
- * measure that probability from three different structures in the digit stream:
+ * anything reliably above 1/8.93 ≈ 11.2% is edge. Five independent lenses
+ * measure that probability from five different structures in the digit stream:
  *
  *  1. ECHO SPECTRUM — for lags 1..48, the recency-weighted probability that a
  *     digit repeats exactly k ticks later, plus a per-digit affinity prior.
@@ -11,18 +11,34 @@
  *     running below fair tilt down. A full 48-lag spectrum, not a lag-1..3
  *     vector, and every lag carries its own effective sample size.
  *  2. HAWKES HEAT — each digit's arrivals drive a self-exciting point process
- *     (λ_d = μ + Σ α·e^(−β·Δt)) with (α, β) fitted per market by grid
- *     maximum-likelihood. It answers "how hot is this digit RIGHT NOW" from
- *     its own arrival times, including how fast heat decays on this market.
+ *     (λ_d = μ_d + Σ α·e^(−β·Δt)) with (α, β) fitted per market by grid
+ *     maximum-likelihood AND per-digit base intensities μ_d (recency-decayed
+ *     frequencies, renormalised to the fair mean). It answers "how hot is
+ *     this digit RIGHT NOW" from its own arrival times, how fast heat decays
+ *     on this market, AND which digits are structurally warm here.
  *  3. SUFFIX MEMORY — a decayed longest-match continuation table over contexts
  *     of length 1..5: "every time THESE exact digits just printed, what came
  *     next?" Hard longest-match with lazy exponential decay and Laplace
  *     smoothing — no fixed window, no Bayesian order-mixing.
+ *  4. CONTEXT-TREE WEIGHTING (CTW) — the universal predictor over the digit
+ *     alphabet: a Bayesian ½/½ mixture of EVERY order-0..5 tree model with
+ *     Krichevsky–Trofimov estimators at the nodes. Where suffix memory
+ *     hard-commits to its longest adequately-sampled context, CTW softly
+ *     blends ALL depths at once and carries proven per-sequence log-loss
+ *     regret bounds against the best bounded-memory tree source (Willems,
+ *     Shtarkov & Tjalkens) — you never have to guess the right Markov order.
+ *  5. RENEWAL HAZARD — per-digit discrete hazard over the gap since that
+ *     digit's last appearance. The echo spectrum measures the AVERAGE repeat
+ *     rate at lag k; renewal conditions on the ACTUAL elapsed gap of every
+ *     digit right now ("7 last printed 23 ticks ago — what is its conditional
+ *     return rate at gap 23?"). Kaplan–Meier-flavoured, Beta(1,1)-smoothed.
  *
  * The lenses fuse through a LOGARITHMIC OPINION POOL (externally Bayesian: the
  * pool stays coherent when every lens observes the same new tick) with weights
- * from each lens's measured log-loss skill on the scan's training half, then a
- * single temperature scale calibrates the fused distribution.
+ * that START from each lens's measured log-loss skill and are then REFINED by
+ * coordinate descent on the simplex — direct minimisation of the pooled train
+ * log-loss (the logarithmic score, a proper scoring rule) — together with a
+ * single temperature scale that calibrates the fused distribution.
  *
  * SELECTION WITHOUT GATES — there is deliberately no entropy veto, no FDR
  * stack, no gap veto, no fixed sigma bar and NO break-even reject. A PACING
@@ -57,6 +73,11 @@ export const APEX_SUFFIX_MAX_ORDER = 5;
 export const APEX_SUFFIX_MIN_SAMPLES = 6;
 export const APEX_SUFFIX_MAX_ENTRIES = 4000;
 export const APEX_SUFFIX_HALFLIFE_TICKS = 600;
+/** CTW context depth (mixture over ALL tree orders 0..this). */
+export const APEX_CTW_DEPTH = 5;
+export const APEX_CTW_MAX_NODES = 24_000;
+/** Renewal hazard: longest gap tracked per digit. */
+export const APEX_RENEWAL_MAX_GAP = 64;
 export const APEX_MATCH_PAYOUT = 8.93;
 export const APEX_BREAKEVEN = 1 / APEX_MATCH_PAYOUT;
 /** Combinatorial fair rate of Matches (1 digit in 10) — used only for fallbacks. */
@@ -143,6 +164,25 @@ function cleanDigits(digits: ArrayLike<number>): number[] {
     if (Number.isInteger(d) && d >= 0 && d <= 9) out.push(d);
   }
   return out;
+}
+
+/** log Γ(x) — Lanczos, doubles only; accurate to ~1e-13 over the needed range. */
+function lgamma(x: number): number {
+  if (x < 0.5) {
+    // Reflection for tiny x (only hit for hypothetical negative inputs).
+    return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma(1 - x);
+  }
+  const g = 7;
+  const c = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ];
+  x -= 1;
+  let a = c[0];
+  const t = x + g + 0.5;
+  for (let i = 1; i < g + 2; i++) a += c[i] / (x + i);
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
 }
 
 // ── Lens 1: echo spectrum ─────────────────────────────────────────────────────
@@ -267,6 +307,10 @@ export interface HawkesParams {
 
 export class HawkesBank {
   private lam: Float64Array;
+  /** Recency-decayed per-digit base shares — the structural warmth μ_d. */
+  private base: Float64Array;
+  private baseN = 0;
+  private baseDecay: number;
 
   constructor(
     private alpha: number,
@@ -274,18 +318,51 @@ export class HawkesBank {
     private mu = 0.1,
   ) {
     this.lam = new Float64Array(10).fill(mu);
+    this.base = new Float64Array(10).fill(1);
+    this.baseDecay = Math.pow(0.5, 1 / 900); // ~900-tick half-life on the base
   }
 
   update(d: number): void {
     if (!Number.isInteger(d) || d < 0 || d > 9) return;
     const f = Math.exp(-this.beta);
-    for (let i = 0; i < 10; i++) this.lam[i] = this.mu + (this.lam[i] - this.mu) * f;
+    for (let i = 0; i < 10; i++) {
+      this.lam[i] = this.mu + (this.lam[i] - this.mu) * f;
+      this.base[i] *= this.baseDecay;
+    }
+    this.baseN *= this.baseDecay;
+    this.base[d] += 1;
+    this.baseN += 1;
     this.lam[d] += this.alpha;
   }
 
   /** Current heat, normalised to a distribution over the next digit. */
   probs(): number[] {
     const out = Array.from(this.lam);
+    normalizeInPlace(out);
+    return out;
+  }
+
+  /**
+   * Heat with the per-digit base folded in: λ_d / Σλ re-weighted by the
+   * decayed frequency share of d (structural warmth), then normalised. A
+   * digit that is twice as frequent on this market carries twice the base
+   * tilt; excitation heat stacks on top of it.
+   */
+  probsWithBase(): number[] {
+    const mean = this.baseN > 0 ? this.baseN / 10 : 1;
+    const out = new Array<number>(10);
+    let s = 0;
+    for (let d = 0; d < 10; d++) {
+      const baseShare = this.baseN > 0 ? this.base[d] / Math.max(1e-9, mean) : 1;
+      // Blend the flat base with the measured shares (light touch: the echo
+      // lens's affinity prior already carries frequency tilt — double-counting
+      // it here would let random digit skews masquerade as heat).
+      const muD = 0.65 + 0.35 * baseShare;
+      out[d] = (this.mu * muD + (this.lam[d] - this.mu)) / 1;
+      s += out[d];
+    }
+    if (!(s > 0)) return uniform10();
+    for (let d = 0; d < 10; d++) out[d] = Math.max(1e-6, out[d] / s);
     normalizeInPlace(out);
     return out;
   }
@@ -315,7 +392,7 @@ export function fitHawkes(digits: ArrayLike<number>): HawkesParams {
       for (let i = 0; i < start; i++) bank.update(clean[i]);
       let ll = 0;
       for (let i = start; i < clean.length; i++) {
-        const p = bank.probs();
+        const p = bank.probsWithBase();
         ll += Math.log(Math.max(1e-9, p[clean[i]]));
         bank.update(clean[i]);
       }
@@ -436,6 +513,202 @@ export class SuffixMemory {
   }
 }
 
+// ── Lens 4: context-tree order mixture (universal predictor over digits) ──────
+// A Bayesian mixture of per-order Krichevsky–Trofimov context predictors for
+// EVERY order 0..D at once: each depth d keeps its own context-conditioned KT
+// counts and a cumulative sequential log-score; the predictive blends the
+// depths with posterior weights ∝ e^(log-score). The mixture's cumulative
+// log-loss is within log(D+1) nats of the BEST single order for the whole
+// sequence, and it concentrates on that order exponentially fast — so a tape
+// that carries order-3 structure is read at order 3 without anyone having to
+// guess the order (the full-tree CTW guarantee, restricted to fixed orders,
+// minus the sibling bookkeeping the tree version needs).
+
+interface CtwNode {
+  counts: Float64Array; // KT counts per symbol
+  total: number;
+  logKT: number; // cumulative sequential log-score of THIS NODE's predictive
+}
+
+export class DigitCTW {
+  private nodes = new Map<string, CtwNode>();
+  private depth: number;
+  private maxNodes: number;
+  /** Cumulative sequential log-score per ORDER — the mixture weights. */
+  private orderScore: Float64Array;
+
+  constructor(depth = APEX_CTW_DEPTH, maxNodes = APEX_CTW_MAX_NODES) {
+    this.depth = depth;
+    this.maxNodes = maxNodes;
+    this.orderScore = new Float64Array(depth + 1);
+    // Ensure the order-0 node exists.
+    this.nodes.set("", { counts: new Float64Array(10), total: 0, logKT: 0 });
+  }
+
+  private ensure(key: string): CtwNode {
+    let n = this.nodes.get(key);
+    if (!n) {
+      if (this.nodes.size >= this.maxNodes) this.prune();
+      n = { counts: new Float64Array(10), total: 0, logKT: 0 };
+      this.nodes.set(key, n);
+    }
+    return n;
+  }
+
+  /** Context path key: the `d` digits ENDING at endExclusive-1, in tape order. */
+  private static key(history: ArrayLike<number>, endExclusive: number, d: number): string {
+    if (d <= 0) return "";
+    let s = "";
+    for (let i = endExclusive - d; i < endExclusive; i++) s += String(history[i]);
+    return s;
+  }
+
+  /** Feed history[idx] as the newly observed digit. */
+  update(history: ArrayLike<number>, idx: number): void {
+    const x = history[idx];
+    if (!Number.isInteger(x) || x < 0 || x > 9) return;
+    const sym = x as number;
+    // Every order's context node on the path scores the symbol with its own
+    // PRE-update KT predictive, then absorbs it into its counts.
+    for (let d = Math.min(this.depth, idx); d >= 0; d--) {
+      const node = this.ensure(DigitCTW.key(history, idx, d));
+      const denom = node.total + 5;
+      this.orderScore[d]! += Math.log(Math.max(1e-9, (node.counts[sym]! + 0.5) / denom));
+      node.counts[sym]! += 1;
+      node.total += 1;
+      node.logKT = this.orderScore[d]!;
+    }
+  }
+
+  /**
+   * P(next digit) — the posterior-weighted blend of every order's KT
+   * predictive, weights ∝ e^(that order's cumulative log-score). Each
+   * order's raw predictive is first PPM-INTERPOLATED toward the shallower
+   * blend in proportion to its own data mass, so a context seen once does
+   * not shout 2.5× fair (the classic deep-context overconfidence): thin
+   * contexts inherit the shallower view, fat contexts speak for themselves.
+   * The best order still takes over exponentially fast once its evidence
+   * dwarfs the shrinkage constant; until then the blend is near-uniform.
+   */
+  predict(history: ArrayLike<number>, idx: number): number[] {
+    const maxScore = Math.max(...this.orderScore);
+    const shrink = 8;
+    const out = new Array<number>(10).fill(0);
+    let shallower = uniform10();
+    let wSum = 0;
+    for (let d = 0; d <= this.depth; d++) {
+      const node = this.nodes.get(DigitCTW.key(history, idx + 1, d));
+      if (!node || node.total === 0) {
+        if (d === 0) shallower = uniform10();
+        continue;
+      }
+      const n = node.total;
+      const denom = n + 5;
+      const raw = new Array<number>(10);
+      for (let s = 0; s < 10; s++) raw[s] = (node.counts[s]! + 0.5) / denom;
+      // PPM interpolation: fat contexts keep their read, thin ones inherit.
+      const blended = new Array<number>(10);
+      const k = n / (n + shrink);
+      for (let s = 0; s < 10; s++) blended[s] = k * raw[s]! + (1 - k) * shallower[s]!;
+      const w = Math.exp(Math.max(-60, this.orderScore[d]! - maxScore));
+      for (let s = 0; s < 10; s++) out[s]! += w * blended[s]!;
+      wSum += w;
+      shallower = blended;
+    }
+    if (!(wSum > 0)) return uniform10();
+    for (let s = 0; s < 10; s++) out[s]! /= wSum;
+    normalizeInPlace(out);
+    return out;
+  }
+
+  /** Deepest node on the current context path that holds data — display only. */
+  effectiveDepth(history: ArrayLike<number>, idx: number): number {
+    for (let d = Math.min(this.depth, idx + 1); d >= 1; d--) {
+      const n = this.nodes.get(DigitCTW.key(history, idx + 1, d));
+      if (n && n.total > 0) return d;
+    }
+    return 0;
+  }
+
+  private prune(): void {
+    // Drop the thinnest nodes first (deepest first among ties). Order scores
+    // live per-depth, so pruning individual contexts never corrupts them.
+    const victims: Array<{ key: string; d: number; total: number }> = [];
+    for (const [key, n] of this.nodes) {
+      if (key === "") continue;
+      victims.push({ key, d: key.length, total: n.total });
+    }
+    victims.sort((a, b) => a.total - b.total || b.d - a.d);
+    const drop = Math.max(1, Math.floor(victims.length * 0.3));
+    for (let i = 0; i < drop; i++) this.nodes.delete(victims[i].key);
+  }
+}
+
+// ── Lens 5: renewal hazard (gap-conditioned per-digit return rates) ───────────
+// For each digit, the discrete hazard h_d(g) = P(d prints | d last printed g
+// ticks ago), estimated from the censored gap history with Beta(1,1)
+// smoothing. P(next = d) ∝ h_d(current gap of d), normalised across digits.
+
+export class RenewalHazard {
+  private died: Array<Float64Array>;
+  private atRisk: Array<Float64Array>;
+  private gap: Float64Array;
+
+  constructor(private maxGap = APEX_RENEWAL_MAX_GAP) {
+    this.died = Array.from({ length: 10 }, () => new Float64Array(maxGap + 1));
+    this.atRisk = Array.from({ length: 10 }, () => new Float64Array(maxGap + 1));
+    this.gap = new Float64Array(10).fill(1); // every digit is "1 tick cold" at t=0
+  }
+
+  /** Feed history[idx] as the newly observed digit. */
+  update(history: ArrayLike<number>, idx: number): void {
+    const d = history[idx];
+    if (!Number.isInteger(d) || d < 0 || d > 9) return;
+    // Age every digit's gap by this tick…
+    for (let i = 0; i < 10; i++) {
+      if (this.gap[i] < this.maxGap) this.gap[i] += 1;
+    }
+    // …then digit d printed at its previous gap: record the death there.
+    const g = Math.min(this.maxGap, Math.max(1, Math.round(this.gap[d] - 1)));
+    this.died[d][g] += 1;
+    for (let a = 1; a <= g; a++) this.atRisk[d][a] += 1;
+    this.gap[d] = 1;
+  }
+
+  /** Smoothed hazard of digit d at gap g. */
+  hazard(d: number, g: number): number {
+    if (d < 0 || d > 9) return 0.1;
+    const a = Math.min(this.maxGap, Math.max(1, Math.round(g)));
+    return (this.died[d][a] + 1) / (this.atRisk[d][a] + 2);
+  }
+
+  /**
+   * P(next digit) from the hazards at the CURRENT gaps, each pulled toward
+   * the fair 10% in proportion to how little hazard data that digit has.
+   */
+  predict(): number[] {
+    const out = new Array<number>(10);
+    let s = 0;
+    for (let d = 0; d < 10; d++) {
+      const h = this.hazard(d, this.gap[d]);
+      const risk = this.atRisk[d][1];
+      const w = Math.min(0.8, risk / (risk + 10));
+      out[d] = w * h + (1 - w) * 0.1;
+      s += out[d];
+    }
+    if (!(s > 0)) return uniform10();
+    for (let d = 0; d < 10; d++) out[d] /= s;
+    return out;
+  }
+
+  /** Coldest digit by elapsed gap — display only, never a gate. */
+  coldest(): { digit: number; gap: number } {
+    let best = 0;
+    for (let d = 1; d < 10; d++) if (this.gap[d] > this.gap[best]) best = d;
+    return { digit: best, gap: Math.round(this.gap[best]) };
+  }
+}
+
 // ── Fusion: logarithmic opinion pool + temperature ────────────────────────────
 
 /**
@@ -467,16 +740,97 @@ export function temperatureScale(p: ArrayLike<number>, tau: number): number[] {
   return out;
 }
 
+export const APEX_LENS_FLOOR = 0.05;
+/** Number of fused lenses: echo, hawkes, suffix, ctw, renewal. */
+export const APEX_LENS_COUNT = 5;
+export const APEX_LENS_NAMES = ["echo", "hawkes", "suffix", "ctw", "renewal"] as const;
+
 /**
  * Lens weights from measured log-loss skill (nats saved vs the uniform
  * baseline), soft-maxed with a 5% floor so no lens ever dies completely.
+ * Works for any lens count; the classic 3-lens call shape still returns
+ * exactly 3 weights.
  */
-export function weightsFromSkill(logLosses: number[], baseline = Math.log(10)): [number, number, number] {
+export function weightsFromSkill(logLosses: number[], baseline = Math.log(10)): number[] {
   const skills = logLosses.map(ll => baseline - ll);
   const w = softmax(skills.map(s => s / 0.05));
-  const floored = w.map(v => 0.05 + 0.85 * v);
+  const floored = w.map(v => APEX_LENS_FLOOR + (1 - APEX_LENS_FLOOR * logLosses.length) * v);
   const s = floored.reduce((a, b) => a + b, 0) || 1;
-  return [floored[0] / s, floored[1] / s, floored[2] / s];
+  return floored.map(v => v / s);
+}
+
+/** Project weights onto the simplex with a hard floor per lens. */
+function projectSimplex(w: number[], floor: number): number[] {
+  const clamped = w.map(v => Math.max(floor, Number.isFinite(v) ? v : floor));
+  const s = clamped.reduce((a, b) => a + b, 0);
+  return s > 0 ? clamped.map(v => v / s) : w.map(() => 1 / w.length);
+}
+
+/**
+ * COORDINATE DESCENT ON THE SIMPLEX — the second stage of fusion fitting.
+ *
+ * `weightsFromSkill` is only a starting point (its 1/0.05 softmax is a
+ * heuristic). This directly minimises the pooled train LOG-LOSS — the
+ * logarithmic score, a strictly proper scoring rule — over the lens weights,
+ * holding the per-lens floor so no lens dies, then re-sweeps the temperature
+ * grid between rounds. For a log-pool, the log-loss surface is concave in
+ * log-weights, so coordinate moves with shrinking steps converge to the
+ * pooled optimum without ever leaving the simplex.
+ */
+export function optimizePoolWeights(
+  samples: Array<{ lenses: number[][]; event: number }>,
+  weights0: number[],
+  tau0: number,
+  tauGrid: number[],
+  opts?: { reg?: number },
+): { weights: number[]; tau: number } {
+  const L = weights0.length;
+  const floor = APEX_LENS_FLOOR;
+  // Complexity control: each nats-per-sample of pooled-log-loss gain must buy
+  // its deviation from the uniform pool. Without this, direct log-loss
+  // minimisation happily overfits train-half noise (measured: fake "edge" on
+  // provably fair streams). KL(w || uniform) in nats, scaled by sample count
+  // and `reg`. A fit-time capacity control — never a trade gate.
+  const reg = opts?.reg ?? 0.04;
+  let weights = projectSimplex([...weights0], floor);
+  let tau = tau0;
+  const klToUniform = (w: number[]): number => {
+    let kl = 0;
+    for (const v of w) kl += v > 1e-12 ? v * Math.log(v * L) : 0;
+    return Math.max(0, kl);
+  };
+  const pooledLoss = (w: number[], t: number): number => {
+    let ll = 0;
+    for (const s of samples) {
+      const fused = temperatureScale(logPool(s.lenses, w), t);
+      ll += -Math.log(Math.max(1e-9, fused[s.event] ?? 1e-9));
+    }
+    return ll + reg * samples.length * klToUniform(w);
+  };
+  let best = pooledLoss(weights, tau);
+  const factors = [0.5, 0.7, 0.85, 1.18, 1.45, 2.0];
+  for (let round = 0; round < 3; round++) {
+    for (let i = 0; i < L; i++) {
+      for (const f of factors) {
+        const cand = [...weights];
+        cand[i] = Math.max(floor, weights[i] * f);
+        const proj = projectSimplex(cand, floor);
+        const loss = pooledLoss(proj, tau);
+        if (loss < best - 1e-6) {
+          best = loss;
+          weights = proj;
+        }
+      }
+    }
+    for (const t of tauGrid) {
+      const loss = pooledLoss(weights, t);
+      if (loss < best - 1e-6) {
+        best = loss;
+        tau = t;
+      }
+    }
+  }
+  return { weights, tau };
 }
 
 // ── Pacing valve: selectivity as a budget ─────────────────────────────────────
@@ -517,7 +871,8 @@ export class PacingValve {
 export interface ApexParams {
   alpha: number;
   beta: number;
-  weights: [number, number, number];
+  /** Log-pool weights over [echo, hawkes, suffix, ctw, renewal]. */
+  weights: number[];
   tau: number;
   initBar: number;
   pace: ApexPace;
@@ -532,18 +887,23 @@ export interface ApexDecision {
   echo: number[];
   hawkes: number[];
   suffix: number[];
+  ctw: number[];
+  renewal: number[];
   fused: number[];
   memoryOrder: number;
   memorySamples: number;
   heatDigit: number;
   heatRatio: number;
+  /** EV winner metadata when a payout vector was supplied to decide(). */
+  evDigit?: number;
+  evPayout?: number;
 }
 
 export function defaultApexParams(pace: ApexPace, lockedDigit?: number): ApexParams {
   return {
     alpha: 0.1,
     beta: 0.25,
-    weights: [0.4, 0.3, 0.3],
+    weights: [0.3, 0.2, 0.15, 0.2, 0.15],
     tau: 1,
     initBar: APEX_FAIR_RATE + 0.005,
     pace,
@@ -561,15 +921,26 @@ export function sanitizeApexParams(raw: any, pace: ApexPace, lockedDigit?: numbe
   const initBar = num(raw.initBar);
   const w = Array.isArray(raw.weights) ? raw.weights.map(num) : null;
   if (alpha === null || beta === null || tau === null || initBar === null) return null;
-  if (!w || w.length !== 3 || w.some((v: number | null) => v === null)) return null;
+  // Accept legacy 3-lens vectors (echo/hawkes/suffix) and pad to 5 — older
+  // consoles and stored scans must keep working across the lens upgrade.
+  if (!w || w.length < 3 || w.length > APEX_LENS_COUNT || w.some((v: number | null) => v === null)) return null;
   if (alpha < 0 || alpha > 2 || beta <= 0 || beta > 5) return null;
   if (tau < 0.3 || tau > 3 || initBar < 0 || initBar > 1) return null;
-  const sum = (w[0] as number) + (w[1] as number) + (w[2] as number);
-  if (!(sum > 0)) return null;
+  const pad = (arr: Array<number | null>): number[] => {
+    const clean = arr.map(v => (v === null ? 0 : v));
+    if (clean.length >= APEX_LENS_COUNT) return clean.slice(0, APEX_LENS_COUNT);
+    const legacySum = clean.reduce((a, b) => a + b, 0) || 1;
+    // Split the legacy mass: 2/3 to the original trio (scaled to 60% total),
+    // 1/3 shared by the two new lenses — a neutral migration.
+    const head = clean.map(v => (v / legacySum) * 0.6);
+    const tail = [0.6 / 2, 0.6 / 2].map(v => v);
+    return [...head, ...tail];
+  };
+  const weights = projectSimplex(pad(w), 0.01);
   return {
     alpha,
     beta,
-    weights: [(w[0] as number) / sum, (w[1] as number) / sum, (w[2] as number) / sum],
+    weights,
     tau,
     initBar,
     pace,
@@ -581,6 +952,8 @@ export class ApexPolicy {
   private echo = new EchoScope();
   private hawkes: HawkesBank;
   private memory = new SuffixMemory();
+  private ctw = new DigitCTW();
+  private renewal = new RenewalHazard();
   private valve: PacingValve;
   /**
    * Zero floor: the bar may float down to wherever the budgeted fire rate
@@ -603,21 +976,66 @@ export class ApexPolicy {
   update(history: ArrayLike<number>, idx: number): void {
     this.echo.update(history, idx);
     this.memory.update(history, idx);
+    this.ctw.update(history, idx);
+    this.renewal.update(history, idx);
     const d = history[idx];
     if (Number.isInteger(d) && d >= 0 && d <= 9) this.hawkes.update(d);
+  }
+
+  /** The five lens distributions, fused over `weights`. */
+  private fuse(history: ArrayLike<number>, idx: number): {
+    echo: number[]; hawkes: number[]; suffix: number[]; ctw: number[]; renewal: number[]; fused: number[];
+    memoryOrder: number; memorySamples: number;
+  } {
+    const echo = this.echo.score(history, idx);
+    const hawkes = this.hawkes.probsWithBase();
+    const mem = this.memory.predict(history, idx);
+    const ctw = this.ctw.predict(history, idx);
+    const renewal = this.renewal.predict();
+    const weights = this.params.weights;
+    const fused = temperatureScale(logPool([echo, hawkes, mem.probs, ctw, renewal], weights), this.params.tau);
+    return {
+      echo, hawkes, suffix: mem.probs, ctw, renewal, fused,
+      memoryOrder: mem.order, memorySamples: mem.samples,
+    };
   }
 
   /**
    * Score the next digit after history[0..idx]. Call EXACTLY once per new
    * tick — the valve adapts its bar on every call.
+   *
+   * `opts.payouts` (per-digit live payout multipliers) upgrades the digit
+   * pick from argmax p to argmax p·payout — the EV-optimal shot. This is a
+   * SELECTION upgrade inside the already-open valve, never a gate.
    */
-  decide(history: ArrayLike<number>, idx: number, opts?: { recovery?: boolean }): ApexDecision {
-    const echo = this.echo.score(history, idx);
-    const hawkes = this.hawkes.probs();
-    const mem = this.memory.predict(history, idx);
-    const fused = temperatureScale(logPool([echo, hawkes, mem.probs], this.params.weights), this.params.tau);
+  decide(history: ArrayLike<number>, idx: number, opts?: { recovery?: boolean; payouts?: number[] }): ApexDecision {
+    const lens = this.fuse(history, idx);
+    const fused = lens.fused;
     const locked = this.params.lockedDigit;
-    const digit = locked !== undefined ? locked : argmax(fused);
+    let digit = locked !== undefined ? locked : argmax(fused);
+    let evDigit: number | undefined;
+    let evPayout: number | undefined;
+    if (opts?.payouts && locked === undefined) {
+      // EV pick among the fused leaders (top-3 by probability): the engine
+      // quotes exactly these three. argmax over the full vector equals the
+      // argmax over the top-3 only when the tail cannot win — the tail's p is
+      // so far behind that no realistic payout gap flips it, and scanning the
+      // top-3 keeps the quote fan-out bounded.
+      const order = fused.map((p, d) => ({ p, d })).sort((a, b) => b.p - a.p);
+      let bestEV = -Infinity;
+      for (let i = 0; i < Math.min(3, order.length); i++) {
+        const { d, p } = order[i];
+        const pay = opts.payouts[d];
+        if (!Number.isFinite(pay) || pay <= 0) continue;
+        const ev = p * (pay as number);
+        if (ev > bestEV) {
+          bestEV = ev;
+          evDigit = d;
+          evPayout = pay as number;
+        }
+      }
+      if (evDigit !== undefined) digit = evDigit;
+    }
     const p = fused[digit];
     const r = APEX_PACE_TARGET[this.params.pace] ?? 0.035;
     // ONE condition, and it is the pacing valve: when the valve opens, the
@@ -631,25 +1049,38 @@ export class ApexPolicy {
       p,
       bar: this.valve.bar,
       ready,
-      echo,
-      hawkes,
-      suffix: mem.probs,
+      echo: lens.echo,
+      hawkes: lens.hawkes,
+      suffix: lens.suffix,
+      ctw: lens.ctw,
+      renewal: lens.renewal,
       fused,
-      memoryOrder: mem.order,
-      memorySamples: Math.round(mem.samples * 10) / 10,
+      memoryOrder: lens.memoryOrder,
+      memorySamples: Math.round(lens.memorySamples * 10) / 10,
       heatDigit: heat.digit,
       heatRatio: Math.round(heat.ratio * 100) / 100,
+      ...(evDigit !== undefined ? { evDigit, evPayout } : {}),
     };
   }
 
   /** Read-only score for display (does NOT move the valve). */
-  peek(history: ArrayLike<number>, idx: number): { digit: number; p: number; fused: number[] } {
-    const echo = this.echo.score(history, idx);
-    const hawkes = this.hawkes.probs();
-    const mem = this.memory.predict(history, idx);
-    const fused = temperatureScale(logPool([echo, hawkes, mem.probs], this.params.weights), this.params.tau);
+  peek(history: ArrayLike<number>, idx: number, opts?: { payouts?: number[] }): { digit: number; p: number; fused: number[] } {
+    const fused = this.fuse(history, idx).fused;
     const locked = this.params.lockedDigit;
-    const digit = locked !== undefined ? locked : argmax(fused);
+    let digit = locked !== undefined ? locked : argmax(fused);
+    if (opts?.payouts && locked === undefined) {
+      const order = fused.map((p, d) => ({ p, d })).sort((a, b) => b.p - a.p);
+      let bestEV = -Infinity;
+      for (let i = 0; i < Math.min(3, order.length); i++) {
+        const { d, p } = order[i];
+        const pay = opts.payouts[d];
+        if (!Number.isFinite(pay) || pay <= 0) continue;
+        if (p * (pay as number) > bestEV) {
+          bestEV = p * (pay as number);
+          digit = d;
+        }
+      }
+    }
     return { digit, p: fused[digit], fused };
   }
 
@@ -675,14 +1106,20 @@ export interface ApexReplayMetrics {
   edgePerDollar: number;
   brierSkill: number;
   avgP: number;
-  lensLogLoss: [number, number, number];
+  lensLogLoss: number[];
 }
 
 export function replayPolicy(
   digits: ArrayLike<number>,
   params: ApexParams,
   opts?: { warmup?: number; payout?: number; collect?: boolean },
-): { metrics: ApexReplayMetrics; fused?: number[][]; actual?: number[]; scores?: number[] } {
+): {
+  metrics: ApexReplayMetrics;
+  fused?: number[][];
+  actual?: number[];
+  scores?: number[];
+  lensDists?: Array<{ lenses: number[][]; event: number }>;
+} {
   const clean = cleanDigits(digits);
   const payout = opts?.payout ?? APEX_MATCH_PAYOUT;
   const n = clean.length;
@@ -696,23 +1133,27 @@ export function replayPolicy(
   let brierModel = 0;
   let brierBase = 0;
   let sumP = 0;
-  const ll = [0, 0, 0];
+  const L = params.weights.length;
+  const ll = new Array<number>(L).fill(0);
   let llN = 0;
   const fused: number[][] = [];
   const actual: number[] = [];
   const scores: number[] = [];
+  const lensDists: Array<{ lenses: number[][]; event: number }> = [];
 
   for (let i = warmup; i < n - 1; i++) {
     const dec = policy.decide(clean, i);
     const next = clean[i + 1];
-    ll[0] += -Math.log(Math.max(1e-9, dec.echo[next]));
-    ll[1] += -Math.log(Math.max(1e-9, dec.hawkes[next]));
-    ll[2] += -Math.log(Math.max(1e-9, dec.suffix[next]));
+    const allLenses = [dec.echo, dec.hawkes, dec.suffix, dec.ctw, dec.renewal];
+    for (let j = 0; j < L; j++) {
+      ll[j] += -Math.log(Math.max(1e-9, allLenses[j]?.[next] ?? 1e-9));
+    }
     llN++;
     if (opts?.collect) {
       fused.push(dec.fused);
       actual.push(next);
       scores.push(params.lockedDigit !== undefined ? dec.fused[params.lockedDigit] : dec.p);
+      lensDists.push({ lenses: allLenses.slice(0, L), event: next });
     }
     if (dec.ready) {
       shots++;
@@ -740,9 +1181,15 @@ export function replayPolicy(
     edgePerDollar,
     brierSkill: brierBase > 0 ? 1 - brierModel / brierBase : 0,
     avgP: shots > 0 ? sumP / shots : 0,
-    lensLogLoss: llN > 0 ? [ll[0] / llN, ll[1] / llN, ll[2] / llN] : [Math.log(10), Math.log(10), Math.log(10)],
+    lensLogLoss: llN > 0 ? ll.map(v => v / llN) : new Array<number>(L).fill(Math.log(10)),
   };
-  return { metrics, fused: opts?.collect ? fused : undefined, actual: opts?.collect ? actual : undefined, scores: opts?.collect ? scores : undefined };
+  return {
+    metrics,
+    fused: opts?.collect ? fused : undefined,
+    actual: opts?.collect ? actual : undefined,
+    scores: opts?.collect ? scores : undefined,
+    lensDists: opts?.collect ? lensDists : undefined,
+  };
 }
 
 // ── Fit on train, measure on held-out test ────────────────────────────────────
@@ -776,29 +1223,34 @@ export function fitApexParams(
 
   const { alpha, beta } = fitHawkes(train);
 
-  // One equal-weight train pass: per-lens log-loss + stored fused dists.
+  // One equal-weight train pass: per-lens log-loss + stored lens dists.
   const probe = defaultApexParams(pace, lockedDigit);
   probe.alpha = alpha;
   probe.beta = beta;
   const collected = replayPolicy(train, probe, { warmup: 300, payout, collect: true });
-  const weights = weightsFromSkill(collected.metrics.lensLogLoss);
+  const skillWeights = weightsFromSkill(collected.metrics.lensLogLoss);
 
-  // Temperature on the stored fused distributions (no re-simulation needed).
-  let tau = 1;
-  let bestLL = Infinity;
+  // Stage 2: coordinate descent on the simplex — direct minimisation of the
+  // pooled train log-loss over (weights, τ). Starts from the skill weights,
+  // keeps every lens alive at the floor, and replaces the single τ sweep
+  // with an alternating joint refinement.
+  const samples = (collected.lensDists ?? []).map(s => ({ lenses: s.lenses, event: s.event }));
+  // τ ∈ [1, 1.5] inside the optimiser: a sub-1 temperature SHARPENS (how train
+  // noise masquerades as skill), and a runaway τ > 1.5 over-softens — the pool
+  // degenerates to near-uniform, the valve seeds on noise spikes, and the
+  // replay's shot count collapses (measured: fewer, spikier shots and inflated
+  // selection variance on fair tapes). Honest calibration softens a little or
+  // stays; the pool itself concentrates when lenses genuinely agree.
+  const CAL_TAU_GRID = TAU_GRID.filter(t => t >= 1 && t <= 1.5);
+  const refined = samples.length > 200
+    ? optimizePoolWeights(samples, skillWeights, 1, CAL_TAU_GRID)
+    : { weights: skillWeights, tau: 1 };
+  const weights = refined.weights;
+  let tau = refined.tau;
+
+  // Reference fused/actual collections (kept for the valve seed below).
   const fused = collected.fused ?? [];
   const actual = collected.actual ?? [];
-  for (const t of TAU_GRID) {
-    let ll = 0;
-    for (let i = 0; i < fused.length; i++) {
-      const cal = temperatureScale(fused[i], t);
-      ll += -Math.log(Math.max(1e-9, cal[actual[i]]));
-    }
-    if (ll < bestLL) {
-      bestLL = ll;
-      tau = t;
-    }
-  }
 
   // Valve seed: the (1 − target) quantile of the FINAL policy's scores —
   // temperature-scaled at the chosen τ with the chosen digit (locked or the
@@ -808,10 +1260,12 @@ export function fitApexParams(
   // to that unreachable seed — a perpetual cold start that starved the bot of
   // every trade no matter which pace was selected.
   const target = APEX_PACE_TARGET[pace] ?? 0.035;
+  const seedDists = (collected.lensDists ?? []).length === fused.length
+    ? (collected.lensDists ?? []).map(s => temperatureScale(logPool(s.lenses, weights), tau))
+    : fused.map(d => temperatureScale(d, tau));
   const finalScores: number[] = [];
-  for (let i = 0; i < fused.length; i++) {
-    const cal = temperatureScale(fused[i], tau);
-    finalScores.push(lockedDigit !== undefined ? cal[lockedDigit] : cal[argmax(cal)]);
+  for (let i = 0; i < seedDists.length; i++) {
+    finalScores.push(lockedDigit !== undefined ? seedDists[i][lockedDigit] : seedDists[i][argmax(seedDists[i])]);
   }
   finalScores.sort((a, b) => a - b);
   const initBar = finalScores.length > 0
@@ -831,7 +1285,7 @@ export interface ApexDiag {
   heatRatio: number;
   memoryOrder: number;
   memorySamples: number;
-  weights: [number, number, number];
+  weights: number[];
   tau: number;
   fireRate: number;
   brierSkill: number;

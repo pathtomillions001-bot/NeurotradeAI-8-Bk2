@@ -27,8 +27,32 @@
  *     suffix before, with exponential half-life so recent structure weighs more.
  *
  * The lenses fuse through a LOGARITHMIC OPINION POOL in logit space (externally
- * Bayesian for Bernoulli events) with skill-weighted lenses + one temperature
- * calibration — agreement across lenses is what makes a shot safe.
+ * Bayesian for Bernoulli events). Weights START from each lens's measured
+ * log-loss skill and are then REFINED by coordinate descent on the simplex —
+ * direct minimisation of the pooled train log-loss (the logarithmic score, a
+ * proper scoring rule) with a KL-to-uniform complexity penalty so the fit can
+ * never pay for noise it discovered — plus one temperature calibration
+ * (τ ≥ 1: honest calibration may soften, never sharpen). Agreement across
+ * lenses is what makes a shot safe.
+ *
+ * SIX lenses now feed the pool (the original four plus two universal
+ * predictors):
+ *  5. PARITY CTW — a binary Context-Tree-Weighting mixture over EVERY parity
+ *     chain of order 0..12 (KT node estimators, ½/½ tree prior, proven
+ *     per-sequence log-loss regret bounds). Where the Markov lens hard-codes
+ *     orders 1–2, CTW softly blends all depths at once — the principled
+ *     "which order is right?" answer: you never pick.
+ *  6. PARITY ECHO SPECTRUM — recency-weighted P(p_t == p_{t−k}) for lags
+ *     1..24. Cyclic alternation ("even, odd, even, odd…" with period k) is
+ *     invisible to order-1/2 chains and only crudely caught by the run
+ *     hazard; the echo spectrum reads it directly, per lag, with its own
+ *     effective sample size.
+ * The digit lens also deepened: P(parity | last TWO digits) with backoff
+ * through P(parity | last digit) to fair — 100 contexts, Jeffreys-smoothed,
+ * so digit-conditioned parity flips (9→even runs, 1→odd runs…) register.
+ * And q_LL — the loss-pair risk price — is no longer a bare order-1 chain
+ * estimate: it is the FUSED probability of the opposite side, i.e. the full
+ * six-lens model's own belief about the loss repeating.
  *
  * SELECTION (the recovery-first policy):
  *  - The side is chosen by utility = (p·payout − 1) − λ·P(loss)·min(q_LL, .95),
@@ -132,6 +156,19 @@ export const PARITY_FORGE_TRAIN_FRACTION = 0.6;
 export const PARITY_FORGE_MIN_FIT_DIGITS = 600;
 export const PARITY_FORGE_MIN_MEASURE_DIGITS = 300;
 
+/** Binary CTW context depth (mixture over ALL parity chain orders 0..this). */
+export const PARITY_FORGE_CTW_DEPTH = 12;
+export const PARITY_FORGE_CTW_MAX_NODES = 60_000;
+/** Parity echo spectrum length. */
+export const PARITY_FORGE_ECHO_LAGS = 24;
+export const PARITY_FORGE_ECHO_HALFLIFE_TICKS = 420;
+/** Lens fusion: floor per lens and the lens count/names. */
+export const PARITY_FORGE_LENS_FLOOR = 0.05;
+export const PARITY_FORGE_LENS_COUNT = 6;
+export const PARITY_FORGE_LENS_NAMES = [
+  "parityMkv", "runHazard", "digitPair", "suffix", "parityCTW", "echo",
+] as const;
+
 // ── Small math helpers ────────────────────────────────────────────────────────
 
 function clamp01(v: number): number {
@@ -165,7 +202,8 @@ export function weightsFromSkillN(logLosses: readonly number[], baseline: number
   const mx = Math.max(...skills);
   const exps = skills.map(s => Math.exp((s - mx) / 0.05));
   const sum = exps.reduce((a, b) => a + b, 0) || 1;
-  const floored = exps.map(v => 0.05 + 0.85 * (v / sum));
+  const L = logLosses.length;
+  const floored = exps.map(v => PARITY_FORGE_LENS_FLOOR + (1 - PARITY_FORGE_LENS_FLOOR * L) * (v / sum));
   const s2 = floored.reduce((a, b) => a + b, 0) || 1;
   return floored.map(v => v / s2);
 }
@@ -174,6 +212,72 @@ export function weightsFromSkillN(logLosses: readonly number[], baseline: number
 export function temperatureScaleBinary(p: number, tau: number): number {
   const t = Number.isFinite(tau) && tau > 0 ? tau : 1;
   return t === 1 ? p : sigmoid(logit(p) / t);
+}
+
+/** Project weights onto the simplex with a hard floor per lens. */
+function projectSimplexBinary(w: number[], floor: number): number[] {
+  const clamped = w.map(v => Math.max(floor, Number.isFinite(v) ? v : floor));
+  const s = clamped.reduce((a, b) => a + b, 0);
+  return s > 0 ? clamped.map(v => v / s) : w.map(() => 1 / w.length);
+}
+
+/**
+ * COORDINATE DESCENT ON THE SIMPLEX for the binary pool — direct minimisation
+ * of the pooled train log-loss (logarithmic score) over lens weights, with a
+ * KL-to-uniform complexity penalty so the fit cannot pay for train noise
+ * (measured: unregularised descent manufactures fake expectancy on fair
+ * tapes). Alternates with the τ grid (τ ≥ 1 only: honest calibration may
+ * soften, never sharpen). A fit-time capacity control — never a trade gate.
+ */
+export function optimizeBinaryPoolWeights(
+  samples: Array<{ lenses: number[]; event: number }>,
+  weights0: number[],
+  tau0: number,
+  tauGrid: number[],
+  opts?: { reg?: number },
+): { weights: number[]; tau: number } {
+  const L = weights0.length;
+  const floor = PARITY_FORGE_LENS_FLOOR;
+  const reg = opts?.reg ?? 0.04;
+  let weights = projectSimplexBinary([...weights0], floor);
+  let tau = tau0;
+  const klToUniform = (w: number[]): number => {
+    let kl = 0;
+    for (const v of w) kl += v > 1e-12 ? v * Math.log(v * L) : 0;
+    return Math.max(0, kl);
+  };
+  const pooledLoss = (w: number[], t: number): number => {
+    let ll = 0;
+    for (const s of samples) {
+      const p = temperatureScaleBinary(logPoolBinary(s.lenses, w), t);
+      ll += -(s.event ? Math.log(Math.max(1e-9, p)) : Math.log(Math.max(1e-9, 1 - p)));
+    }
+    return ll + reg * samples.length * klToUniform(w);
+  };
+  let best = pooledLoss(weights, tau);
+  const factors = [0.5, 0.7, 0.85, 1.18, 1.45, 2.0];
+  for (let round = 0; round < 3; round++) {
+    for (let i = 0; i < L; i++) {
+      for (const f of factors) {
+        const cand = [...weights];
+        cand[i] = Math.max(floor, weights[i] * f);
+        const proj = projectSimplexBinary(cand, floor);
+        const loss = pooledLoss(proj, tau);
+        if (loss < best - 1e-6) {
+          best = loss;
+          weights = proj;
+        }
+      }
+    }
+    for (const t of tauGrid) {
+      const loss = pooledLoss(weights, t);
+      if (loss < best - 1e-6) {
+        best = loss;
+        tau = t;
+      }
+    }
+  }
+  return { weights, tau };
 }
 
 export function wilson(k: number, n: number, z = 1.96): { lower: number; upper: number } {
@@ -201,6 +305,24 @@ function cleanDigits(digits: ArrayLike<number>): number[] {
 }
 
 function parityOf(d: number): number { return d % 2; } // 0 even, 1 odd
+
+/** log Γ(x) — Lanczos, doubles only; accurate to ~1e-13 over the needed range. */
+function lgamma(x: number): number {
+  if (x < 0.5) {
+    return Math.log(Math.PI / Math.sin(Math.PI * x)) - lgamma(1 - x);
+  }
+  const g = 7;
+  const c = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+    771.32342877765313, -176.61502916214059, 12.507343278686905,
+    -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ];
+  x -= 1;
+  let a = c[0];
+  const t = x + g + 0.5;
+  for (let i = 1; i < g + 2; i++) a += c[i] / (x + i);
+  return 0.5 * Math.log(2 * Math.PI) + (x + 0.5) * Math.log(t) - t + Math.log(a);
+}
 
 // ── Lens 1: parity Markov (order 1–2, Dirichlet + count-mixed shrinkage) ───────
 
@@ -320,9 +442,12 @@ export class ParityRunHazard {
 // ── Lens 3: digit-conditioned parity (P(parity | last digit)) ────────────────
 
 export class DigitParity {
-  // c[ lastDigit * 2 + nextParity ]
+  // P(parity | last digit): c[ lastDigit * 2 + nextParity ]
   private c = new Float64Array(10 * 2);
   private n = new Float64Array(10);
+  // P(parity | last TWO digits): c2[ pair * 2 + nextParity ]
+  private c2 = new Float64Array(100 * 2);
+  private n2 = new Float64Array(100);
 
   update(history: ArrayLike<number>, idx: number): void {
     if (idx < 1) return;
@@ -330,15 +455,40 @@ export class DigitParity {
     const curP = parityOf(history[idx]!);
     this.c[lastD * 2 + curP]! += 1;
     this.n[lastD]! += 1;
+    if (idx >= 2) {
+      const prevD = history[idx - 2]!;
+      const pair = prevD * 10 + lastD;
+      this.c2[pair * 2 + curP]! += 1;
+      this.n2[pair]! += 1;
+    }
   }
 
-  /** P(next parity = target | last digit). */
-  p(history: ArrayLike<number>, idx: number, targetParity: number): number {
+  /** P(next parity = target | last digit), Jeffreys-smoothed toward fair. */
+  oneDigit(history: ArrayLike<number>, idx: number, targetParity: number): number {
     const lastD = history[idx] ?? 0;
     const n = this.n[lastD]!;
     const e = (this.c[lastD * 2 + targetParity]! + JEFFREYS) / (n + 2 * JEFFREYS);
     const w = n / (n + 8);
     return (1 - w) * 0.5 + w * e;
+  }
+
+  /**
+   * P(next parity = target | last TWO digits) with hierarchical backoff:
+   * pair evidence shrinks into the one-digit estimate, which shrinks into
+   * fair. Two digits of context see digit-conditioned parity FLIPS (e.g. a
+   * 9 followed by anything skewing even) that a single digit cannot express.
+   */
+  p(history: ArrayLike<number>, idx: number, targetParity: number): number {
+    const lastD = history[idx] ?? 0;
+    if (idx < 1) return this.oneDigit(history, idx, targetParity);
+    const prevD = history[idx - 1] ?? 0;
+    const pair = prevD * 10 + lastD;
+    const n2 = this.n2[pair]!;
+    const fallback = this.oneDigit(history, idx, targetParity);
+    if (n2 === 0) return fallback;
+    const e2 = (this.c2[pair * 2 + targetParity]! + JEFFREYS) / (n2 + 2 * JEFFREYS);
+    const w2 = n2 / (n2 + 16);
+    return (1 - w2) * fallback + w2 * e2;
   }
 }
 
@@ -399,6 +549,203 @@ export class SuffixParityMemory {
   }
 }
 
+// ── Lens 5: parity CTW order mixture (universal blend over ALL chain orders) ──
+// A Bayesian mixture of per-order Krichevsky–Trofimov context predictors for
+// every parity-chain order 0..12 at once: each depth keeps its own context-
+// conditioned KT counts and a cumulative sequential log-score, and the
+// predictive blends the depths with posterior weights ∝ e^(log-score). The
+// mixture's cumulative log-loss sits within log(13) nats of the BEST single
+// order and concentrates on it exponentially fast — parity structure at any
+// depth up to 12 is read at its true depth, with no order to pick.
+
+interface BinaryCtwNode {
+  c0: number;
+  c1: number;
+  logKT: number;
+}
+
+export class ParityCTW {
+  private nodes = new Map<number, BinaryCtwNode>();
+  private depth: number;
+  private maxNodes: number;
+  /** Cumulative sequential log-score per ORDER — the mixture weights. */
+  private orderScore: Float64Array;
+
+  constructor(depth = PARITY_FORGE_CTW_DEPTH, maxNodes = PARITY_FORGE_CTW_MAX_NODES) {
+    this.depth = depth;
+    this.maxNodes = maxNodes;
+    this.orderScore = new Float64Array(depth + 1);
+    this.nodes.set(0, { c0: 0, c1: 0, logKT: 0 });
+  }
+
+  /**
+   * Node key: depth in the high bits, parity context packed as bits below —
+   * most recent parity in the lowest context bit. The depth tag is NOT
+   * cosmetic: "1" at depth 1 and "0001" at depth 4 pack to the same bits, and
+   * without the tag they would share one node's counts.
+   */
+  private static key(history: ArrayLike<number>, endExclusive: number, d: number): number {
+    let k = 0;
+    for (let i = endExclusive - d; i < endExclusive; i++) k = (k << 1) | (history[i]! & 1);
+    return (d << 13) | k;
+  }
+
+  private static parentKeyOf(key: number): number {
+    const d = (key >> 13) - 1;
+    const bits = (key & 0x1fff) >> 1;
+    return (d << 13) | bits;
+  }
+
+  private static depthOf(key: number): number {
+    return key >> 13;
+  }
+
+  private ensure(key: number): BinaryCtwNode {
+    let n = this.nodes.get(key);
+    if (!n) {
+      if (this.nodes.size >= this.maxNodes) this.prune();
+      n = { c0: 0, c1: 0, logKT: 0 };
+      this.nodes.set(key, n);
+    }
+    return n;
+  }
+
+  /** Feed history[idx] as the newly observed digit (parity taken mod 2). */
+  update(history: ArrayLike<number>, idx: number): void {
+    const x = parityOf(history[idx]!);
+    for (let d = Math.min(this.depth, idx); d >= 0; d--) {
+      const node = this.ensure(ParityCTW.key(history, idx, d));
+      const n = node.c0 + node.c1;
+      // Pre-update KT predictive of THIS order's context node scores the symbol.
+      this.orderScore[d]! += Math.log(Math.max(1e-9, (x === 1 ? node.c1 + 0.5 : node.c0 + 0.5) / (n + 1)));
+      if (x === 0) node.c0 += 1; else node.c1 += 1;
+      node.logKT = this.orderScore[d]!;
+    }
+  }
+
+  /**
+   * P(next parity = target) — posterior-weighted blend of every order's KT
+   * predictive, weights ∝ e^(cumulative log-score), with each order first
+   * PPM-interpolated toward the shallower blend by data mass (a context seen
+   * once inherits the shallower view instead of shouting). The best order
+   * still takes over exponentially fast once its evidence dwarfs shrinkage.
+   */
+  p(history: ArrayLike<number>, idx: number, targetParity: number): number {
+    const maxScore = Math.max(...this.orderScore);
+    const shrink = 8;
+    let shallower = 0.5;
+    let p1 = 0;
+    let wSum = 0;
+    for (let d = 0; d <= this.depth; d++) {
+      const node = this.nodes.get(ParityCTW.key(history, idx + 1, d));
+      if (!node || node.c0 + node.c1 === 0) continue;
+      const n = node.c0 + node.c1;
+      const raw = (node.c1 + 0.5) / (n + 1);
+      const k = n / (n + shrink);
+      const blended = k * raw + (1 - k) * shallower;
+      const w = Math.exp(Math.max(-60, this.orderScore[d]! - maxScore));
+      p1 += w * blended;
+      wSum += w;
+      shallower = blended;
+    }
+    const out = wSum > 0 ? p1 / wSum : 0.5;
+    return Math.min(1 - 1e-9, Math.max(1e-9, targetParity === 1 ? out : 1 - out));
+  }
+
+  /** Deepest parity order carrying data right now — display only. */
+  effectiveOrder(history: ArrayLike<number>, idx: number): number {
+    for (let d = Math.min(this.depth, idx + 1); d >= 1; d--) {
+      const n = this.nodes.get(ParityCTW.key(history, idx + 1, d));
+      if (n && n.c0 + n.c1 > 0) return d;
+    }
+    return 0;
+  }
+
+  private prune(): void {
+    // Drop the thinnest contexts first (deepest first among ties). Order
+    // scores live per-depth, so pruning contexts never corrupts the mixture.
+    const rootKey = 0; // depth 0, no bits
+    const victims: Array<{ key: number; total: number; d: number }> = [];
+    for (const [key, n] of this.nodes) {
+      if (key === rootKey) continue;
+      victims.push({ key, total: n.c0 + n.c1, d: ParityCTW.depthOf(key) });
+    }
+    victims.sort((a, b) => a.total - b.total || b.d - a.d);
+    const drop = Math.max(1, Math.floor(victims.length * 0.3));
+    for (let i = 0; i < drop; i++) this.nodes.delete(victims[i].key);
+  }
+}
+
+// ── Lens 6: parity echo spectrum (recency-weighted repeat rates per lag) ──────
+// For lags 1..24, the recency-weighted P(p_t == p_{t−k}). Scoring tilts the
+// lag-k trailing parity by its measured lift over fair — cyclic alternation
+// with any period shows up as above-fair lags at k and k+1 (one for "same",
+// one for "flip") that the order-1/2 chain and the run hazard miss.
+
+export class ParityEcho {
+  private n: Float64Array;
+  private h: Float64Array;
+  private decay: number;
+
+  constructor(
+    private lags = PARITY_FORGE_ECHO_LAGS,
+    halfLife = PARITY_FORGE_ECHO_HALFLIFE_TICKS,
+  ) {
+    this.n = new Float64Array(lags);
+    this.h = new Float64Array(lags);
+    this.decay = Math.pow(0.5, 1 / Math.max(1, halfLife));
+  }
+
+  /** Feed history[idx] as the newly observed digit. */
+  update(history: ArrayLike<number>, idx: number): void {
+    const x = parityOf(history[idx]!);
+    for (let k = 0; k < this.lags; k++) {
+      this.n[k] *= this.decay;
+      this.h[k] *= this.decay;
+    }
+    const m = Math.min(this.lags, idx);
+    for (let k = 1; k <= m; k++) {
+      this.n[k - 1] += 1;
+      if (parityOf(history[idx - k]!) === x) this.h[k - 1] += 1;
+    }
+  }
+
+  /** Posterior-mean same-parity rate at 1-based lag k (prior: 50%). */
+  rate(k: number): number {
+    if (k < 1 || k > this.lags) return 0.5;
+    return (this.h[k - 1]! + 5) / (this.n[k - 1]! + 10); // Beta(5,5) prior = fair
+  }
+
+  /** P(next parity = target) from the lag tilts pointing at each parity. */
+  p(history: ArrayLike<number>, idx: number, targetParity: number): number {
+    let tiltSame = 0;
+    let tiltFlip = 0;
+    const m = Math.min(this.lags, idx + 1);
+    for (let k = 1; k <= m; k++) {
+      const pastP = parityOf(history[idx + 1 - k]!);
+      const lift = this.rate(k) / 0.5;
+      const w = Math.exp(-k / 10);
+      const t = w * Math.log(Math.max(0.4, Math.min(2.5, lift)));
+      if (pastP === 0) tiltSame += t; // evidence about parity 0 (tilt of its own echo rate)
+      else tiltFlip += t;
+    }
+    // tiltSame accumulates evidence from lags whose TRAILING parity is 0:
+    // if parity-0's echo rate at that lag is above fair, parity 0 is tilted up.
+    const logit0 = tiltSame - tiltFlip;
+    const p0 = 1 / (1 + Math.exp(-Math.max(-20, Math.min(20, logit0))));
+    const out = targetParity === 0 ? p0 : 1 - p0;
+    return Math.min(1 - 1e-9, Math.max(1e-9, out));
+  }
+
+  /** Strongest same-parity lags — display only. */
+  topLags(count = 3): Array<{ lag: number; rate: number }> {
+    const rows: Array<{ lag: number; rate: number }> = [];
+    for (let k = 1; k <= this.lags; k++) rows.push({ lag: k, rate: this.rate(k) });
+    rows.sort((a, b) => Math.abs(b.rate - 0.5) - Math.abs(a.rate - 0.5));
+    return rows.slice(0, Math.max(1, count));
+  }
+}
+
 // ── Pacing valve (normal shots only — recovery has the static bar) ────────────
 
 export class PacingValve {
@@ -426,8 +773,8 @@ export class PacingValve {
 // ── Policy: four lenses + fusion + the recovery-first selection ───────────────
 
 export interface ParityForgeParams {
-  /** Log-pool weights over [parityMarkov, runHazard, digitParity, suffix]. */
-  weights: [number, number, number, number];
+  /** Log-pool weights over [parityMarkov, runHazard, digitPair, suffix, parityCTW, echo]. */
+  weights: number[];
   tau: number;
   normalInitBar: number;
 }
@@ -437,7 +784,7 @@ export interface ParityForgeSideRead {
   p: number;
   /** Fused win probability BEFORE temperature calibration. */
   pRaw: number;
-  lenses: [number, number, number, number];
+  lenses: number[];
   qLL: number;
   pairRisk: number;
   utility: number;
@@ -482,6 +829,8 @@ export class ParityForgePolicy {
   private runHazard = new ParityRunHazard();
   private digitParity = new DigitParity();
   private suffix = new SuffixParityMemory();
+  private parityCTW = new ParityCTW();
+  private echo = new ParityEcho();
   private normalValve: PacingValve;
 
   constructor(private readonly params: ParityForgeParams) {
@@ -506,27 +855,60 @@ export class ParityForgePolicy {
     this.digitParity.update(history, idx);
     this.runHazard.update(history, idx);
     this.suffix.update(history, idx);
+    this.parityCTW.update(history, idx);
+    this.echo.update(history, idx);
   }
 
-  /** Read one contract's fused win probability + its four lens components. */
-  readSide(history: ArrayLike<number>, idx: number, contract: ParityForgeContract): ParityForgeSideRead {
-    const targetParity = contract.id === "even" ? 0 : 1;
-    const pM = this.parityMarkov.p(history, idx, targetParity);
-    const pH = this.runHazard.p(history, idx, targetParity);
-    const pD = this.digitParity.p(history, idx, targetParity);
-    const pS = this.suffix.p(history, idx, targetParity);
-    const lenses: [number, number, number, number] = [pM, pH, pD, pS];
+  /** The six lens probabilities for one side's win event. */
+  lensVector(history: ArrayLike<number>, idx: number, targetParity: number): number[] {
+    return [
+      this.parityMarkov.p(history, idx, targetParity),
+      this.runHazard.p(history, idx, targetParity),
+      this.digitParity.p(history, idx, targetParity),
+      this.suffix.p(history, idx, targetParity),
+      this.parityCTW.p(history, idx, targetParity),
+      this.echo.p(history, idx, targetParity),
+    ];
+  }
+
+  /** Calibrated fused probability for one side (pool + temperature). */
+  pooledSide(history: ArrayLike<number>, idx: number, targetParity: number): { p: number; pRaw: number; lenses: number[] } {
+    const lenses = this.lensVector(history, idx, targetParity);
     const pRaw = clamp01(logPoolBinary(lenses, this.params.weights));
     const p = clamp01(temperatureScaleBinary(pRaw, this.params.tau));
-    const qLL = this.parityMarkov.qLLForSide(targetParity);
+    return { p, pRaw, lenses };
+  }
+
+  /**
+   * Read one contract's fused win probability + its six lens components.
+   * q_LL — the loss-pair risk price — is the FULL model's probability of the
+   * OPPOSITE (losing) side, not a bare order-1 chain estimate: when the whole
+   * lens stack believes the losing parity persists, pair-risk rises together
+   * with the evidence, exactly as loss-pair pricing should.
+   */
+  readSide(history: ArrayLike<number>, idx: number, contract: ParityForgeContract): ParityForgeSideRead {
+    const targetParity = contract.id === "even" ? 0 : 1;
+    const mine = this.pooledSide(history, idx, targetParity);
+    const opposite = this.pooledSide(history, idx, 1 - targetParity);
+    const qLL = clamp01(opposite.p);
     const pairWeight = contract.mode === "recovery"
       ? PARITY_FORGE_RECOVERY_PAIR_WEIGHT
       : PARITY_FORGE_NORMAL_PAIR_WEIGHT;
-    const { utility, pairRisk } = sideUtility(p, contract.payout, qLL, pairWeight);
+    const { utility, pairRisk } = sideUtility(mine.p, contract.payout, qLL, pairWeight);
     return {
-      contract, p, pRaw, lenses, qLL, pairRisk, utility,
+      contract, p: mine.p, pRaw: mine.pRaw, lenses: mine.lenses, qLL, pairRisk, utility,
       breakEven: 1 / contract.payout,
     };
+  }
+
+  /** Parity echo lags for the console's rhythm panel — display only. */
+  echoLags(count = 3): Array<{ lag: number; rate: number }> {
+    return this.echo.topLags(count);
+  }
+
+  /** Deepest parity order the CTW mixture is currently exercising. */
+  ctwOrder(history: ArrayLike<number>, idx: number): number {
+    return this.parityCTW.effectiveOrder(history, idx);
   }
 
   private best(
@@ -730,17 +1112,18 @@ export function fitParityForgeParams(
   const test = clean.slice(split);
 
   if (clean.length < PARITY_FORGE_MIN_FIT_DIGITS || train.length < 250 || test.length < 120) {
-    const params: ParityForgeParams = { weights: [0.3, 0.25, 0.2, 0.25], tau: 1, normalInitBar: 0.53 };
+    const params: ParityForgeParams = { weights: [0.2, 0.18, 0.16, 0.14, 0.18, 0.14], tau: 1, normalInitBar: 0.53 };
     const { metrics } = replayParityForge(clean, params, { warmup: Math.min(200, Math.floor(clean.length / 3)), ...opts });
     return { params, train: metrics, test: metrics };
   }
 
-  // ── Train pass: per-lens binary log-loss (pooled over both parity sides) + τ.
-  const probe = new ParityForgePolicy({ weights: [0.25, 0.25, 0.25, 0.25], tau: 1, normalInitBar: 0.53 });
+  // ── Train pass: per-lens binary log-loss (pooled over both parity sides).
+  const probe = new ParityForgePolicy({ weights: [1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 6, 1 / 6], tau: 1, normalInitBar: 0.53 });
   for (let i = 0; i < 300 && i < train.length; i++) probe.update(train, i);
 
-  const ll = [0, 0, 0, 0];
-  const pooled: Array<{ lenses: [number, number, number, number]; event: number }> = [];
+  const L = PARITY_FORGE_LENS_COUNT;
+  const ll = new Array<number>(L).fill(0);
+  const pooled: Array<{ lenses: number[]; event: number }> = [];
   const normalScores: number[] = [];
   let llN = 0;
 
@@ -749,46 +1132,45 @@ export function fitParityForgeParams(
     const nextParity = parityOf(next);
     for (const c of PARITY_FORGE_ALL_CONTRACTS) {
       const targetParity = c.id === "even" ? 0 : 1;
-      const read = probe.readSide(train, i, c);
+      const lens = probe.lensVector(train, i, targetParity);
       const event = nextParity === targetParity ? 1 : 0;
-      for (let j = 0; j < 4; j++) {
-        const pj = Math.min(1 - 1e-9, Math.max(1e-9, read.lenses[j]!));
+      for (let j = 0; j < L; j++) {
+        const pj = Math.min(1 - 1e-9, Math.max(1e-9, lens[j]!));
         ll[j]! += -(event ? Math.log(pj) : Math.log(1 - pj));
       }
-      pooled.push({ lenses: read.lenses, event });
+      pooled.push({ lenses: lens, event });
       llN++;
     }
-    // Normal side best score (both sides, utility order) for the valve seed.
-    const reads = PARITY_FORGE_NORMAL_CONTRACTS.map(c => probe.readSide(train, i, c));
-    reads.sort((a, b) => b.utility - a.utility);
-    if (reads[0]) normalScores.push(reads[0].p);
     probe.update(train, i + 1);
   }
 
   const baseline = Math.log(2);
-  const weightsArr = weightsFromSkillN(
-    llN > 0 ? ll.map(v => v / llN) : [baseline, baseline, baseline, baseline],
+  const skillWeights = weightsFromSkillN(
+    llN > 0 ? ll.map(v => v / llN) : new Array<number>(L).fill(baseline),
     baseline,
   );
-  const weights = [weightsArr[0]!, weightsArr[1]!, weightsArr[2]!, weightsArr[3]!] as [number, number, number, number];
 
-  // ── τ on the skill-weighted pool of the collected lens vectors.
-  let tau = 1;
-  let bestLL = Infinity;
-  for (const t of TAU_GRID_PF) {
-    let l = 0;
-    for (const s of pooled) {
-      const raw = logPoolBinary(s.lenses, weights);
-      const p = temperatureScaleBinary(raw, t);
-      l += -(s.event ? Math.log(Math.max(1e-9, p)) : Math.log(Math.max(1e-9, 1 - p)));
-    }
-    if (l < bestLL) {
-      bestLL = l;
-      tau = t;
-    }
+  // ── Stage 2: regularised coordinate descent on the simplex, τ ∈ [1, 1.5].
+  // Sub-1 temperatures sharpen (how train noise masquerades as skill — the
+  // recovery bar must stay meaningful); runaway τ > 1.5 over-softens until the
+  // pool is near-uniform and the replay trades noise spikes instead of reads.
+  const CAL_TAU_GRID_PF = TAU_GRID_PF.filter(t => t >= 1 && t <= 1.5);
+  const refined = pooled.length > 200
+    ? optimizeBinaryPoolWeights(pooled, skillWeights, 1, CAL_TAU_GRID_PF)
+    : { weights: skillWeights, tau: 1 };
+  const weights = refined.weights;
+  let tau = refined.tau;
+
+  // Valve seed: the train quantile of BEST normal-side scores at (1 − budget),
+  // computed at the FINAL pool so the live valve starts converged.
+  for (let i = 300; i < train.length - 1; i++) {
+    const reads = PARITY_FORGE_NORMAL_CONTRACTS.map(c => {
+      const mine = probe.pooledSide(train, i, c.id === "even" ? 0 : 1);
+      return temperatureScaleBinary(mine.pRaw, tau);
+    });
+    reads.sort((a, b) => b - a);
+    if (reads[0] !== undefined) normalScores.push(reads[0]!);
   }
-
-  // Valve seed: the train quantile of BEST normal-side scores at (1 − budget).
   normalScores.sort((a, b) => a - b);
   const normalInitBar = normalScores.length > 0
     ? quantile(normalScores, 1 - PARITY_FORGE_NORMAL_PACE_TARGET)
@@ -803,7 +1185,7 @@ export function fitParityForgeParams(
 // ── One-market scan read ──────────────────────────────────────────────────────
 
 export interface ParityForgeDiag {
-  weights: [number, number, number, number];
+  weights: number[];
   tau: number;
   normalInitBar: number;
   historyUsed: number;
@@ -846,11 +1228,15 @@ export function scoreParityForgeMarket(
 
   // Verdict ladder — measurement honesty ONLY, never a deploy gate:
   //   PRIME  = the exact live policy made money on unseen ticks AND the
-  //            recovery band held its face-up win rate (the ladder survives)
+  //            recovery band PROVED its win rate statistically: the Wilson
+  //            95% LOWER bound clears break-even, so a lucky 7-of-12 run on a
+  //            fair tape can never wear the top badge (parity with Echo
+  //            Apex's honesty bar)
   //   VIABLE = positive paper expectancy with real recovery mass
   //   THIN   = everything else
+  const recoveryProven = m.recoveryShots > 0 && m.recoveryHitRateLower >= 1 / rPay;
   let verdict: ParityForgeVerdict;
-  if (!thinData && m.paperEdgePerDollar >= 0.02 && m.recoveryShots >= 6 && m.recoveryHitRate >= 0.56 && m.normalShots >= 6) {
+  if (!thinData && m.paperEdgePerDollar >= 0.02 && m.recoveryShots >= 6 && recoveryProven && m.normalShots >= 6) {
     verdict = "prime";
   } else if (!thinData && m.paperEdgePerDollar > 0 && m.recoveryShots >= 4) {
     verdict = "viable";

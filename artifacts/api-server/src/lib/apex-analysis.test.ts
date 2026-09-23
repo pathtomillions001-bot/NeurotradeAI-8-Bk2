@@ -281,9 +281,10 @@ describe("apex pipeline on planted-edge streams", () => {
     const digits = echoStream(3000, 0.3, 59);
     const fit = fitApexParams(digits, "steady");
     const w = fit.params.weights;
-    assert.ok(Math.abs(w[0] + w[1] + w[2] - 1) < 1e-9);
+    assert.equal(w.length, 5, `weights=${w}`);
+    assert.ok(Math.abs(w.reduce((a, b) => a + b, 0) - 1) < 1e-9, `sum=${w.reduce((a, b) => a + b, 0)}`);
     assert.ok(w.every(v => v > 0.03), `dead lens: ${w}`);
-    assert.ok(fit.params.tau >= 0.6 && fit.params.tau <= 2.6, `tau=${fit.params.tau}`);
+    assert.ok(fit.params.tau >= 1 && fit.params.tau <= 2.6, `tau=${fit.params.tau}`);
     assert.ok(fit.params.initBar > 0 && fit.params.initBar < 1, `bar=${fit.params.initBar}`);
   });
 });

@@ -696,7 +696,7 @@ export function OverUnderNavigatorConsole({
       </div>
       <p className="text-[10px] text-muted-foreground/70">
         Walk-forward lenses: digit Markov · loss clustering · hole hazard ·
-        suffix memory
+        suffix memory · EW drift · regime HMM
       </p>
     </div>
   );
@@ -927,6 +927,30 @@ export function OverUnderNavigatorConsole({
             <span>{watch.switched ? "market switched" : "market stable"}</span>
             <span className="text-fuchsia-200">bar is static</span>
           </div>
+          {/* MARKET SCOUT — the switching engine's live leaderboard */}
+          {watch.scout && watch.scout.top.length > 0 && (
+            <div className="mt-3 rounded-lg bg-black/20 px-2.5 py-2 space-y-1">
+              <p className="flex items-center gap-1 text-[9px] uppercase tracking-widest text-muted-foreground/70">
+                <Shuffle className="h-2.5 w-2.5" /> Market scout · {watch.mode}
+              </p>
+              {watch.scout.top.map((s, i) => (
+                <div key={s.name} className="flex items-center gap-2 text-[10px]">
+                  <span className="w-3 font-mono text-muted-foreground/60">{i + 1}</span>
+                  <span className={`flex-1 font-medium ${s.name === watch.scout!.active ? "text-emerald-300" : "text-white/80"}`}>
+                    {s.name}{s.name === watch.scout!.active ? " · on watch" : ""}
+                  </span>
+                  <span className="font-mono text-muted-foreground">{(s.score * 100).toFixed(1)}</span>
+                  <span className={`w-12 text-right font-mono ${(s.live ?? 0) >= 0 ? "text-emerald-300/80" : "text-red-300/80"}`}>
+                    live {(s.live >= 0 ? "+" : "") + (s.live * 100).toFixed(1)}
+                  </span>
+                </div>
+              ))}
+              <p className="text-[8px] leading-relaxed text-muted-foreground/60">
+                composite edge per $ — live tape · held-out re-fit card · own fired
+                outcomes. The scout only redirects the fire budget; it never vetoes a shot.
+              </p>
+            </div>
+          )}
         </div>
       )}
       {deployed && (

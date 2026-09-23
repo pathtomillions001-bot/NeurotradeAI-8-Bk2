@@ -72,6 +72,57 @@ export const APEX_BOT_ID = "apex";
 export const APEX_BOT_NAME = "Echo Apex";
 const APEX_CONTRACT_TYPE = "DIGITMATCH";
 
+/**
+ * 60s cache of full per-digit payout vectors per market (live OR fallback —
+ * both are worth keeping briefly so the 20–45s re-fit cadence and the
+ * switching-mode migration sweeps don't re-price the book every pass).
+ */
+const payoutVecCache = new Map<string, { vector: number[]; at: number }>();
+const PAYOUT_VEC_TTL_MS = 60_000;
+
+/**
+ * Quote the LIVE per-digit Matches payout multipliers for one market — all
+ * 10 digits in parallel, each with its own fast timeout and canonical
+ * fallback. The vector is cached for 60s regardless of source.
+ */
+async function quoteDigitPayouts(symbol: string, currency: string): Promise<number[]> {
+  const cached = payoutVecCache.get(symbol);
+  if (cached && Date.now() - cached.at < PAYOUT_VEC_TTL_MS) return cached.vector;
+  const quotes = await Promise.all(
+    Array.from({ length: 10 }, (_, d) =>
+      resolveRecoveryPayout({
+        symbol,
+        contractType: APEX_CONTRACT_TYPE,
+        barrier: d,
+        duration: 1,
+        durationUnit: "t",
+        currency,
+      }).then(q => (Number.isFinite(q.payoutMultiplier) && q.payoutMultiplier > 1 ? q.payoutMultiplier : APEX_MATCH_PAYOUT))
+        .catch(() => APEX_MATCH_PAYOUT)
+    ),
+  );
+  payoutVecCache.set(symbol, { vector: quotes, at: Date.now() });
+  return quotes;
+}
+
+/**
+ * Quote payout vectors for MANY markets with bounded concurrency (4 markets
+ * in flight) so a scan across 19 markets never floods the pricing feed.
+ */
+async function quoteManyPayouts(symbols: string[], currency: string): Promise<Map<string, number[]>> {
+  const out = new Map<string, number[]>();
+  const queue = [...symbols];
+  const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+    for (;;) {
+      const symbol = queue.shift();
+      if (!symbol) return;
+      out.set(symbol, await quoteDigitPayouts(symbol, currency));
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 /** Digits re-read from the feed every scan/refit pass. */
 const SCAN_DIGITS = 4500;
 /** Re-measure cadence — live never trusts a stale fit for long. */
@@ -111,6 +162,8 @@ export interface ApexCandidate {
   fireRate: number;
   breakEven: number;
   payout: number;
+  /** Live per-digit payout multipliers used for the EV digit pick, when quoted. */
+  payouts?: number[];
   params: ApexParams;
   diag: ApexDiag;
   thinData: boolean;
@@ -367,7 +420,20 @@ export async function scanForApex(
 ): Promise<ApexScanResult> {
   const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
   const all: ApexCandidate[] = [];
+  const digitsBySymbol = new Map<string, number[]>();
   let deepest = 0;
+
+  // The scan quotes in the account currency when the session has one, so the
+  // EV digit pick prices the book the user actually trades.
+  let currency = "USD";
+  if (ownerSessionId) {
+    try {
+      const acct = await db.select().from(accountsTable)
+        .where(and(eq(accountsTable.sessionId, ownerSessionId), eq(accountsTable.isActive, true)))
+        .limit(1);
+      if (acct.length > 0 && acct[0].currency) currency = acct[0].currency;
+    } catch { /* default USD */ }
+  }
 
   for (let i = 0; i < markets.length; i++) {
     const market = markets[i]!;
@@ -386,7 +452,10 @@ export async function scanForApex(
       digits = tickManager.getDigits(market.symbol, SCAN_DIGITS);
     }
     deepest = Math.max(deepest, digits.length);
+    digitsBySymbol.set(market.symbol, digits);
 
+    // Pass 1 — flat canonical payout: rank markets cheaply. The EV
+    // refinement (pass 2) re-prices only the leaders with live quotes.
     const read = scoreMarket(digits, APEX_ONLY_PACE, {
       ...(spec.digit !== undefined ? { lockedDigit: spec.digit } : {}),
     });
@@ -408,6 +477,48 @@ export async function scanForApex(
       thinData: read.thinData,
     });
     await sleep(5);
+  }
+
+  // ── Pass 2 — EV refinement on the leaders ──
+  // Quote the full 10-digit payout vector for the top candidates and re-run
+  // scoreMarket with it: the AI digit pick becomes argmax held-out-EV
+  // (held-out p × live payout), and edgePerDollar is measured against the
+  // quotes the user actually gets. Bounded to the top flat-payout candidates
+  // so a scan stays fast when the pricing feed is slow.
+  const FLAT_RANK: Record<ApexVerdict, number> = { prime: 0, viable: 1, thin: 2 };
+  const leaders = [...all]
+    .filter(c => !c.thinData)
+    .sort((a, b) => FLAT_RANK[a.verdict] - FLAT_RANK[b.verdict] || b.edgePerDollar - a.edgePerDollar)
+    .slice(0, 6);
+  if (leaders.length > 0) {
+    const quoteMap = await quoteManyPayouts(leaders.map(c => c.symbol), currency);
+    for (const c of leaders) {
+      const payouts = quoteMap.get(c.symbol);
+      const digits = digitsBySymbol.get(c.symbol);
+      if (!payouts || !digits || digits.length === 0) continue;
+      const re = scoreMarket(digits, APEX_ONLY_PACE, {
+        ...(spec.digit !== undefined ? { lockedDigit: spec.digit } : {}),
+        payouts,
+      });
+      const upgraded: ApexCandidate = {
+        ...c,
+        digit: re.digit,
+        verdict: re.verdict,
+        confidence: re.confidence,
+        edgePerDollar: re.edgePerDollar,
+        hitRate: re.hitRate,
+        hitRateLower: re.hitRateLower,
+        shots: re.shots,
+        fireRate: re.fireRate,
+        breakEven: re.breakEven,
+        payout: re.payout,
+        payouts,
+        params: re.params,
+        diag: re.diag,
+      };
+      const idx = all.findIndex(x => x.symbol === c.symbol);
+      if (idx >= 0) all[idx] = upgraded;
+    }
   }
 
   const ranked = all.sort(
@@ -599,6 +710,8 @@ async function runLoop(config: ApexConfig) {
   let lossRun = 0;
   let consecutiveErrors = 0;
   const healthRing: number[] = [];
+  /** Live per-digit payout vector for the active market (refreshed per refit). */
+  let livePayouts: number[] | null = null;
 
   async function readDigits(symbol: string): Promise<number[]> {
     try {
@@ -610,7 +723,11 @@ async function runLoop(config: ApexConfig) {
 
   /** Re-measure the ACTIVE market, rebuild the live policy on the fresh fit. */
   async function refitActive(): Promise<ApexCandidate | null> {
-    const digits = await readDigits(activeSymbol);
+    const [digits, payouts] = await Promise.all([
+      readDigits(activeSymbol),
+      quoteDigitPayouts(activeSymbol, currency),
+    ]);
+    livePayouts = payouts;
     if (digits.length < MIN_LIVE_DIGITS) return null;
     // ONE pass: honest walk-forward fit, then the live policy IS the fitted
     // card. What the scan measured is what now trades. The adapted pacing bar
@@ -619,6 +736,7 @@ async function runLoop(config: ApexConfig) {
     // bot of trades.
     const read = scoreMarket(digits, APEX_ONLY_PACE, {
       ...(SPEC.digit !== undefined ? { lockedDigit: SPEC.digit } : {}),
+      payouts,
     });
     const candidate: ApexCandidate = {
       symbol: activeSymbol,
@@ -633,6 +751,7 @@ async function runLoop(config: ApexConfig) {
       fireRate: read.fireRate,
       breakEven: read.breakEven,
       payout: read.payout,
+      payouts,
       params: read.params,
       diag: read.diag,
       thinData: read.thinData,
@@ -670,24 +789,53 @@ async function runLoop(config: ApexConfig) {
       return { migrated: false };
     }
     const markets = AUTOMATED_DERIV_MARKETS.filter(m => m.digitEnabled);
-    let best: ApexCandidate | null = null;
-    let incumbentEdge = Number.NEGATIVE_INFINITY;
+    // Pass 1 — flat-payout scores; pass 2 — live payout vectors for the
+    // incumbent + leaders, so migration compares EV against the quotes the
+    // account actually gets (bounded to keep the sweep fast).
+    const flat: Array<{ m: (typeof markets)[number]; c: ApexCandidate }> = [];
     for (const m of markets) {
       const digits = await readDigits(m.symbol);
       if (digits.length < MIN_LIVE_DIGITS) continue;
       const read = scoreMarket(digits, APEX_ONLY_PACE, {
         ...(SPEC.digit !== undefined ? { lockedDigit: SPEC.digit } : {}),
       });
-      const c: ApexCandidate = {
-        symbol: m.symbol, displayName: m.displayName, digit: read.digit,
-        verdict: read.verdict, confidence: read.confidence, edgePerDollar: read.edgePerDollar,
-        hitRate: read.hitRate, hitRateLower: read.hitRateLower, shots: read.shots,
-        fireRate: read.fireRate, breakEven: read.breakEven, payout: read.payout,
-        params: read.params, diag: read.diag, thinData: read.thinData,
-      };
-      if (m.symbol === activeSymbol) incumbentEdge = c.edgePerDollar;
-      if (!best || VERDICT_RANK[c.verdict] < VERDICT_RANK[best.verdict]
-          || (c.verdict === best.verdict && c.edgePerDollar > best.edgePerDollar)) best = c;
+      flat.push({
+        m,
+        c: {
+          symbol: m.symbol, displayName: m.displayName, digit: read.digit,
+          verdict: read.verdict, confidence: read.confidence, edgePerDollar: read.edgePerDollar,
+          hitRate: read.hitRate, hitRateLower: read.hitRateLower, shots: read.shots,
+          fireRate: read.fireRate, breakEven: read.breakEven, payout: read.payout,
+          params: read.params, diag: read.diag, thinData: read.thinData,
+        },
+      });
+    }
+    const rankedFlat = [...flat].sort((a, b) =>
+      VERDICT_RANK[a.c.verdict] - VERDICT_RANK[b.c.verdict] || b.c.edgePerDollar - a.c.edgePerDollar);
+    const quoteSymbols = new Set<string>([activeSymbol, ...rankedFlat.slice(0, 5).map(x => x.m.symbol)]);
+    const quoteMap = await quoteManyPayouts([...quoteSymbols], currency);
+    let best: ApexCandidate | null = null;
+    let incumbentEdge = Number.NEGATIVE_INFINITY;
+    for (const { m, c } of flat) {
+      let candidate = c;
+      const payouts = quoteMap.get(m.symbol);
+      if (payouts) {
+        const digits = await readDigits(m.symbol);
+        const re = scoreMarket(digits, APEX_ONLY_PACE, {
+          ...(SPEC.digit !== undefined ? { lockedDigit: SPEC.digit } : {}),
+          payouts,
+        });
+        candidate = {
+          ...c,
+          digit: re.digit, verdict: re.verdict, confidence: re.confidence,
+          edgePerDollar: re.edgePerDollar, hitRate: re.hitRate, hitRateLower: re.hitRateLower,
+          shots: re.shots, fireRate: re.fireRate, breakEven: re.breakEven, payout: re.payout,
+          payouts, params: re.params, diag: re.diag,
+        };
+      }
+      if (m.symbol === activeSymbol) incumbentEdge = candidate.edgePerDollar;
+      if (!best || VERDICT_RANK[candidate.verdict] < VERDICT_RANK[best.verdict]
+          || (candidate.verdict === best.verdict && candidate.edgePerDollar > best.edgePerDollar)) best = candidate;
     }
     if (best && best.symbol !== activeSymbol
         && best.verdict !== "thin"
@@ -801,7 +949,13 @@ async function runLoop(config: ApexConfig) {
       }
       if (live && newTicks > 0) {
         // ONE valve observation per tick — exactly as the scan replayed it.
-        const entry = live.decide(digits, tailIdx, { recovery: inRecovery });
+        // The live payout vector rides along so the digit choice is the
+        // EV-optimal one (argmax p·pay over the full vector), matching the
+        // scan's held-out EV pick.
+        const entry = live.decide(digits, tailIdx, {
+          recovery: inRecovery,
+          ...(SPEC.digit === undefined && livePayouts ? { payouts: livePayouts } : {}),
+        });
         lastEntry = entry;
         decidedTicks++;
       }
@@ -853,39 +1007,29 @@ async function runLoop(config: ApexConfig) {
       // The valve already opened on the fused probability — this block cannot
       // un-fire the shot, it can only point it better. Deriv quotes per-digit
       // Matches payouts (8.2×–9.4× typical), so the SAME probability buys
-      // different edge on different digits: quote the top-3 fused candidates
-      // in parallel and fire the digit with the highest p·payout. Only in
-      // AI-digit mode — a user-locked digit is sovereign and never overridden.
+      // different edge on different digits. Quote the FULL 10-digit vector
+      // (60s-cached — the refit already warmed it) and fire argmax p·payout.
+      // On a statistically flat posterior this concentrates every shot on the
+      // fattest quote on the board — at fair p = 10% that is −6%/shot instead
+      // of −11%/shot, a ~44% reduction in bleed with zero change to the fire
+      // budget. Only in AI-digit mode — a user-locked digit is sovereign.
       let payout = APEX_MATCH_PAYOUT;
       let firedP = entry.p;
       if (SPEC.digit === undefined) {
-        const leaders = entry.fused
-          .map((p, d) => ({ p, d }))
-          .sort((a, b) => b.p - a.p)
-          .slice(0, 3);
-        const quoted = await Promise.all(leaders.map(c =>
-          resolveRecoveryPayout({
-            symbol: activeSymbol,
-            contractType: APEX_CONTRACT_TYPE,
-            barrier: c.d,
-            duration: 1,
-            durationUnit: "t",
-            currency,
-          }).then(q => ({ ...c, pay: q.payoutMultiplier || APEX_MATCH_PAYOUT }))
-            .catch(() => ({ ...c, pay: APEX_MATCH_PAYOUT }))
-        ));
-        let best = quoted[0];
-        if (best) {
-          for (const q of quoted) {
-            if (q.p * q.pay > best.p * best.pay) best = q;
-          }
-          if (best.d !== fireDigit) {
-            logger.info({ from: fireDigit, to: best.d, p: best.p, pay: best.pay }, "Echo Apex EV digit upgrade");
-          }
-          fireDigit = best.d;
-          payout = best.pay;
-          firedP = best.p;
+        const quotes = await quoteDigitPayouts(activeSymbol, currency);
+        let best = { d: fireDigit, p: firedP, pay: payout };
+        for (let d = 0; d < 10; d++) {
+          const pay = quotes[d];
+          if (!Number.isFinite(pay) || pay <= 0) continue;
+          const ev = entry.fused[d] * pay;
+          if (ev > best.p * best.pay) best = { d, p: entry.fused[d], pay };
         }
+        if (best.d !== fireDigit) {
+          logger.info({ from: fireDigit, to: best.d, p: best.p, pay: best.pay }, "Echo Apex EV digit upgrade");
+        }
+        fireDigit = best.d;
+        payout = best.pay;
+        firedP = best.p;
       } else {
         const payoutQuote = await resolveRecoveryPayout({
           symbol: activeSymbol,

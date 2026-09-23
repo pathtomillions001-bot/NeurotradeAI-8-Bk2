@@ -11,7 +11,11 @@
 import { Router } from "express";
 import { logger } from "../lib/logger";
 import { AUTOMATED_DERIV_MARKETS, isAutomatedMarket } from "../lib/deriv";
-import type { ParityForgeParams, ParityForgeSideMode } from "../lib/parity-forge-analysis";
+import {
+  PARITY_FORGE_LENS_COUNT,
+  type ParityForgeParams,
+  type ParityForgeSideMode,
+} from "../lib/parity-forge-analysis";
 import {
   PARITY_FORGE_BOT_ID,
   getStatus,
@@ -38,13 +42,28 @@ function parseParams(raw: any): ParityForgeParams | null {
   const w = Array.isArray(raw.weights) ? raw.weights.map(num) : null;
   const tau = num(raw.tau);
   const normalInitBar = num(raw.normalInitBar);
-  if (!w || w.length !== 4 || w.some((v: number | null) => v === null)) return null;
   if (tau === null || normalInitBar === null) return null;
+  if (!w || w.some((v: number | null) => v === null)) return null;
   if (tau < 0.3 || tau > 3) return null;
-  const sum = (w[0] as number) + (w[1] as number) + (w[2] as number) + (w[3] as number);
+  // The scan fits ONE weight per lens — currently 6
+  // [parityMkv, runHazard, digitPair, suffix, parityCTW, echo]. The card that
+  // /start receives is the card the scan produced, so its length must equal
+  // the live lens count. Legacy 4-lens cards (pre-CTW/echo consoles and older
+  // stored scans) are accepted and migrated: the original four keep 60% of the
+  // mass (scaled proportionally) and the two newer lenses share the rest —
+  // the same neutral migration the Apex console uses for its legacy vectors.
+  // Anything else is malformed and refused.
+  let clean = w as number[];
+  if (clean.length === 4) {
+    const legacySum = clean.reduce((a, b) => a + b, 0) || 1;
+    const head = clean.map(v => (v / legacySum) * 0.6);
+    clean = [...head, 0.2, 0.2];
+  }
+  if (clean.length !== PARITY_FORGE_LENS_COUNT) return null;
+  const sum = clean.reduce((a, b) => a + b, 0);
   if (!(sum > 0)) return null;
   return {
-    weights: [(w[0] as number) / sum, (w[1] as number) / sum, (w[2] as number) / sum, (w[3] as number) / sum],
+    weights: clean.map(v => v / sum),
     tau,
     normalInitBar: Math.min(0.95, Math.max(0, normalInitBar)),
   };

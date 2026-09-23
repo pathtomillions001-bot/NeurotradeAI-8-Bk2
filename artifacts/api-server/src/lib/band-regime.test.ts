@@ -297,4 +297,42 @@ describe("Market Scout", () => {
     const aged = scout.scores("normal", read, t0).find(s => s.symbol === "DEAD")!;
     assert.ok(Math.abs(aged.card - 0.05) < 1e-9, `aged card=${aged.card}`);
   });
+
+  it("urgency waives dwell/cooldown and relaxes the margin, but never flees into a dead tape", () => {
+    const { scout, read } = makeScout({ HOT: HOT80, DEAD: DEAD80, NEUTRAL: NEUTRAL80 });
+    const t0 = Date.now();
+    // Sitting on NEUTRAL for 3 s (dwell NOT satisfied), switched 20 s ago
+    // (cooldown NOT satisfied). Calm scout: locked in place.
+    scout.enter("NEUTRAL", t0 - 3_000);
+    scout.markSwitch(t0 - 20_000);
+    assert.equal(scout.bestChallenger("normal", read, "NEUTRAL", t0), null);
+    // Starving/bleeding scout: same clocks, the door opens toward HOT.
+    const ch = scout.bestChallenger("normal", read, "NEUTRAL", t0, { level: 1, reason: "starving" });
+    assert.ok(ch, "urgency must waive the anti-flap clocks");
+    assert.equal(ch!.symbol, "HOT");
+    assert.equal(ch!.via, "urgent");
+    // A residual cooldown always remains: 1 s after a switch, even urgent stays put.
+    scout.markSwitch(t0 - 1_000);
+    assert.equal(scout.bestChallenger("normal", read, "NEUTRAL", t0, { level: 1 }), null);
+    // Urgent from HOT when the only alternatives are worse: stay (no dead-tape rescue).
+    const { scout: s2, read: r2 } = makeScout({ HOT: DEAD80, DEAD: DEAD80, NEUTRAL: NEUTRAL80.map(() => 0) });
+    s2.enter("HOT", t0 - 1_000);
+    assert.equal(s2.bestChallenger("normal", r2, "HOT", t0, { level: 1 }), null);
+  });
+
+  it("loss-streak penalties demote a market and decay back", () => {
+    const { scout, read } = makeScout({ HOT: HOT80, DEAD: DEAD80, NEUTRAL: NEUTRAL80 });
+    const t0 = Date.now();
+    const before = scout.scores("normal", read, t0).find(s => s.symbol === "HOT")!;
+    scout.penalize("HOT", 0.03, t0);
+    const after = scout.scores("normal", read, t0).find(s => s.symbol === "HOT")!;
+    assert.ok(Math.abs(before.composite - after.composite - 0.03) < 1e-9, `penalty=${after.penalty}`);
+    assert.ok(Math.abs(after.penalty - 0.03) < 1e-9);
+    // Half-life 4 min by default.
+    const later = scout.scores("normal", read, t0 + 4 * 60_000).find(s => s.symbol === "HOT")!;
+    assert.ok(Math.abs(later.penalty - 0.015) < 1e-9, `decayed=${later.penalty}`);
+    // Stacking is capped.
+    scout.penalize("HOT", 0.5, t0);
+    assert.ok(scout.penaltyOf("HOT", t0) <= 0.08 + 1e-12);
+  });
 });

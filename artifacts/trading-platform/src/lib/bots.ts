@@ -117,7 +117,11 @@ export interface BastionDeployedStatus {
 /** Market Scout leaderboard — the switching engine's top markets right now. */
 export interface BotScoutStatus {
   active: string;
-  top: Array<{ name: string; score: number; live: number }>;
+  top: Array<{ name: string; score: number; live: number; penalty?: number }>;
+  /** Navigator only: 0..1 — how hard the scout is looking for a way out. */
+  urgency?: number;
+  /** Navigator only: why (starving / bleeding on the active tape). */
+  urgencyReason?: string;
 }
 
 export interface BastionWatchStatus {

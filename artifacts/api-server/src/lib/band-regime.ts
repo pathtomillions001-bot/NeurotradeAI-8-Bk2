@@ -394,6 +394,8 @@ export interface ScoutConfig {
   liveWeight?: number;
   cardWeight?: number;
   provenWeight?: number;
+  /** Half-life of loss-streak penalties (default 4 min). */
+  penaltyHalfLifeMs?: number;
 }
 
 export interface ScoutScore {
@@ -403,6 +405,8 @@ export interface ScoutScore {
   live: number;
   card: number;
   proven: number;
+  /** Decayed loss-streak penalty already subtracted from `composite`. */
+  penalty: number;
 }
 
 export interface ScoutChallenger {
@@ -412,6 +416,23 @@ export interface ScoutChallenger {
   activeComposite: number;
   /** True when the flee clause (active tape dead) relaxed the margin. */
   flee: boolean;
+  /** Which clause opened the door: hysteresis (default), flee, or urgency. */
+  via: "margin" | "flee" | "urgent";
+}
+
+/**
+ * Optional urgency signal for `bestChallenger`. When the caller reports that
+ * the active market is STARVING it (no bar-clearing setup for a long stretch)
+ * or BLEEDING it (a fresh loss streak), the anti-flap clocks are waived and
+ * the margin relaxed — those clocks exist to stop flapping between two good
+ * tapes, not to pin the bot to a tape that is giving it nothing. Default
+ * (no urgency) is byte-for-byte the legacy hysteresis rule.
+ */
+export interface ScoutUrgency {
+  /** 0 = calm (legacy rule) … 1 = fully urgent (dwell waived, margin ÷ 4). */
+  level: number;
+  /** Human reason, echoed back in the challenger for the console. */
+  reason?: string;
 }
 
 /**
@@ -450,6 +471,9 @@ export class MarketScout {
   private enteredAt = new Map<string, number>();
   private lastSwitchAt = 0;
   private outcomes = new Map<string, { nH: number; nL: number; rH: number; rL: number }>();
+  /** Decaying per-market penalty ($/$) applied after a loss streak. */
+  private penalties = new Map<string, { amount: number; at: number }>();
+  private readonly penaltyHalfLifeMs: number;
 
   constructor(
     public readonly markets: readonly ScoutMarket[],
@@ -464,6 +488,26 @@ export class MarketScout {
     this.liveWeight = config.liveWeight ?? 0.55;
     this.cardWeight = config.cardWeight ?? 0.3;
     this.provenWeight = config.provenWeight ?? 0.15;
+    this.penaltyHalfLifeMs = config.penaltyHalfLifeMs ?? 4 * 60_000;
+  }
+
+  /**
+   * Punish a market that just cost the bot a streak. The penalty is a plain
+   * $/$ subtraction from that market's composite that halves every
+   * `penaltyHalfLifeMs`, so the market is not banned — it must simply EARN the
+   * seat back rather than keep it by inertia. Stacks (capped) on repeats.
+   */
+  penalize(symbol: string, amount: number, now: number): void {
+    const cur = this.penaltyOf(symbol, now);
+    this.penalties.set(symbol, { amount: Math.min(0.08, cur + amount), at: now });
+  }
+
+  /** Current (decayed) penalty for a market, $/$. */
+  penaltyOf(symbol: string, now: number): number {
+    const p = this.penalties.get(symbol);
+    if (!p) return 0;
+    const v = p.amount * Math.pow(0.5, Math.max(0, now - p.at) / this.penaltyHalfLifeMs);
+    return v < 1e-4 ? 0 : v;
   }
 
   /** Called when the bot starts on a market (or lands on one via a switch). */
@@ -554,6 +598,8 @@ export class MarketScout {
         w += this.provenWeight;
       }
       composite /= w || 1;
+      const penalty = this.penaltyOf(m.symbol, now);
+      composite -= penalty;
 
       out.push({
         symbol: m.symbol,
@@ -562,6 +608,7 @@ export class MarketScout {
         live,
         card: cardTerm,
         proven,
+        penalty,
       });
     }
     out.sort((a, b) => b.composite - a.composite);
@@ -578,19 +625,31 @@ export class MarketScout {
     read: (symbol: string) => ArrayLike<number>,
     activeSymbol: string,
     now: number,
+    urgency?: ScoutUrgency,
   ): ScoutChallenger | null {
     if (this.markets.length < 2) return null;
     const ranked = this.scores(mode, read, now);
     const active = ranked.find((s) => s.symbol === activeSymbol);
     if (!active) return null;
-    const dwellOk = now - (this.enteredAt.get(activeSymbol) ?? 0) >= this.minDwellMs;
-    const cooldownOk = now - this.lastSwitchAt >= this.cooldownMs;
+    const u = clamp01(urgency?.level ?? 0);
+    const urgent = u > 0;
+    // Urgency waives the dwell clock entirely and shrinks the cooldown — a
+    // starving/bleeding tape has forfeited its right to be waited out. A
+    // short residual cooldown always remains so two urgent passes in a row
+    // cannot ping-pong.
+    const dwellOk = urgent || now - (this.enteredAt.get(activeSymbol) ?? 0) >= this.minDwellMs;
+    const effCooldown = urgent ? Math.max(5_000, this.cooldownMs * (1 - 0.75 * u)) : this.cooldownMs;
+    const cooldownOk = now - this.lastSwitchAt >= effCooldown;
     if (!dwellOk || !cooldownOk) return null;
 
     const deadTape = active.live <= 0;
-    const effMargin = deadTape ? this.margin / 2 : this.margin;
+    let effMargin = deadTape ? this.margin / 2 : this.margin;
+    if (urgent) effMargin = Math.min(effMargin, this.margin / (1 + 3 * u));
     for (const s of ranked) {
       if (s.symbol === activeSymbol) continue;
+      // An urgent switch must still land on a tape with a POSITIVE live edge —
+      // fleeing a bad market into an equally dead one is not a rescue.
+      if (urgent && s.live <= 0) break;
       if (s.composite - active.composite >= effMargin) {
         return {
           symbol: s.symbol,
@@ -598,6 +657,7 @@ export class MarketScout {
           composite: s.composite,
           activeComposite: active.composite,
           flee: deadTape,
+          via: urgent ? "urgent" : deadTape ? "flee" : "margin",
         };
       }
       break; // only the TOP challenger is ever considered

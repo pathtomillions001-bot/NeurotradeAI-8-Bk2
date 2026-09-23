@@ -932,12 +932,21 @@ export function OverUnderNavigatorConsole({
             <div className="mt-3 rounded-lg bg-black/20 px-2.5 py-2 space-y-1">
               <p className="flex items-center gap-1 text-[9px] uppercase tracking-widest text-muted-foreground/70">
                 <Shuffle className="h-2.5 w-2.5" /> Market scout · {watch.mode}
+                {(watch.scout.urgency ?? 0) > 0 && (
+                  <span className="ml-auto normal-case tracking-normal text-amber-300">
+                    looking elsewhere · {Math.round((watch.scout.urgency ?? 0) * 100)}%
+                  </span>
+                )}
               </p>
+              {watch.scout.urgencyReason && (
+                <p className="text-[9px] text-amber-200/80">{watch.scout.urgencyReason}</p>
+              )}
               {watch.scout.top.map((s, i) => (
                 <div key={s.name} className="flex items-center gap-2 text-[10px]">
                   <span className="w-3 font-mono text-muted-foreground/60">{i + 1}</span>
                   <span className={`flex-1 font-medium ${s.name === watch.scout!.active ? "text-emerald-300" : "text-white/80"}`}>
                     {s.name}{s.name === watch.scout!.active ? " · on watch" : ""}
+                    {s.penalty ? <span className="ml-1 text-red-300/70">−{(s.penalty * 100).toFixed(1)} streak</span> : null}
                   </span>
                   <span className="font-mono text-muted-foreground">{(s.score * 100).toFixed(1)}</span>
                   <span className={`w-12 text-right font-mono ${(s.live ?? 0) >= 0 ? "text-emerald-300/80" : "text-red-300/80"}`}>
@@ -947,7 +956,8 @@ export function OverUnderNavigatorConsole({
               ))}
               <p className="text-[8px] leading-relaxed text-muted-foreground/60">
                 composite edge per $ — live tape · held-out re-fit card · own fired
-                outcomes. The scout only redirects the fire budget; it never vetoes a shot.
+                outcomes. The bot never lowers its bar to trade: when this tape offers no
+                fair setup (starving) or just cost a streak (bleeding), it hunts other markets.
               </p>
             </div>
           )}

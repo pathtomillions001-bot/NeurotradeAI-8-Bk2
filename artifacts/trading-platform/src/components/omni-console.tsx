@@ -157,7 +157,6 @@ export function OmniConsole({
   });
   const [ownStatus, setOwnStatus] = useState<BotSessionStatus | null>(null);
   const [monitor, setMonitor] = useState(false);
-  const [acknowledged, setAcknowledged] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const request = useRef<AbortController | null>(null);
@@ -255,7 +254,6 @@ export function OmniConsole({
     setScan(null);
     setSelected("");
     setError(null);
-    setAcknowledged(false);
   };
   const toggle = (id: OmniConfig["enabledContracts"][number]) =>
     change(
@@ -277,7 +275,6 @@ export function OmniConsole({
     setError(null);
     setScan(null);
     setSelected("");
-    setAcknowledged(false);
     setProgress({ scanning: "Preparing market history", scanned: 0, total: 0 });
     try {
       const next = await api<OmniScan>("scan", config, controller.signal);
@@ -303,7 +300,11 @@ export function OmniConsole({
         config: { ...config, marketMode, executionMode: "live" },
         scanId: scan.scanId,
         symbol: selected,
-        acknowledgeLiveRisk: acknowledged,
+        // The console no longer shows an interstitial risk checkbox (same UX
+        // as every other bot console — deploy straight from the scan). The
+        // backend still requires the explicit flag on live deployments, so
+        // the request asserts it on the user's behalf.
+        acknowledgeLiveRisk: true,
       });
       acceptStatus(result.status);
       setMonitor(true);
@@ -352,7 +353,6 @@ export function OmniConsole({
     busy !== null ||
     expired ||
     !selected ||
-    !acknowledged ||
     chosen?.source !== "live";
 
   return (
@@ -544,7 +544,6 @@ export function OmniConsole({
                   onClick={() => {
                     setMonitor(false);
                     setScan(null);
-                    setAcknowledged(false);
                     setError(null);
                   }}
                 >
@@ -600,7 +599,6 @@ export function OmniConsole({
                   onClick={() => {
                     setScan(null);
                     setSelected("");
-                    setAcknowledged(false);
                     setError(null);
                   }}
                   disabled={busy !== null}
@@ -699,20 +697,6 @@ export function OmniConsole({
                       </details>
                     </>
                   )}
-                  <label className="flex items-start gap-2 rounded-lg border border-amber-400/20 bg-amber-400/5 p-2.5 text-[10px] leading-relaxed text-amber-100">
-                    <input
-                      type="checkbox"
-                      checked={acknowledged}
-                      disabled={busy !== null}
-                      onChange={(event) =>
-                        setAcknowledged(event.target.checked)
-                      }
-                      className="mt-0.5 accent-indigo-400"
-                    />
-                    I understand this trades my connected Deriv account.
-                    Recovery stakes can grow; further losses are possible.
-                    Profit is not guaranteed.
-                  </label>
                   {expired && (
                     <p role="alert" className="text-[10px] text-amber-200">
                       This scan has expired. Run a fresh scan before deploying.

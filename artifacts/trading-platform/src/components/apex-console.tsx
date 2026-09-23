@@ -26,6 +26,15 @@ import { withTabSession } from "@/lib/tab-session";
 type Step = "config" | "scanning" | "scan-result" | "running";
 type Verdict = "prime" | "viable" | "thin";
 
+// The five fused lenses — order matches the API's weights vector.
+const APEX_LENS_META = [
+  { name: "echo", color: "bg-lime-400" },
+  { name: "hawkes", color: "bg-orange-400" },
+  { name: "suffix", color: "bg-sky-400" },
+  { name: "ctw", color: "bg-fuchsia-400" },
+  { name: "renewal", color: "bg-cyan-400" },
+];
+
 interface Candidate {
   symbol: string;
   displayName: string;
@@ -46,7 +55,7 @@ interface Candidate {
     heatRatio: number;
     memoryOrder: number;
     memorySamples: number;
-    weights: [number, number, number];
+    weights: number[];
     tau: number;
     fireRate: number;
     brierSkill: number;
@@ -288,12 +297,12 @@ export function ApexConsole({ bot, open, onOpenChange, session, onSession }: {
       <div className="flex items-center gap-1.5">
         <span className="text-[8px] uppercase tracking-wider text-muted-foreground/60">lens mix</span>
         <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-black/40 flex">
-          <div className="bg-lime-400" style={{ width: `${c.diag.weights[0] * 100}%` }} title="echo" />
-          <div className="bg-orange-400" style={{ width: `${c.diag.weights[1] * 100}%` }} title="hawkes" />
-          <div className="bg-sky-400" style={{ width: `${c.diag.weights[2] * 100}%` }} title="suffix" />
+          {APEX_LENS_META.map((m, i) => (
+            <div key={m.name} className={m.color} style={{ width: `${(c.diag.weights[i] ?? 0) * 100}%` }} title={m.name} />
+          ))}
         </div>
         <span className="text-[8px] font-mono text-muted-foreground/70">
-          {(c.diag.weights[0] * 100).toFixed(0)}/{(c.diag.weights[1] * 100).toFixed(0)}/{(c.diag.weights[2] * 100).toFixed(0)}
+          {c.diag.weights.map(w => (w * 100).toFixed(0)).join("/")}
         </span>
       </div>
     </div>

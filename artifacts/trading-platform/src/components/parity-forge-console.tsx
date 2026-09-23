@@ -34,6 +34,16 @@ type Step = "config" | "scanning" | "scan-result" | "running";
 type Verdict = "prime" | "viable" | "thin";
 type SideMode = "both" | "even" | "odd";
 
+// The six fused lenses — order matches the API's weights/lenses vectors.
+const PF_LENS_META = [
+  { name: "parityMkv", label: "parity Mkv", color: "bg-cyan-400" },
+  { name: "runHazard", label: "run hazard", color: "bg-amber-400" },
+  { name: "digitPair", label: "digit→par", color: "bg-teal-400" },
+  { name: "suffix", label: "suffix", color: "bg-fuchsia-400" },
+  { name: "parityCTW", label: "CTW 0-12", color: "bg-lime-400" },
+  { name: "echo", label: "echo lag", color: "bg-orange-400" },
+];
+
 interface Candidate {
   symbol: string;
   displayName: string;
@@ -53,7 +63,7 @@ interface Candidate {
   breakEven: number;
   params: any;
   diag: {
-    weights: [number, number, number, number];
+    weights: number[];
     tau: number;
     normalInitBar: number;
     historyUsed: number;
@@ -381,10 +391,9 @@ export function ParityForgeConsole({ bot, open, onOpenChange, session, onSession
       <div className="flex items-center gap-1.5">
         <span className="text-[8px] uppercase tracking-wider text-muted-foreground/60">lens mix</span>
         <div className="flex-1 h-1.5 rounded-full overflow-hidden bg-black/40 flex">
-          <div className="bg-cyan-400" style={{ width: `${c.diag.weights[0] * 100}%` }} title="parity markov" />
-          <div className="bg-amber-400" style={{ width: `${c.diag.weights[1] * 100}%` }} title="run hazard" />
-          <div className="bg-teal-400" style={{ width: `${c.diag.weights[2] * 100}%` }} title="digit parity" />
-          <div className="bg-fuchsia-400" style={{ width: `${c.diag.weights[3] * 100}%` }} title="suffix" />
+          {PF_LENS_META.map((m, i) => (
+            <div key={m.name} className={m.color} style={{ width: `${(c.diag.weights[i] ?? 0) * 100}%` }} title={m.name} />
+          ))}
         </div>
         <span className="text-[8px] font-mono text-muted-foreground/70">
           {c.diag.weights.map(w => (w * 100).toFixed(0)).join("/")}
@@ -410,7 +419,7 @@ export function ParityForgeConsole({ bot, open, onOpenChange, session, onSession
   type ParityForgeWatchStatus = {
     phase: string; mode: string; sideLabel: string; altLabel: string;
     p: number; altP: number; bar: number; ready: boolean;
-    pairRisk: number; qLL: number; lenses: [number, number, number, number];
+    pairRisk: number; qLL: number; lenses: number[];
     recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
     reason: string; switched: boolean; ticksWatched: number; confidence: number; verdict: string;
   };
@@ -661,9 +670,9 @@ export function ParityForgeConsole({ bot, open, onOpenChange, session, onSession
                         </div>
                       )}
 
-                      <div className="grid grid-cols-4 gap-1 pt-1 border-t border-white/5">
-                        { (["parity Mkv", "run hazard", "digit→par", "suffix"] as const).map((lbl, i) => (
-                          <Stat key={lbl} label={lbl} value={`${((watch.lenses[i] ?? 0) * 100).toFixed(0)}%`} />
+                      <div className="grid grid-cols-3 gap-1 pt-1 border-t border-white/5">
+                        { PF_LENS_META.map((m, i) => (
+                          <Stat key={m.name} label={m.label} value={`${((watch.lenses[i] ?? 0) * 100).toFixed(0)}%`} />
                         ))}
                       </div>
                     </div>

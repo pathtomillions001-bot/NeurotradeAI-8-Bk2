@@ -65,6 +65,7 @@ import {
   PARITY_FORGE_NORMAL_CONTRACTS,
   PARITY_FORGE_RECOVERY_BAR,
   PARITY_FORGE_RECOVERY_CONTRACTS,
+  type ParityForgeDiag,
   ParityForgePolicy,
   scoreParityForgeMarket,
   type ParityForgeContract,
@@ -118,14 +119,7 @@ export interface ParityForgeCandidate {
   fireRatePer100: number;
   breakEven: number;
   params: ParityForgeParams;
-  diag: {
-    weights: [number, number, number, number];
-    tau: number;
-    normalInitBar: number;
-    historyUsed: number;
-    qLL: { even: number; odd: number };
-    fireRatePer100: number;
-  };
+  diag: ParityForgeDiag;
   thinData: boolean;
   metrics: ParityForgeReplayMetrics;
 }
@@ -180,7 +174,7 @@ export interface ParityForgeWatch {
   ready: boolean;
   pairRisk: number;
   qLL: number;
-  lenses: [number, number, number, number];
+  lenses: number[];
   /** Always-on recovery radar: the best recovery shot right now. */
   recoveryRadar: Array<{ label: string; p: number; utility: number; ready: boolean }>;
   reason: string;
@@ -258,7 +252,7 @@ function freshWatch(): ParityForgeWatch {
     ready: false,
     pairRisk: 0,
     qLL: 0,
-    lenses: [0, 0, 0, 0],
+    lenses: [0, 0, 0, 0, 0, 0],
     recoveryRadar: [],
     reason: "",
     switched: false,
@@ -574,7 +568,7 @@ function applyDecisionToWatch(dec: ParityForgeDecision, radar: ParityForgeWatch[
   session.watch.ready = dec.ready;
   session.watch.pairRisk = dec.read?.pairRisk ?? 0;
   session.watch.qLL = dec.read?.qLL ?? 0;
-  session.watch.lenses = dec.read?.lenses ?? [0, 0, 0, 0];
+  session.watch.lenses = dec.read?.lenses ?? [0, 0, 0, 0, 0, 0];
   session.watch.recoveryRadar = radar;
   session.watch.reason = dec.reason;
 }
@@ -861,7 +855,7 @@ async function runLoop(config: ParityForgeConfig) {
       }
 
       // ── SOVEREIGNTY — re-asserted immediately before every buy ──
-      const fireContract: ParityForgeContract = entry.side!;
+      let fireContract: ParityForgeContract = entry.side!;
       const expectSet = inRecovery ? PARITY_FORGE_RECOVERY_CONTRACTS : PARITY_FORGE_NORMAL_CONTRACTS;
       if (!isAutomatedMarket(activeSymbol) || !expectSet.some(c => c.id === fireContract.id)) {
         session.running = false;
@@ -871,14 +865,51 @@ async function runLoop(config: ParityForgeConfig) {
         return;
       }
 
-      const payoutQuote = await resolveRecoveryPayout({
-        symbol: activeSymbol,
-        contractType: fireContract.contractType,
-        duration: PARITY_FORGE_DURATION,
-        durationUnit: PARITY_FORGE_DURATION_UNIT,
-        currency,
-      });
-      const payout = payoutQuote.payoutMultiplier || fireContract.payout;
+      // ── EV-AWARE SIDE CHOICE (selection upgrade, never a gate) ──
+      // The selector already committed to firing this tick — this block only
+      // points the shot. Even/Odd payouts are quoted separately and drift
+      // apart (1.90×–2.00×), so the same fused probability buys different
+      // edge on different sides: quote BOTH sides in parallel and fire the
+      // one with the highest p·payout. Only when the user armed BOTH sides —
+      // a one-sided deployment keeps its sovereign side.
+      let firedRead = entry.read;
+      let sideQuotes: Array<{ c: ParityForgeContract; pay: number }> = [];
+      if (SPEC.sideMode === "both") {
+        sideQuotes = await Promise.all(expectSet.map(c =>
+          resolveRecoveryPayout({
+            symbol: activeSymbol,
+            contractType: c.contractType,
+            duration: PARITY_FORGE_DURATION,
+            durationUnit: PARITY_FORGE_DURATION_UNIT,
+            currency,
+          }).then(q => ({ c, pay: q.payoutMultiplier || c.payout }))
+            .catch(() => ({ c, pay: c.payout }))
+        ));
+        const pOf = (id: string): number =>
+          entry.side && entry.side.id === id ? (entry.read?.p ?? 0)
+          : entry.alt && entry.alt.contract.id === id ? entry.alt.p
+          : 0;
+        let best = sideQuotes.find(q => q.c.id === fireContract.id);
+        for (const q of sideQuotes) {
+          if (pOf(q.c.id) * q.pay > pOf(best!.c.id) * best!.pay) best = q;
+        }
+        if (best && best.c.id !== fireContract.id) {
+          logger.info({ from: fireContract.id, to: best.c.id, pay: best.pay }, "Parity Forge EV side upgrade");
+          fireContract = best.c;
+          firedRead = fireContract.id === entry.side?.id ? entry.read : entry.alt;
+        }
+      }
+      if (!sideQuotes.some(q => q.c.id === fireContract.id)) {
+        const payoutQuote = await resolveRecoveryPayout({
+          symbol: activeSymbol,
+          contractType: fireContract.contractType,
+          duration: PARITY_FORGE_DURATION,
+          durationUnit: PARITY_FORGE_DURATION_UNIT,
+          currency,
+        });
+        sideQuotes = [{ c: fireContract, pay: payoutQuote.payoutMultiplier || fireContract.payout }];
+      }
+      const payout = sideQuotes.find(q => q.c.id === fireContract.id)!.pay;
 
       if (inRecovery) {
         try {
@@ -898,7 +929,7 @@ async function runLoop(config: ParityForgeConfig) {
 
       const sharedStep = recoveryEngine.getState().recoveryStep;
       session.watch.phase = "firing";
-      session.watch.reason = `firing ${fireContract.label} on ${activeName}`;
+      session.watch.reason = `firing ${fireContract.label} on ${activeName} (EV-quoted ${payout.toFixed(2)}×)`;
       session.currentStake = stake;
       session.currentMarket = activeName;
       session.currentContractType = fireContract.contractType;
@@ -908,8 +939,9 @@ async function runLoop(config: ParityForgeConfig) {
       broadcast();
 
       const reason = `[Parity Forge${inRecovery ? " RECOVERY" : ""}] ${fireContract.label} on ${activeName} · ` +
-        `P(${(entry.read!.p * 100).toFixed(1)}%) vs bar(${(entry.bar * 100).toFixed(1)}%) · ` +
-        `pair-risk ${(entry.read!.pairRisk * 100).toFixed(0)}% · qLL ${(entry.read!.qLL * 100).toFixed(0)}% · ` +
+        `P(${((firedRead?.p ?? 0) * 100).toFixed(1)}%) vs bar(${(entry.bar * 100).toFixed(1)}%) · ` +
+        `EV-quoted payout ${payout.toFixed(2)}× · ` +
+        `pair-risk ${((firedRead?.pairRisk ?? 0) * 100).toFixed(0)}% · qLL ${((firedRead?.qLL ?? 0) * 100).toFixed(0)}% · ` +
         `no-ratchet bar`;
 
       const [journaled] = await db.insert(tradesTable).values({
@@ -920,7 +952,7 @@ async function runLoop(config: ParityForgeConfig) {
         stake: String(Math.round(stake * 100) / 100),
         direction: "hold",
         status: "open",
-        aiConfidence: String(Math.round(entry.read!.p * 100)),
+        aiConfidence: String(Math.round((firedRead?.p ?? 0) * 100)),
         aiRiskScore: "15",
         isAutonomous: true,
         agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${reason}`,

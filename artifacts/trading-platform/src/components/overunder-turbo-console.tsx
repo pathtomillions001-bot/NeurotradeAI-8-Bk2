@@ -379,18 +379,18 @@ export function OverUnderTurboConsole({
                     </div>
 
                     {/* The two deploy buttons — LOCKED or SWITCHING */}
-                    <div className="grid grid-cols-1 gap-2">
+                    <div className="grid grid-cols-2 gap-2">
                       <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
                               className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
                         <Lock className="w-4 h-4 mr-2" />
-                        Locked — {label(scanResult.best.normal)} / {label(scanResult.best.recovery)} on {scanResult.best.displayName}
+                        Locked
                       </Button>
                       <Button onClick={() => handleStart(scanResult.best!, "switching")} disabled={loading}
                               variant="outline" className={`w-full h-10 ${a.outlineBtn} text-xs font-bold`}>
                         <ArrowRightLeft className="w-4 h-4 mr-2" />
-                        Switching — auto-leave only if this market turns bad
+                        Switching
                       </Button>
-                      <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
+                      <p className="col-span-2 text-[9px] text-muted-foreground/60 leading-relaxed">
                         Locked never changes market. Switching keeps these exact barriers and moves
                         ONLY when this market stops being favorable — trading never pauses for a
                         healthy tape.

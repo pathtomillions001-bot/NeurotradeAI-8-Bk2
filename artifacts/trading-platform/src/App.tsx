@@ -16,7 +16,6 @@ import Connect from "./pages/connect";
 import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
-import DbotStudio from "./pages/dbot-studio";
 import Bots from "./pages/bots";
 import { onSessionChange, withTabSession } from "@/lib/tab-session";
 import {
@@ -240,7 +239,6 @@ function Router() {
         <Route path="/settings" component={Settings} />
         <Route path="/connect" component={Connect} />
         <Route path="/risk-calculator" component={RiskCalculator} />
-        <Route path="/dbot-studio" component={DbotStudio} />
         <Route component={NotFound} />
       </Switch>
     </Layout>

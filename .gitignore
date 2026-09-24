@@ -54,12 +54,3 @@ cookie*.txt
 .local/
 .data/
 **/.data/
-
-# Vendored Deriv bot builder (fork) — build outputs; sources stay in git
-vendor/binary-bot/node_modules/
-vendor/binary-bot/www/
-vendor/binary-bot/blockly-translations/
-vendor/binary-bot/temp/
-
-# Embedded builder bundle synced into the web app (rebuilt by @workspace/dbot-builder)
-artifacts/trading-platform/public/dbot/

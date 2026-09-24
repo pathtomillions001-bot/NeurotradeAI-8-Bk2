@@ -39,7 +39,6 @@ import parityForgeRouter from "./parity-forge";
 import surgeRouter from "./surge";
 import navigatorRouter from "./overunder-navigator";
 import turboRouter from "./overunder-turbo";
-import dbotRouter from "./dbot";
 import * as omni from "../lib/omni-engine";
 import omniRouter from "./omni";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
@@ -63,7 +62,6 @@ router.use("/parity-forge", parityForgeRouter);
 router.use("/surge", surgeRouter);
 router.use("/overunder-navigator", navigatorRouter);
 router.use("/overunder-turbo", turboRouter);
-router.use("/dbot", dbotRouter);
 router.use("/omni", omniRouter);
 
 interface ParsedBotBody {

@@ -62,7 +62,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { runWithSession } from "./session";
+import { createSessionScoped, runWithSession } from "./session";
 import {
   antiPatternPenalty,
   botPrecisionScore,
@@ -170,7 +170,7 @@ interface AntiPatternRecord {
 // step come from the shared account ledger. What is local: the anti-pattern
 // memory used by the sniper gate's decaying penalty, and display counters.
 
-let session: {
+interface SpecialistSessionState {
   running: boolean;
   sessionId: string | null;
   config: BotConfig | null;
@@ -195,22 +195,37 @@ let session: {
   lastSide?: BotContractType;
   /** Digit traded last (match/differ bots) — feeds the digit hysteresis. */
   lastDigit?: number;
-} = {
-  running: false,
-  sessionId: null,
-  config: null,
-  totalProfit: 0,
-  tradeCount: 0,
-  winCount: 0,
-  lossCount: 0,
-  currentStake: 0,
-  patternTrades: [],
-  consecutiveRecoveryLosses: 0,
-  topMarkets: [],
-  stopRequested: false,
-  lastEntropyBits: 3.32,
-  lastEv: 0,
-};
+}
+
+function freshSpecialistSession(): SpecialistSessionState {
+  return {
+    running: false,
+    sessionId: null,
+    config: null,
+    totalProfit: 0,
+    tradeCount: 0,
+    winCount: 0,
+    lossCount: 0,
+    currentStake: 0,
+    patternTrades: [],
+    consecutiveRecoveryLosses: 0,
+    topMarkets: [],
+    stopRequested: false,
+    lastEntropyBits: 3.32,
+    lastEv: 0,
+  };
+}
+
+// ── ONE STATE PER ACCOUNT SESSION ─────────────────────────────────────────────
+// This was previously a module-level singleton shared by ALL five specialist
+// bots AND every account: starting Match Sniper for one account overwrote Parity
+// Sentinel's session on another (config, stake, counters, running flag), and a
+// stop in one account killed the other account's bot. Every read and write of
+// `session` now resolves through AsyncLocalStorage to the CALLING account's own
+// state, so each connected Deriv account runs its own bot independently.
+// `replaceSession()` (used by startSession) resets only this account's state.
+const { state: session, replace: replaceSession } =
+  createSessionScoped<SpecialistSessionState>(freshSpecialistSession);
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -318,7 +333,7 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
   // always belongs to whichever engine is running.
   resetSignalValue();
 
-  session = {
+  replaceSession({
     running:      true,
     sessionId:    `bot_${config.botId}_${Date.now()}`,
     config,
@@ -337,7 +352,7 @@ export async function startSession(config: BotConfig): Promise<{ ok: boolean; er
     lastEntropyBits: 3.32,
     lastEv: 0,
     lastDigit: undefined,
-  };
+  });
 
   // Self-learning calibration: load this bot's own trade history so its
   // probabilities are calibrated against its own track record from the very
@@ -745,6 +760,16 @@ async function runLoop(config: BotConfig) {
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
   recoveryEngine.setPersistenceSession(ownerSessionId);
+
+  // Read THIS account's persisted recovery ledger (the recovery journal) before
+  // the first trade. Without this, a restart/redeploy left the engine blind to
+  // debt another engine had already recorded: it re-opened normal trades and
+  // repeated the same recovery stake while the journal still showed the loss.
+  const persistedRecovery = (settings[0] as any)?.recoveryStateJson;
+  if (persistedRecovery) {
+    try { recoveryEngine.hydrateStateIfNeeded(persistedRecovery); }
+    catch { /* malformed row — this account's ledger starts fresh */ }
+  }
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";

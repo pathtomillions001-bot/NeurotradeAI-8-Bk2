@@ -21,10 +21,12 @@
  */
 
 import { db } from "@workspace/db";
-import { accountsTable, tradesTable } from "@workspace/db";
+import { accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { fetchDerivProfitTable } from "./deriv";
 import { logger } from "./logger";
+import { runWithSession } from "./session";
+import * as recoveryEngine from "./agents/recovery-engine";
 
 /** Trades older than this that are still `open` are considered unsettled. */
 const RECONCILE_AFTER_MS = 90_000;
@@ -135,6 +137,15 @@ export async function reconcileUnsettledTrades(): Promise<number> {
         const token = account?.bearerToken ?? account?.token ?? null;
         if (!token || !account) continue;
 
+        // Recovery parameters for THIS account, so a settled outcome steps the
+        // same step cap the engine that opened the trade would have used.
+        const settingsRows = await db
+          .select()
+          .from(settingsTable)
+          .where(eq(settingsTable.sessionId, sessionId))
+          .limit(1);
+        const maxRecoverySteps = Number((settingsRows[0] as any)?.maxRecoverySteps ?? 3) || 3;
+
         const transactions = await fetchDerivProfitTable(
           token,
           account.derivAccountId ?? account.loginId,
@@ -166,6 +177,26 @@ export async function reconcileUnsettledTrades(): Promise<number> {
             })
             .where(eq(tradesTable.id, row.id));
           settled++;
+          // A REAL money outcome must reach the shared recovery ledger. This row
+          // was abandoned (open/error) by the engine that opened it, so without
+          // this the loss never grew the debt and the engine's next recovery
+          // trade repeated the SAME stake — and the journal showed a loss the
+          // ledger never knew about. Executed under the trade's OWN session, so
+          // it can only ever touch this account's ledger.
+          try {
+            runWithSession(sessionId, () => {
+              recoveryEngine.setPersistenceSession(sessionId);
+              if (!recoveryEngine.isTrackedContract(row.contractType)) return;
+              const payoutMultiplier = won && buyPrice > 0
+                ? Math.round(((buyPrice + profit) / buyPrice) * 1000) / 1000
+                : 1;
+              recoveryEngine.recordOutcome(
+                won, profit, buyPrice, maxRecoverySteps, row.contractType, payoutMultiplier,
+              );
+            });
+          } catch (ledgerErr) {
+            logger.warn({ ledgerErr, tradeId: row.id }, "Reconciler could not update the recovery ledger");
+          }
           logger.info(
             { tradeId: row.id, contractId: tx.contract_id, won, profit },
             "Reconciler settled an interrupted trade from Deriv's profit table",

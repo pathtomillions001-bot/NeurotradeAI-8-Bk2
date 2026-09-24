@@ -63,7 +63,8 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { runWithSession } from "./session";
+import { createSessionScoped, runWithSession } from "./session";
+import { registerBotEngine, runningOtherEngines } from "./engine-registry";
 import type { RecoveryTradeRecord } from "./speed-recovery-state";
 
 export { recordRecoveryOutcome } from "./speed-recovery-state";
@@ -180,7 +181,7 @@ export interface SpeedAIStatus {
 // for the sniper gate's decaying penalty) and a display counter. Neither of
 // these decides normal-vs-recovery mode or stake size.
 
-let session: {
+interface SpeedAISessionState {
   running: boolean;
   sessionId: string | null;
   config: SpeedAIConfig | null;
@@ -201,22 +202,42 @@ let session: {
   stopRequested: boolean;
   lastEntropyBits: number;
   lastEv: number;
-} = {
-  running: false,
-  sessionId: null,
-  config: null,
-  totalProfit: 0,
-  tradeCount: 0,
-  winCount: 0,
-  lossCount: 0,
-  currentStake: 0,
-  patternTrades: [],
-  consecutiveRecoveryLosses: 0,
-  topMarkets: [],
-  stopRequested: false,
-  lastEntropyBits: 3.32,
-  lastEv: 0,
-};
+}
+
+function freshSpeedAISession(): SpeedAISessionState {
+  return {
+    running: false,
+    sessionId: null,
+    config: null,
+    totalProfit: 0,
+    tradeCount: 0,
+    winCount: 0,
+    lossCount: 0,
+    currentStake: 0,
+    patternTrades: [],
+    consecutiveRecoveryLosses: 0,
+    topMarkets: [],
+    stopRequested: false,
+    lastEntropyBits: 3.32,
+    lastEv: 0,
+  };
+}
+
+// ── ONE STATE PER ACCOUNT SESSION ─────────────────────────────────────────────
+// This was previously a module-level singleton, so starting the FAB for one
+// account silently overwrote every other account's session — its stake,
+// counters, config and running flag. Every read and write of `session` below
+// now resolves through AsyncLocalStorage to the CALLING account's own state,
+// so two accounts can run the FAB concurrently without interference.
+// `replaceSession()` (used by startSession) resets only this account's state.
+const { state: session, replace: replaceSession } =
+  createSessionScoped<SpeedAISessionState>(freshSpeedAISession);
+
+// Publish a cheap running-probe for THIS account's session, so every other bot
+// engine's "one engine at a time" guard can see the FAB as well (and vice
+// versa). The probe is read under the CALLING session's context, so it only ever
+// reports the FAB running on the caller's own account.
+registerBotEngine("neuroai", () => ({ running: session.running, name: "NeuroAI Quantum FAB" }));
 
 // ── Mathematical & Statistical Subsystems ─────────────────────────────────────
 
@@ -1484,7 +1505,9 @@ export function stopSession() {
   session.stopRequested = true;
   session.running       = false;
   session.message       = "Session stopped by user";
-  releaseTradingOwnership("neuroai");
+  // Release ONLY this account's lock: `session` is session-scoped, so this
+  // resolves to the session being stopped — never another account's.
+  releaseTradingOwnership("neuroai", session.config?.ownerSessionId);
   broadcast();
   logger.info("NeuroAI FAB session stopped");
 }
@@ -1492,13 +1515,25 @@ export function stopSession() {
 export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean; error?: string }> {
   if (session.running) return { ok: false, error: "A NeuroAI session is already active" };
 
+  // Another bot engine (specialist bot, Omni, Echo Apex, Bastion, …) already
+  // trading THIS account would race the same recovery ledger. One ledger = one
+  // engine, per account — other accounts are unaffected (the probes resolve
+  // against the caller's own session).
+  const otherEngines = runningOtherEngines("neuroai");
+  if (otherEngines.length > 0) {
+    return {
+      ok: false,
+      error: `${otherEngines[0]!.name} is already trading on this account. Stop it first — one engine at a time owns the shared recovery ledger.`,
+    };
+  }
+
   // ── Single-executor guard ──────────────────────────────────────────────────
   // Recovery debt is account-level and lives in one shared ledger. If the main
   // autonomous engine is currently executing trades, a second executor here
   // would race that ledger (two engines sizing stakes off the same debt at the
   // same time) — this was the root cause of the normal/recovery trade mix-up.
-  if (!acquireTradingOwnership("neuroai")) {
-    const owner = currentTradingOwner();
+  if (!acquireTradingOwnership("neuroai", config.ownerSessionId)) {
+    const owner = currentTradingOwner(config.ownerSessionId);
     const label = owner ? tradingOwnerLabel(owner) : "another engine";
     return {
       ok: false,
@@ -1506,11 +1541,11 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
     };
   }
 
-  if (config.stake < 0.35)    { releaseTradingOwnership("neuroai"); return { ok: false, error: "Minimum stake is $0.35" }; }
-  if (config.stopLoss <= 0)   { releaseTradingOwnership("neuroai"); return { ok: false, error: "Stop loss must be positive" }; }
-  if (config.takeProfit <= 0) { releaseTradingOwnership("neuroai"); return { ok: false, error: "Take profit must be positive" }; }
-  if (config.normalContractTypes.length   === 0) { releaseTradingOwnership("neuroai"); return { ok: false, error: "Select at least one normal contract type" }; }
-  if (config.recoveryContractTypes.length === 0) { releaseTradingOwnership("neuroai"); return { ok: false, error: "Select at least one recovery contract type" }; }
+  if (config.stake < 0.35)    { releaseTradingOwnership("neuroai", config.ownerSessionId); return { ok: false, error: "Minimum stake is $0.35" }; }
+  if (config.stopLoss <= 0)   { releaseTradingOwnership("neuroai", config.ownerSessionId); return { ok: false, error: "Stop loss must be positive" }; }
+  if (config.takeProfit <= 0) { releaseTradingOwnership("neuroai", config.ownerSessionId); return { ok: false, error: "Take profit must be positive" }; }
+  if (config.normalContractTypes.length   === 0) { releaseTradingOwnership("neuroai", config.ownerSessionId); return { ok: false, error: "Select at least one normal contract type" }; }
+  if (config.recoveryContractTypes.length === 0) { releaseTradingOwnership("neuroai", config.ownerSessionId); return { ok: false, error: "Select at least one recovery contract type" }; }
 
   // FAB sessions inherit the account's current recovery state — if the shared
   // ledger still holds unrecovered debt (e.g. from autonomous or manual
@@ -1522,7 +1557,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
   // markets as it trades.
   resetSignalValue();
 
-  session = {
+  replaceSession({
     running:      true,
     sessionId:    `neuro_${Date.now()}`,
     config,
@@ -1540,7 +1575,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
       : "Initializing Quantum Analysis Engine…",
     lastEntropyBits: 3.32,
     lastEv: 0,
-  };
+  });
 
   logger.info({ config, inheritedRecovery: sharedRecovery.inRecovery, inheritedDebt: sharedRecovery.unrecoveredAmount }, "NeuroAI FAB session starting");
   broadcast();
@@ -1555,7 +1590,7 @@ export async function startSession(config: SpeedAIConfig): Promise<{ ok: boolean
       session.message = `⚠️ ${friendlyErrorMessage(err)}`;
       broadcast();
     }).finally(() => {
-      releaseTradingOwnership("neuroai");
+      releaseTradingOwnership("neuroai", config.ownerSessionId);
     })
   );
 
@@ -1585,6 +1620,17 @@ async function runLoop(config: SpeedAIConfig) {
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
   recoveryEngine.setPersistenceSession(ownerSessionId);
+
+  // Read THIS account's persisted recovery ledger (the recovery journal) before
+  // the first trade. Without this the FAB opened on the NORMAL stake after a
+  // restart/redeploy even though the account still owed recovery debt, and its
+  // recovery stake never advanced — the "same stake in two recovery trades"
+  // report. Debt recorded by any engine is now honoured by all of them.
+  const persistedRecovery = (settings[0] as any)?.recoveryStateJson;
+  if (persistedRecovery) {
+    try { recoveryEngine.hydrateStateIfNeeded(persistedRecovery); }
+    catch { /* malformed row — this account's ledger starts fresh */ }
+  }
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
@@ -1617,8 +1663,8 @@ async function runLoop(config: SpeedAIConfig) {
     // ── Single-executor guard ────────────────────────────────────────────────
     // If the main autonomous engine has taken over trading, stop instead of
     // racing it against the same shared recovery ledger.
-    if (!hasTradingOwnership("neuroai")) {
-      const owner = currentTradingOwner();
+    if (!hasTradingOwnership("neuroai", ownerSessionId)) {
+      const owner = currentTradingOwner(ownerSessionId);
       session.running = false;
       session.message = `⛔ Session stopped — the ${owner ? tradingOwnerLabel(owner) : "other engine"} is now trading this account. One shared recovery ledger = one trading engine at a time.`;
       broadcast();
@@ -1931,6 +1977,11 @@ async function runLoop(config: SpeedAIConfig) {
     let profit: number;
     let entryPrice = tickManager.getLatestPrice(best.symbol) ?? 0;
     let exitPrice  = entryPrice;
+    // Contract id captured the moment Deriv acknowledges the purchase (if any).
+    // Persisted on the error path below so the trade reconciler can settle the
+    // outcome from Deriv's own journal — and step the shared recovery ledger —
+    // even when this process never got the result.
+    let liveContractId: string | null = null;
 
     if (isLive) {
       try {
@@ -1956,6 +2007,7 @@ async function runLoop(config: SpeedAIConfig) {
           accountId:    accounts[0].derivAccountId ?? accounts[0].loginId,
           barrier:      best.barrier,
         });
+        liveContractId = String(liveResult.contractId);
         const result = await waitForContractResult(
           token!, accounts[0].derivAccountId ?? accounts[0].loginId,
           liveResult.contractId, 30_000,
@@ -1969,7 +2021,7 @@ async function runLoop(config: SpeedAIConfig) {
         logger.warn({ err, symbol: best.symbol }, "NeuroAI live trade execution error — retrying");
         try {
           await db.update(tradesTable).set({
-            status: "error", profit: "0", payout: "0", closedAt: new Date(),
+            status: "error", derivContractId: liveContractId, profit: "0", payout: "0", closedAt: new Date(),
             agentReasoning: `${fabReason} [EXECUTION FAILED: ${friendlyErrorMessage(err, { max: 200 })}]`,
           }).where(eq(tradesTable.id, fabTrade.id));
         } catch { /* best-effort */ }

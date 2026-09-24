@@ -69,7 +69,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { runWithSession } from "./session";
+import { createSessionScoped, runWithSession } from "./session";
 import { registerLiveBot, unregisterLiveBot } from "./live-registry";
 import {
   BASTION_NORMAL_CONTRACTS,
@@ -303,7 +303,16 @@ function freshSession(): SessionState {
   };
 }
 
-let session: SessionState = freshSession();
+// ── ONE STATE PER ACCOUNT SESSION ─────────────────────────────────────────────
+// This was previously a module-level singleton, so starting this engine for one
+// account silently overwrote every other account's session — its stake,
+// counters, config and running flag (and a stop in one account killed the other
+// account's bot). Every read and write of `session` now resolves through
+// AsyncLocalStorage to the CALLING account's own state, so two connected Deriv
+// accounts can run this engine concurrently without interference.
+// `replaceSession()` (used by startSession) resets only this account's state.
+const { state: session, replace: replaceSession } =
+  createSessionScoped<SessionState>(freshSession);
 
 function sleep(ms: number) {
   return new Promise(r => setTimeout(r, ms));
@@ -533,7 +542,7 @@ export async function startSession(config: BastionConfig): Promise<{ ok: boolean
   const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === config.symbol);
   if (!market || !market.digitEnabled) return fail("This bot needs a digit-enabled market");
 
-  session = {
+  replaceSession({
     ...freshSession(),
     running: true,
     sessionId: `bot_bastion_${Date.now()}`,
@@ -546,7 +555,7 @@ export async function startSession(config: BastionConfig): Promise<{ ok: boolean
     message: config.marketMode === "locked"
       ? `Locked on ${config.displayName} — Over 1 / Under 8 out, Over 3 / Under 6 in debt.`
       : `Deployed on ${config.displayName} — recovery may migrate to better markets.`,
-  };
+  });
   if (session.activeRead) {
     session.watch.confidence = session.activeRead.confidence;
     session.watch.verdict = session.activeRead.verdict;
@@ -621,6 +630,16 @@ async function runLoop(config: BastionConfig) {
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
   recoveryEngine.setPersistenceSession(ownerSessionId);
+
+  // Read THIS account's persisted recovery ledger (the recovery journal) before
+  // the first trade. Without this, a restart/redeploy left the engine blind to
+  // debt another engine had already recorded: it re-opened normal trades and
+  // repeated the same recovery stake while the journal still showed the loss.
+  const persistedRecovery = (settings[0] as any)?.recoveryStateJson;
+  if (persistedRecovery) {
+    try { recoveryEngine.hydrateStateIfNeeded(persistedRecovery); }
+    catch { /* malformed row — this account's ledger starts fresh */ }
+  }
 
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;

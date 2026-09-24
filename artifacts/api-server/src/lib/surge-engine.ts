@@ -57,7 +57,7 @@ import {
   currentTradingOwner,
   tradingOwnerLabel,
 } from "./engine-arbiter";
-import { runWithSession } from "./session";
+import { createSessionScoped, runWithSession } from "./session";
 import { registerLiveBot, unregisterLiveBot } from "./live-registry";
 import {
   SURGE_NORMAL_CONTRACTS,
@@ -283,7 +283,16 @@ function freshSession(): SessionState {
   };
 }
 
-let session: SessionState = freshSession();
+// ── ONE STATE PER ACCOUNT SESSION ─────────────────────────────────────────────
+// This was previously a module-level singleton, so starting this engine for one
+// account silently overwrote every other account's session — its stake,
+// counters, config and running flag (and a stop in one account killed the other
+// account's bot). Every read and write of `session` now resolves through
+// AsyncLocalStorage to the CALLING account's own state, so two connected Deriv
+// accounts can run this engine concurrently without interference.
+// `replaceSession()` (used by startSession) resets only this account's state.
+const { state: session, replace: replaceSession } =
+  createSessionScoped<SessionState>(freshSession);
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -417,11 +426,11 @@ export async function startSession(config: SurgeConfig): Promise<{ ok: boolean; 
   const market = AUTOMATED_DERIV_MARKETS.find(m => m.symbol === config.symbol);
   if (!market) return fail("This market cannot be traded by this bot");
 
-  session = {
+  replaceSession({
     ...freshSession(), running: true, sessionId: `bot_surge_${Date.now()}`, config,
     currentStake: config.stake, currentMarket: config.displayName, activeSymbol: config.symbol, activeName: config.displayName, activeRead: config.lockedAnalysis ?? null,
     message: config.marketMode === "locked" ? `Locked on ${config.displayName} — Rise/Fall, recovery holds this market.` : `Deployed on ${config.displayName} — Rise/Fall, recovery hunts best market.`,
-  };
+  });
   if (session.activeRead) { session.watch.confidence = session.activeRead.confidence; session.watch.verdict = session.activeRead.verdict; }
 
   logger.info({ botId: SURGE_BOT_ID, sideMode: config.spec.sideMode, marketMode: config.marketMode, symbol: config.symbol }, "Vector Surge session starting");
@@ -459,6 +468,16 @@ async function runLoop(config: SurgeConfig) {
   if (accounts.length === 0) accounts = await db.select().from(accountsTable).where(eq(accountsTable.sessionId, ownerSessionId)).limit(1);
   const settings = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
   recoveryEngine.setPersistenceSession(ownerSessionId);
+
+  // Read THIS account's persisted recovery ledger (the recovery journal) before
+  // the first trade. Without this, a restart/redeploy left the engine blind to
+  // debt another engine had already recorded: it re-opened normal trades and
+  // repeated the same recovery stake while the journal still showed the loss.
+  const persistedRecovery = (settings[0] as any)?.recoveryStateJson;
+  if (persistedRecovery) {
+    try { recoveryEngine.hydrateStateIfNeeded(persistedRecovery); }
+    catch { /* malformed row — this account's ledger starts fresh */ }
+  }
 
   const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;

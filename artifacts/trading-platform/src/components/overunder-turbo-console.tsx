@@ -14,9 +14,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
+import { useLocation } from "wouter";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair,
+  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair, Blocks,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -231,6 +232,49 @@ export function OverUnderTurboConsole({
     } finally { setLoading(false); }
   };
 
+  const [, navigate] = useLocation();
+  const [creatingDbot, setCreatingDbot] = useState(false);
+
+  const handleCreateDbot = async (c: Candidate) => {
+    setCreatingDbot(true);
+    try {
+      const res = await fetch("/api/bots/dbot/overunder-turbo/build", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: c.symbol,
+          normal: c.normal,
+          recovery: c.recovery,
+          baseStake: config.stake,
+          takeProfit: config.takeProfit,
+          stopLoss: config.stopLoss,
+          maxConsecutiveLosses: config.maxRecoverySteps ?? 15,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Failed to compile DBot strategy");
+        return;
+      }
+
+      window.sessionStorage.setItem("nt.dbot.xml", data.xml);
+      window.sessionStorage.setItem("nt.dbot.meta", JSON.stringify({
+        botName: "Over/Under Turbo",
+        filename: data.filename,
+        summary: data.summary,
+        createdAt: new Date().toISOString(),
+      }));
+
+      toast.success(`DBot created for ${c.displayName}! Opening Bot Builder…`);
+      onOpenChange(false);
+      navigate("/bot-builder");
+    } catch (err: any) {
+      toast.error(err?.message ?? "Could not build DBot");
+    } finally {
+      setCreatingDbot(false);
+    }
+  };
+
   const handleStop = async () => {
     setLoading(true);
     try {
@@ -378,22 +422,47 @@ export function OverUnderTurboConsole({
                       </p>
                     </div>
 
-                    {/* The two deploy buttons — LOCKED or SWITCHING */}
+                    {/* The deploy buttons: CREATE DBOT (Deriv Bot Builder) + In-Engine */}
                     <div className="grid grid-cols-1 gap-2">
-                      <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
-                              className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                        <Lock className="w-4 h-4 mr-2" />
-                        Locked — {label(scanResult.best.normal)} / {label(scanResult.best.recovery)} on {scanResult.best.displayName}
+                      <Button
+                        onClick={() => handleCreateDbot(scanResult.best!)}
+                        disabled={loading || creatingDbot}
+                        className={`w-full h-11 ${a.solidBtn} text-white font-bold text-xs shadow-lg flex items-center justify-center`}
+                      >
+                        {creatingDbot ? (
+                          <>
+                            <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                            Building Deriv DBot…
+                          </>
+                        ) : (
+                          <>
+                            <Blocks className="w-4 h-4 mr-2" />
+                            Create DBot — {label(scanResult.best.normal)} / {label(scanResult.best.recovery)} on {scanResult.best.displayName}
+                          </>
+                        )}
                       </Button>
-                      <Button onClick={() => handleStart(scanResult.best!, "switching")} disabled={loading}
-                              variant="outline" className={`w-full h-10 ${a.outlineBtn} text-xs font-bold`}>
-                        <ArrowRightLeft className="w-4 h-4 mr-2" />
-                        Switching — auto-leave only if this market turns bad
-                      </Button>
+                      <div className="grid grid-cols-2 gap-2">
+                        <Button
+                          onClick={() => handleStart(scanResult.best!, "locked")}
+                          disabled={loading || creatingDbot}
+                          variant="outline"
+                          className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}
+                        >
+                          <Lock className="w-3.5 h-3.5 mr-1.5" />
+                          Locked (In-Engine)
+                        </Button>
+                        <Button
+                          onClick={() => handleStart(scanResult.best!, "switching")}
+                          disabled={loading || creatingDbot}
+                          variant="outline"
+                          className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}
+                        >
+                          <ArrowRightLeft className="w-3.5 h-3.5 mr-1.5" />
+                          Switching (In-Engine)
+                        </Button>
+                      </div>
                       <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
-                        Locked never changes market. Switching keeps these exact barriers and moves
-                        ONLY when this market stops being favorable — trading never pauses for a
-                        healthy tape.
+                        <b>Create DBot</b> generates Deriv DBot blocks for {scanResult.best.displayName} with debt-recovery and opens the visual Bot Builder in seconds.
                       </p>
                     </div>
 

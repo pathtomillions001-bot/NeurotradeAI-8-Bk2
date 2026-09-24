@@ -1,7 +1,7 @@
 import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { useGetAiEngineStatus, useToggleAutonomousEngine } from "@workspace/api-client-react";
-import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X, Calculator, Bot } from "lucide-react";
+import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X, Calculator, Bot, Blocks } from "lucide-react";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
 import { toast } from "sonner";
@@ -15,6 +15,7 @@ const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/markets", label: "Markets", icon: BarChart2 },
   { href: "/bots", label: "AI Bots", icon: Bot },
+  { href: "/bot-builder", label: "Bot Builder", icon: Blocks },
   { href: "/trades", label: "Journal", icon: Briefcase },
   { href: "/analytics", label: "Analytics", icon: Activity },
   { href: "/risk-calculator", label: "Risk Calc", icon: Calculator },

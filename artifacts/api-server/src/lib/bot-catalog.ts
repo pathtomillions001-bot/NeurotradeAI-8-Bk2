@@ -84,6 +84,15 @@ export interface BotDefinition {
   surge?: boolean;
   /** Over/Under Navigator: four user-selected normal/recovery barriers. */
   navigator?: boolean;
+  /**
+   * Over/Under Turbo: the continuous-fire Over/Under engine. Scans every digit
+   * market × the fixed normal (Over 1/2, Under 7/8) and recovery (Over 4/5,
+   * Under 4/5) barrier sets ONCE, locks the best market + barriers, then trades
+   * non-stop (arm-once, no mid-session gating or re-scanning) to TP/SL, with an
+   * optional market-only switching rescue. Deploys from its own console and its
+   * own /overunder-turbo endpoints.
+   */
+  turbo?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -158,6 +167,32 @@ export const BOT_CATALOG: BotDefinition[] = [
       { id: "secondary", label: "Under only", contracts: ["DIGITUNDER"], desc: "Normal and recovery can still use your selected Under barriers" },
     ],
     nominalWinRate: "measured walk-forward",
+    nominalPayout: "barrier quote",
+  },
+  {
+    id: "overunder-turbo",
+    name: "Over/Under Turbo",
+    code: "BOT-OU-TURBO",
+    family: "barrier",
+    turbo: true,
+    contractLabel: "Over 1/2 · Under 7/8 → recovery Over 4/5 · Under 4/5",
+    tagline: "Scan once. Lock the best tape. Fire non-stop.",
+    description:
+      "The continuous-fire Over/Under specialist. One deep scan subjects every digit market to all four normal barriers (Over 1, Over 2, Under 7, Under 8) crossed with all four recovery barriers (Over 4, Over 5, Under 4, Under 5) and returns the single best market with its best normal and best recovery contract, ranked by simulated survival — the honest probability that an uninterrupted session reaches take-profit before stop-loss. Deploy it LOCKED (never move) or SWITCHING (leave the market only when it turns measurably unfavorable — the barriers never change). Then it arms once on a good entry tick and trades non-stop, one 1-tick contract settling straight into the next, with zero mid-session re-analysis or re-scanning, through wins and losses alike, until TP or SL.",
+    edge: [
+      "Non-stop cadence — the whole analysis budget is spent ONCE up front; after arming there is no gating, no green-light waiting and no re-scanning between trades, so one contract flows directly into the next like a turbo bot",
+      "Fixed barrier sets, exhaustively scanned: normal Over 1 / Over 2 / Under 7 / Under 8 × recovery Over 4 / Over 5 / Under 4 / Under 5 across every digit market — the best triple wins",
+      "Survival-first selection: loss-clustering Markov (ξ = P(loss|loss)/P(loss)), the CONDITIONAL recovery estimand P(recovery wins | last digit ∈ normal-loss set), autocorrelation-corrected lower-confidence bounds, χ² stationarity and a stationary block-bootstrap replay of the real engine rules → P(TP before SL), then a Benjamini–Hochberg FDR screen",
+      "Arm-once entry: waits for the locked normal contract to be at/above break-even over the live window, then starts the uninterrupted run",
+      "Switching rescue: leaves the market ONLY when it turns unfavorable (worst-case rate under break-even, losses clustering, or drifting) and only for a measurably better tape — continuous trading is never paused for a healthy market",
+      "Same shared recovery ledger and debt-driven stake formula as every other bot, with a circuit breaker if the live loss run exceeds the modelled depth",
+    ],
+    accent: "sky",
+    icon: "zap",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "simulated survival",
     nominalPayout: "barrier quote",
   },
   {
@@ -603,6 +638,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.parityForge) return "parity-forge@1";
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
+  if (bot.turbo) return "overunder-turbo@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

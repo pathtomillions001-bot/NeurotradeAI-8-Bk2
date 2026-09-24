@@ -55,6 +55,8 @@ export interface BotCardData {
   surge?: boolean;
   /** Over/Under Navigator: configurable normal/recovery digit bands. */
   navigator?: boolean;
+  /** Over/Under Turbo: continuous-fire over/under (own console + routes). */
+  turbo?: boolean;
   /** Omni Sentinel: user-allowlisted multi-contract opportunity tournament. */
   omni?: boolean;
   /**
@@ -255,6 +257,43 @@ export interface NavigatorWatchStatus {
   verdict: string;
 }
 
+/** Over/Under Turbo only: the frozen lock + its pre-deploy telemetry. */
+export interface TurboLockStatus {
+  symbol: string;
+  displayName: string;
+  normal: string;
+  recovery: string;
+  marketMode: string;
+  survival: number;
+  ruin: number;
+  clusterRatio: number;
+  normalLcb: number;
+  recoveryConditional: number;
+  expectedMaxLossRun: number;
+  recoveryDepthP95: number;
+  signals: string[];
+}
+
+/** Over/Under Turbo only: the live arm/trade monitor. */
+export interface TurboWatchStatus {
+  /** arming = waiting for the entry tick; trading = non-stop turbo. */
+  phase: "arming" | "trading";
+  mode: "normal" | "recovery";
+  market: string;
+  contract: string;
+  stake: number;
+  /** Live short-window win rate of the locked normal contract (0..1). */
+  recentRate: number;
+  /** Break-even rate of the locked normal contract (0..1). */
+  breakEven: number;
+  marketFavorable: boolean;
+  healthReason: string;
+  switchBoard?: Array<{ name: string; score: number; survival: number }>;
+  reason: string;
+  switches: number;
+  ticksWatched: number;
+}
+
 export interface BotSessionStatus {
   /** Omni Sentinel: scoped configuration and live opportunity radar. */
   omni?: OmniSessionDetails;
@@ -270,6 +309,10 @@ export interface BotSessionStatus {
   navigatorDeployed?: NavigatorDeployedStatus;
   /** Over/Under Navigator only: live timing and recovery radar. */
   navigatorWatch?: NavigatorWatchStatus;
+  /** Over/Under Turbo only: the frozen (market, normal, recovery) lock. */
+  turboLock?: TurboLockStatus;
+  /** Over/Under Turbo only: live arm/trade monitor state. */
+  turboWatch?: TurboWatchStatus;
   /** Parity Forge only: the measured card it deployed. */
   parityForgeDeployed?: ParityForgeDeployedStatus;
   /** Parity Forge only: live parity/recovery watch state. */

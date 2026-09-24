@@ -1,0 +1,49 @@
+@import '../../assets/css/variables';
+@import '../../assets/css/mixins';
+
+.fixed-banner {
+    &__container {
+        display: flex;
+        justify-content: center;
+        background-color: #ffeabf;
+        height: 56px;
+        font-size: var(--font-size-s);
+        @include mobile {
+            height: unset;
+        }
+    }
+
+    &__content {
+        display: flex;
+        align-items: center;
+        font-family: var(--font-stack);
+
+        @include mobile {
+            padding: 16px;
+            font-size: var(--font-size-s);
+            align-items: flex-start;
+        }
+    }
+
+    &__visit-deriv-bot {
+        color: var(--text-prominent);
+        text-decoration: underline;
+        font-weight: bold;
+        &:hover {
+            text-decoration: underline;
+        }
+
+        &:visited {
+            color: unset;
+        }
+    }
+
+    &__icon {
+        margin-right: 0.5rem;
+    }
+}
+
+a,
+a:visited {
+    font-weight: normal;
+}

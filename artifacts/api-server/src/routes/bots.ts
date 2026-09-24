@@ -32,11 +32,13 @@ import * as bastion from "../lib/bastion-engine";
 import * as parityForge from "../lib/parity-forge-engine";
 import * as surge from "../lib/surge-engine";
 import * as navigator from "../lib/overunder-navigator-engine";
+import * as turbo from "../lib/overunder-turbo-engine";
 import apexRouter from "./apex";
 import bastionRouter from "./bastion";
 import parityForgeRouter from "./parity-forge";
 import surgeRouter from "./surge";
 import navigatorRouter from "./overunder-navigator";
+import turboRouter from "./overunder-turbo";
 import * as omni from "../lib/omni-engine";
 import omniRouter from "./omni";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
@@ -59,6 +61,7 @@ router.use("/bastion", bastionRouter);
 router.use("/parity-forge", parityForgeRouter);
 router.use("/surge", surgeRouter);
 router.use("/overunder-navigator", navigatorRouter);
+router.use("/overunder-turbo", turboRouter);
 router.use("/omni", omniRouter);
 
 interface ParsedBotBody {
@@ -81,7 +84,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   // Family bots own their own routes; the generic specialist path must never be
   // able to start them with a mismatched config.
-  if (bot.omni || bot.apex || bot.bastion || bot.parityForge || bot.surge || bot.navigator || bot.killShotFamily || bot.preLocked || bot.oneShot) {
+  if (bot.omni || bot.apex || bot.bastion || bot.parityForge || bot.surge || bot.navigator || bot.turbo || bot.killShotFamily || bot.preLocked || bot.oneShot) {
     return { ok: false, error: "This bot is deployed from its own console, not the generic bot endpoint" };
   }
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };
@@ -209,6 +212,7 @@ router.get("/", (req, res) => {
   const pfg = visibleParityForgeStatus(req.sessionId);
   const svg = visibleSurgeStatus(req.sessionId);
   const nav = visibleNavigatorStatus(req.sessionId);
+  const trb = visibleTurboStatus(req.sessionId);
   const omniStatus = omni.getStatus();
   res.json({
     release: API_RELEASE,
@@ -221,6 +225,7 @@ router.get("/", (req, res) => {
       if (bot.parityForge) return { ...bot, console: console_, session: pfg.running ? pfg : null };
       if (bot.surge) return { ...bot, console: console_, session: svg.running ? svg : null };
       if (bot.navigator) return { ...bot, console: console_, session: nav.running ? nav : null };
+      if (bot.turbo) return { ...bot, console: console_, session: trb.running ? trb : null };
       if (bot.id === dualLock.DUAL_LOCK_BOT_ID) {
         return { ...bot, console: console_, session: dual.running ? dual : null };
       }
@@ -242,6 +247,7 @@ router.get("/", (req, res) => {
       { botId: parityForge.PARITY_FORGE_BOT_ID, running: pfg.running },
       { botId: surge.SURGE_BOT_ID, running: svg.running },
       { botId: navigator.NAVIGATOR_BOT_ID, running: nav.running },
+      { botId: turbo.TURBO_BOT_ID, running: trb.running },
       { botId: status.botId, running: status.running },
     ]),
   });
@@ -741,6 +747,13 @@ function visibleNavigatorStatus(sessionId: string) {
   return { ...status, running: false, sessionId: null, config: undefined, navigatorDeployed: undefined, navigatorWatch: undefined };
 }
 
+function visibleTurboStatus(sessionId: string) {
+  const status = turbo.getStatus();
+  const owner = turbo.getOwnerSessionId();
+  if (!owner || owner === sessionId) return status;
+  return { ...status, running: false, sessionId: null, config: undefined, turboLock: undefined, turboWatch: undefined };
+}
+
 router.get("/status", (req, res) => {
   const omniStatus = omni.getStatus();
   if (omniStatus.running) { res.json(omniStatus); return; }
@@ -754,6 +767,8 @@ router.get("/status", (req, res) => {
   const nav2 = visibleNavigatorStatus(req.sessionId);
   if (svg2.running) { res.json(svg2); return; }
   if (nav2.running) { res.json(nav2); return; }
+  const trb2 = visibleTurboStatus(req.sessionId);
+  if (trb2.running) { res.json(trb2); return; }
   const dual = visibleDualStatus(req.sessionId);
   if (dual.running) { res.json(dual); return; }
   const shot = visibleKillShotStatus(req.sessionId);
@@ -873,7 +888,7 @@ router.post("/:botId/stop", (req, res) => {
     res.status(404).json({ error: "Unknown bot" });
     return;
   }
-  if (botDef.omni || botDef.apex || botDef.parityForge || botDef.surge || botDef.navigator || botDef.bastion || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
+  if (botDef.omni || botDef.apex || botDef.parityForge || botDef.surge || botDef.navigator || botDef.turbo || botDef.bastion || botDef.killShotFamily || botDef.preLocked || botDef.oneShot) {
     res.status(400).json({ error: "This bot is stopped from its own console" });
     return;
   }

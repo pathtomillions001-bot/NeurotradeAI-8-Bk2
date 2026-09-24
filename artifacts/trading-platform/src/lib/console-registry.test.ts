@@ -27,6 +27,7 @@ const API_CONSOLE_IDS = [
   "bastion@1",
   "omni@2",
   "overunder-navigator@1",
+  "overunder-turbo@1",
   "parity-forge@1",
   "specialist@1",
   "surge@1",
@@ -106,7 +107,7 @@ describe("consoleSkew", () => {
       skew.bots.map(entry => entry.name),
       ["Echo Apex", "Dual-Lock Range Sentinel"],
     );
-    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "dual-lock@1", "omni@2", "overunder-navigator@1", "parity-forge@1", "surge@1"]);
+    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "dual-lock@1", "omni@2", "overunder-navigator@1", "overunder-turbo@1", "parity-forge@1", "surge@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {

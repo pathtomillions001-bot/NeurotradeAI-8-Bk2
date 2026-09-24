@@ -14,10 +14,9 @@
 import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
-import { useLocation } from "wouter";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair, Hammer,
+  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -108,7 +107,6 @@ export function OverUnderTurboConsole({
   session: BotSessionStatus | null;
   onSession: (status: BotSessionStatus | null) => void;
 }) {
-  const [, setLocation] = useLocation();
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
@@ -241,44 +239,6 @@ export function OverUnderTurboConsole({
       onSession(data.status ?? null);
       toast.success("Turbo session stopped");
     } catch { /* ignore */ } finally { setLoading(false); }
-  };
-
-  /**
-   * Build the scanned lock as a Deriv DBot (visual builder, in-app).
-   * The API compiles the (market, normal, recovery) triple + session metrics
-   * into Blockly XML; DBot Studio then loads it into the embedded builder and
-   * the Deriv DBot itself executes the trades (locked market semantics).
-   */
-  const handleCreateDbot = async (c: Candidate) => {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/bots/dbot/overunder-turbo/build", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          symbol: c.symbol,
-          normal: c.normal,
-          recovery: c.recovery,
-          baseStake: config.stake,
-          takeProfit: config.takeProfit,
-          stopLoss: config.stopLoss,
-          maxConsecutiveLosses: config.maxRecoverySteps,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) { toast.error(data.error ?? "Could not build the DBot"); return; }
-      window.sessionStorage.setItem("nt.dbot.xml", data.xml);
-      window.sessionStorage.setItem("nt.dbot.meta", JSON.stringify({
-        botName: "Over/Under Turbo",
-        filename: data.filename,
-        summary: data.summary,
-        createdAt: new Date().toISOString(),
-      }));
-      toast.success(`⚒ ${label(c.normal)} → ${label(c.recovery)} on ${c.displayName} — opening DBot Studio`);
-      setLocation("/dbot-studio");
-    } catch {
-      toast.error("Could not reach the DBot builder service");
-    } finally { setLoading(false); }
   };
 
   const profit = session?.totalProfit ?? 0;
@@ -423,34 +383,18 @@ export function OverUnderTurboConsole({
                       <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
                               className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
                         <Lock className="w-4 h-4 mr-2" />
-                        Locked
+                        Locked — {label(scanResult.best.normal)} / {label(scanResult.best.recovery)} on {scanResult.best.displayName}
                       </Button>
                       <Button onClick={() => handleStart(scanResult.best!, "switching")} disabled={loading}
                               variant="outline" className={`w-full h-10 ${a.outlineBtn} text-xs font-bold`}>
                         <ArrowRightLeft className="w-4 h-4 mr-2" />
-                        Switching
+                        Switching — auto-leave only if this market turns bad
                       </Button>
                       <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
                         Locked never changes market. Switching keeps these exact barriers and moves
                         ONLY when this market stops being favorable — trading never pauses for a
                         healthy tape.
                       </p>
-
-                      {/* DBot build — the scan result compiled into a Deriv bot, built
-                          and run inside the app by the embedded DBot builder. */}
-                      <div className="pt-2 border-t border-white/5 space-y-1.5">
-                        <Button onClick={() => handleCreateDbot(scanResult.best!)} disabled={loading}
-                                variant="outline"
-                                className="w-full h-10 border-sky-500/40 text-sky-300 hover:bg-sky-500/10 text-xs font-bold">
-                          {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Hammer className="w-4 h-4 mr-2" />}
-                          Create DBot
-                        </Button>
-                        <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
-                          Compiles this lock + your SL/TP and debt-recovery settings into a real Deriv
-                          DBot inside NeuroTrade — you review the blocks, press RUN, and the DBot
-                          executes the trades on the found market (locked to it).
-                        </p>
-                      </div>
                     </div>
 
                     {scanResult.allScored.length > 1 && (

@@ -103,6 +103,19 @@ export default defineConfig({
         target: "http://localhost:8080",
         changeOrigin: true,
       },
+      // Bot Studio: the vendored Deriv DBot builder runs as its own rsbuild dev
+      // server on 4003 and is mounted under /bot/ so it shares this origin (and
+      // therefore the platform's session cookie + localStorage) — that is what
+      // makes the builder open already signed in.
+      //
+      // No rewrite: the builder dev server is itself mounted under /bot
+      // (rsbuild `server.base`), so its HTML, assets and HMR socket all resolve
+      // through this proxy unchanged.
+      "/bot": {
+        target: "http://localhost:4003",
+        changeOrigin: true,
+        ws: true,
+      },
     },
   },
   preview: {

@@ -54,6 +54,3 @@ cookie*.txt
 .local/
 .data/
 **/.data/
-
-# DBot embed build output (rebuild with: pnpm run build:dbot)
-out/

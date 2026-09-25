@@ -103,11 +103,6 @@ export default defineConfig({
         target: "http://localhost:8080",
         changeOrigin: true,
       },
-      // Embedded Deriv DBot builder bundle (served by the API server).
-      "/dbot": {
-        target: "http://localhost:8080",
-        changeOrigin: true,
-      },
     },
   },
   preview: {

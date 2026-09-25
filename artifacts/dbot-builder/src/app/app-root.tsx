@@ -1,14 +1,15 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect, useRef, useState } from 'react';
 import { observer } from 'mobx-react-lite';
 import ErrorBoundary from '@/components/error-component/error-boundary';
 import ErrorComponent from '@/components/error-component/error-component';
 import ChunkLoader from '@/components/loader/chunk-loader';
+import { lazyWithRetry } from '@/utils/lazy-retry';
 import { api_base } from '@/external/bot-skeleton';
 import { useStore } from '@/hooks/useStore';
 import { localize } from '@deriv-com/translations';
 import './app-root.scss';
 
-const AppContent = lazy(() => import('./app-content'));
+const AppContent = lazyWithRetry(() => import('./app-content'));
 
 const AppRootLoader = () => {
     return <ChunkLoader message={localize('Loading...')} />;
@@ -33,36 +34,60 @@ const ErrorComponentWrapper = observer(() => {
     );
 });
 
+// How long the boot loader may stay up while `api_base.init()` is still in
+// flight before the UI is rendered anyway (the connection, auth state and
+// active-symbol list all settle in the background and update the UI live).
+const API_INIT_UI_GATE_MS = 2500;
+
+let api_init_promise: Promise<void> | null = null;
+
+/**
+ * Kick off `api_base.init()` as early as possible and remember the promise so
+ * every caller awaits the same attempt (the socket singleton makes a second
+ * concurrent init redundant).
+ *
+ * The eager module-scope call overlaps the Deriv WebSocket handshake (and the
+ * embedded NeuroTrade session fetch) with React mounting and the async chunks
+ * downloading, which shaves the round-trips off the visible boot time.
+ */
+const startApiInit = () => {
+    if (!api_init_promise) {
+        api_init_promise = api_base
+            .init()
+            .then(() => {
+                // settle regardless — the gate only controls when the UI shows
+            })
+            .catch((error: unknown) => {
+                console.error('API initialization failed:', error);
+            });
+    }
+    return api_init_promise;
+};
+
+// Start immediately at module evaluation — before the first React render.
+startApiInit();
+
 const AppRoot = () => {
     const store = useStore();
-    const api_base_initialized = useRef(false);
+    const api_init_started = useRef(false);
     const [is_api_initialized, setIsApiInitialized] = useState(false);
 
-    // Initialize API
+    // Initialize API (module-scope call above usually already resolved this).
     useEffect(() => {
         const timeoutId = setTimeout(() => {
-            if (!is_api_initialized) {
-                setIsApiInitialized(true);
-            }
-        }, 5000);
+            setIsApiInitialized(true);
+        }, API_INIT_UI_GATE_MS);
 
-        const initializeApi = async () => {
-            if (!api_base_initialized.current) {
-                try {
-                    await api_base.init();
-                    api_base_initialized.current = true;
-                } catch (error) {
-                    console.error('API initialization failed:', error);
-                    api_base_initialized.current = false;
-                } finally {
-                    setIsApiInitialized(true);
-                    clearTimeout(timeoutId); // Clear timeout if API init completes
-                }
-            }
-        };
+        startApiInit().finally(() => {
+            setIsApiInitialized(true);
+            clearTimeout(timeoutId);
+        });
 
-        initializeApi();
         return () => clearTimeout(timeoutId);
+    }, []);
+
+    useEffect(() => {
+        api_init_started.current = true;
     }, []);
 
     if (!store || !is_api_initialized) return <AppRootLoader />;

@@ -2,6 +2,7 @@
 import { action, makeObservable, reaction } from 'mobx';
 import { api_base, ApiHelpers, DBot, runIrreversibleEvents } from '@/external/bot-skeleton';
 import { setCurrency } from '@/external/bot-skeleton/scratch/utils';
+import { isPreviewMode, PREVIEW_BASE_PATH } from '@/utils/is-preview-mode';
 import { TApiHelpersStore } from '@/types/stores.types';
 import RootStore from './root-store';
 
@@ -57,7 +58,10 @@ export default class AppStore {
         if (!this.dbot_store) return;
 
         blockly_store.setLoading(true);
-        await DBot.initWorkspace('/', this.dbot_store, this.api_helpers_store, ui.is_mobile, false);
+        // The base path seeds `window.__webpack_public_path__`, which Blockly media and
+    // flyout image URLs are built from. In the embedded preview build the app is
+    // served under /bot/preview, so pass that base instead of '/'.
+    await DBot.initWorkspace(isPreviewMode() ? `${PREVIEW_BASE_PATH}/` : '/', this.dbot_store, this.api_helpers_store, ui.is_mobile, false);
 
         blockly_store.setContainerSize();
         blockly_store.setLoading(false);

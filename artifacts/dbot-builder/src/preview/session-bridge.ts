@@ -1,5 +1,6 @@
 import { clearAuthInfo } from '@/external/deriv-core';
 import {
+    isAuthorizing$,
     isAuthorized$,
     setAccountList,
     setAuthData,
@@ -17,6 +18,10 @@ const CLIENT_ID_HEADER = 'x-client-id';
 const RISK_ACK_HEADER = 'x-risk-ack';
 
 export const BOT_BUILDER_SYNC_MESSAGE = 'NEUROTRADE_BOT_BUILDER_SYNC';
+
+// The Deriv login the builder socket is currently connected/connecting for —
+// used to dedupe sync requests (see syncEmbeddedPreviewSession).
+let sync_login_id: string | null = null;
 
 type EmbeddedAccount = {
     loginId: string;
@@ -135,23 +140,37 @@ export async function syncEmbeddedPreviewSession(expectedLoginId?: string | null
     if (!isPreviewMode()) return;
 
     const activeLoginId = (localStorage.getItem('active_loginid') || '').trim();
-    const shouldReconnect =
-        !activeLoginId ||
-        !expectedLoginId ||
-        activeLoginId !== expectedLoginId ||
-        !isAuthorized$.value;
 
+    // Track the login the builder socket is being (re)connected FOR, so a
+    // burst of sync messages while an authorize handshake is still in flight
+    // doesn't tear the socket down and restart it forever.
     if (expectedLoginId) {
         localStorage.setItem('active_loginid', expectedLoginId);
+
+        const already_handled =
+            sync_login_id === expectedLoginId ||
+            (!sync_login_id && activeLoginId === expectedLoginId && (isAuthorized$.value || isAuthorizing$.value));
+        if (already_handled) return;
+        sync_login_id = expectedLoginId;
+    } else if (!sync_login_id && !activeLoginId) {
+        // NeuroTrade reports no connection and the builder holds none either.
+        return;
+    } else {
+        sync_login_id = null;
     }
 
     try {
-        if (shouldReconnect) {
-            const { api_base } = await import('@/external/bot-skeleton');
-            await api_base.init(true);
+        if (!expectedLoginId) {
+            // NeuroTrade disconnected: drop the builder's seeded state FIRST so
+            // the reconnect below comes up anonymous instead of re-authorizing
+            // the account the app just disabled.
+            clearPreviewSessionState();
         }
+        const { api_base } = await import('@/external/bot-skeleton');
+        await api_base.init(true);
     } catch (error) {
         console.error('[preview] Failed to synchronize NeuroTrade Deriv session:', error);
+        if (sync_login_id === expectedLoginId) sync_login_id = null;
     }
 }
 

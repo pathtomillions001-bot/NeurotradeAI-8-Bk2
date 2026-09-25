@@ -28,7 +28,6 @@ import {
   stopPathForBot,
   stopBodyForBot,
   openPathForBot,
-  dbotStopPath,
   OPEN_SPEED_AI_EVENT,
   type LiveBot,
 } from "@/lib/live-bots";
@@ -36,7 +35,6 @@ import {
 function EngineIcon({ botId, className }: { botId: string; className?: string }) {
   if (botId === "neuroai") return <Zap className={className} />;
   if (botId === "autonomous") return <Cpu className={className} />;
-  if (botId === "dbot") return <Bot className={className} />;
   return <Bot className={className} />;
 }
 
@@ -108,15 +106,8 @@ export function LiveBotIndicator({ compact = false, live }: { compact?: boolean;
     if (confirmTimer.current) clearTimeout(confirmTimer.current);
     setConfirmStop(false);
     const body = stopBodyForBot(bot.botId);
-    // A DBot's kill switch is per-bot (it runs in the browser, not on a server
-    // engine): POST /api/dbots/:id/stop, with the id from the live status.
-    const dbotPath = bot.botId === "dbot" ? dbotStopPath(s) : null;
-    if (bot.botId === "dbot" && !dbotPath) {
-      toast.error("Could not address the running DBot — open Bot Studio to stop it");
-      return;
-    }
     try {
-      const res = await fetch(dbotPath ?? stopPathForBot(bot.botId), {
+      const res = await fetch(stopPathForBot(bot.botId), {
         method: "POST",
         headers: body ? { "Content-Type": "application/json" } : undefined,
         body: body ? JSON.stringify(body) : undefined,

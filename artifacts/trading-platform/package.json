@@ -11,8 +11,7 @@
     "start": "node ./scripts/serve-production.mjs",
     "test": "tsx --test src/lib/landing-gate.test.ts src/lib/console-registry.test.ts src/lib/omni.test.ts src/lib/manual-trading.test.ts",
     "check:first-paint": "node scripts/first-paint-check.mjs",
-    "check:release": "node scripts/check-deployed-release.mjs",
-    "check:bot-studio": "node scripts/bot-studio-check.mjs"
+    "check:release": "node scripts/check-deployed-release.mjs"
   },
   "devDependencies": {
     "@hookform/resolvers": "^3.10.0",

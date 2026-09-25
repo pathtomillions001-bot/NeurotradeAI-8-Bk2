@@ -27,12 +27,8 @@ export const WEB_CONSOLE_IDS = [
   "bastion@1",
   /** Over/Under Navigator — configurable normal/recovery digit bands. */
   "overunder-navigator@1",
-  /**
-   * Over/Under Turbo — continuous-fire over/under: scan once, lock, trade
-   * non-stop. @2 adds the CREATE DERIV DBOT path (compile the scan into a DBot
-   * and run it in Bot Studio) and moves LOCKED/SWITCHING behind "Advanced".
-   */
-  "overunder-turbo@2",
+  /** Over/Under Turbo — continuous-fire over/under: scan once, lock, trade non-stop. */
+  "overunder-turbo@1",
   /** Parity Forge — Even/Odd parity specialist with recovery-first intelligence. */
   "parity-forge@1",
   /** Vector Surge — Rise/Fall momentum specialist with recovery-first intelligence. */
@@ -45,12 +41,6 @@ export const WEB_CONSOLE_IDS = [
   "killshot@1",
   /** Kill-Shot family oracles (Over/Under, Even/Odd, Matches/Differs). */
   "killshot-family@1",
-  /**
-   * Deriv DBot — a bot built from a scan and run in the user's browser via Bot
-   * Studio (/bot-studio). Not a catalogue bot: the API advertises this console
-   * for the live badge while a DBot is trading (see GET /api/bots/live).
-   */
-  "dbot@1",
 ] as const;
 
 export type WebConsoleId = (typeof WEB_CONSOLE_IDS)[number];

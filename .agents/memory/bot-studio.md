@@ -57,10 +57,37 @@ when nothing is connected, so the workspace still loads for building.
 - Surface: **workspace + trades window only** (no DBot dashboard/bot list/
   tutorials), branded as Bot Studio.
 
-## Still to build (phases agreed, Bot Studio is phase 0–1)
+## Phase 2 — scan → DBot → Run (done)
 
-2. Spec → Blockly XML compiler + `POST /api/dbots` + the turbo console button
-   (bump `overunder-turbo@2`, add `dbot@1` to the console contract).
-3. Trade mirroring + reconciler + arbiter owner `dbot` + live badge + kill switch.
-4. Generic factory so every scanner can emit a DBot, and the capability matrix
-   saying which semantics survive in Blockly.
+- `lib/dbots/strategy-xml.ts` compiles a scan's decision into Blockly XML
+  (scanned market/contracts, stake, SL/TP, the shared-ladder recovery and the
+  live-payout-based recovery stake). `lib/dbots/factory.ts` is the ONE
+  scanner-facing call (`createDbot`) — new scanners reuse it.
+- `routes/dbots.ts`: create/list/get/xml/live/heartbeat/stop/live-current.
+- Over/Under Turbo's LOCKED/SWITCHING pair is now secondary: the primary action
+  is **Create Deriv DBot** → `POST /api/dbots` → `/bot-studio?dbot=<id>`; legacy
+  server deployment sits under **Advanced**.
+- Console contract: `overunder-turbo@2` + `dbot@1` (the live badge's console for
+  a running DBot) in `WEB_CONSOLE_IDS` / `CONSOLE_REGISTRY`; the API's
+  `botConsoleIds()` pin and `GET /api/bots/live`'s `dbot` → `dbot@1` mapping
+  follow.
+- Vendored builder: `?load=<dbotId>` fetches `/api/dbots/:id/xml` into the
+  workspace, and `dbot:running` reports Run/Stop to the host.
+
+## Phase 3 — fills → journal + shared ledger + arbiter (done)
+
+- `lib/dbots/registry.ts`: heartbeat liveness (45 s TTL) and the arbiter's
+  `dbot` owner — the account has ONE executor, DBot or server engine.
+- `lib/dbots/mirror.ts`: each heartbeat mirrors newly settled `profit_table`
+  rows (symbol + contract types + since-live, deduped by `derivContractId`) into
+  journal rows tagged `[deriv-dbot]` and one `recordOutcome` per fill into the
+  SINGLE shared ledger. An account switch (demo ↔ real) stops the bot.
+- Web: `lib/dbot-run-bridge.ts` claims the lock on Run and heartbeats it;
+  leaving Bot Studio (or a stop from any page) releases it. The live badge opens
+  a running DBot in Bot Studio and stops that exact bot; the Journal badges DBot
+  fills as `DBOT` (`isDbot` on `/deriv-journal`).
+
+## Still to build
+
+4. Capability matrix saying which scan semantics survive in Blockly, and
+   Kill-Shot / Dual-Lock adapters on top of `createDbot`.

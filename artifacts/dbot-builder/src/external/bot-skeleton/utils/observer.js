@@ -81,9 +81,15 @@ export default class Observer {
     }
 
     unregister(event, f) {
+        // `eam.get(event)` is undefined for an event nobody ever registered on,
+        // and `.filter` on undefined threw — which made a defensive cleanup call
+        // (e.g. interpreter.stop() removing a contract.status listener it may
+        // never have added) crash the whole stop path.
+        const actionList = this.eam.get(event);
+        if (!actionList) return;
         this.eam = this.eam.set(
             event,
-            this.eam.get(event).filter(r => r.searchBy !== f)
+            actionList.filter(r => r.searchBy !== f)
         );
     }
 

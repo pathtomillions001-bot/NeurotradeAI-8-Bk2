@@ -341,21 +341,30 @@ export default class TicksService {
     };
 
     unsubscribeFromTicksService() {
-        return new Promise((resolve, reject) => {
+        return new Promise(resolve => {
+            // Forget failures are expected while stopping (the server may have
+            // already dropped the subscription, or the socket is closing). Every
+            // path must settle this promise: the old `catch` below logged and
+            // returned, so a synchronous throw from forgetCandleSubscription
+            // left callers awaiting forever — which is what wedged
+            // interpreter.stop() and pinned api_base.is_stopping at true.
+            const done = () => {
+                this.ticks_history_promise = null;
+                resolve();
+            };
+
             this.forget()
-                .then(() => {
-                    try {
-                        this.forgetCandleSubscription()
-                            .then(() => {
-                                resolve();
-                            })
-                            .catch(reject);
-                    } catch (e) {
-                        console.log('Error in unsubscribeFromTicksService', e);
-                    }
+                .catch(error => {
+                    console.warn('Error in unsubscribeFromTicksService (forget):', error?.message ?? error);
                 })
-                .catch(reject);
-            this.ticks_history_promise = null;
+                .then(() => this.forgetCandleSubscription())
+                .catch(error => {
+                    console.warn(
+                        'Error in unsubscribeFromTicksService (forgetCandleSubscription):',
+                        error?.message ?? error
+                    );
+                })
+                .then(done);
         });
     }
 }

@@ -1,4 +1,3 @@
-import * as BlocklyJavaScript from 'blockly/javascript';
 import { localize } from '@deriv-com/translations';
 import { setColors } from './hooks/colours.js';
 import goog from './goog.js';
@@ -28,7 +27,14 @@ const modifyBlocklyWorkSpaceContextMenu = () => {
 };
 
 export const loadBlockly = async isDarkMode => {
-    const BlocklyModule = await import('blockly');
+    // `blockly/javascript` used to be a STATIC import at the top of this module.
+    // Because dbot.js imports this file synchronously, that single line dragged
+    // the whole Blockly core into the INITIAL chunk group — a ~1.7 MB deferred
+    // script plus a ~2.3 MB render-blocking stylesheet on first paint, even
+    // though `import('blockly')` right below was meant to keep it lazy.
+    // Importing both in parallel here makes Blockly fully async: first paint no
+    // longer waits for it, and it still arrives before the workspace needs it.
+    const [BlocklyModule, BlocklyJavaScript] = await Promise.all([import('blockly'), import('blockly/javascript')]);
     window.Blockly = BlocklyModule.default;
     window.Blockly.Colours = {};
     const BlocklyGenerator = new window.Blockly.Generator('code');

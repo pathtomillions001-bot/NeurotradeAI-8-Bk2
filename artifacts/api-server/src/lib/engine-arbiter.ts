@@ -31,7 +31,7 @@
 
 import { getBrowserSessionId } from "./session";
 
-export type TradingOwner = "autonomous" | "neuroai" | "bots";
+export type TradingOwner = "autonomous" | "neuroai" | "bots" | "dbot";
 
 const ownersBySession = new Map<string, TradingOwner>();
 

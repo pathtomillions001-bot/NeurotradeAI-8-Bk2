@@ -31,6 +31,9 @@ import {
   type TurboContract,
   type TurboSide,
 } from "../lib/overunder-turbo-analysis";
+import { generateDbotXml } from "../lib/dbot-xml/generator";
+import type { DbotStrategyManifest } from "../lib/dbot-xml/manifest";
+import { dbotStrategiesTable } from "@workspace/db";
 
 const router = Router();
 
@@ -185,6 +188,95 @@ router.post("/start", async (req, res): Promise<void> => {
     return;
   }
   res.json({ ok: true, status: visibleStatus(req.sessionId) });
+});
+
+/**
+ * CREATE BOT — compile the scanned lock into a Deriv DBot strategy.
+ *
+ * Same validation as /start (the scan's normal/recovery contracts + measured
+ * market), but instead of arming our server engine this builds the Blockly
+ * XML the embedded Deriv DBot executes: 1-tick digits on the found market,
+ * stake/TP/SL from the deploy form, and the account's own debt-exact
+ * recovery ladder (lib/dbot-xml/ladder.ts) embedded as loss-streak blocks.
+ * The saved strategy is loaded into the Bot Builder page, where the user
+ * clicks Run — from then on DBot executes, not this engine.
+ */
+router.post("/create-bot", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+
+  const normal = parseContract(body.normal);
+  const recovery = parseContract(body.recovery);
+  if (!normal || !isNormalContract(normal.side, normal.barrier)) {
+    res.status(400).json({ error: "normal must be one of Over 1, Over 2, Under 7, Under 8 — run the scan first" });
+    return;
+  }
+  if (!recovery || !isRecoveryContract(recovery.side, recovery.barrier)) {
+    res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 4, Under 5 — run the scan first" });
+    return;
+  }
+  const symbol = typeof body.symbol === "string" ? body.symbol : "";
+  if (!symbol || !isAutomatedMarket(symbol)) {
+    res.status(400).json({ error: "Run the scan first — a measured digit market is required" });
+    return;
+  }
+
+  const params = await simParams(req.sessionId, body);
+  const candidate = body.candidate ?? {};
+  const payoutMultiplier = Number.isFinite(Number(candidate.normalPayout)) && Number(candidate.normalPayout) > 1
+    ? Number(candidate.normalPayout)
+    : 1.95; // conservative digits over/under fallback when the scan telemetry is absent
+
+  const manifest: DbotStrategyManifest = {
+    source: "overunder-turbo",
+    symbol,
+    displayName: typeof candidate.displayName === "string" ? candidate.displayName : symbol,
+    contract: { side: normal.side, barrier: normal.barrier },
+    recoveryContract: { side: recovery.side, barrier: recovery.barrier },
+    duration: 1,
+    durationUnit: "t",
+    stake: params.stake,
+    takeProfit: params.takeProfit,
+    stopLoss: params.stopLoss,
+    recovery: {
+      baseStake: params.stake,
+      payoutMultiplier,
+      markupPercent: params.markupPercent,
+      maxSteps: params.maxRecoverySteps,
+      maxTradeStake: params.maxStake,
+    },
+    scan: {
+      score: candidate.score,
+      survival: candidate.survival,
+      normalBreakEven: candidate.normalBreakEven,
+      recoveryBreakEven: candidate.recoveryBreakEven,
+      normalPayout: candidate.normalPayout,
+      recoveryPayout: candidate.recoveryPayout,
+    },
+    generatedAt: new Date().toISOString(),
+  };
+
+  try {
+    const { xml, ladder } = generateDbotXml(manifest);
+    const [row] = await db
+      .insert(dbotStrategiesTable)
+      .values({
+        sessionId: req.sessionId,
+        name: `Turbo DBot — ${manifest.displayName} ${contractLabel(normal)}`,
+        source: "overunder-turbo",
+        symbol,
+        manifest: JSON.stringify(manifest),
+        xml,
+      })
+      .returning();
+    logger.info(
+      { strategyId: row.id, symbol, ladder: ladder.stakes },
+      "Over/Under Turbo: DBot strategy compiled from scan",
+    );
+    res.json({ id: row.id, name: row.name, xml, manifest, ladder });
+  } catch (err) {
+    logger.error({ err }, "Turbo create-bot failed");
+    res.status(500).json({ error: err instanceof Error ? err.message : "Could not compile the DBot strategy" });
+  }
 });
 
 router.post("/stop", (req, res) => {

@@ -1,7 +1,7 @@
 import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { useGetAiEngineStatus, useToggleAutonomousEngine } from "@workspace/api-client-react";
-import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X, Calculator, Bot } from "lucide-react";
+import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X, Calculator, Bot, Workflow } from "lucide-react";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
 import { toast } from "sonner";
@@ -10,12 +10,13 @@ import { SpeedAIFab } from "./speed-ai-fab";
 import { AccountSwitcher } from "./account-switcher";
 import { LiveBotIndicator } from "./live-bot-indicator";
 import { useLiveBots } from "@/lib/live-bots";
+import { preloadBotBuilder } from "@/lib/bot-builder-frame";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/markets", label: "Markets", icon: BarChart2 },
   { href: "/bots", label: "AI Bots", icon: Bot },
-  { href: "/bot-builder", label: "Bot Builder", icon: Bot },
+  { href: "/bot-builder", label: "Bot Builder", icon: Workflow },
   { href: "/trades", label: "Journal", icon: Briefcase },
   { href: "/analytics", label: "Analytics", icon: Activity },
   { href: "/risk-calculator", label: "Risk Calc", icon: Calculator },
@@ -88,11 +89,22 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
 
 export function Layout({ children }: { children: ReactNode }) {
   const [location] = useLocation();
+  // The builder draws its own Run/Stop cluster in the same top-right corner,
+  // so the floating NeuroAI button would sit on top of it on that page.
+  const showSpeedAiFab = location !== "/bot-builder";
   const [mobileOpen, setMobileOpen] = useState(false);
   // The single source of truth for "which bot is live right now" — polled
   // every 5s + SSE, so a bot that starts in the background appears within
   // seconds and survives a page refresh (the poll re-runs on mount).
   const liveBots = useLiveBots();
+
+  // Boot the Deriv bot builder in the background the moment the app shell is
+  // up: the (large) builder bundle downloads and initializes while the user is
+  // anywhere else, so opening Bot Builder later is instant. The frame stays
+  // alive across visits — see lib/bot-builder-frame.ts.
+  useEffect(() => {
+    preloadBotBuilder();
+  }, []);
 
   // Close mobile menu on location change
   useEffect(() => {
@@ -182,7 +194,7 @@ export function Layout({ children }: { children: ReactNode }) {
       </div>
 
       {/* SpeedAI floating engine — available on every page */}
-      <SpeedAIFab />
+      {showSpeedAiFab && <SpeedAIFab />}
     </div>
   );
 }

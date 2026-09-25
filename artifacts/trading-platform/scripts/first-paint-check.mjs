@@ -50,7 +50,7 @@ const MARKERS = {
   splash: 'data-testid="boot-splash"',
   layout: ">Risk Calc<",
   landing: ">Market Open<",
-  builder: ">Deriv Bot Builder<",
+  builder: 'data-testid="bot-builder-page"',
 };
 
 function describe(html) {
@@ -67,8 +67,8 @@ const cases = [
   { url: "/connect", expect: "layout", note: "OAuth landing route is never gated" },
   { url: "/connect?code=abc&state=xyz", expect: "layout", note: "OAuth callback with query works" },
   { url: "/markets/cryBTCUSD", expect: "layout", note: "deep dynamic route" },
-  // Regression guard for the bot-builder 404: the route must render the builder
-  // shell (page + iframe), never the NotFound fallback.
+  // Regression guard for the bot-builder 404: the route must render the bot
+  // builder page (which hosts the singleton builder iframe), never NotFound.
   { url: "/bot-builder", expect: "builder", note: "bot builder route renders the builder shell, not the 404 fallback" },
 ];
 

@@ -44,4 +44,5 @@
 - [SpeedAI recovery scanner constraints](speed-ai-recovery-scanner.md) — tiered priority (OVER/UNDER → EVEN/ODD → DIGITMATCH); only barriers with ≥ user's payout; never DIGITDIFF or RISE/FALL.
 - [SpeedAI recovery gate v3](speed-ai-recovery-gate-v3.md) — 4-window scoring (15/30/60/100t), deepSignalBonus (Z-score/chi-sq/gap), anti-pattern penalty, MATCH top-3 barriers, tick-polling green-light.
 - [SpeedAI PrecisionAI v3](speed-ai-precision-v3.md) — contract-type-specific weights; 4 new helpers (streakAgainst, digitGap, markovToTarget, priceMomentum); 3-window scoring (30/60/100) throughout; enhanced green-light; normal retry → 3×.
+- [Bot builder run stability](bot-builder-run-stability.md) — ChunkLoadError after first trade (public-path + CSS @import roots), javascriptGenerator race, singleton iframe preload, account-scoped session sync, 80% zoom, Workflow icon.
 - [Deriv journal pagination](journal-pagination.md) — profit_table max 500/call; JournalManager chains offset pages until batch < 500; user had 3500+ trades before the cap caused analytics blackout.

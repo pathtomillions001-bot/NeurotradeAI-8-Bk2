@@ -46,3 +46,21 @@ export const loadBlockly = async isDarkMode => {
     await import('./hooks/index.js');
     await import('./blocks');
 };
+
+// Single-flight loader: concurrent callers (double mount, fast Run clicks,
+// re-inits) must not re-import the block definitions — importing `./blocks`
+// twice re-runs its top-level generator registrations against a freshly
+// replaced `window.Blockly`, and a half-finished second pass leaves
+// `window.Blockly.JavaScript` unset while the first is still awaiting.
+let blockly_load_promise = null;
+
+export const ensureBlocklyLoaded = (isDarkMode = false) => {
+    if (window.Blockly?.JavaScript?.javascriptGenerator) return Promise.resolve();
+    if (!blockly_load_promise) {
+        blockly_load_promise = loadBlockly(isDarkMode).catch(error => {
+            blockly_load_promise = null;
+            throw error;
+        });
+    }
+    return blockly_load_promise;
+};

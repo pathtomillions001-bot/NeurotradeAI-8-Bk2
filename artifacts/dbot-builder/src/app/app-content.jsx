@@ -5,6 +5,7 @@ import AuthLoadingWrapper from '@/components/auth-loading-wrapper';
 import { botNotification } from '@/components/bot-notification/bot-notification';
 import useLiveChat from '@/components/chat/useLiveChat';
 import ChunkLoader from '@/components/loader/chunk-loader';
+import { lazyWithRetry } from '@/utils/lazy-retry';
 import { getUrlBase } from '@/components/shared';
 import TransactionDetailsModal from '@/components/transaction-details';
 import { api_base, ApiHelpers, ServerTime } from '@/external/bot-skeleton';
@@ -31,7 +32,7 @@ import '../components/bot-notification/bot-notification.scss';
 // the import — and all of src/preview/ — is dead-code-eliminated from standalone partner
 // builds (where the BFF strips src/preview/ entirely).
 const PreviewBranding =
-    process.env.NEXT_PUBLIC_APP_BUILD === 'true' ? lazy(() => import('../preview/preview-branding')) : null;
+    process.env.NEXT_PUBLIC_APP_BUILD === 'true' ? lazyWithRetry(() => import('../preview/preview-branding')) : null;
 
 const AppContent = observer(() => {
     const [is_api_initialized, setIsApiInitialized] = React.useState(false);

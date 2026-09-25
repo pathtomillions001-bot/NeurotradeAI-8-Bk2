@@ -41,3 +41,45 @@ const env = {
 };
 
 run("npm", ["run", "build"], { env });
+
+// ── Strip remote @import rules from the built stylesheets ────────────────────
+// Vendored Deriv CSS (@deriv-com/ui, quill) begins every chunk stylesheet with
+// `@import "https://fonts.googleapis.com/..."`. When that request fails — slow
+// network, blocked host, captive portal — the <link> injected for a LAZY CSS
+// chunk fires an `error` event even though the local styles themselves parsed.
+// The chunk loader then rejects, React Router's error boundary takes the app
+// down ("Sorry for the interruption") and any running bot dies with it — right
+// after the first trade, when the run-panel UI lazy-loads its chunks.
+//
+// Removing the remote imports makes every stylesheet fully local: fonts keep
+// loading through the resilient <link> path (src/utils/load-web-font.ts), with
+// the brand font stack as fallback, and no network request can ever fail a
+// chunk load again.
+function stripRemoteCssImports(dir) {
+  const cssFiles = [];
+  const walk = (d) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, entry.name);
+      if (entry.isDirectory()) walk(p);
+      else if (entry.name.endsWith(".css")) cssFiles.push(p);
+    }
+  };
+  walk(dir);
+
+  let stripped = 0;
+  for (const file of cssFiles) {
+    const source = fs.readFileSync(file, "utf8");
+    const cleaned = source
+      .replace(/@import\s+url\(\s*["']?https?:[^)]*?\)\s*;?/g, "")
+      .replace(/@import\s+["']https?:[^"']*["']\s*;?/g, "");
+    if (cleaned !== source) {
+      fs.writeFileSync(file, cleaned);
+      stripped += 1;
+    }
+  }
+  console.log(
+    `[dbot-builder] Stripped remote @import rules from ${stripped}/${cssFiles.length} stylesheets`,
+  );
+}
+
+stripRemoteCssImports(path.join(builderRoot, "out", "preview"));

@@ -8,7 +8,7 @@ import { getSavedWorkspaces, saveWorkspaceToRecent } from '../utils/local-storag
 import { isDbotRTL } from '../utils/workspace';
 import main_xml from './xml/main.xml';
 import { forgetAccumulatorsProposalRequest } from './accumulators-proposal-handler';
-import { loadBlockly } from './blockly';
+import { ensureBlocklyLoaded, loadBlockly } from './blockly';
 import DBotStore from './dbot-store';
 import { isAllRequiredBlocksEnabled, updateDisabledBlocks, validateErrorOnBlockDelete } from './utils';
 
@@ -25,7 +25,7 @@ class DBot {
      * Initialises the workspace and mounts it to a container element (app_contents).
      */
     async initWorkspace(public_path, store, api_helpers_store, is_mobile, is_dark_mode) {
-        await loadBlockly(is_dark_mode);
+        await ensureBlocklyLoaded(is_dark_mode);
         const recent_files = await getSavedWorkspaces();
         this.interpreter = Interpreter();
 
@@ -110,7 +110,16 @@ class DBot {
         };
 
         return new Promise((resolve, reject) => {
-            __webpack_public_path__ = public_path; // eslint-disable-line no-global-assign
+            // Keep the base path on `window.__webpack_public_path__` (which Blockly
+            // media / flyout image URLs read at runtime) WITHOUT touching the
+            // bundler's module public path: in an rspack build, a bare
+            // `__webpack_public_path__ = ...` assignment rewrites the chunk
+            // loader's `__webpack_require__.p`. Callers used to pass '/', so every
+            // lazy chunk requested AFTER workspace init (e.g. the `pako` chunk
+            // fetched when the first contract is bought) resolved against the site
+            // root instead of /bot/preview — ChunkLoadError → "Sorry for the
+            // interruption" → the bot died right after its first trade.
+            window.__webpack_public_path__ = public_path;
             ApiHelpers.setInstance(api_helpers_store);
             DBotStore.setInstance(store);
             const window_width = window.innerWidth;
@@ -234,7 +243,12 @@ class DBot {
     /** Saves the current workspace to local storage
      * and update saved status if strategy changes  */
     async saveRecentWorkspace() {
-        const current_xml_dom = this?.workspace ? Blockly?.Xml?.workspaceToDom(this.workspace) : null;
+        // Early clicks can race workspace init: `Blockly` (or `Blockly.Xml`) is
+        // not on `window` yet. Skip saving rather than throwing.
+        const current_xml_dom =
+            this?.workspace && window.Blockly?.Xml?.workspaceToDom
+                ? window.Blockly.Xml.workspaceToDom(this.workspace)
+                : null;
         try {
             const recent_files = await getSavedWorkspaces();
             if (current_xml_dom && this.isStrategyUpdated(current_xml_dom, recent_files)) {
@@ -272,25 +286,41 @@ class DBot {
     runBot() {
         if (api_base.is_stopping) return;
 
-        try {
-            api_base.is_stopping = false;
-            const code = this.generateCode();
-            if (!this.interpreter.bot.tradeEngine.checkTicksPromiseExists()) this.interpreter = Interpreter();
+        // The Run button can become clickable while `loadBlockly` is still
+        // resolving (its completion is what defines `window.Blockly.JavaScript`).
+        // Generating code before that produced
+        // "Cannot read properties of undefined (reading 'javascriptGenerator')",
+        // stopped the bot and surfaced an error dialog. Await readiness first.
+        const start = () => {
+            try {
+                api_base.is_stopping = false;
+                const code = this.generateCode();
+                if (!this.interpreter.bot.tradeEngine.checkTicksPromiseExists()) this.interpreter = Interpreter();
 
-            this.is_bot_running = true;
+                this.is_bot_running = true;
 
-            api_base.setIsRunning(true);
-            this.interpreter.run(code).catch(error => {
+                api_base.setIsRunning(true);
+                this.interpreter.run(code).catch(error => {
+                    globalObserver.emit('Error', error);
+                    this.stopBot();
+                });
+            } catch (error) {
                 globalObserver.emit('Error', error);
-                this.stopBot();
-            });
-        } catch (error) {
-            globalObserver.emit('Error', error);
 
-            if (this.interpreter) {
-                this.stopBot();
+                if (this.interpreter) {
+                    this.stopBot();
+                }
             }
-        }
+        };
+
+        ensureBlocklyLoaded()
+            .then(start)
+            .catch(error => {
+                globalObserver.emit('Error', error);
+                if (this.interpreter) {
+                    this.stopBot();
+                }
+            });
     }
 
     /**
@@ -298,6 +328,9 @@ class DBot {
      * @param {Object} limitations Optional limitations (legacy argument)
      */
     generateCode(limitations = {}) {
+        if (!window.Blockly?.JavaScript?.javascriptGenerator) {
+            throw new Error('The code generator is still loading — please try again in a moment.');
+        }
         return `
             var BinaryBotPrivateInit;
             var BinaryBotPrivateStart;
@@ -498,6 +531,12 @@ class DBot {
      */
     valueInputLimitationsListener(event, force_check = false) {
         if (!force_check && (!this.workspace || this.workspace.isDragging())) {
+            return;
+        }
+
+        // Workspace events can fire while `loadBlockly` is still resolving; the
+        // JS generator is not attached yet, so there is nothing to validate.
+        if (!window.Blockly?.JavaScript?.javascriptGenerator) {
             return;
         }
 

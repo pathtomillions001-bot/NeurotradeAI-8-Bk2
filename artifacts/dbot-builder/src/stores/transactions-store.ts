@@ -6,8 +6,7 @@ import { ProposalOpenContract } from '@deriv/api-types';
 import { TPortfolioPosition, TStores } from '@deriv/stores/types';
 import { TContractInfo } from '../components/summary/summary-card.types';
 import { transaction_elements } from '../constants/transactions';
-import { getStoredItemsByKey, setStoredItemsByKey } from '../utils/session-storage';
-import { getSetting, storeSetting } from '../utils/settings';
+import { getStoredItemsByKey, getStoredItemsByUser, setStoredItemsByKey } from '../utils/session-storage';
 import RootStore from './root-store';
 
 type TTransaction = {
@@ -28,26 +27,16 @@ export default class TransactionsStore {
         this.root_store = root_store;
         this.core = core;
         this.is_transaction_details_modal_open = false;
-        // The store is built before the Deriv socket authorizes, so the live
-        // loginid is usually empty here — seed from the persisted key instead
-        // (and adopt the live one as soon as it arrives).
-        if (this.core?.client?.loginid) this.setAccountKey(this.core.client.loginid as string);
+        this.disposeReactionsFn = this.registerReactions();
 
-        // `makeObservable` must run BEFORE the reactions below are registered:
-        // a reaction evaluates its tracked expression immediately, and if the
-        // observables (`elements`, `account_key`) are still plain fields at that
-        // moment no dependencies are recorded — the cache-write reaction then
-        // never fires and the history is silently lost on reload.
         makeObservable(this, {
             elements: observable,
-            account_key: observable,
             active_transaction_id: observable,
             recovered_completed_transactions: observable,
             recovered_transactions: observable,
             is_called_proposal_open_contract: observable,
             is_transaction_details_modal_open: observable,
             transactions: computed,
-            setAccountKey: action.bound,
             onBotContractEvent: action.bound,
             pushTransaction: action.bound,
             clear: action.bound,
@@ -57,69 +46,19 @@ export default class TransactionsStore {
             sortOutPositionsBeforeAction: action.bound,
             recoverPendingContractsById: action.bound,
         });
-
-        this.disposeReactionsFn = this.registerReactions();
     }
     TRANSACTION_CACHE = 'transaction_cache';
-    // Which account the transaction history currently on screen belongs to.
-    //
-    // The history used to be looked up live against `client.loginid`, so the
-    // moment that value went blank — socket blip, OTP re-authorize, demo/real
-    // switch, Stop while the app re-syncs the session — the Transactions tab
-    // rendered "no transactions" while the Journal (an in-memory list) kept
-    // everything. The last account that actually traded is remembered here and
-    // persisted, so Stop (or any auth hiccup) never hides the trading data: it
-    // only goes away on Reset, which calls clear().
-    ACCOUNT_SETTING = 'transaction_cache_account';
 
-    elements: TElement = this.restoreCachedElements();
-    account_key: string = this.resolveInitialAccountKey();
+    elements: TElement = getStoredItemsByUser(this.TRANSACTION_CACHE, this.core?.client?.loginid, []);
     active_transaction_id: null | number = null;
     recovered_completed_transactions: number[] = [];
     recovered_transactions: number[] = [];
     is_called_proposal_open_contract = false;
     is_transaction_details_modal_open = false;
 
-    /**
-     * Restores the whole per-account history map from the session cache.
-     *
-     * NB: the cached value must be read as a MAP keyed by loginid. An earlier
-     * build wrote `getStoredItemsByUser(...)` here, which returns a single
-     * account's LIST — so `elements` came back as an array, every
-     * `elements[loginid]` lookup missed, and the history vanished on each
-     * reload even though it was still on disk. Legacy array caches written by
-     * that build are migrated under the remembered account key.
-     */
-    private restoreCachedElements(): TElement {
-        const stored = getStoredItemsByKey(this.TRANSACTION_CACHE, {}) as unknown;
-        if (Array.isArray(stored)) {
-            const account = this.resolveInitialAccountKey();
-            return account ? { [account]: stored as TTransaction[] } : {};
-        }
-        return (stored as TElement) || {};
-    }
-
-    /** Last account that traded — survives a blank loginid and a reload. */
-    private resolveInitialAccountKey(): string {
-        try {
-            const remembered = getSetting(this.ACCOUNT_SETTING);
-            if (typeof remembered === 'string' && remembered) return remembered;
-            return localStorage.getItem('active_loginid') || '';
-        } catch {
-            return '';
-        }
-    }
-
-    setAccountKey = (key: string) => {
-        if (!key || key === this.account_key) return;
-        this.account_key = key;
-        storeSetting(this.ACCOUNT_SETTING, key);
-    };
-
     get transactions(): TTransaction[] {
-        const key = this.account_key || ((this.core?.client?.loginid as string) ?? '');
-        if (!key) return [];
-        return this.elements[key] ?? [];
+        if (this.core?.client?.loginid) return this.elements[this.core?.client?.loginid] ?? [];
+        return [];
     }
 
     get statistics() {
@@ -174,14 +113,7 @@ export default class TransactionsStore {
     pushTransaction(data: TContractInfo) {
         const is_completed = isEnded(data as ProposalOpenContract);
         const { run_id } = this.root_store.run_panel;
-        // The live loginid wins while it is present (a real account switch must
-        // land on the new account); when it is blank the remembered account is
-        // used, so a stop/disconnect never re-keys — or hides — the history.
-        const live_loginid = (this.core?.client?.loginid as string) || '';
-        const current_account = live_loginid || this.account_key;
-
-        if (!current_account) return;
-        if (current_account !== this.account_key) this.setAccountKey(current_account);
+        const current_account = this.core?.client?.loginid as string;
 
         const contract: TContractInfo = {
             ...data,
@@ -244,11 +176,9 @@ export default class TransactionsStore {
         this.elements = { ...this.elements }; // force update
     }
 
-    /** Wipes the visible history for the current account. Only Reset calls this. */
     clear() {
-        const key = this.account_key || ((this.core?.client?.loginid as string) ?? '');
-        if (key && this.elements?.[key]?.length > 0) {
-            this.elements[key] = [];
+        if (this.elements && this.elements[this.core?.client?.loginid as string]?.length > 0) {
+            this.elements[this.core?.client?.loginid as string] = [];
         }
         this.recovered_completed_transactions = this.recovered_completed_transactions?.slice(0, 0);
         this.recovered_transactions = this.recovered_transactions?.slice(0, 0);
@@ -258,23 +188,12 @@ export default class TransactionsStore {
     registerReactions() {
         const { client } = this.core;
 
-        // Follow the authorized account. A blank loginid (socket blip, OTP
-        // re-authorize, Stop + session resync) is deliberately ignored so the
-        // history on screen stays put until the user resets it.
-        const disposeAccountKeyListener = reaction(
-            () => client?.loginid,
-            loginid => {
-                if (loginid) this.setAccountKey(loginid as string);
-            }
-        );
-
         // Write transactions to session storage on each change in transaction elements.
         const disposeTransactionElementsListener = reaction(
-            () => this.elements[this.account_key],
+            () => this.elements[client?.loginid as string],
             elements => {
-                if (!this.account_key) return;
                 const stored_transactions = getStoredItemsByKey(this.TRANSACTION_CACHE, {});
-                stored_transactions[this.account_key] = elements?.slice(0, 5000) ?? [];
+                stored_transactions[client.loginid as string] = elements?.slice(0, 5000) ?? [];
                 setStoredItemsByKey(this.TRANSACTION_CACHE, stored_transactions);
             }
         );
@@ -288,7 +207,6 @@ export default class TransactionsStore {
         );
 
         return () => {
-            disposeAccountKeyListener();
             disposeTransactionElementsListener();
             disposeRecoverContracts();
         };

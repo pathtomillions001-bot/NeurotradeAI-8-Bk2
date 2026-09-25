@@ -139,7 +139,7 @@ describe('useLogout', () => {
     });
 
     describe('Storage Clearing Fallback', () => {
-        it('falls back to clearing only the auth keys — never the run history', async () => {
+        it('should clear all storage if targeted clearing fails', async () => {
             const mockError = new Error('Logout failed');
             mockLogout.mockRejectedValue(mockError);
 
@@ -156,21 +156,23 @@ describe('useLogout', () => {
 
             await waitFor(() => {
                 expect(ErrorLogger.error).toHaveBeenCalledWith('Logout', 'Failed to clear auth storage', storageError);
-                // The builder keeps the user's transaction/journal history until
-                // Reset, so a failed logout must never nuke the whole store.
-                expect(sessionStorage.clear).not.toHaveBeenCalled();
-                expect(localStorage.clear).not.toHaveBeenCalled();
+                expect(sessionStorage.clear).toHaveBeenCalled();
+                expect(localStorage.clear).toHaveBeenCalled();
             });
         });
 
-        it('should log error if the fallback clearing also fails', async () => {
+        it('should log error if final storage clear also fails', async () => {
             const mockError = new Error('Logout failed');
             mockLogout.mockRejectedValue(mockError);
 
-            // Mock removeItem to throw errors
+            // Mock both removeItem and clear to throw errors
             const storageError = new Error('Storage error');
+            const finalError = new Error('Final storage error');
             Storage.prototype.removeItem = jest.fn().mockImplementation(() => {
                 throw storageError;
+            });
+            Storage.prototype.clear = jest.fn().mockImplementation(() => {
+                throw finalError;
             });
 
             const { result } = renderHook(() => useLogout());
@@ -179,9 +181,7 @@ describe('useLogout', () => {
             await handleLogout();
 
             await waitFor(() => {
-                expect(ErrorLogger.error).toHaveBeenCalledWith('Logout', 'Failed to clear auth storage', storageError);
-                expect(sessionStorage.clear).not.toHaveBeenCalled();
-                expect(localStorage.clear).not.toHaveBeenCalled();
+                expect(ErrorLogger.error).toHaveBeenCalledWith('Logout', 'Failed to clear all storage', finalError);
             });
         });
     });

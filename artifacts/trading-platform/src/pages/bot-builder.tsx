@@ -70,28 +70,11 @@ export default function BotBuilder() {
   return (
     <div
       data-testid="bot-builder-page"
-      className="h-[calc(100dvh-3.5rem)] w-full overflow-hidden bg-background md:h-[100dvh]"
+      className="h-[calc(100vh-3.5rem)] w-full overflow-hidden bg-background"
     >
-      {/*
-        The 125%/125% sizing compensates for the 0.8 zoom below: a zoomed box
-        that measures 100% only PAINTS at 100% × 0.8 = 80% of its container,
-        which left a dead ~20% strip of the page background under the builder —
-        the "plain black bar" that sat BELOW the builder's own footer (the bar
-        with the GMT server clock) and pushed the real footer off the bottom
-        edge of the page. Sizing the zoomed box at 125% makes the painted result
-        exactly 100% of the page, so the builder's footer is the last bar on
-        screen and the workspace fills the viewport. The page wrapper keeps
-        `overflow-hidden`, so the pre-zoom overflow is never visible.
-
-        Height: the 3.5rem subtraction matches the mobile top bar only (the
-        desktop header is hidden and <main> has no top padding there), so
-        desktop must use the full viewport — otherwise the wrapper stopped
-        56px short and the page background showed as a bar BELOW the builder's
-        footer, which is what the report described.
-      */}
       <div
         ref={containerRef}
-        className="h-[125%] w-[125%] [&>iframe]:h-full [&>iframe]:w-full [&>iframe]:border-0 [&>iframe]:bg-white"
+        className="h-full w-full [&>iframe]:h-full [&>iframe]:w-full [&>iframe]:border-0 [&>iframe]:bg-white"
         style={{ zoom: 0.8 }}
       />
     </div>

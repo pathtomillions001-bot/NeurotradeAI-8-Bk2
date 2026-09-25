@@ -8,20 +8,14 @@ import RoutePromptDialog from '@/components/route-prompt-dialog';
 import { useAccountSwitching } from '@/hooks/useAccountSwitching';
 import { useLanguageFromURL } from '@/hooks/useLanguageFromURL';
 import { StoreProvider } from '@/hooks/useStore';
-import { lazyWithRetry } from '@/utils/lazy-retry';
 import { isPreviewMode, PREVIEW_BASE_PATH } from '@/utils/is-preview-mode';
 import { localize, TranslationProvider } from '@deriv-com/translations';
 import CoreStoreProvider from './CoreStoreProvider';
 import i18nInstance from './i18n';
 import './app-root.scss';
 
-// Route-level chunks go through `lazyWithRetry` as well: a single failed chunk
-// fetch (flaky network, a CDN hiccup, a cached index referencing a stale hash)
-// would otherwise reject the lazy import, unmount the whole router and surface
-// the "Sorry for the interruption / Refresh" page — killing a running bot with
-// it. `lazyWithRetry` retries the import a couple of times before giving up.
-const Layout = lazyWithRetry(() => import('../components/layout'));
-const AppRoot = lazyWithRetry(() => import('./app-root'));
+const Layout = lazy(() => import('../components/layout'));
+const AppRoot = lazy(() => import('./app-root'));
 
 /**
  * Component wrapper to handle language URL parameter

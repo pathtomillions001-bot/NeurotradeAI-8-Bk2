@@ -254,6 +254,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS deriv_journal_unique
 CREATE INDEX IF NOT EXISTS deriv_journal_session_idx
   ON deriv_journal (session_id, purchase_time DESC);
 
+-- ── DBot strategies (Create Bot flow) ─────────────────────────────────────────
+-- Scanner manifests compiled to Deriv DBot Blockly XML. The Bot Builder page
+-- loads these into the embedded builder; the XML is executed by DBot itself.
+CREATE TABLE IF NOT EXISTS dbot_strategies (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT 'legacy',
+  name TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'overunder-turbo',
+  symbol TEXT NOT NULL,
+  manifest TEXT NOT NULL,
+  xml TEXT NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS dbot_strategies_session_idx
+  ON dbot_strategies (session_id, created_at);
+
 CREATE TABLE IF NOT EXISTS trades (
   id SERIAL PRIMARY KEY,
   session_id TEXT NOT NULL DEFAULT 'legacy',

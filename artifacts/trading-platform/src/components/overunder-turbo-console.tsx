@@ -16,8 +16,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair,
+  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair, Blocks,
 } from "lucide-react";
+import { useLocation } from "wouter";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { useGetSettings } from "@workspace/api-client-react";
@@ -109,6 +110,7 @@ export function OverUnderTurboConsole({
 }) {
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
+  const [, navigate] = useLocation();
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
     scanning: null, scanned: 0, total: 20,
@@ -228,6 +230,35 @@ export function OverUnderTurboConsole({
       );
     } catch {
       toast.error("Could not start the bot");
+    } finally { setLoading(false); }
+  };
+
+  /**
+   * CREATE BOT — compile this scanned lock into a Deriv DBot strategy and open
+   * the in-app Bot Builder with it loaded. The DBot then executes the trades
+   * (our recovery ladder embedded as blocks); Locked/Switching stay as the
+   * server-engine secondary options.
+   */
+  const handleCreateBot = async (c: Candidate) => {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/bots/overunder-turbo/create-bot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: c.symbol,
+          normal: c.normal,
+          recovery: c.recovery,
+          candidate: c,
+          ...config,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { toast.error(data.error ?? "Could not build the DBot"); return; }
+      toast.success(`🧩 DBot built for ${c.displayName} — ${label(c.normal)}; press Run in the Bot Builder`);
+      navigate(`/bot-builder?strategy=${data.id}`);
+    } catch {
+      toast.error("Could not reach the strategy compiler");
     } finally { setLoading(false); }
   };
 
@@ -378,7 +409,19 @@ export function OverUnderTurboConsole({
                       </p>
                     </div>
 
-                    {/* The two deploy buttons — LOCKED or SWITCHING */}
+                    {/* PRIMARY: build a Deriv DBot for this lock */}
+                    <Button onClick={() => handleCreateBot(scanResult.best!)} disabled={loading}
+                            className="w-full h-11 bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-sm">
+                      <Blocks className="w-4 h-4 mr-2" />
+                      Create DBot
+                    </Button>
+                    <p className="text-[9px] text-muted-foreground/60 leading-relaxed -mt-1">
+                      Builds a Deriv DBot for this market with your stake / TP / SL and your recovery
+                      ladder embedded as blocks. It opens in the Bot Builder — press Run there and the
+                      DBot executes the trades on your connected account (demo or real).
+                    </p>
+
+                    {/* Secondary: our own server engine — LOCKED or SWITCHING */}
                     <div className="grid grid-cols-2 gap-2">
                       <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
                               className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>

@@ -147,6 +147,19 @@ app.use(async (_req, res, next) => {
 
 app.use("/api", router);
 
+// ── Embedded Deriv DBot builder (static bundle) ──────────────────────────────
+// The vendored builder (artifacts/dbot-builder, `build:embed` → out/preview)
+// is served from THIS origin so the iframe shares localStorage with the
+// trading platform — that is what makes the no-second-login token bridge
+// possible. In dev the Vite server proxies /dbot here.
+const dbotDist = resolve(import.meta.dirname, "../../../artifacts/dbot-builder/out/preview");
+app.use("/dbot", express.static(dbotDist, { index: "index.html" }));
+app.get(/^\/dbot(\/.*)?$/, (_req, res) => {
+  res.sendFile(resolve(dbotDist, "index.html"), (err) => {
+    if (err) res.status(404).json({ error: "DBot builder bundle not built — run: pnpm --filter @workspace/dbot-builder run build:embed" });
+  });
+});
+
 // ── Startup ──────────────────────────────────────────────────────────────────
 // Ensure DB schema is applied before anything else touches the database
 dbReady.then(() => {

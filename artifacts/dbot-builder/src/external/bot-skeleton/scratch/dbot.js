@@ -409,12 +409,23 @@ class DBot {
         if (api_base.is_stopping) return;
 
         api_base.setIsRunning(false);
-
-        await this.interpreter.stop();
         this.is_bot_running = false;
-        this.interpreter = null;
-        this.interpreter = Interpreter();
-        await this.interpreter.bot.tradeEngine.watchTicks(this.symbol);
+
+        try {
+            // `this.interpreter` is null whenever the bot was never started (or
+            // a previous stop already tore it down) — Stop must still be a
+            // no-op, not a TypeError that leaves the Run button dead.
+            await this.interpreter?.stop?.();
+        } catch (error) {
+            console.error('stopBot: interpreter stop failed', error);
+        } finally {
+            // Never leave the stop latch set: `runBot()` refuses to start while
+            // `api_base.is_stopping` is true, so a failed stop used to make Run
+            // permanently do nothing until the page was reloaded.
+            api_base.is_stopping = false;
+        }
+
+        this.resetInterpreter();
         forgetAccumulatorsProposalRequest(this);
     }
 
@@ -422,11 +433,37 @@ class DBot {
      * Immediately instructs the interpreter to terminate the WS connection and bot.
      */
     async terminateBot() {
-        if (this.interpreter) {
+        if (!this.interpreter) return;
+
+        try {
             await this.interpreter.terminateSession();
+        } catch (error) {
+            console.error('terminateBot: session termination failed', error);
+        } finally {
+            api_base.is_stopping = false;
+            this.is_bot_running = false;
+        }
+
+        this.resetInterpreter();
+    }
+
+    /**
+     * Rebuilds the interpreter and re-arms tick watching for the current
+     * symbol. Failures are contained: the next Run creates a fresh interpreter
+     * anyway, and a rejected promise here surfaced as an unhandled rejection
+     * (and, in the embedded builder, an error screen) on some Stop clicks.
+     */
+    resetInterpreter() {
+        try {
             this.interpreter = null;
             this.interpreter = Interpreter();
-            await this.interpreter.bot.tradeEngine.watchTicks(this.symbol);
+            // Re-arm ticks in the background — Run does not depend on it.
+            Promise.resolve(this.interpreter?.bot?.tradeEngine?.watchTicks?.(this.symbol)).catch(error => {
+                console.error('resetInterpreter: watchTicks failed', error);
+            });
+        } catch (error) {
+            console.error('resetInterpreter: failed to rebuild interpreter', error);
+            this.interpreter = null;
         }
     }
 

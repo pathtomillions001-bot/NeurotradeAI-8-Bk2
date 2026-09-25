@@ -211,6 +211,10 @@ export default class RunPanelStore {
             this.toggleDrawer(true);
             this.run_id = `run-${Date.now()}`;
 
+            // Only ever cleared at the START of a run: the card belongs to the
+            // contract about to be placed, so a stale result overlay from the
+            // previous run must not bleed into this one. Stopping/errors never
+            // touch it — the user's history is cleared by Reset (clearStat).
             summary_card.clear();
             this.setContractStage(contract_stages.STARTING);
             this.dbot.runBot();
@@ -233,21 +237,35 @@ export default class RunPanelStore {
         this.is_contract_buying_in_progress = false;
 
         const { is_multiplier } = this.root_store.summary_card;
-        const { summary_card } = this.root_store;
 
         if (is_multiplier) {
             this.showStopMultiplierContractDialog();
-        } else {
-            this.stopBot();
-            summary_card.clear();
-            this.setShowBotStopMessage(true);
+            return;
         }
+
+        // The visible trading data (Summary card, Transactions tab, Journal) is
+        // intentionally NOT cleared here: stopping the bot means it stops
+        // trading, not that the user loses the run they just watched. Everything
+        // is cleared by Reset (clearStat → this.clear/journal/summary/transactions).
+        this.stopBot();
+        this.setShowBotStopMessage(true);
     };
 
     stopBot = () => {
         const { ui } = this.core;
 
-        this.dbot.stopBot();
+        try {
+            // Never let a stop failure leave the panel in a state where the Stop
+            // button is stuck (or where Run refuses to start); dbot.stopBot()
+            // clears `api_base.is_stopping` in a finally block.
+            Promise.resolve(this.dbot.stopBot()).catch(error => {
+                // eslint-disable-next-line no-console
+                console.error('stopBot failed:', error);
+            });
+        } catch (error) {
+            // eslint-disable-next-line no-console
+            console.error('stopBot failed:', error);
+        }
 
         ui.setPromptHandler(false);
 
@@ -313,14 +331,17 @@ export default class RunPanelStore {
     };
 
     stopMyBot = () => {
-        const { summary_card, quick_strategy } = this.root_store;
+        const { quick_strategy } = this.root_store;
         const { ui } = this.core;
         const { toggleStopBotDialog } = quick_strategy;
 
         ui.setPromptHandler(false);
         this.dbot.terminateBot();
         this.onCloseDialog();
-        summary_card.clear();
+        // Stopping must not wipe the trading data the user is looking at: the
+        // Summary card keeps the last contract (spot/profit/loss) visible until
+        // the next Run, which clears it, or until Reset (clearStat) — see the
+        // retention contract in onStopBotClick.
         toggleStopBotDialog();
         if (this.timer) {
             clearInterval(this.timer);
@@ -342,7 +363,6 @@ export default class RunPanelStore {
     };
 
     showStopMultiplierContractDialog = () => {
-        const { summary_card } = this.root_store;
         const { ui } = this.core;
 
         this.onOkButtonClick = () => {
@@ -356,7 +376,8 @@ export default class RunPanelStore {
                 performance.clearMeasures();
             }
             this.onCloseDialog();
-            summary_card.clear();
+            // Terminating the bot is another kind of Stop: the contract (and its
+            // details) stay visible until the user presses Reset.
         };
         this.onCancelButtonClick = () => {
             this.onClickSell();
@@ -656,7 +677,10 @@ export default class RunPanelStore {
         // data.error for API errors, data for code errors
         const error = data.error || data;
         if (unrecoverable_errors.includes(error.code)) {
-            this.root_store.summary_card.clear();
+            // NOTE: the summary card is deliberately left alone here. An error
+            // stops the bot, and the user's contract/transaction details must
+            // survive that — they are only cleared by Reset (clearStat), as the
+            // Transactions/Journal tabs already behave.
             this.error_type = ErrorTypes.UNRECOVERABLE_ERRORS;
         } else {
             this.error_type = ErrorTypes.RECOVERABLE_ERRORS;

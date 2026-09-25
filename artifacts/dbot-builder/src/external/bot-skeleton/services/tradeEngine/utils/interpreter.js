@@ -161,6 +161,24 @@ const Interpreter = () => {
 
     async function stop() {
         return new Promise((resolve, reject) => {
+            // Settle exactly once and never leave `api_base.is_stopping` latched:
+            // `runBot()` bails out while it is true, so a stop that rejected
+            // half-way used to kill the Run button until the page was reloaded
+            // (users then hammered Stop again and again).
+            let settled = false;
+            const done = () => {
+                if (settled) return;
+                settled = true;
+                api_base.is_stopping = false;
+                resolve();
+            };
+            const fail = error => {
+                if (settled) return;
+                settled = true;
+                api_base.is_stopping = false;
+                reject(error);
+            };
+
             try {
                 const global_timeouts = globalObserver.getState('global_timeouts') ?? [];
                 const is_timeouts_cancellable = Object.keys(global_timeouts).every(
@@ -172,29 +190,26 @@ const Interpreter = () => {
                     // When user is rate limited, allow them to stop the bot immediately
                     // granted there is no active contract.
                     global_timeouts.forEach(timeout => clearTimeout(global_timeouts[timeout]));
-                    terminateSession().then(() => {
-                        api_base.is_stopping = false;
-                        resolve();
-                    });
+                    terminateSession().then(done, fail);
                 } else if (
                     bot.tradeEngine.isSold === false &&
                     !$scope.is_error_triggered &&
                     isMultiplierContract(bot?.tradeEngine?.data?.contract?.contract_type ?? '')
                 ) {
+                    // Deliberate wait: a multiplier contract is settled before the
+                    // session is torn down. `is_stopping` is NOT latched here, so
+                    // Run stays usable while the contract runs out.
                     globalObserver.register('contract.status', async contractStatus => {
                         if (contractStatus.id === 'contract.sold') {
-                            terminateSession().then(() => resolve());
+                            terminateSession().then(done, fail);
                         }
                     });
                 } else {
                     api_base.is_stopping = true;
-                    terminateSession().then(() => {
-                        api_base.is_stopping = false;
-                        resolve();
-                    });
+                    terminateSession().then(done, fail);
                 }
             } catch (e) {
-                reject(e);
+                fail(e);
             }
         });
     }
@@ -210,9 +225,18 @@ const Interpreter = () => {
                 // Unsubscribe the subscriptions from Proposal, Balance and OpenContract
                 api_base.clearSubscriptions();
 
-                ticksService.unsubscribeFromTicksService().then(() => {
+                // `ticksService` (or its unsubscribe method) can already be gone —
+                // a second Stop press, an interpreter rebuilt after an error, a
+                // dependency that threw while tearing down. The old code called it
+                // unguarded, so the resulting TypeError rejected this promise while
+                // `stop()`'s `.then(...)` had no error handler: the stop latch
+                // stayed on and the promise never settled (dead Run button).
+                const unsubscribe = ticksService?.unsubscribeFromTicksService?.();
+                if (unsubscribe && typeof unsubscribe.then === 'function') {
+                    unsubscribe.then(resolve, reject);
+                } else {
                     resolve();
-                });
+                }
             } catch (error) {
                 reject(error);
             }

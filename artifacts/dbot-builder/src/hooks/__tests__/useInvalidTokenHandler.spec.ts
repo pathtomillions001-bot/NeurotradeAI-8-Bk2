@@ -101,7 +101,12 @@ describe('useInvalidTokenHandler', () => {
             // Trigger the handler
             await handler();
 
-            expect(sessionStorage.clear).toHaveBeenCalled();
+            // Only the auth-scoped keys are dropped — the run history the user
+            // keeps until Reset (`transaction_cache`, `journal_cache`) and the
+            // host app's tab-session keys must survive an invalid-token blip.
+            expect(sessionStorage.clear).not.toHaveBeenCalled();
+            expect(sessionStorage.removeItem).toHaveBeenCalledWith('deriv_accounts');
+            expect(sessionStorage.removeItem).toHaveBeenCalledWith('session_token');
         });
 
         it('should clear invalid auth data from localStorage', async () => {
@@ -282,7 +287,7 @@ describe('useInvalidTokenHandler', () => {
             });
         });
 
-        it('should clear sessionStorage completely to remove stale data', async () => {
+        it('should clear the stale auth keys without wiping the run history', async () => {
             const mockOAuthURL = 'https://oauth.example.com/authorize';
             mockGenerateOAuthURL.mockResolvedValue(mockOAuthURL);
 
@@ -295,7 +300,8 @@ describe('useInvalidTokenHandler', () => {
             // Trigger the handler
             await handler();
 
-            expect(sessionStorage.clear).toHaveBeenCalled();
+            expect(sessionStorage.clear).not.toHaveBeenCalled();
+            expect(sessionStorage.removeItem).toHaveBeenCalledWith('deriv_accounts');
         });
     });
 

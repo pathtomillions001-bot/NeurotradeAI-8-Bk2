@@ -23,8 +23,26 @@ export const useInvalidTokenHandler = (): { unregisterHandler: () => void } => {
             localStorage.removeItem('accountsList');
             localStorage.removeItem('clientAccounts');
 
-            // Clear sessionStorage completely to remove any stale auth data
-            sessionStorage.clear();
+            // Clear session-scoped AUTH keys only — never sessionStorage.clear(),
+            // which also holds the run history the user keeps until Reset.
+            ['deriv_accounts', 'query_param_currency', 'client_account_details', 'session_token'].forEach(key =>
+                sessionStorage.removeItem(key)
+            );
+
+            // Inside NeuroTrade the builder is account-bound to the host app:
+            // auth is repaired by the session bridge (the parent re-sends the
+            // connected account), so never bounce the embedded builder out to
+            // Deriv's own OAuth flow — that looked like a broken page and lost
+            // the workspace the user was working in.
+            const [{ isPreviewMode }, { syncEmbeddedPreviewSession }] = await Promise.all([
+                import('@/utils/is-preview-mode'),
+                import('@/preview/session-bridge'),
+            ]);
+
+            if (isPreviewMode()) {
+                await syncEmbeddedPreviewSession(null);
+                return;
+            }
 
             // Redirect to OAuth login instead of reload to get fresh authentication
             const { generateOAuthURL } = await import('@/components/shared');

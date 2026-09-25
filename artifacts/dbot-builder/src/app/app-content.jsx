@@ -37,6 +37,7 @@ const PreviewBranding =
 const AppContent = observer(() => {
     const [is_api_initialized, setIsApiInitialized] = React.useState(false);
     const [is_loading, setIsLoading] = React.useState(true);
+    const symbol_gate_timeout = React.useRef(null);
 
     const store = useStore();
     const { app, transactions, common, client } = store;
@@ -137,15 +138,37 @@ const AppContent = observer(() => {
         });
     };
 
+    // Hard ceiling on the boot gate below. The whole builder (workspace,
+    // toolbar, Run panel) used to stay behind a spinner until a Deriv
+    // round-trip for the active-symbol list came back; on a slow or congested
+    // connection that turned into seconds of staring at "Initializing Deriv Bot
+    // account..." before the bot could even be opened — which is also what
+    // delayed the first trade. The symbols are only needed to *pick* a market
+    // (and the market dropdown fetches them itself when it opens), so after this
+    // long we render the app and let the list arrive in the background.
+    const ACTIVE_SYMBOLS_UI_GATE_MS = 1200;
+
     const changeActiveSymbolLoadingState = () => {
+        const releaseGate = () => {
+            if (symbol_gate_timeout.current) {
+                clearTimeout(symbol_gate_timeout.current);
+                symbol_gate_timeout.current = null;
+            }
+            setIsLoading(false);
+        };
+
+        // Fail-open ceiling: never keep the builder behind a spinner longer
+        // than this waiting for the symbol list.
+        if (!symbol_gate_timeout.current) {
+            symbol_gate_timeout.current = setTimeout(releaseGate, ACTIVE_SYMBOLS_UI_GATE_MS);
+        }
+
         init();
 
         const retrieveActiveSymbols = () => {
             const { active_symbols } = ApiHelpers.instance;
 
-            active_symbols.retrieveActiveSymbols(true).then(() => {
-                setIsLoading(false);
-            });
+            active_symbols.retrieveActiveSymbols(true).then(releaseGate, releaseGate);
         };
 
         if (ApiHelpers?.instance?.active_symbols) {

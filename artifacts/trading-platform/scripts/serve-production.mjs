@@ -29,6 +29,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.resolve(packageRoot, "dist/public");
 
+// Bot Studio: the vendored Deriv DBot builder (artifacts/dbot-builder) is
+// mounted on THIS origin under /bot so it shares the platform's session
+// cookie and localStorage — that shared origin is what lets the builder open
+// already connected to the user's Deriv account (see /api/dbot/*).
+const botStudioDir = path.resolve(packageRoot, "..", "dbot-builder", "dist");
+const botStudioBuilt = fs.existsSync(path.join(botStudioDir, "index.html"));
+if (!botStudioBuilt) {
+  console.warn(
+    `[web] Bot Studio bundle not found at ${botStudioDir}. Run: pnpm --filter @workspace/dbot-builder run build:embedded`,
+  );
+}
+
 const rawPort = process.env.PORT ?? "5000";
 const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) {
@@ -155,6 +167,32 @@ const server = http.createServer((req, res) => {
 
   if (pathname === "/api" || pathname.startsWith("/api/")) {
     return proxy.web(req, res, { target: upstream });
+  }
+
+  // ── Bot Studio bundle ──────────────────────────────────────────────────────
+  // Served BEFORE the platform's SPA fallback: the builder emits its own asset
+  // URLs already prefixed with /bot (rsbuild assetPrefix), so the path inside
+  // the mount is what is left after stripping the prefix.
+  if (botStudioBuilt && (pathname === "/bot" || pathname.startsWith("/bot/"))) {
+    // serve-handler resolves against req.url, so present the builder with the
+    // path INSIDE the mount.
+    req.url = pathname.slice("/bot".length) || "/";
+    return handler(req, res, {
+      public: botStudioDir,
+      // React Router app: unknown deep links inside the builder resolve to its
+      // own index.html, never to the platform's.
+      rewrites: [{ source: "**", destination: "/index.html" }],
+      directoryListing: false,
+      headers: [
+        {
+          source: "**/*",
+          headers: [
+            { key: "X-Content-Type-Options", value: "nosniff" },
+            { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          ],
+        },
+      ],
+    });
   }
 
   return handler(req, res, {

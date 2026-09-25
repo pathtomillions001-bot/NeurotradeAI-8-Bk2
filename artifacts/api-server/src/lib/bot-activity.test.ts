@@ -80,7 +80,7 @@ describe("bot console contract", () => {
       "killshot@1",
       "omni@2",
       "overunder-navigator@1",
-      "overunder-turbo@1",
+      "overunder-turbo@2",
       "parity-forge@1",
       "specialist@1",
       "surge@1",

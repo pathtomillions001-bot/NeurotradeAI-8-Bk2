@@ -17,6 +17,7 @@ import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
 import Bots from "./pages/bots";
+import BotStudio from "./pages/bot-studio";
 import { onSessionChange, withTabSession } from "@/lib/tab-session";
 import {
   isLandingDismissed,
@@ -233,6 +234,7 @@ function Router() {
         <Route path="/markets" component={Markets} />
         <Route path="/markets/:symbol" component={MarketDetail} />
         <Route path="/bots" component={Bots} />
+        <Route path="/bot-studio" component={BotStudio} />
         <Route path="/trades" component={Trades} />
         <Route path="/analytics" component={Analytics} />
         <Route path="/intelligence" component={Intelligence} />

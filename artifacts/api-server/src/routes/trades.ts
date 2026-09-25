@@ -15,6 +15,8 @@ import { getFallbackPayout } from "../lib/payouts";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
 import { evaluateManualAssist } from "../lib/speed-ai-engine";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
+import { extractBarrierFromLongcode, normalizeDerivContractType } from "../lib/deriv-longcode";
+import { dbotContractIds, DBOT_SOURCE_TAG } from "../lib/dbots/mirror";
 
 const router = Router();
 
@@ -142,6 +144,7 @@ router.get("/stats", async (req, res): Promise<void> => {
   }
 
   const transactions = await getDerivTransactions(req.sessionId);
+
   const mapped = transactions.map((t: any) => {
     const buyPrice = Number(t.buy_price ?? 0);
     const sellPrice = Number(t.sell_price ?? 0);
@@ -725,41 +728,6 @@ function computeJournalStats(trades: any[]) {
   };
 }
 
-// Deriv's profit_table has no structured "barrier" field for digit contracts, so
-// the barrier has to be parsed out of the longcode sentence. The naive approach —
-// "grab the last digit anywhere in the string" — is WRONG: longcodes end with a
-// duration clause ("...after 3 ticks."), so a contract barrier of 8 traded with a
-// 3-tick duration would read back as barrier 3. Match the specific phrase the
-// barrier actually appears in instead of scanning the whole sentence.
-//   DIGITOVER:  "...is strictly higher than 8 after 5 ticks."
-//   DIGITUNDER: "...is strictly lower than 8 after 5 ticks."
-//   DIGITMATCH: "...is 5 after 5 ticks."
-//   DIGITDIFF:  "...is not 5 after 5 ticks."
-//   DIGITEVEN/DIGITODD have no barrier — none of these patterns match, correctly.
-const BARRIER_PATTERNS: RegExp[] = [
-  /strictly higher than (\d)/i,
-  /strictly lower than (\d)/i,
-  /is not (\d) after \d+ tick/i,
-  /is (\d) after \d+ tick/i,
-  /matches (\d)/i,
-  /differs from (\d)/i,
-];
-
-function extractBarrierFromLongcode(longcode: unknown): number | null {
-  if (typeof longcode !== "string") return null;
-  for (const pattern of BARRIER_PATTERNS) {
-    const match = longcode.match(pattern);
-    if (match) return Number(match[1]);
-  }
-  return null;
-}
-
-function normalizeDerivContractType(ct: string): string {
-  // Canonical: CALL (Rise) and PUT (Fall). Normalize legacy RISE/FALL → CALL/PUT.
-  if (ct === "RISE") return "CALL";
-  if (ct === "FALL") return "PUT";
-  return ct;
-}
 
 // ── Deriv profit_table journal (sole source of truth — no local fallback) ───────
 router.get("/deriv-journal", async (req, res): Promise<void> => {
@@ -783,6 +751,12 @@ router.get("/deriv-journal", async (req, res): Promise<void> => {
     res.json({ source: "deriv" as const, trades: [], todayTrades: emptyStats.todayTradesList, stats: emptyStats });
     return;
   }
+
+  // Which of these contracts a Deriv DBot mirrored for this session. The
+  // journal is Deriv's own profit_table (so a DBot's fills are already in it);
+  // this set is what lets them read as "taken by your bot" instead of looking
+  // like anonymous trades. It is a no-op for accounts that never ran a DBot.
+  const dbotContracts = await dbotContractIds(req.sessionId).catch(() => new Set<string>());
 
   const mapped = transactions.map((t: any) => {
     const buyPrice = Number(t.buy_price ?? 0);
@@ -811,6 +785,7 @@ router.get("/deriv-journal", async (req, res): Promise<void> => {
       longcode: t.longcode ?? null,
       isAutonomous: false,
       aiConfidence: null,
+      isDbot: dbotContracts.has(String(t.transaction_id ?? "")),
       source: "deriv",
     };
   });
@@ -864,6 +839,10 @@ function formatTrade(trade: typeof tradesTable.$inferSelect) {
     aiConfidence: trade.aiConfidence ? Number(trade.aiConfidence) : null,
     aiRiskScore: trade.aiRiskScore ? Number(trade.aiRiskScore) : null,
     isAutonomous: trade.isAutonomous,
+    // Mirrored Deriv-DBot fills carry the source tag; the UI badges them so a
+    // bot's trades are never confused with the engines' or the user's own.
+    isDbot: typeof trade.agentReasoning === "string"
+      && trade.agentReasoning.startsWith(`[${DBOT_SOURCE_TAG}]`),
     agentReasoning: trade.agentReasoning,
     createdAt: trade.createdAt.toISOString(),
     closedAt: trade.closedAt ? trade.closedAt.toISOString() : null,

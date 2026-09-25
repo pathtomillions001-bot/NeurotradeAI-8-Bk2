@@ -6,6 +6,7 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 
 - `pnpm --filter @workspace/api-server run dev` — run the API server (port 8080 → proxied at /api)
 - `pnpm --filter @workspace/trading-platform run dev` — run the frontend (port 5000 → proxied at /)
+- `pnpm --filter @workspace/dbot-builder run dev:embedded` — run the embedded Deriv DBot builder (port 4003, mounted at /bot → proxied at /bot; `build:embedded` for production)
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
 - `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
@@ -54,6 +55,10 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - `artifacts/trading-platform/src/components/bot-console.tsx` — per-bot deploy console
 - `artifacts/api-server/src/lib/deriv.ts` — Deriv WebSocket API client + market definitions
 - `artifacts/trading-platform/src/` — React frontend (pages, components, hooks)
+- `artifacts/dbot-builder/` — the vendored Deriv DBot builder (MIT, upstream deriv-com/bot via neurotrade-dbot-builder). Embedded mode trims it to the Blockly workspace + run panel and routes account/socket setup through the platform instead of OAuth.
+- `artifacts/dbot-builder/src/services/neurotrade-bridge.ts` — the builder side of the host handshake (`/api/dbot/session`, `/api/dbot/ws-url`)
+- `artifacts/api-server/src/routes/dbot.ts` — Bot Studio bridge: active-account lookup + OTP WebSocket minting for the embedded builder
+- `artifacts/trading-platform/src/pages/bot-studio.tsx` — `/bot-studio` page (same-origin iframe + account binding)
 
 ## Architecture decisions
 
@@ -81,6 +86,8 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - **Self-learning**: Per-market win rates persisted in Postgres (`market_win_rates`); trade features logged for calibration
 - **EV gating**: Deriv `proposal` API fetches live payout; trades require positive expected value when enabled
 - **Paper trade mode**: Log decisions without live Deriv orders for validation
+
+- **Bot Studio is an embedded Deriv DBot on the SAME origin, and never a second login**: the builder (`artifacts/dbot-builder`) is served at `/bot` by the platform itself, so it shares the session cookie and localStorage. It never runs Deriv OAuth: `src/services/neurotrade-bridge.ts` seeds `active_loginid`/`account_type`/`deriv_accounts` from `GET /api/dbot/session` and obtains its trading socket from `GET /api/dbot/ws-url`, which refreshes the stored token server-side and mints a single-use OTP URL for the session's ACTIVE account — demo or real exactly as selected in the app, so the bearer token never enters the browser and the user is never asked to log in twice. `?accountId=` is only honoured for accounts belonging to the requesting session. Embedded mode (`NEXT_PUBLIC_DBOT_EMBEDDED=true`) removes login/signup, the dashboard, charts, tutorials, LiveChat, GTM and the OAuth callback, leaving the workspace + trades window. See `docs/bot-studio.md`.
 
 ## Product
 
@@ -115,6 +122,9 @@ _Populate as you build — explicit user instructions worth remembering across s
 - **Redirect URI must match**: The redirect URI used in OAuth must exactly match what is registered in the Deriv app dashboard (including trailing slashes, http vs https, port).
 - **DERIV_APP_ID**: Alphanumeric string from app.deriv.com/apps. Used as OAuth `client_id` and `Deriv-App-ID` header on REST calls. Not appended to the WebSocket URL.
 - The `ws` package must be a `dependency` (not devDependency) since it's used at runtime in the bundled server
+- **Bot Studio React/types must stay on the workspace catalog**: upstream `neurotrade-dbot-builder` asks for React ^19.2 and `@types/react` ^19.2, while this workspace pins 19.1. Installing both hoists a SECOND React + `@types/react` into `node_modules`, which breaks unrelated packages (react-query hooks load hooks from one copy and the renderer from the other; `mockup-sandbox` calendar/spinner refs stop typechecking). `artifacts/dbot-builder/package.json` therefore declares `react`, `react-dom`, `@types/react`, `@types/react-dom` as `catalog:` — keep it that way.
+- **The vendored builder needs deps its upstream `package.json` omits** — `prop-types`, `lodash.debounce`, `rxjs`, `immutable` (build fails with "Module not found" without them) and `jsdom` (its own `tsc --noEmit` fails). Do not drop them when re-syncing upstream.
+- **DBot execution is browser-side**: the builder's bot runs in the tab and stops if the tab closes. The server-side engines (autonomous, NeuroAI FAB, specialist bots, Over/Under Turbo) remain the unattended option; the arbiter owner for a DBot is `dbot`.
 - Market analysis cache lives in-memory — restarts clear it; first requests will be slower as cache warms up
 
 ## Pointers

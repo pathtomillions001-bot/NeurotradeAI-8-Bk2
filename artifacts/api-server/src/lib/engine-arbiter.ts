@@ -31,7 +31,15 @@
 
 import { getBrowserSessionId } from "./session";
 
-export type TradingOwner = "autonomous" | "neuroai" | "bots";
+/**
+ * `dbot` is the Deriv DBot a user built from a scan and is running in Bot
+ * Studio. The bot itself executes in the browser, so the server cannot see its
+ * fills directly — but it CAN see that one has been started for this account,
+ * and it must hold this lock for as long as the user says it is running
+ * (POST /api/dbots/:id/live + heartbeats). That is what stops a server engine
+ * from starting next to it and double-trading the same shared recovery ledger.
+ */
+export type TradingOwner = "autonomous" | "neuroai" | "bots" | "dbot";
 
 const ownersBySession = new Map<string, TradingOwner>();
 
@@ -76,5 +84,6 @@ export function hasTradingOwnership(owner: TradingOwner, sessionId?: string): bo
 export function tradingOwnerLabel(owner: TradingOwner): string {
   if (owner === "autonomous") return "main autonomous engine";
   if (owner === "neuroai") return "NeuroAI FAB session";
+  if (owner === "dbot") return "Deriv DBot (Bot Studio)";
   return "specialist AI bot";
 }

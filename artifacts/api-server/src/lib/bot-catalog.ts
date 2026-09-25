@@ -638,7 +638,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.parityForge) return "parity-forge@1";
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
-  if (bot.turbo) return "overunder-turbo@1";
+  if (bot.turbo) return "overunder-turbo@2";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

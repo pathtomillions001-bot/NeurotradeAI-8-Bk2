@@ -22,6 +22,7 @@ import { BotConsole } from "@/components/bot-console";
 import { DualLockConsole } from "@/components/dual-lock-console";
 import { KillShotConsole } from "@/components/killshot-console";
 import { KillShotFamilyConsole } from "@/components/killshot-family-console";
+import { DbotConsole } from "@/components/dbot-console";
 import { WEB_CONSOLE_IDS, type WebConsoleId } from "./console-contract";
 import type { BotCardData, BotSessionStatus } from "./bots";
 
@@ -39,13 +40,14 @@ export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProp
   "apex@1": ApexConsole,
   "bastion@1": BastionConsole,
   "overunder-navigator@1": OverUnderNavigatorConsole,
-  "overunder-turbo@1": OverUnderTurboConsole,
+  "overunder-turbo@2": OverUnderTurboConsole,
   "parity-forge@1": ParityForgeConsole,
   "surge@1": SurgeConsole,
   "specialist@1": BotConsole,
   "dual-lock@1": DualLockConsole,
   "killshot@1": KillShotConsole,
   "killshot-family@1": KillShotFamilyConsole,
+  "dbot@1": DbotConsole,
 };
 
 /** Console ids this bundle implements (mirrors `WEB_CONSOLE_IDS` exactly). */

@@ -539,6 +539,7 @@ router.get("/accounts", async (req, res): Promise<void> => {
 
 router.get("/bot-builder/session", async (req, res): Promise<void> => {
   const accounts = await getSessionAccounts(req.sessionId);
+  const includeWebsocket = String(req.query.include_websocket ?? "") === "1";
   if (accounts.length === 0) {
     res.json({
       connected: false,
@@ -559,7 +560,12 @@ router.get("/bot-builder/session", async (req, res): Promise<void> => {
   }
 
   try {
-    const websocketUrl = await getOtpWebSocketUrl(token, derivAccountId);
+    // Account metadata is returned without an OTP by default so the embedded
+    // builder can paint immediately. OTPs are one-time credentials and are
+    // requested only by the trading-ready handshake.
+    const websocketUrl = includeWebsocket
+      ? await getOtpWebSocketUrl(token, derivAccountId)
+      : null;
     const payload = accounts.map((account) => formatBotBuilderAccount(account));
     const activePayload = payload.find((account) => account.loginId === active.loginId) ?? payload[0] ?? null;
 

@@ -21,6 +21,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { createGzip } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import handler from "serve-handler";
 import httpProxy from "http-proxy";
@@ -98,18 +99,34 @@ const contentTypes = new Map([
   [".webp", "image/webp"],
 ]);
 
-function sendStaticFile(res, filePath) {
+function sendStaticFile(res, filePath, req) {
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
   res.setHeader("content-type", contentTypes.get(path.extname(filePath)) ?? "application/octet-stream");
   if (filePath.includes(`${path.sep}static${path.sep}`) || filePath.includes(`${path.sep}assets${path.sep}`)) {
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
   }
+
+  // The embedded builder's initial JS/CSS is large enough that sending it
+  // uncompressed adds seconds on mobile networks. The custom production server
+  // does not pass through a framework compression middleware, so compress the
+  // text assets at the edge here while leaving images, video, WASM and fonts
+  // untouched. Vite/Rsbuild dev servers already handle their own responses.
+  const compressible = /\.(?:css|html|js|json|svg)$/i.test(filePath);
+  if (compressible) res.setHeader("Vary", "Accept-Encoding");
+  const acceptsGzip = /(?:^|,|;)\s*gzip(?:\s*;|\s|,|$)/i.test(req?.headers?.["accept-encoding"] ?? "");
+  if (compressible && acceptsGzip) {
+    res.setHeader("Content-Encoding", "gzip");
+    res.writeHead(200);
+    fs.createReadStream(filePath).pipe(createGzip()).pipe(res);
+    return;
+  }
+
   res.writeHead(200);
   fs.createReadStream(filePath).pipe(res);
 }
 
-function tryServeBotBuilder(pathname, res, returnNext) {
+function tryServeBotBuilder(pathname, res, returnNext, req) {
   if (pathname !== "/bot/preview" && !pathname.startsWith("/bot/preview/")) return false;
   // No builder bundle on disk yet — the local dev server proxies /bot/preview to
   // the standalone rsbuild builder (:4003). Fall through so the request can reach
@@ -123,7 +140,7 @@ function tryServeBotBuilder(pathname, res, returnNext) {
     ? requested
     : path.join(botBuilderDir, "index.html");
 
-  sendStaticFile(res, filePath);
+  sendStaticFile(res, filePath, req);
   return true;
 }
 
@@ -234,7 +251,7 @@ const server = http.createServer((req, res) => {
   // The Deriv bot builder is a separately built SPA copied to /bot/preview.
   // Serve it before the NeuroTrade SPA fallback so /bot/preview and all nested
   // builder assets/routes resolve to the real builder, not NeuroTrade's index.
-  if (tryServeBotBuilder(pathname, res, returnNext)) {
+  if (tryServeBotBuilder(pathname, res, returnNext, req)) {
     return undefined;
   }
 

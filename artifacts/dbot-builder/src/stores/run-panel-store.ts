@@ -10,6 +10,7 @@ import { getSelectedTradeType } from '@/external/bot-skeleton/scratch/utils';
 import { handleBackendError, isBackendError } from '@/utils/error-handler';
 // import { journalError, switch_account_notification } from '@/utils/bot-notifications';
 import GTM from '@/utils/gtm';
+import { ensureEmbeddedPreviewConnection } from '@/preview/session-bridge';
 import { isPreviewMode } from '@/utils/is-preview-mode';
 import { helpers } from '@/utils/store-helpers';
 import { generateUrlWithRedirect } from '@/utils/url-redirect-utils';
@@ -181,6 +182,20 @@ export default class RunPanelStore {
         const is_ios = mobileOSDetect() === 'iOS';
         this.dbot.saveRecentWorkspace();
         this.dbot.unHighlightAllBlocks();
+
+        // The embedded builder paints from a public market-data socket for
+        // speed. Before the first purchase, wait for the server-issued
+        // authenticated socket tied to NeuroTrade's currently active account.
+        // This prevents a click during the OTP handshake from producing one
+        // trade followed by a generic interruption.
+        if (isPreviewMode()) {
+            const accountReady = await ensureEmbeddedPreviewConnection(client.loginid || undefined);
+            if (!accountReady) {
+                this.showLoginDialog();
+                return;
+            }
+        }
+
         if (!client.is_logged_in) {
             this.showLoginDialog();
             return;

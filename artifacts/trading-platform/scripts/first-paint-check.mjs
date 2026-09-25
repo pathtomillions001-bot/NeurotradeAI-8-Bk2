@@ -50,9 +50,7 @@ const MARKERS = {
   splash: 'data-testid="boot-splash"',
   layout: ">Risk Calc<",
   landing: ">Market Open<",
-  // The builder page intentionally has no extra heading bar so the workspace
-  // and Run button remain visible on mobile; assert the embedded app itself.
-  builder: 'title="Deriv Bot Builder"',
+  builder: ">Deriv Bot Builder<",
 };
 
 function describe(html) {

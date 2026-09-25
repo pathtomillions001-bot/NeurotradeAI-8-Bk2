@@ -7,11 +7,7 @@ import {
     resolveReferralViaProxy,
 } from '@/external/deriv-core';
 import type { AuthConfig } from '@/external/deriv-core';
-import {
-    consumeEmbeddedPreviewSession,
-    fetchEmbeddedPreviewSession,
-    isEmbeddedPreviewConnectionReady,
-} from '@/preview/session-bridge';
+import { fetchEmbeddedPreviewSession } from '@/preview/session-bridge';
 import { getInitialLanguage } from '@deriv-com/translations';
 import { DerivWSAccountsService } from '@/services/derivws-accounts.service';
 import brandConfig from '../../../../../brand.config.json';
@@ -85,21 +81,9 @@ const getDefaultServerURL = () => {
  */
 export const getSocketURL = async (): Promise<string> => {
     try {
-        // In the embedded build, public market data is enough for first paint.
-        // Warm account metadata in parallel, but never make the first workspace
-        // wait for an OTP handshake. syncEmbeddedPreviewSession switches the
-        // socket to the authenticated URL before Run is allowed to trade.
-        if (process.env.NEXT_PUBLIC_APP_BUILD === 'true') {
-            if (isEmbeddedPreviewConnectionReady()) {
-                const previewSession = await fetchEmbeddedPreviewSession({ includeWebsocket: true });
-                if (previewSession?.connected && previewSession.websocketUrl) {
-                    consumeEmbeddedPreviewSession();
-                    return previewSession.websocketUrl;
-                }
-            } else {
-                void fetchEmbeddedPreviewSession();
-            }
-            return getDefaultServerURL();
+        const previewSession = await fetchEmbeddedPreviewSession();
+        if (previewSession?.connected && previewSession.websocketUrl) {
+            return previewSession.websocketUrl;
         }
 
         const authInfo = getAuthInfo();

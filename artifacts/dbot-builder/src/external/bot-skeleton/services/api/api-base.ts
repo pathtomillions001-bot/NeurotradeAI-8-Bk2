@@ -1,8 +1,6 @@
 // @ts-nocheck — vendored bot code with known upstream type gaps; see AGENTS.md
 /* [AI] - Analytics removed - utility functions moved to @/utils/account-helpers */
 import { getAccountId, getAccountType, isDemoAccount, removeUrlParameter } from '@/utils/account-helpers';
-import { isEmbeddedPreviewConnectionReady } from '@/preview/session-bridge';
-import { isPreviewMode } from '@/utils/is-preview-mode';
 /* [/AI] */
 import CommonStore from '@/stores/common-store';
 import { DerivWSAccountsService } from '@/services/derivws-accounts.service';
@@ -67,11 +65,6 @@ class APIBase {
     active_symbols_promise: Promise<any[] | undefined> | null = null;
     common_store: CommonStore | undefined;
     reconnection_attempts: number = 0;
-    socket_event_handlers: {
-        connection: TApiBaseApi['connection'];
-        open: () => void;
-        close: () => void;
-    } | null = null;
 
     // Constants for timeouts - extracted magic numbers for better maintainability
     private readonly ACTIVE_SYMBOLS_TIMEOUT_MS = 10000; // 10 seconds
@@ -146,12 +139,8 @@ class APIBase {
             }
         }
 
-        // The first embedded socket is intentionally public so the workspace can
-        // paint without waiting for an OTP. Do not send `balance` on that public
-        // socket; the preview bridge will replace it with an authenticated socket
-        // and call this path again before Run is allowed.
-        const canAuthorize = !isPreviewMode() || isEmbeddedPreviewConnectionReady();
-        if (activeAccountId && canAuthorize) {
+        // Now proceed with normal authorization if we have an account_id
+        if (activeAccountId) {
             setIsAuthorizing(true);
             await this.authorizeAndSubscribe();
         }
@@ -175,44 +164,18 @@ class APIBase {
         }
 
         if (!this.api || this.api?.connection.readyState !== 1 || force_create_connection) {
-            const previousApi = this.api;
-            if (previousApi?.connection) {
+            if (this.api?.connection) {
                 ApiHelpers.disposeInstance();
                 setConnectionStatus(CONNECTION_STATUS.CLOSED);
-
-                // Remove the exact handlers that were registered for the old
-                // socket. Using bind() inline creates a different function and
-                // leaves stale close handlers behind; those stale handlers can
-                // start a second reconnect during the public-to-auth handoff.
-                if (this.socket_event_handlers) {
-                    previousApi.connection.removeEventListener('open', this.socket_event_handlers.open);
-                    previousApi.connection.removeEventListener('close', this.socket_event_handlers.close);
-                }
-                this.socket_event_handlers = null;
-                this.api = null;
-                this.is_authorized = false;
-                setIsAuthorized(false);
-                previousApi.disconnect();
+                this.api.disconnect();
+                this.api.connection.removeEventListener('open', this.onsocketopen.bind(this));
+                this.api.connection.removeEventListener('close', this.onsocketclose.bind(this));
             }
 
-            const nextApi = await generateDerivApiInstance();
-            this.api = nextApi;
+            this.api = await generateDerivApiInstance();
 
-            if (nextApi?.connection) {
-                const open = () => {
-                    // A socket closed during replacement must never mutate the
-                    // state of the newer active socket.
-                    if (this.api !== nextApi) return;
-                    this.onsocketopen();
-                };
-                const close = () => {
-                    if (this.api !== nextApi) return;
-                    this.onsocketclose();
-                };
-                this.socket_event_handlers = { connection: nextApi.connection, open, close };
-                nextApi.connection.addEventListener('open', open);
-                nextApi.connection.addEventListener('close', close);
-            }
+            this.api?.connection.addEventListener('open', this.onsocketopen.bind(this));
+            this.api?.connection.addEventListener('close', this.onsocketclose.bind(this));
 
             // Store the current account ID used for this WebSocket connection
             // This will be used to check if we need to regenerate the connection when the tab becomes active

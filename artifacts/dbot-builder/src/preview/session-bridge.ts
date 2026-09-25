@@ -26,7 +26,7 @@ type EmbeddedAccount = {
     isActive: boolean;
 };
 
-export type EmbeddedSessionResponse = {
+type EmbeddedSessionResponse = {
     connected: boolean;
     activeLoginId: string | null;
     activeAccount: EmbeddedAccount | null;
@@ -42,23 +42,6 @@ type EmbeddedStoredAccount = {
     status: 'active';
     account_type: 'demo' | 'real';
 };
-
-type SessionFetchOptions = {
-    /** Request the one-time authenticated Deriv WebSocket URL. */
-    includeWebsocket?: boolean;
-    /** Ignore the cache, for an account switch or a reconnect. */
-    force?: boolean;
-};
-
-// The account metadata request is deliberately separate from the OTP request.
-// Metadata is safe to warm during first paint; an OTP handshake is comparatively
-// expensive and must never hold the builder UI hostage.
-let sessionPromise: Promise<EmbeddedSessionResponse | null> | null = null;
-let authenticatedSessionPromise: Promise<EmbeddedSessionResponse | null> | null = null;
-let authenticatedSessionLoginId: string | null = null;
-let previewSyncLoginId: string | null = null;
-let previewSyncPromise: Promise<boolean> | null = null;
-let previewAuthenticatedConnectionReady = false;
 
 function toStoredAccounts(accounts: EmbeddedAccount[]): EmbeddedStoredAccount[] {
     return accounts.map(account => ({
@@ -100,11 +83,6 @@ function buildEmbeddedSessionHeaders() {
 }
 
 function clearPreviewSessionState() {
-    previewAuthenticatedConnectionReady = false;
-    previewSyncPromise = null;
-    previewSyncLoginId = null;
-    authenticatedSessionPromise = null;
-    authenticatedSessionLoginId = null;
     clearAuthInfo();
     sessionStorage.removeItem('deriv_accounts');
     localStorage.removeItem('active_loginid');
@@ -133,202 +111,50 @@ function seedPreviewSessionState(session: EmbeddedSessionResponse) {
     localStorage.setItem('clientAccounts', JSON.stringify(accountMap));
 }
 
-/**
- * Fetch the parent app's active account. The default request does not ask the
- * API server for an OTP, so it is quick enough to run while the builder paints.
- * The authenticated URL is requested only when the socket is ready to trade.
- */
-export async function fetchEmbeddedPreviewSession(
-    options: SessionFetchOptions = {},
-): Promise<EmbeddedSessionResponse | null> {
+export async function fetchEmbeddedPreviewSession(): Promise<EmbeddedSessionResponse | null> {
     if (!isPreviewMode()) return null;
 
-    const includeWebsocket = options.includeWebsocket === true;
-    if (!options.force) {
-        if (includeWebsocket && authenticatedSessionPromise) return authenticatedSessionPromise;
-        if (!includeWebsocket && sessionPromise) return sessionPromise;
-    }
-
-    const request = (async () => {
-        try {
-            const endpoint = includeWebsocket
-                ? `${BOT_BUILDER_SESSION_ENDPOINT}?include_websocket=1`
-                : BOT_BUILDER_SESSION_ENDPOINT;
-            const response = await fetch(endpoint, {
-                credentials: 'include',
-                headers: buildEmbeddedSessionHeaders(),
-            });
-            if (!response.ok) {
-                throw new Error(`Embedded bot-builder session request failed (${response.status})`);
-            }
-            const session = (await response.json()) as EmbeddedSessionResponse;
-            // A forced account switch may have replaced this request while the
-            // server was generating its response. Do not seed stale account data.
-            const isCurrentRequest = includeWebsocket
-                ? authenticatedSessionPromise === request
-                : sessionPromise === request;
-            if (isCurrentRequest) seedPreviewSessionState(session);
-            return session;
-        } catch (error) {
-            console.error('[preview] Failed to bootstrap NeuroTrade session for Deriv Bot Builder:', error);
-            return null;
-        }
-    })();
-
-    if (includeWebsocket) {
-        authenticatedSessionPromise = request;
-        void request.then(session => {
-            // An account switch can replace this request before its OTP returns.
-            // Never let the stale response become the active account identity.
-            if (authenticatedSessionPromise === request) {
-                authenticatedSessionLoginId = session?.activeLoginId ?? null;
-            }
+    try {
+        const response = await fetch(BOT_BUILDER_SESSION_ENDPOINT, {
+            credentials: 'include',
+            headers: buildEmbeddedSessionHeaders(),
         });
-    } else {
-        sessionPromise = request;
+        if (!response.ok) {
+            throw new Error(`Embedded bot-builder session request failed (${response.status})`);
+        }
+        const session = (await response.json()) as EmbeddedSessionResponse;
+        seedPreviewSessionState(session);
+        return session;
+    } catch (error) {
+        console.error('[preview] Failed to bootstrap NeuroTrade session for Deriv Bot Builder:', error);
+        return null;
     }
-    return request;
 }
 
-/** True only after the iframe has a server-issued authenticated trading URL. */
-export function isEmbeddedPreviewConnectionReady() {
-    return previewAuthenticatedConnectionReady;
-}
+export async function syncEmbeddedPreviewSession(expectedLoginId?: string | null) {
+    if (!isPreviewMode()) return;
 
-/**
- * OTP WebSocket URLs are connection credentials, not a long-lived cache entry.
- * Once APIBase has consumed one for a socket, allow the next reconnect to ask
- * the server for a fresh URL while retaining the authenticated account state.
- */
-export function consumeEmbeddedPreviewSession() {
-    authenticatedSessionPromise = null;
-}
+    const activeLoginId = (localStorage.getItem('active_loginid') || '').trim();
+    const shouldReconnect =
+        !activeLoginId ||
+        !expectedLoginId ||
+        activeLoginId !== expectedLoginId ||
+        !isAuthorized$.value;
 
-/**
- * Switch the iframe to the currently active NeuroTrade account. This is kept
- * separate from the fast metadata warm-up so a page can paint immediately and
- * the one-time OTP handshake can run in the background.
- */
-export function syncEmbeddedPreviewSession(expectedLoginId?: string | null) {
-    if (!isPreviewMode()) return Promise.resolve(false);
-
-    if (!expectedLoginId) {
-        resetEmbeddedPreviewSession();
-        return Promise.resolve(false);
+    if (expectedLoginId) {
+        localStorage.setItem('active_loginid', expectedLoginId);
     }
 
-    // Parent account switches must invalidate the previous one-time URL.
-    // Reusing it would reconnect the builder to the old account.
-    const accountChanged = Boolean(
-        expectedLoginId &&
-            ((authenticatedSessionLoginId && expectedLoginId !== authenticatedSessionLoginId) ||
-                (previewSyncLoginId && expectedLoginId !== previewSyncLoginId)),
-    );
-    if (accountChanged) {
-        authenticatedSessionPromise = null;
-        authenticatedSessionLoginId = null;
-        previewAuthenticatedConnectionReady = false;
-        previewSyncPromise = null;
-        previewSyncLoginId = null;
-    } else if (previewSyncPromise) {
-        return previewSyncPromise;
-    } else if (
-        previewAuthenticatedConnectionReady &&
-        authenticatedSessionLoginId === expectedLoginId &&
-        isAuthorized$.value
-    ) {
-        return Promise.resolve(true);
-    }
-
-    previewSyncLoginId = expectedLoginId;
-    let syncPromise: Promise<boolean>;
-    syncPromise = (async () => {
-        try {
-            const session = await fetchEmbeddedPreviewSession({ includeWebsocket: true, force: accountChanged });
-            if (!session?.connected || !session.websocketUrl || !session.activeLoginId) {
-                previewAuthenticatedConnectionReady = false;
-                return false;
-            }
-            if (previewSyncPromise !== syncPromise) return false;
-
-            // The API session is authoritative. This also handles an account
-            // switch that happens while the iframe is already open.
-            previewAuthenticatedConnectionReady = true;
+    try {
+        if (shouldReconnect) {
             const { api_base } = await import('@/external/bot-skeleton');
             await api_base.init(true);
-
-            // APIBase starts authorization from the socket's open event. Keep
-            // this synchronization in flight until that event has completed so
-            // a duplicate PREVIEW_READY cannot start a second replacement.
-            const deadline = Date.now() + 10_000;
-            while (Date.now() < deadline) {
-                if (
-                    isAuthorized$.value &&
-                    api_base.is_authorized &&
-                    api_base.account_id === session.activeLoginId
-                ) {
-                    return true;
-                }
-                await new Promise(resolve => setTimeout(resolve, 50));
-            }
-            previewAuthenticatedConnectionReady = false;
-            console.error('[preview] Timed out waiting for Deriv authorization during session sync');
-            return false;
-        } catch (error) {
-            previewAuthenticatedConnectionReady = false;
-            console.error('[preview] Failed to synchronize NeuroTrade Deriv session:', error);
-            return false;
         }
-    })();
-    previewSyncPromise = syncPromise;
-    void syncPromise.finally(() => {
-        if (previewSyncPromise === syncPromise) {
-            previewSyncPromise = null;
-            previewSyncLoginId = null;
-        }
-    });
-    return syncPromise;
-}
-
-/**
- * Ensure Run can never race the background OTP handshake. The function resolves
- * only after the authenticated socket has authorized the selected demo/real
- * account, or returns false when no account is connected.
- */
-export async function ensureEmbeddedPreviewConnection(expectedLoginId?: string | null) {
-    if (!isPreviewMode()) return true;
-
-    // Refresh the small metadata response on Run. This closes the race where
-    // the parent changed accounts while the iframe still had a cached OTP URL.
-    const activeSession = await fetchEmbeddedPreviewSession({ force: true });
-    // The parent server owns the active account. client.loginid can briefly be
-    // stale during an account switch, so prefer the account returned here.
-    const loginId = activeSession?.activeLoginId ?? expectedLoginId;
-    if (!loginId || !activeSession?.connected) return false;
-
-    const needsAuthenticatedSocket =
-        !previewAuthenticatedConnectionReady ||
-        authenticatedSessionLoginId !== loginId ||
-        !isAuthorized$.value;
-    if (needsAuthenticatedSocket) {
-        const synchronized = await syncEmbeddedPreviewSession(loginId);
-        if (!synchronized) return false;
+    } catch (error) {
+        console.error('[preview] Failed to synchronize NeuroTrade Deriv session:', error);
     }
-
-    const { api_base } = await import('@/external/bot-skeleton');
-    const deadline = Date.now() + 10_000;
-    while (Date.now() < deadline) {
-        // isAuthorized$ can briefly still be true for the previous account while
-        // an account switch replaces its socket. Check the APIBase identity too.
-        if (isAuthorized$.value && api_base.is_authorized && api_base.account_id === loginId) return true;
-        await new Promise(resolve => setTimeout(resolve, 50));
-    }
-
-    console.error('[preview] Timed out waiting for Deriv authorization before running the bot');
-    return false;
 }
 
 export function resetEmbeddedPreviewSession() {
-    sessionPromise = null;
     clearPreviewSessionState();
 }

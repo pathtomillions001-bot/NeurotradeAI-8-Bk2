@@ -2,9 +2,7 @@
 
 # compiled output
 dist
-# Root-level scratch only: the vendored DBot builder keeps upstream source
-# under artifacts/dbot-builder/src/utils/tmp/, which is NOT build output.
-/tmp
+tmp
 out-tsc
 *.tsbuildinfo
 .expo

@@ -8,8 +8,6 @@ import aiRouter from "./ai";
 import settingsRouter from "./settings";
 import speedAiRouter from "./speed-ai";
 import botsRouter from "./bots";
-import dbotRouter from "./dbot";
-import dbotsRouter from "./dbots";
 
 const router: IRouter = Router();
 
@@ -22,9 +20,5 @@ router.use("/ai", aiRouter);
 router.use("/settings", settingsRouter);
 router.use("/speed-ai", speedAiRouter);
 router.use("/bots", botsRouter);
-// Bot Studio bridge — used by the embedded Deriv DBot builder (same-origin).
-router.use("/dbot", dbotRouter);
-// Deriv DBots built from a scan (create / run / heartbeat / stop).
-router.use("/dbots", dbotsRouter);
 
 export default router;

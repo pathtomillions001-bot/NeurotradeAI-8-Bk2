@@ -26,12 +26,6 @@ interface JournalTrade {
   isAutonomous: boolean;
   aiConfidence: number | null;
   source?: string;
-  /**
-   * True when this contract was mirrored from a Deriv DBot (a bot built from a
-   * scan and run in Bot Studio). The journal is Deriv's profit_table, so the
-   * row would otherwise look like an anonymous trade.
-   */
-  isDbot?: boolean;
 }
 
 interface JournalStats {
@@ -340,23 +334,13 @@ export default function Trades() {
                       </div>
 
                       <div className="col-span-1">
-                        {trade.isDbot ? (
-                          <Badge
-                            variant="outline"
-                            title="Taken by a Deriv DBot you built in Bot Studio"
-                            className="text-[9px] px-1 py-0 border-sky-500/30 text-sky-400"
-                          >
-                            DBOT
-                          </Badge>
-                        ) : (
-                          <Badge variant="outline" className={`text-[9px] px-1 py-0 ${
-                            trade.source === "live" ? "border-green-500/30 text-green-400"
-                            : trade.source === "paper" ? "border-amber-500/30 text-amber-400"
-                            : "border-border text-muted-foreground"
-                          }`}>
-                            {trade.source === "live" ? "LIVE" : trade.source === "paper" ? "PAPER" : "—"}
-                          </Badge>
-                        )}
+                        <Badge variant="outline" className={`text-[9px] px-1 py-0 ${
+                          trade.source === "live" ? "border-green-500/30 text-green-400"
+                          : trade.source === "paper" ? "border-amber-500/30 text-amber-400"
+                          : "border-border text-muted-foreground"
+                        }`}>
+                          {trade.source === "live" ? "LIVE" : trade.source === "paper" ? "PAPER" : "—"}
+                        </Badge>
                       </div>
 
                       <div className="col-span-1 text-right">

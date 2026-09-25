@@ -17,26 +17,23 @@ import { CONSOLE_REGISTRY, consoleSkew, implementedConsoleIds, resolveConsole } 
 import { WEB_CONSOLE_IDS } from "./console-contract.js";
 
 /**
- * Console ids the API can currently send this bundle (`botConsoleId()` in
- * artifacts/api-server/src/lib/bot-catalog.ts, plus `dbot@1` — which the live
- * route GET /api/bots/live emits for a Deriv DBot built from a scan, since a
- * DBot has no catalogue entry). Hard-coded on purpose: if the API starts asking
- * for a console this bundle does not ship, this test fails here — in the web
- * build that would render it — rather than in production.
+ * Console ids the API catalogue currently emits (`botConsoleId()` in
+ * artifacts/api-server/src/lib/bot-catalog.ts). Hard-coded on purpose: if the
+ * API starts asking for a console this bundle does not ship, this test fails
+ * here — in the web build that would render it — rather than in production.
  */
 const API_CONSOLE_IDS = [
   "apex@1",
   "bastion@1",
   "omni@2",
   "overunder-navigator@1",
-  "overunder-turbo@2",
+  "overunder-turbo@1",
   "parity-forge@1",
   "specialist@1",
   "surge@1",
   "dual-lock@1",
   "killshot@1",
   "killshot-family@1",
-  "dbot@1",
 ];
 
 describe("web console contract", () => {
@@ -110,9 +107,7 @@ describe("consoleSkew", () => {
       skew.bots.map(entry => entry.name),
       ["Echo Apex", "Dual-Lock Range Sentinel"],
     );
-    // overunder-turbo@2 (the Create-DBot console) and dbot@1 (the Deriv DBot
-    // console the live route can ask for) are missing from that stale bundle too.
-    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "dbot@1", "dual-lock@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
+    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "dual-lock@1", "omni@2", "overunder-navigator@1", "overunder-turbo@1", "parity-forge@1", "surge@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {

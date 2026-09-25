@@ -105,10 +105,6 @@ const config: Config = {
         '^@/stores/(.*)$': '<rootDir>/src/stores/$1',
         '^@/pages/(.*)$': '<rootDir>/src/pages/$1',
         '^@/services/(.*)$': '<rootDir>/src/services/$1',
-        '^@/app/(.*)$': '<rootDir>/src/app/$1',
-        // `src/components/shared/utils/config` (imported by error/page-error
-        // components) pulls the embedded-preview session bridge.
-        '^@/preview/(.*)$': '<rootDir>/src/preview/$1',
         // `@/` is mapped one directory at a time here, with no catch-all.
         '^@/translations$': '<rootDir>/src/translations',
         // The footer and mobile menu escape the alias to reach brand.config.json.
@@ -202,10 +198,8 @@ const config: Config = {
     },
 
     // An array of regexp pattern strings that are matched against all source file paths, matched files will skip transformation
-    // react-router@8 ships ESM-only; force babel-jest to transform it and its
-    // ESM-only deps (`@remix-run/route-pattern`, cookie-es) instead of failing
-    // the whole suite with "Unexpected token 'export'".
-    transformIgnorePatterns: ['/node_modules/(?!(@deriv-com/ui|react-router|@remix-run|cookie-es)/)'],
+    // react-router@8 ships ESM-only; force babel-jest to transform it (and its cookie-es dep).
+    transformIgnorePatterns: ['/node_modules/(?!(@deriv-com/ui|react-router|cookie-es)/)'],
 
     // An array of regexp pattern strings that are matched against all modules before the module loader will automatically return a mock for them
     // unmockedModulePathPatterns: undefined,

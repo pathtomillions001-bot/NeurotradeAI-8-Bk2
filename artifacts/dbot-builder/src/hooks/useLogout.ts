@@ -33,19 +33,12 @@ export const useLogout = () => {
                 localStorage.removeItem('account_type');
             } catch (storageError) {
                 ErrorLogger.error('Logout', 'Failed to clear auth storage', storageError);
-                // Last resort: still only drop the auth-scoped keys. Clearing
-                // storage wholesale also threw away the run history the builder
-                // keeps until the user presses Reset (transaction_cache,
-                // journal_cache) and the host app's tab-session keys.
+                // Last resort: if targeted clearing fails, clear all storage
                 try {
-                    ['deriv_accounts', 'query_param_currency', 'client_account_details', 'session_token'].forEach(key =>
-                        sessionStorage.removeItem(key)
-                    );
-                    ['active_loginid', 'authToken', 'accountsList', 'clientAccounts', 'account_type'].forEach(key =>
-                        localStorage.removeItem(key)
-                    );
+                    sessionStorage.clear();
+                    localStorage.clear();
                 } catch (finalError) {
-                    ErrorLogger.error('Logout', 'Failed to clear auth storage', finalError);
+                    ErrorLogger.error('Logout', 'Failed to clear all storage', finalError);
                 }
             }
         }

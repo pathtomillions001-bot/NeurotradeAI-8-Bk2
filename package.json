@@ -11,8 +11,7 @@
     "build:api": "pnpm --filter @workspace/api-server build",
     "build:web": "pnpm --filter @workspace/trading-platform build",
     "start:api": "pnpm --filter @workspace/api-server start",
-    "start:web": "pnpm --filter @workspace/trading-platform start",
-    "build:dbot": "pnpm --filter @workspace/dbot-builder run build:embed"
+    "start:web": "pnpm --filter @workspace/trading-platform start"
   },
   "private": true,
   "devDependencies": {

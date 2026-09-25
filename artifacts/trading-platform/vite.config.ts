@@ -103,6 +103,14 @@ export default defineConfig({
         target: "http://localhost:8080",
         changeOrigin: true,
       },
+      // Development mount for the unmodified Deriv bot builder. Start it with:
+      //   NEXT_PUBLIC_APP_BUILD=true NEXT_PUBLIC_DERIV_APP_ID=$DERIV_APP_ID npm --prefix artifacts/dbot-builder run dev -- --host 0.0.0.0
+      // Production copies its static build into dist/public/bot/preview.
+      "/bot/preview": {
+        target: "http://localhost:4003",
+        changeOrigin: true,
+        ws: true,
+      },
     },
   },
   preview: {

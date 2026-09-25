@@ -2,8 +2,13 @@
 
 # compiled output
 dist
-tmp
+# Root-scoped on purpose: an unanchored `tmp` also swallowed the vendored bot
+# builder's real source dir artifacts/dbot-builder/src/utils/tmp/ (its
+# `dummy.tsx` Icon shim is imported by 8+ components), so the builder vanished
+# from the repo and failed to build. Only the repo-root scratch dir is ignored.
+/tmp
 out-tsc
+artifacts/dbot-builder/out/
 *.tsbuildinfo
 .expo
 .expo-shared

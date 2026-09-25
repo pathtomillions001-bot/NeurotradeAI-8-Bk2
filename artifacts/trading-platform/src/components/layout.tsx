@@ -15,6 +15,7 @@ const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/markets", label: "Markets", icon: BarChart2 },
   { href: "/bots", label: "AI Bots", icon: Bot },
+  { href: "/bot-builder", label: "Bot Builder", icon: Bot },
   { href: "/trades", label: "Journal", icon: Briefcase },
   { href: "/analytics", label: "Analytics", icon: Activity },
   { href: "/risk-calculator", label: "Risk Calc", icon: Calculator },

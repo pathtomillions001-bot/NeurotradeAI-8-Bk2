@@ -16,6 +16,7 @@ import Connect from "./pages/connect";
 import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
+import BotBuilder from "./pages/bot-builder";
 import Bots from "./pages/bots";
 import { onSessionChange, withTabSession } from "@/lib/tab-session";
 import {

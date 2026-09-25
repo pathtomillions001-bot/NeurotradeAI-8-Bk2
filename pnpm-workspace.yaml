@@ -36,6 +36,12 @@ minimumReleaseAgeExclude:
 
 packages:
   - artifacts/*
+  # The vendored Deriv bot builder is a standalone, separately-deployed app with
+  # its OWN toolchain (npm + rsbuild, React 19.2, Blockly, SmartCharts) served on
+  # its own origin. Keeping it out of the pnpm workspace means the root
+  # install/build/typecheck/test pipelines are completely unaffected by it and it
+  # never hoists a second React next to the platform's catalog React.
+  - '!artifacts/dbot-builder'
   - lib/*
   - lib/integrations/*
   - scripts

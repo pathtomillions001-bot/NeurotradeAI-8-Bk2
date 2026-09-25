@@ -4,6 +4,7 @@ import { ApiError } from "@workspace/api-client-react";
 
 const BOT_BUILDER_PATH = "/bot/preview/";
 const BOT_BUILDER_SYNC_MESSAGE = "NEUROTRADE_BOT_BUILDER_SYNC";
+const BOT_BUILDER_READY_MESSAGE = "PREVIEW_READY";
 
 export default function BotBuilder() {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -35,23 +36,29 @@ export default function BotBuilder() {
     postBuilderSync();
   }, [postBuilderSync]);
 
+  // The preview can finish booting after the iframe's load event. Re-send the
+  // account hand-off when the builder explicitly announces that its listener is
+  // ready, so a fast cache hit and a slow network load behave identically.
+  useEffect(() => {
+    const handleBuilderMessage = (event: MessageEvent<{ type?: string; source?: string }>) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type !== BOT_BUILDER_READY_MESSAGE) return;
+      postBuilderSync();
+    };
+
+    window.addEventListener("message", handleBuilderMessage);
+    return () => window.removeEventListener("message", handleBuilderMessage);
+  }, [postBuilderSync]);
+
   return (
     <div className="flex h-full min-h-[calc(100vh-3.5rem)] flex-col bg-background md:min-h-screen">
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border bg-card/80 px-4 py-3 backdrop-blur md:px-6">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">Deriv Bot Builder</h1>
-          <p className="text-sm text-muted-foreground">
-            Build and run Deriv bots inside NeuroTrade with your connected account.
-          </p>
-        </div>
-      </div>
-
       <iframe
         ref={iframeRef}
         title="Deriv Bot Builder"
         src={BOT_BUILDER_PATH}
         className="min-h-0 flex-1 border-0 bg-white"
         allow="clipboard-read; clipboard-write; fullscreen"
+        loading="eager"
         onLoad={postBuilderSync}
       />
     </div>

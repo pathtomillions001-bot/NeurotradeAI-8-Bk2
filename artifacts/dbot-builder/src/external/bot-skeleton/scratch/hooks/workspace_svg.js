@@ -311,13 +311,15 @@ window.Blockly.WorkspaceSvg.getTopLevelWorkspaceMetrics_ = function () {
     let absolute_left = 0;
     let absolute_top = 0;
 
+    const header_offset = process.env.NEXT_PUBLIC_APP_BUILD === 'true' ? 0 : 50;
+
     if (this.toolbox_ && this.toolboxPosition === window.Blockly.TOOLBOX_AT_LEFT) {
-        absolute_top = 50; // deriv-bot: Add some spacing for Core header.
+        absolute_top = header_offset; // deriv-bot: Add spacing only when the standalone header is rendered.
         absolute_left = toolbox_dimensions.width;
     }
 
     if (this.toolbox_ && this.toolboxPosition === window.Blockly.TOOLBOX_AT_TOP) {
-        absolute_top = toolbox_dimensions.height + 50;
+        absolute_top = toolbox_dimensions.height + header_offset;
     }
 
     const metrics = {

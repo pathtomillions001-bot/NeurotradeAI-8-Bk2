@@ -9,6 +9,7 @@ import {
   exchangeOAuthCode,
   getDerivAccounts,
   getJournalManager,
+  getOtpWebSocketUrl,
   DERIV_AUTH_BASE,
   APP_ID,
 } from "../lib/deriv";
@@ -84,6 +85,19 @@ function formatAccount(account: typeof accountsTable.$inferSelect, balance?: num
     fullName: account.fullName,
     country: account.country,
     connectedAt: account.connectedAt.toISOString(),
+  };
+}
+
+function formatBotBuilderAccount(account: typeof accountsTable.$inferSelect, balance?: number) {
+  return {
+    loginId: account.loginId,
+    currency: account.currency,
+    balance: balance ?? Number(account.balance),
+    isVirtual: account.isVirtual,
+    isActive: account.isActive,
+    email: account.email,
+    fullName: account.fullName,
+    country: account.country,
   };
 }
 
@@ -521,6 +535,46 @@ router.get("/accounts", async (req, res): Promise<void> => {
     account,
     balances.get(account.derivAccountId ?? account.loginId),
   )));
+});
+
+router.get("/bot-builder/session", async (req, res): Promise<void> => {
+  const accounts = await getSessionAccounts(req.sessionId);
+  if (accounts.length === 0) {
+    res.json({
+      connected: false,
+      activeLoginId: null,
+      activeAccount: null,
+      accounts: [],
+      websocketUrl: null,
+    });
+    return;
+  }
+
+  const active = accounts.find((account) => account.isActive) ?? accounts[0];
+  const derivAccountId = active.derivAccountId ?? active.loginId;
+  const token = active.bearerToken ?? active.token;
+  if (!token) {
+    res.status(400).json({ error: "No bearer token for the active Deriv account" });
+    return;
+  }
+
+  try {
+    const websocketUrl = await getOtpWebSocketUrl(token, derivAccountId);
+    const payload = accounts.map((account) => formatBotBuilderAccount(account));
+    const activePayload = payload.find((account) => account.loginId === active.loginId) ?? payload[0] ?? null;
+
+    res.json({
+      connected: true,
+      activeLoginId: active.loginId,
+      activeAccount: activePayload,
+      accounts: payload,
+      websocketUrl,
+    });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : "Failed to prepare bot-builder session";
+    logger.error({ err, sessionId: req.sessionId, loginId: active.loginId }, "Bot-builder session bootstrap failed");
+    res.status(502).json({ error: message });
+  }
 });
 
 router.post("/switch-account", async (req, res): Promise<void> => {

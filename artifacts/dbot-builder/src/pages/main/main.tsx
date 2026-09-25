@@ -17,6 +17,7 @@ import { CONNECTION_STATUS } from '@/external/bot-skeleton/services/api/observab
 import { isDbotRTL } from '@/external/bot-skeleton/utils/workspace';
 import { useApiBase } from '@/hooks/useApiBase';
 import { useStore } from '@/hooks/useStore';
+import { isPreviewMode } from '@/utils/is-preview-mode';
 import {
     disableUrlParameterApplication,
     enableUrlParameterApplication,
@@ -44,8 +45,8 @@ import Dashboard from '../dashboard';
 import RunStrategy from '../dashboard/run-strategy';
 import './main.scss';
 
-const ChartWrapper = lazy(() => import('../chart/chart-wrapper'));
-const Tutorial = lazy(() => import('../tutorials'));
+const ChartWrapper = isPreviewMode() ? null : lazy(() => import('../chart/chart-wrapper'));
+const Tutorial = isPreviewMode() ? null : lazy(() => import('../tutorials'));
 
 const AppWrapper = observer(() => {
     const { connectionStatus } = useApiBase();
@@ -78,7 +79,8 @@ const AppWrapper = observer(() => {
     const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
-    const hash = ['dashboard', 'bot_builder', 'chart', 'tutorial'];
+    const is_preview_mode = isPreviewMode();
+    const hash = is_preview_mode ? ['dashboard', 'bot_builder'] : ['dashboard', 'bot_builder', 'chart', 'tutorial'];
     const { isDesktop } = useDevice();
     const location = useLocation();
     const navigate = useNavigate();
@@ -121,14 +123,14 @@ const AppWrapper = observer(() => {
 
     // App Builder embeds the bot at /bot/preview — open the bot builder there by
     // default (instead of the dashboard) when no explicit #tab hash is present.
-    const is_preview_mode = window.location.pathname.includes('/preview');
     let tab_value: number | string = active_tab;
-    const GetHashedValue = (tab: number) => {
+    const getHashedValue = (tab: number) => {
         tab_value = location.hash?.split('#')[1];
         if (!tab_value) return is_preview_mode ? BOT_BUILDER : tab;
-        return Number(hash.indexOf(String(tab_value)));
+        const nextTab = hash.indexOf(String(tab_value));
+        return nextTab >= 0 ? nextTab : is_preview_mode ? BOT_BUILDER : tab;
     };
-    const active_hash_tab = GetHashedValue(active_tab);
+    const active_hash_tab = getHashedValue(active_tab);
 
     // Set up modal state change listener
     React.useEffect(() => {
@@ -144,7 +146,8 @@ const AppWrapper = observer(() => {
 
     React.useEffect(() => {
         const el_dashboard = document.getElementById('id-dbot-dashboard');
-        const el_tutorial = document.getElementById('id-tutorials');
+        const el_right_edge = document.getElementById(is_preview_mode ? 'id-bot-builder' : 'id-tutorials');
+        if (!el_dashboard || !el_right_edge) return undefined;
 
         const observer_dashboard = new window.IntersectionObserver(
             ([entry]) => {
@@ -160,7 +163,7 @@ const AppWrapper = observer(() => {
             }
         );
 
-        const observer_tutorial = new window.IntersectionObserver(
+        const observer_right_edge = new window.IntersectionObserver(
             ([entry]) => {
                 if (entry.isIntersecting) {
                     setRightTabShadow(false);
@@ -174,8 +177,13 @@ const AppWrapper = observer(() => {
             }
         );
         observer_dashboard.observe(el_dashboard);
-        observer_tutorial.observe(el_tutorial);
-    });
+        observer_right_edge.observe(el_right_edge);
+
+        return () => {
+            observer_dashboard.disconnect();
+            observer_right_edge.disconnect();
+        };
+    }, [is_preview_mode]);
 
     React.useEffect(() => {
         if (connectionStatus !== CONNECTION_STATUS.OPENED) {
@@ -293,7 +301,7 @@ const AppWrapper = observer(() => {
 
         // Prevent scrolling when tutorial tab is active (only on mobile)
         const mainElement = document.querySelector('.main__container');
-        if (active_tab === DBOT_TABS.TUTORIAL && !isDesktop) {
+        if (!is_preview_mode && active_tab === DBOT_TABS.TUTORIAL && !isDesktop) {
             document.body.style.overflow = 'hidden';
             if (mainElement instanceof HTMLElement) {
                 mainElement.classList.add('no-scroll');
@@ -405,53 +413,57 @@ const AppWrapper = observer(() => {
                                 }
                                 id='id-bot-builder'
                             />
-                            <div
-                                label={
-                                    <>
-                                        <LabelPairedChartLineCaptionRegularIcon
-                                            height='24px'
-                                            width='24px'
-                                            fill='var(--text-general)'
-                                        />
-                                        <Localize i18n_default_text='Charts' />
-                                    </>
-                                }
-                                id={
-                                    is_chart_modal_visible || is_trading_view_modal_visible
-                                        ? 'id-charts--disabled'
-                                        : 'id-charts'
-                                }
-                            >
-                                <Suspense
-                                    fallback={<ChunkLoader message={localize('Please wait, loading chart...')} />}
+                            {!is_preview_mode && ChartWrapper && (
+                                <div
+                                    label={
+                                        <>
+                                            <LabelPairedChartLineCaptionRegularIcon
+                                                height='24px'
+                                                width='24px'
+                                                fill='var(--text-general)'
+                                            />
+                                            <Localize i18n_default_text='Charts' />
+                                        </>
+                                    }
+                                    id={
+                                        is_chart_modal_visible || is_trading_view_modal_visible
+                                            ? 'id-charts--disabled'
+                                            : 'id-charts'
+                                    }
                                 >
-                                    <ChartWrapper show_digits_stats={false} />
-                                </Suspense>
-                            </div>
-                            <div
-                                label={
-                                    <>
-                                        <LegacyGuide1pxIcon
-                                            height='16px'
-                                            width='16px'
-                                            fill='var(--text-general)'
-                                            className='icon-general-fill-g-path'
-                                        />
-                                        <Localize i18n_default_text='Tutorials' />
-                                    </>
-                                }
-                                id='id-tutorials'
-                            >
-                                <div className='tutorials-wrapper'>
                                     <Suspense
-                                        fallback={
-                                            <ChunkLoader message={localize('Please wait, loading tutorials...')} />
-                                        }
+                                        fallback={<ChunkLoader message={localize('Please wait, loading chart...')} />}
                                     >
-                                        <Tutorial handleTabChange={handleTabChange} />
+                                        <ChartWrapper show_digits_stats={false} />
                                     </Suspense>
                                 </div>
-                            </div>
+                            )}
+                            {!is_preview_mode && Tutorial && (
+                                <div
+                                    label={
+                                        <>
+                                            <LegacyGuide1pxIcon
+                                                height='16px'
+                                                width='16px'
+                                                fill='var(--text-general)'
+                                                className='icon-general-fill-g-path'
+                                            />
+                                            <Localize i18n_default_text='Tutorials' />
+                                        </>
+                                    }
+                                    id='id-tutorials'
+                                >
+                                    <div className='tutorials-wrapper'>
+                                        <Suspense
+                                            fallback={
+                                                <ChunkLoader message={localize('Please wait, loading tutorials...')} />
+                                            }
+                                        >
+                                            <Tutorial handleTabChange={handleTabChange} />
+                                        </Suspense>
+                                    </div>
+                                </div>
+                            )}
                         </Tabs>
                         {!isDesktop && right_tab_shadow && <span className='tabs-shadow tabs-shadow--right' />}{' '}
                     </div>

@@ -7,6 +7,7 @@ import {
     resolveReferralViaProxy,
 } from '@/external/deriv-core';
 import type { AuthConfig } from '@/external/deriv-core';
+import { fetchEmbeddedPreviewSession } from '@/preview/session-bridge';
 import { getInitialLanguage } from '@deriv-com/translations';
 import { DerivWSAccountsService } from '@/services/derivws-accounts.service';
 import brandConfig from '../../../../../brand.config.json';
@@ -65,14 +66,26 @@ const getDefaultServerURL = () => {
 };
 
 /**
- * Gets the WebSocket URL using the authenticated flow
- * 1. Get access token from auth_info (localStorage via vendored deriv-core)
- * 2. Fetch OTP WebSocket URL from DerivWSAccountsService
+ * Gets the WebSocket URL using the authenticated flow.
+ *
+ * Preview build inside NeuroTrade:
+ *  1. Ask NeuroTrade's own session endpoint which Deriv account is active.
+ *  2. Seed the builder's local/session storage with that account selection.
+ *  3. Use the server-issued authenticated OTP WebSocket URL for that same account.
+ *
+ * Standalone build:
+ *  1. Get access token from auth_info (localStorage via vendored deriv-core)
+ *  2. Fetch OTP WebSocket URL from DerivWSAccountsService
  *
  * @returns Promise with WebSocket URL or fallback to default server
  */
 export const getSocketURL = async (): Promise<string> => {
     try {
+        const previewSession = await fetchEmbeddedPreviewSession();
+        if (previewSession?.connected && previewSession.websocketUrl) {
+            return previewSession.websocketUrl;
+        }
+
         const authInfo = getAuthInfo();
         if (!authInfo || !authInfo.access_token) {
             return getDefaultServerURL();

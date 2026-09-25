@@ -10,6 +10,7 @@ import { getSelectedTradeType } from '@/external/bot-skeleton/scratch/utils';
 import { handleBackendError, isBackendError } from '@/utils/error-handler';
 // import { journalError, switch_account_notification } from '@/utils/bot-notifications';
 import GTM from '@/utils/gtm';
+import { isPreviewMode } from '@/utils/is-preview-mode';
 import { helpers } from '@/utils/store-helpers';
 import { generateUrlWithRedirect } from '@/utils/url-redirect-utils';
 import { Buy, ProposalOpenContract } from '@deriv/api-types';
@@ -372,6 +373,24 @@ export default class RunPanelStore {
     };
 
     showLoginDialog = () => {
+        // Inside NeuroTrade the builder is account-bound to the parent app, so
+        // auth must be managed there — never by opening Deriv's own login/sign-up
+        // flow from the embedded builder.
+        if (isPreviewMode()) {
+            this.onOkButtonClick = this.onCloseDialog;
+            this.onCancelButtonClick = null;
+            this.dialog_options = {
+                title: localize('Connect your Deriv account in NeuroTrade'),
+                message: localize('Use NeuroTrade’s Connect page to link the account you want this bot to trade on. The builder will follow that connected demo or real account automatically.'),
+                ok_button_text: localize('OK'),
+                cancel_button_text: '',
+                dismissable: true,
+                is_closed_on_cancel: true,
+            };
+            this.is_dialog_open = true;
+            return;
+        }
+
         // Only allow closing through the buttons
         this.onOkButtonClick = () => {
             generateOAuthURL('registration').then(url => {

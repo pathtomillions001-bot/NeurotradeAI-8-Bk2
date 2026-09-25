@@ -273,8 +273,15 @@ export default class ClientStore {
             localStorage.removeItem('clientAccounts');
             localStorage.removeItem('account_type');
 
-            // Clear sessionStorage
-            sessionStorage.clear();
+            // Clear session-scoped auth data — but NOT the whole of
+            // sessionStorage. It also holds the run history the user expects to
+            // keep until they press Reset (transaction_cache, journal_cache),
+            // plus the host app's tab-session keys. An auth blip (stale OTP,
+            // reconnect, account switch) used to wipe all of it, which is why
+            // transactions disappeared while the in-memory Journal survived.
+            ['deriv_accounts', 'query_param_currency', 'client_account_details', 'session_token'].forEach(key =>
+                sessionStorage.removeItem(key)
+            );
 
             // Clear cookies
             removeCookies('client_information');

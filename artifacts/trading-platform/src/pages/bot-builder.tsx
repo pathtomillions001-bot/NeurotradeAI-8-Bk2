@@ -72,9 +72,20 @@ export default function BotBuilder() {
       data-testid="bot-builder-page"
       className="h-[calc(100vh-3.5rem)] w-full overflow-hidden bg-background"
     >
+      {/*
+        The 125%/125% sizing compensates for the 0.8 zoom below: a zoomed box
+        that measures 100% only PAINTS at 100% × 0.8 = 80% of its container,
+        which left a dead ~20% strip of the page background under the builder —
+        the "plain black bar" that sat BELOW the builder's own footer (the bar
+        with the GMT server clock) and pushed the real footer off the bottom
+        edge of the page. Sizing the zoomed box at 125% makes the painted result
+        exactly 100% of the page, so the builder's footer is the last bar on
+        screen and the workspace fills the viewport. The page wrapper keeps
+        `overflow-hidden`, so the pre-zoom overflow is never visible.
+      */}
       <div
         ref={containerRef}
-        className="h-full w-full [&>iframe]:h-full [&>iframe]:w-full [&>iframe]:border-0 [&>iframe]:bg-white"
+        className="h-[125%] w-[125%] [&>iframe]:h-full [&>iframe]:w-full [&>iframe]:border-0 [&>iframe]:bg-white"
         style={{ zoom: 0.8 }}
       />
     </div>

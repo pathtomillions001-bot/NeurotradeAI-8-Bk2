@@ -37,7 +37,13 @@ const ErrorComponentWrapper = observer(() => {
 // How long the boot loader may stay up while `api_base.init()` is still in
 // flight before the UI is rendered anyway (the connection, auth state and
 // active-symbol list all settle in the background and update the UI live).
-const API_INIT_UI_GATE_MS = 2500;
+//
+// Kept deliberately short (fail-open): the workspace/Blockly mount only starts
+// once AppContent renders, so every millisecond spent gating on a Deriv
+// round-trip is a millisecond the user waits before their bot is usable — and
+// the Run button is separately disabled until the symbols arrive, so rendering
+// early cannot start a trade with stale data.
+const API_INIT_UI_GATE_MS = 1200;
 
 let api_init_promise: Promise<void> | null = null;
 

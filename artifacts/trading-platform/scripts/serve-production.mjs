@@ -30,6 +30,27 @@ const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.resolve(packageRoot, "dist/public");
 const botBuilderDir = path.resolve(publicDir, "bot/preview");
 
+// Shared SPA-fallback options for the NeuroTrade production server, so both the
+// normal path and the bot-builder passthrough derive from one definition.
+const spaHandlerOptions = {
+  public: publicDir,
+  rewrites: [{ source: "**", destination: "/index.html" }],
+  directoryListing: false,
+  headers: [
+    {
+      source: "**/*",
+      headers: [
+        { key: "X-Content-Type-Options", value: "nosniff" },
+        { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+      ],
+    },
+    {
+      source: "assets/**",
+      headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
+    },
+  ],
+};
+
 const rawPort = process.env.PORT ?? "5000";
 const port = Number(rawPort);
 if (Number.isNaN(port) || port <= 0) {
@@ -88,9 +109,12 @@ function sendStaticFile(res, filePath) {
   fs.createReadStream(filePath).pipe(res);
 }
 
-function tryServeBotBuilder(pathname, res) {
+function tryServeBotBuilder(pathname, res, returnNext) {
   if (pathname !== "/bot/preview" && !pathname.startsWith("/bot/preview/")) return false;
-  if (!fs.existsSync(botBuilderDir)) return false;
+  // No builder bundle on disk yet — the local dev server proxies /bot/preview to
+  // the standalone rsbuild builder (:4003). Fall through so the request can reach
+  // that proxy instead of a 404 (production always ships the bundle in-tree).
+  if (!fs.existsSync(path.join(botBuilderDir, "index.html"))) return returnNext();
 
   const relative = decodeURIComponent(pathname.replace(/^\/bot\/preview\/?/, ""));
   const requested = relative ? path.resolve(botBuilderDir, relative) : path.join(botBuilderDir, "index.html");
@@ -163,6 +187,10 @@ const server = http.createServer((req, res) => {
   const url = req.url ?? "/";
   const pathname = url.split("?")[0];
 
+  const returnNext = () => {
+    handler(req, res, spaHandlerOptions);
+  };
+
   // ── Release endpoints — MUST be before static handler ────────────────────
   if (pathname === "/__release") {
     res.setHeader("content-type", "application/json; charset=utf-8");
@@ -206,28 +234,11 @@ const server = http.createServer((req, res) => {
   // The Deriv bot builder is a separately built SPA copied to /bot/preview.
   // Serve it before the NeuroTrade SPA fallback so /bot/preview and all nested
   // builder assets/routes resolve to the real builder, not NeuroTrade's index.
-  if (tryServeBotBuilder(pathname, res)) {
+  if (tryServeBotBuilder(pathname, res, returnNext)) {
     return undefined;
   }
 
-  return handler(req, res, {
-    public: publicDir,
-    rewrites: [{ source: "**", destination: "/index.html" }],
-    directoryListing: false,
-    headers: [
-      {
-        source: "**/*",
-        headers: [
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-        ],
-      },
-      {
-        source: "assets/**",
-        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
-      },
-    ],
-  });
+  return returnNext();
 });
 
 server.on("upgrade", (req, socket, head) => {

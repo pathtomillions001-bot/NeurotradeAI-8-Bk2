@@ -4,6 +4,7 @@ import ErrorBoundary from '@/components/error-component/error-boundary';
 import ErrorComponent from '@/components/error-component/error-component';
 import ChunkLoader from '@/components/loader/chunk-loader';
 import { api_base } from '@/external/bot-skeleton';
+import { fetchEmbeddedPreviewSession, syncEmbeddedPreviewSession } from '@/preview/session-bridge';
 import { useStore } from '@/hooks/useStore';
 import { localize } from '@deriv-com/translations';
 import './app-root.scss';
@@ -51,6 +52,17 @@ const AppRoot = () => {
                 try {
                     await api_base.init();
                     api_base_initialized.current = true;
+                    // Paint from the fast public socket first, then prepare the
+                    // authenticated demo/real socket in the background. Run has
+                    // its own readiness guard, so a slow OTP never loses a click.
+                    if (process.env.NEXT_PUBLIC_APP_BUILD === 'true') {
+                        void fetchEmbeddedPreviewSession().then(session => {
+                            if (!session?.activeLoginId) return;
+                            window.setTimeout(() => {
+                                void syncEmbeddedPreviewSession(session.activeLoginId);
+                            }, 250);
+                        });
+                    }
                 } catch (error) {
                     console.error('API initialization failed:', error);
                     api_base_initialized.current = false;

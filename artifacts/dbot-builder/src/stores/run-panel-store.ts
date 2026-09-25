@@ -20,6 +20,20 @@ import { localize } from '@deriv-com/translations';
 import { TDbot } from 'Types';
 import RootStore from './root-store';
 
+const BLOCKLY_READY_TIMEOUT_MS = 10_000;
+const BLOCKLY_READY_POLL_MS = 50;
+
+const waitForBlocklyReady = async (): Promise<boolean> => {
+    const deadline = Date.now() + BLOCKLY_READY_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+        if (window.Blockly?.derivWorkspace && window.Blockly?.JavaScript?.javascriptGenerator) return true;
+        await new Promise(resolve => setTimeout(resolve, BLOCKLY_READY_POLL_MS));
+    }
+
+    return Boolean(window.Blockly?.derivWorkspace && window.Blockly?.JavaScript?.javascriptGenerator);
+};
+
 export type TContractState = {
     buy?: Buy;
     contract?: ProposalOpenContract;
@@ -163,6 +177,17 @@ export default class RunPanelStore {
     };
 
     onRunButtonClick = async () => {
+        // The preview shell intentionally paints before Blockly finishes loading.
+        // Never enter the interpreter with a partial Blockly object: generateCode
+        // reads Blockly.JavaScript.javascriptGenerator and would otherwise throw
+        // "Cannot read properties of undefined" instead of executing a trade.
+        if (!(await waitForBlocklyReady())) {
+            botNotification(localize('Bot Builder is still loading. Please try Run again in a moment.'), undefined, {
+                type: 'warning',
+            });
+            return;
+        }
+
         let timer_counter = 1;
         if (window.sendRequestsStatistic) {
             performance.clearMeasures();

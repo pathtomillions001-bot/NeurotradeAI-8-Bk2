@@ -28,6 +28,7 @@ import httpProxy from "http-proxy";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const publicDir = path.resolve(packageRoot, "dist/public");
+const botBuilderDir = path.resolve(publicDir, "bot/preview");
 
 const rawPort = process.env.PORT ?? "5000";
 const port = Number(rawPort);
@@ -56,6 +57,51 @@ const proxy = httpProxy.createProxyServer({
   proxyTimeout: 0,
   timeout: 0,
 });
+
+const contentTypes = new Map([
+  [".css", "text/css; charset=utf-8"],
+  [".cur", "application/octet-stream"],
+  [".gif", "image/gif"],
+  [".html", "text/html; charset=utf-8"],
+  [".ico", "image/x-icon"],
+  [".jpeg", "image/jpeg"],
+  [".jpg", "image/jpeg"],
+  [".js", "text/javascript; charset=utf-8"],
+  [".json", "application/json; charset=utf-8"],
+  [".mp4", "video/mp4"],
+  [".png", "image/png"],
+  [".svg", "image/svg+xml"],
+  [".ttf", "font/ttf"],
+  [".wasm", "application/wasm"],
+  [".wav", "audio/wav"],
+  [".webp", "image/webp"],
+]);
+
+function sendStaticFile(res, filePath) {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  res.setHeader("content-type", contentTypes.get(path.extname(filePath)) ?? "application/octet-stream");
+  if (filePath.includes(`${path.sep}static${path.sep}`) || filePath.includes(`${path.sep}assets${path.sep}`)) {
+    res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  }
+  res.writeHead(200);
+  fs.createReadStream(filePath).pipe(res);
+}
+
+function tryServeBotBuilder(pathname, res) {
+  if (pathname !== "/bot/preview" && !pathname.startsWith("/bot/preview/")) return false;
+  if (!fs.existsSync(botBuilderDir)) return false;
+
+  const relative = decodeURIComponent(pathname.replace(/^\/bot\/preview\/?/, ""));
+  const requested = relative ? path.resolve(botBuilderDir, relative) : path.join(botBuilderDir, "index.html");
+  const safe = requested === botBuilderDir || requested.startsWith(`${botBuilderDir}${path.sep}`);
+  const filePath = safe && fs.existsSync(requested) && fs.statSync(requested).isFile()
+    ? requested
+    : path.join(botBuilderDir, "index.html");
+
+  sendStaticFile(res, filePath);
+  return true;
+}
 
 proxy.on("error", (err, _req, res) => {
   console.error("[web] API proxy error:", err.message);
@@ -155,6 +201,13 @@ const server = http.createServer((req, res) => {
 
   if (pathname === "/api" || pathname.startsWith("/api/")) {
     return proxy.web(req, res, { target: upstream });
+  }
+
+  // The Deriv bot builder is a separately built SPA copied to /bot/preview.
+  // Serve it before the NeuroTrade SPA fallback so /bot/preview and all nested
+  // builder assets/routes resolve to the real builder, not NeuroTrade's index.
+  if (tryServeBotBuilder(pathname, res)) {
+    return undefined;
   }
 
   return handler(req, res, {

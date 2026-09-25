@@ -410,12 +410,27 @@ class DBot {
 
         api_base.setIsRunning(false);
 
-        await this.interpreter.stop();
-        this.is_bot_running = false;
-        this.interpreter = null;
-        this.interpreter = Interpreter();
-        await this.interpreter.bot.tradeEngine.watchTicks(this.symbol);
-        forgetAccumulatorsProposalRequest(this);
+        try {
+            if (this.interpreter) {
+                await this.interpreter.stop();
+            }
+        } catch (error) {
+            // Stopping is best-effort. Whatever the broker said, the local
+            // engine must end up in a clean, re-runnable state — otherwise the
+            // next Run click hits `if (api_base.is_stopping) return` and the
+            // builder looks permanently frozen.
+            console.warn('Interpreter stop failed (ignored, resetting engine):', error?.message ?? error);
+        } finally {
+            this.is_bot_running = false;
+            api_base.is_stopping = false;
+            this.interpreter = Interpreter();
+            try {
+                await this.interpreter.bot.tradeEngine.watchTicks(this.symbol);
+            } catch (error) {
+                console.warn('watchTicks after stop failed (ignored):', error?.message ?? error);
+            }
+            forgetAccumulatorsProposalRequest(this);
+        }
     }
 
     /**

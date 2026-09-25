@@ -161,6 +161,44 @@ const Interpreter = () => {
 
     async function stop() {
         return new Promise((resolve, reject) => {
+            // `is_stopping` gates BOTH dbot.runBot() and dbot.stopBot() (see
+            // scratch/dbot.js). The previous implementation only cleared it
+            // inside `terminateSession().then(...)`, so a single rejected
+            // `forget` from Deriv ("already forgotten" / socket closed while
+            // stopping) left it pinned at true forever — after which Run and
+            // Stop both silently early-returned and the builder looked frozen.
+            // `settle` makes the reset and the promise settlement exactly-once
+            // and unconditional.
+            let is_settled = false;
+            let did_register_contract_listener = false;
+            const settle = (error = null) => {
+                if (is_settled) return;
+                is_settled = true;
+                api_base.is_stopping = false;
+                clearTimeout(watchdog);
+                if (did_register_contract_listener) {
+                    globalObserver.unregister('contract.status', on_contract_sold);
+                }
+                if (error) reject(error);
+                else resolve();
+            };
+
+            // Last-resort guard: teardown is best-effort, but the UI must never
+            // wait on the broker forever. Multiplier contracts wait for
+            // `contract.sold` below, which simply never arrives if the user
+            // stopped before entry or the socket dropped mid-contract.
+            const STOP_WATCHDOG_MS = 10000;
+            const watchdog = setTimeout(() => settle(), STOP_WATCHDOG_MS);
+
+            const on_contract_sold = async contractStatus => {
+                if (contractStatus?.id !== 'contract.sold') return;
+                try {
+                    await terminateSession();
+                } finally {
+                    settle();
+                }
+            };
+
             try {
                 const global_timeouts = globalObserver.getState('global_timeouts') ?? [];
                 const is_timeouts_cancellable = Object.keys(global_timeouts).every(
@@ -172,29 +210,24 @@ const Interpreter = () => {
                     // When user is rate limited, allow them to stop the bot immediately
                     // granted there is no active contract.
                     global_timeouts.forEach(timeout => clearTimeout(global_timeouts[timeout]));
-                    terminateSession().then(() => {
-                        api_base.is_stopping = false;
-                        resolve();
-                    });
+                    terminateSession().finally(() => settle());
                 } else if (
                     bot.tradeEngine.isSold === false &&
                     !$scope.is_error_triggered &&
                     isMultiplierContract(bot?.tradeEngine?.data?.contract?.contract_type ?? '')
                 ) {
-                    globalObserver.register('contract.status', async contractStatus => {
-                        if (contractStatus.id === 'contract.sold') {
-                            terminateSession().then(() => resolve());
-                        }
-                    });
+                    // Wait for the open multiplier contract to settle so its
+                    // P/L is reported correctly — but bounded by the watchdog so
+                    // a contract that never sells can't hang the Stop button.
+                    api_base.is_stopping = true;
+                    globalObserver.register('contract.status', on_contract_sold);
+                    did_register_contract_listener = true;
                 } else {
                     api_base.is_stopping = true;
-                    terminateSession().then(() => {
-                        api_base.is_stopping = false;
-                        resolve();
-                    });
+                    terminateSession().finally(() => settle());
                 }
             } catch (e) {
-                reject(e);
+                settle(e);
             }
         });
     }
@@ -210,9 +243,20 @@ const Interpreter = () => {
                 // Unsubscribe the subscriptions from Proposal, Balance and OpenContract
                 api_base.clearSubscriptions();
 
-                ticksService.unsubscribeFromTicksService().then(() => {
-                    resolve();
-                });
+                // Tearing the session down is best-effort: Deriv routinely
+                // rejects `forget` for subscriptions it already dropped. That
+                // rejection used to escape unhandled, which left THIS promise
+                // pending forever (no `.catch`) and wedged the stop path above.
+                // Resolve either way — the subscriptions are being discarded
+                // regardless of what the server says about forgetting them.
+                ticksService
+                    .unsubscribeFromTicksService()
+                    .catch(error => {
+                        console.warn('unsubscribeFromTicksService failed during stop (ignored):', error?.message ?? error);
+                    })
+                    .then(() => {
+                        resolve();
+                    });
             } catch (error) {
                 reject(error);
             }

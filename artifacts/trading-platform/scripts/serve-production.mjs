@@ -21,6 +21,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import handler from "serve-handler";
 import httpProxy from "http-proxy";
@@ -98,18 +99,72 @@ const contentTypes = new Map([
   [".webp", "image/webp"],
 ]);
 
-function sendStaticFile(res, filePath) {
+// ── Compression ──────────────────────────────────────────────────────────────
+// Neither serve-handler nor the old sendStaticFile compressed anything, so the
+// browser pulled the bot builder's initial payload down raw: ~5 MB of JS+CSS
+// that gzips to ~700 KB. On a normal connection that alone is the difference
+// between a ~2 s and a ~20 s first paint, and the Blockly/workspace chunks land
+// right on the critical path for placing a trade.
+//
+// serve-handler has no compression option, so compressible static files are
+// served through here instead; everything else still falls through to it for
+// SPA rewrites and 404s.
+const COMPRESSIBLE_EXTENSIONS = new Set([
+  ".css",
+  ".html",
+  ".js",
+  ".json",
+  ".map",
+  ".mjs",
+  ".svg",
+  ".txt",
+  ".wasm",
+  ".xml",
+]);
+
+function wantsGzip(req) {
+  return /\bgzip\b/.test(String(req.headers["accept-encoding"] ?? ""));
+}
+
+function sendStaticFile(req, res, filePath) {
+  const extension = path.extname(filePath);
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
-  res.setHeader("content-type", contentTypes.get(path.extname(filePath)) ?? "application/octet-stream");
+  res.setHeader("content-type", contentTypes.get(extension) ?? "application/octet-stream");
   if (filePath.includes(`${path.sep}static${path.sep}`) || filePath.includes(`${path.sep}assets${path.sep}`)) {
     res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
   }
+
+  if (COMPRESSIBLE_EXTENSIONS.has(extension) && wantsGzip(req)) {
+    // No Content-Length: the encoded size is not known up front.
+    res.setHeader("Content-Encoding", "gzip");
+    res.setHeader("Vary", "Accept-Encoding");
+    res.writeHead(200);
+    fs.createReadStream(filePath).pipe(zlib.createGzip({ level: 6 })).pipe(res);
+    return;
+  }
+
   res.writeHead(200);
   fs.createReadStream(filePath).pipe(res);
 }
 
-function tryServeBotBuilder(pathname, res, returnNext) {
+/**
+ * Serve a compressible static file out of the NeuroTrade build when one exists.
+ * Returns false so non-assets (SPA routes) fall through to serve-handler.
+ */
+function tryServeCompressedStatic(pathname, req, res) {
+  if (!COMPRESSIBLE_EXTENSIONS.has(path.extname(pathname))) return false;
+
+  const relative = decodeURIComponent(pathname.replace(/^\/+/, ""));
+  const requested = path.resolve(publicDir, relative);
+  const safe = requested === publicDir || requested.startsWith(`${publicDir}${path.sep}`);
+  if (!safe || !fs.existsSync(requested) || !fs.statSync(requested).isFile()) return false;
+
+  sendStaticFile(req, res, requested);
+  return true;
+}
+
+function tryServeBotBuilder(pathname, req, res, returnNext) {
   if (pathname !== "/bot/preview" && !pathname.startsWith("/bot/preview/")) return false;
   // No builder bundle on disk yet — the local dev server proxies /bot/preview to
   // the standalone rsbuild builder (:4003). Fall through so the request can reach
@@ -123,7 +178,7 @@ function tryServeBotBuilder(pathname, res, returnNext) {
     ? requested
     : path.join(botBuilderDir, "index.html");
 
-  sendStaticFile(res, filePath);
+  sendStaticFile(req, res, filePath);
   return true;
 }
 
@@ -234,7 +289,13 @@ const server = http.createServer((req, res) => {
   // The Deriv bot builder is a separately built SPA copied to /bot/preview.
   // Serve it before the NeuroTrade SPA fallback so /bot/preview and all nested
   // builder assets/routes resolve to the real builder, not NeuroTrade's index.
-  if (tryServeBotBuilder(pathname, res, returnNext)) {
+  if (tryServeBotBuilder(pathname, req, res, returnNext)) {
+    return undefined;
+  }
+
+  // Compressible NeuroTrade assets go through here so they gzip; SPA routes and
+  // unknown paths fall through to serve-handler for the rewrite/404 behaviour.
+  if (tryServeCompressedStatic(pathname, req, res)) {
     return undefined;
   }
 

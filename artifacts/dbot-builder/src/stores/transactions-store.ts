@@ -27,7 +27,6 @@ export default class TransactionsStore {
         this.root_store = root_store;
         this.core = core;
         this.is_transaction_details_modal_open = false;
-        this.disposeReactionsFn = this.registerReactions();
 
         makeObservable(this, {
             elements: observable,
@@ -40,16 +39,29 @@ export default class TransactionsStore {
             onBotContractEvent: action.bound,
             pushTransaction: action.bound,
             clear: action.bound,
+            restoreStoredTransactions: action.bound,
             registerReactions: action.bound,
             recoverPendingContracts: action.bound,
             updateResultsCompletedContract: action.bound,
             sortOutPositionsBeforeAction: action.bound,
             recoverPendingContractsById: action.bound,
         });
+
+        // MUST come after makeObservable: the reactions below read
+        // `this.elements`, and setting them up first made MobX track a plain
+        // (not yet observable) array — so the session-storage writer never
+        // fired and transactions were never persisted. JournalStore, which has
+        // always registered its reactions after makeObservable, is why the
+        // journal survived a reload while the transactions panel came back
+        // empty.
+        this.disposeReactionsFn = this.registerReactions();
     }
     TRANSACTION_CACHE = 'transaction_cache';
 
-    elements: TElement = getStoredItemsByUser(this.TRANSACTION_CACHE, this.core?.client?.loginid, []);
+    // `elements` is keyed by loginid, so the empty default must be an object —
+    // an array default made the first `elements[loginid]` read an untracked
+    // string-key access on an observable array.
+    elements: TElement = getStoredItemsByUser(this.TRANSACTION_CACHE, this.core?.client?.loginid, {});
     active_transaction_id: null | number = null;
     recovered_completed_transactions: number[] = [];
     recovered_transactions: number[] = [];
@@ -127,14 +139,11 @@ export default class TransactionsStore {
             profit: is_completed ? data.profit : 0,
         };
 
-        if (!this.elements[current_account]) {
-            this.elements = {
-                ...this.elements,
-                [current_account]: [],
-            };
-        }
+        const existing: TTransaction[] = Array.isArray(this.elements?.[current_account])
+            ? this.elements[current_account]
+            : [];
 
-        const same_contract_index = this.elements[current_account]?.findIndex(c => {
+        const same_contract_index = existing.findIndex(c => {
             if (typeof c.data === 'string') return false;
             return (
                 c.type === transaction_elements.CONTRACT &&
@@ -143,10 +152,18 @@ export default class TransactionsStore {
             );
         });
 
+        // Build a NEW array instead of unshift/splice-ing the existing one.
+        // Mutating in place kept the same array reference, so the
+        // session-storage reaction (whose data fn is `elements[loginid]`) saw no
+        // change after the very first contract and silently stopped persisting.
+        let next_rows: TTransaction[];
+
         if (same_contract_index === -1) {
+            next_rows = [{ type: transaction_elements.CONTRACT, data: contract }, ...existing];
+
             // Render a divider if the "run_id" for this contract is different.
-            if (this.elements[current_account]?.length > 0) {
-                const temp_contract = this.elements[current_account]?.[0];
+            if (existing.length > 0) {
+                const temp_contract = existing[0];
                 const is_contract = temp_contract.type === transaction_elements.CONTRACT;
                 const is_new_run =
                     is_contract &&
@@ -154,35 +171,58 @@ export default class TransactionsStore {
                     contract.run_id !== temp_contract?.data?.run_id;
 
                 if (is_new_run) {
-                    this.elements[current_account]?.unshift({
-                        type: transaction_elements.DIVIDER,
-                        data: contract.run_id,
-                    });
+                    next_rows = [{ type: transaction_elements.DIVIDER, data: contract.run_id }, ...next_rows];
                 }
             }
-
-            this.elements[current_account]?.unshift({
-                type: transaction_elements.CONTRACT,
-                data: contract,
-            });
         } else {
             // If data belongs to existing contract in memory, update it.
-            this.elements[current_account]?.splice(same_contract_index, 1, {
+            next_rows = existing.slice();
+            next_rows.splice(same_contract_index, 1, {
                 type: transaction_elements.CONTRACT,
                 data: contract,
             });
         }
 
-        this.elements = { ...this.elements }; // force update
+        this.elements = { ...this.elements, [current_account]: next_rows };
     }
 
     clear() {
-        if (this.elements && this.elements[this.core?.client?.loginid as string]?.length > 0) {
-            this.elements[this.core?.client?.loginid as string] = [];
-        }
+        // Reassign a fresh object rather than mutating in place: `pushTransaction`
+        // already has to do `this.elements = { ...this.elements }` to make the
+        // observable fire, and the session-storage reaction below keys off
+        // `this.elements[loginid]`. Mutating silently left the persisted cache
+        // holding the old rows.
+        const current_account = this.core?.client?.loginid as string;
+        this.elements = { ...this.elements, [current_account]: [] };
         this.recovered_completed_transactions = this.recovered_completed_transactions?.slice(0, 0);
         this.recovered_transactions = this.recovered_transactions?.slice(0, 0);
         this.is_transaction_details_modal_open = false;
+    }
+
+    /**
+     * Rehydrate this account's transactions from the session-storage cache.
+     *
+     * JournalStore has always done this on `client.loginid` change (see its
+     * `disposeJournalMessageListener`), but TransactionsStore only read the
+     * cache once, in its field initialiser. So whenever the builder remounted
+     * or the loginid resolved after construction, the journal came back and the
+     * transactions panel came back EMPTY — the exact asymmetry users saw as
+     * "transactions vanish on Stop, journal survives".
+     *
+     * Never clobber rows we already hold in memory for that account: an
+     * in-flight contract must not be replaced by a staler cache snapshot.
+     */
+    restoreStoredTransactions(loginid?: string) {
+        const account = loginid ?? (this.core?.client?.loginid as string);
+        if (!account) return;
+
+        const in_memory = this.elements?.[account];
+        if (Array.isArray(in_memory) && in_memory.length > 0) return;
+
+        const stored = getStoredItemsByUser(this.TRANSACTION_CACHE, account, []);
+        if (!Array.isArray(stored) || stored.length === 0) return;
+
+        this.elements = { ...this.elements, [account]: stored };
     }
 
     registerReactions() {
@@ -198,6 +238,15 @@ export default class TransactionsStore {
             }
         );
 
+        // Load cached transactions when the account becomes known / changes.
+        // Mirrors JournalStore so the two panels can never disagree about
+        // whether history survived.
+        const disposeTransactionsRestoreListener = reaction(
+            () => client?.loginid,
+            loginid => this.restoreStoredTransactions(loginid),
+            { fireImmediately: true }
+        );
+
         // User could've left the page mid-contract. On initial load, try
         // to recover any pending contracts so we can reflect accurate stats
         // and transactions.
@@ -208,6 +257,7 @@ export default class TransactionsStore {
 
         return () => {
             disposeTransactionElementsListener();
+            disposeTransactionsRestoreListener();
             disposeRecoverContracts();
         };
     }

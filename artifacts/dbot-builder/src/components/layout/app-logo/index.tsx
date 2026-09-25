@@ -4,10 +4,19 @@
 // from the App Builder via PREVIEW_BRANDING) → letter-badge fallback; app name from the
 // preview or the resolved deploy/build name.
 import { localize } from '@deriv-com/translations';
+import { isPreviewMode } from '@/utils/is-preview-mode';
 import { LogoMark } from './LogoMark';
 import './app-logo.scss';
 
 export const AppLogo = () => {
+    if (isPreviewMode()) {
+        return (
+            <span className='app-header__logo' aria-label={localize('Home')}>
+                <LogoMark height={32} />
+            </span>
+        );
+    }
+
     return (
         <a href='/' className='app-header__logo' aria-label={localize('Home')}>
             <LogoMark height={32} />

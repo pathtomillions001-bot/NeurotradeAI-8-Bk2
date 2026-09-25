@@ -4,6 +4,7 @@
 import brandConfig from '@/../brand.config.json';
 import { useApiBase } from '@/hooks/useApiBase';
 import useModalManager from '@/hooks/useModalManager';
+import { isPreviewMode } from '@/utils/is-preview-mode';
 import { getActiveTabUrl } from '@/utils/getActiveTabUrl';
 // [AI]
 import { OFFERED_LANGUAGES } from '@/utils/offered-languages';
@@ -22,6 +23,7 @@ const Footer = () => {
     const { currentLang = 'EN', localize, switchLanguage } = useTranslations();
     const { hideModal, isModalOpenFor, showModal } = useModalManager();
     const { isAuthorized } = useApiBase();
+    const is_embedded_preview = isPreviewMode();
 
     // Get footer configuration from brand.config.json
     const enableLanguageSettings = brandConfig.platform.footer?.enable_language_settings ?? true;
@@ -31,7 +33,7 @@ const Footer = () => {
     return (
         <footer className='app-footer'>
             <FullScreen />
-            {isAuthorized && <LogoutFooter />}
+            {!is_embedded_preview && isAuthorized && <LogoutFooter />}
             {/* [AI] Conditionally render language settings based on brand config */}
             {enableLanguageSettings && (
                 <>

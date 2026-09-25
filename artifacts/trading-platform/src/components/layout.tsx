@@ -11,22 +11,11 @@ import { AccountSwitcher } from "./account-switcher";
 import { LiveBotIndicator } from "./live-bot-indicator";
 import { useLiveBots } from "@/lib/live-bots";
 
-function BotBuilderNavIcon({ className }: { className?: string }) {
-  return (
-    <img
-      src="/bot/preview/assets/icons/IcBotBuilder.svg"
-      alt=""
-      aria-hidden="true"
-      className={className}
-    />
-  );
-}
-
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/markets", label: "Markets", icon: BarChart2 },
   { href: "/bots", label: "AI Bots", icon: Bot },
-  { href: "/bot-builder", label: "Bot Builder", icon: BotBuilderNavIcon },
+  { href: "/bot-builder", label: "Bot Builder", icon: Bot },
   { href: "/trades", label: "Journal", icon: Briefcase },
   { href: "/analytics", label: "Analytics", icon: Activity },
   { href: "/risk-calculator", label: "Risk Calc", icon: Calculator },

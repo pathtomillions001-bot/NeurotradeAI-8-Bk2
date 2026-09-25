@@ -70,7 +70,7 @@ export default function BotBuilder() {
   return (
     <div
       data-testid="bot-builder-page"
-      className="h-[calc(100vh-3.5rem)] w-full overflow-hidden bg-background"
+      className="h-[calc(100dvh-3.5rem)] w-full overflow-hidden bg-background md:h-[100dvh]"
     >
       {/*
         The 125%/125% sizing compensates for the 0.8 zoom below: a zoomed box
@@ -82,6 +82,12 @@ export default function BotBuilder() {
         exactly 100% of the page, so the builder's footer is the last bar on
         screen and the workspace fills the viewport. The page wrapper keeps
         `overflow-hidden`, so the pre-zoom overflow is never visible.
+
+        Height: the 3.5rem subtraction matches the mobile top bar only (the
+        desktop header is hidden and <main> has no top padding there), so
+        desktop must use the full viewport — otherwise the wrapper stopped
+        56px short and the page background showed as a bar BELOW the builder's
+        footer, which is what the report described.
       */}
       <div
         ref={containerRef}

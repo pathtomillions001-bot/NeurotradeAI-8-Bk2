@@ -83,7 +83,12 @@ export default defineConfig({
       "@": path.resolve(import.meta.dirname, "src"),
       "@assets": path.resolve(import.meta.dirname, "..", "..", "attached_assets"),
     },
-    dedupe: ["react", "react-dom"],
+    // react-query MUST be deduped alongside react: the workspace can hold two
+    // peer-resolved instances of it (e.g. lib/api-client-react binding to a
+    // different react build than the app). Two instances = two QueryClient
+    // contexts = "No QueryClient set" crash that blanks every route inside
+    // <Layout> (black screen) while the landing page still renders.
+    dedupe: ["react", "react-dom", "@tanstack/react-query"],
   },
   root: path.resolve(import.meta.dirname),
   build: {

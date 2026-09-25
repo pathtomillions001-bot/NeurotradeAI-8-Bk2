@@ -1,6 +1,7 @@
 import { observer } from 'mobx-react-lite';
 import { useStore } from '@/hooks/useStore';
 import { Loader } from '@deriv-com/ui';
+import { isPreviewMode } from '@/utils/is-preview-mode';
 
 const BlocklyLoading = observer(() => {
     const { blockly_store } = useStore();
@@ -8,10 +9,7 @@ const BlocklyLoading = observer(() => {
 
     return (
         <>
-            {/* The preview still needs this boundary: the app shell can paint
-                quickly, but Blockly must finish registering blocks and its
-                JavaScript generator before the workspace is interactive. */}
-            {is_loading && (
+            {is_loading && !isPreviewMode() && (
                 <div className='bot__loading' data-testid='blockly-loader'>
                     <Loader />
                     <div>Loading Blockly...</div>

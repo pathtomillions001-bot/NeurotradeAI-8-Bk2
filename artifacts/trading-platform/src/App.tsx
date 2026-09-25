@@ -234,6 +234,7 @@ function Router() {
         <Route path="/markets" component={Markets} />
         <Route path="/markets/:symbol" component={MarketDetail} />
         <Route path="/bots" component={Bots} />
+        <Route path="/bot-builder" component={BotBuilder} />
         <Route path="/trades" component={Trades} />
         <Route path="/analytics" component={Analytics} />
         <Route path="/intelligence" component={Intelligence} />

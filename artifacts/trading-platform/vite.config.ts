@@ -16,6 +16,97 @@ if (Number.isNaN(port) || port <= 0) {
 // Default to "/" — safe for any hosting context.
 const basePath = process.env.BASE_PATH ?? "/";
 
+// ── Deriv bot builder dev serve ──────────────────────────────────────────────
+// The bot builder is a standalone rsbuild app (artifacts/dbot-builder) that the
+// Production build compiles and copies into dist/public/bot/preview. Production
+// serves that bundle directly; dev has no such bundle unless it's built, and the
+// legacy /bot/preview proxy pointed at a :4003 rsbuild process that nothing
+// starts. That left a fresh dev instance showing an empty iframe (or a 404 when
+// the page route was missing).
+//
+// This plugin reuses rsbuild's static output (out/preview) when it exists, so a
+// developer who has ever built the builder gets a working /bot/preview with zero
+// extra processes — matching production's behaviour exactly. When the output is
+// absent it falls through to the legacy /bot/preview proxy (rsbuild dev on :4003)
+// for incremental builder work, and finally to a 404 with a clear hint.
+function botPreviewDevServe(): Plugin {
+  const builderOut = path.resolve(
+    __dirname,
+    "..",
+    "dbot-builder",
+    "out",
+    "preview",
+  );
+  const mime = new Map([
+    [".html", "text/html; charset=utf-8"],
+    [".js", "text/javascript; charset=utf-8"],
+    [".css", "text/css; charset=utf-8"],
+    [".json", "application/json; charset=utf-8"],
+    [".svg", "image/svg+xml"],
+    [".png", "image/png"],
+    [".wav", "audio/wav"],
+    [".webp", "image/webp"],
+    [".mp4", "video/mp4"],
+    [".wasm", "application/wasm"],
+  ]);
+
+  const stripPrefix = "/bot/preview/";
+  const indexFile = path.join(builderOut, "index.html");
+
+  return {
+    name: "neurotrade-bot-preview-dev-serve",
+    configureServer(server) {
+      const outputReady = fs.existsSync(indexFile);
+      if (!outputReady) {
+        server.config.logger.info(
+          "[bot-preview] Builder output not found — falling back to the /bot/preview " +
+            "proxy (rsbuild dev on :4003). For a zero-process dev preview, run " +
+            "`node scripts/build-dbot-builder.mjs` once, then restart `vite dev`.",
+        );
+      }
+
+      server.middlewares.use((req, res, next) => {
+        const url = req.url ?? "/";
+        const pathname = url.split("?")[0];
+        if (pathname !== "/bot/preview" && !pathname.startsWith(stripPrefix)) {
+          return next();
+        }
+
+        // When the builder bundle isn't available, defer to the legacy /bot/preview
+        // proxy so incremental builder work (rsbuild dev on :4003) still functions.
+        if (!outputReady) return next();
+
+        const relative = decodeURIComponent(
+          pathname.replace(/^\/bot\/preview\/?/, ""),
+        );
+        const requested = relative
+          ? path.resolve(builderOut, relative)
+          : indexFile;
+        const safe =
+          requested === builderOut || requested.startsWith(`${builderOut}${path.sep}`);
+        // Unknown nested paths get the SPA fallback (index.html), matching production.
+        const filePath =
+          safe && fs.existsSync(requested) && fs.statSync(requested).isFile()
+            ? requested
+            : indexFile;
+
+        if (fs.existsSync(filePath)) {
+          res.setHeader(
+            "content-type",
+            mime.get(path.extname(filePath)) ?? "application/octet-stream",
+          );
+          fs.createReadStream(filePath).pipe(res);
+          return undefined;
+        }
+
+        res.statusCode = 404;
+        res.end("Bot builder output missing. Run `node scripts/build-dbot-builder.mjs` then restart `vite dev`.");
+        return undefined;
+      });
+    },
+  };
+}
+
 // ── Release stamp ─────────────────────────────────────────────────────────────
 // The web and API services deploy independently, so every build carries the
 // commit it came from plus the bot consoles it implements. The bundle compares
@@ -64,6 +155,7 @@ export default defineConfig({
     tailwindcss(),
     runtimeErrorOverlay(),
     releaseManifest(),
+    botPreviewDevServe(),
     ...(process.env.NODE_ENV !== "production" &&
     process.env.REPL_ID !== undefined
       ? [

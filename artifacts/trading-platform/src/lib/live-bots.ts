@@ -33,6 +33,8 @@ export interface LiveBotStatus {
   message?: string;
   inRecovery?: boolean;
   recoveryStep?: number;
+  /** Deriv DBot only: which stored bot the badge refers to. */
+  dbotId?: string;
   [key: string]: unknown;
 }
 
@@ -74,6 +76,16 @@ export function stopPathForBot(botId: string): string {
 }
 
 /**
+ * Where to POST a DBot's kill switch. A DBot is not a server engine: stopping it
+ * is an explicit per-bot call, so the id from the live status is required.
+ * Returns null when it cannot be addressed (the badge then hides Stop).
+ */
+export function dbotStopPath(status: LiveBotStatus): string | null {
+  const dbotId = typeof status.dbotId === "string" ? status.dbotId : null;
+  return dbotId ? `/api/dbots/${dbotId}/stop` : null;
+}
+
+/**
  * Extra POST body for non-bots stop endpoints. The autonomous engine is
  * toggled (running:false); everything else stops with an empty body.
  */
@@ -93,6 +105,8 @@ export function stopBodyForBot(botId: string): Record<string, unknown> | undefin
  */
 export function openPathForBot(botId: string): string | null {
   if (botId === "neuroai" || botId === "autonomous") return null;
+  // A DBot lives in Bot Studio (its own page), not in the Bot Arena.
+  if (botId === "dbot") return "/bot-studio";
   return `/bots?open=${botId}`;
 }
 

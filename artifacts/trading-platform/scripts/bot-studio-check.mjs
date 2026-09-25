@@ -18,12 +18,24 @@
  *   4. the not-connected state disappears, leaving someone with no account in
  *      front of a builder that cannot trade with no explanation.
  *
+ * It also pins the SCAN → DBOT → RUN handshake, which spans three files and
+ * would otherwise only fail in a browser:
+ *
+ *   5. the Over/Under Turbo console's primary action builds a DBot from the
+ *      scanned lock (`POST /api/dbots`) and opens Bot Studio on it — the old
+ *      server-side LOCKED/SWITCHING buttons must stay behind "Advanced";
+ *   6. Bot Studio turns the builder's Run into `POST /api/dbots/:id/live` plus
+ *      heartbeats (which is what mirrors fills into the journal + the shared
+ *      recovery ledger) and forwards the app's kill switch to the iframe;
+ *   7. the journal can tag those fills (the API marks them `isDbot`).
+ *
  * The builder bundle itself is not loaded here — this is a routing/embedding
  * contract check, cheap enough to run on every change.
  */
 import { createServer } from "vite";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
+import { readFileSync } from "node:fs";
 
 const root = new URL("../", import.meta.url).pathname;
 const server = await createServer({
@@ -59,6 +71,12 @@ const App = (await server.ssrLoadModule("/src/App.tsx")).default;
 const { BOT_STUDIO_MOUNT } = await server.ssrLoadModule("/src/pages/bot-studio.tsx");
 const html = renderToString(createElement(App));
 
+const read = (relative) => readFileSync(new URL(relative, import.meta.url), "utf8");
+const turboConsole = read("../src/components/overunder-turbo-console.tsx");
+const runBridge = read("../src/lib/dbot-run-bridge.ts");
+const liveBots = read("../src/lib/live-bots.ts");
+const journalPage = read("../src/pages/trades.tsx");
+
 const CHECKS = [
   ["/bot-studio renders the Bot Studio page", () => html.includes("Bot Studio")],
   [
@@ -73,6 +91,36 @@ const CHECKS = [
   [
     "the account binding is explained (trades land on the app's account)",
     () => html.includes("same account as NeuroTrade"),
+  ],
+  [
+    "the turbo scan's primary action builds a Deriv DBot from the locked scan",
+    () =>
+      turboConsole.includes("Create Deriv DBot") &&
+      /fetch\("\/api\/dbots"/.test(turboConsole) &&
+      turboConsole.includes("/bot-studio?dbot="),
+  ],
+  [
+    "the server-side engines stay available, but only behind Advanced",
+    () =>
+      turboConsole.includes("showAdvanced") &&
+      turboConsole.includes("Advanced — run on the server instead") &&
+      turboConsole.indexOf("Create Deriv DBot") < turboConsole.indexOf("Advanced — run on the server instead"),
+  ],
+  [
+    "running a DBot claims the account lock and mirrors fills (live + heartbeat)",
+    () => /api\/dbots\/\$\{dbotId\}\/live/.test(runBridge) && /heartbeat/.test(runBridge) && runBridge.includes("neurotrade:stop-bot"),
+  ],
+  [
+    "leaving Bot Studio stops the run instead of leaving a live lock behind",
+    () => /stop\("page-closed"\)/.test(runBridge),
+  ],
+  [
+    "the live badge can open a running DBot in Bot Studio and stop that exact bot",
+    () => liveBots.includes('return "/bot-studio"') && liveBots.includes("/api/dbots/${dbotId}/stop"),
+  ],
+  [
+    "the journal badges DBot fills instead of showing them as anonymous trades",
+    () => journalPage.includes("isDbot") && journalPage.includes("DBOT"),
   ],
 ];
 

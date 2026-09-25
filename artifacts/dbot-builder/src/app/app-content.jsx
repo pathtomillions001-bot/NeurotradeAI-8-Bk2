@@ -14,7 +14,7 @@ import useDevMode from '@/hooks/useDevMode';
 import { useStore } from '@/hooks/useStore';
 import useThemeSwitcher from '@/hooks/useThemeSwitcher';
 import { isPreviewMode } from '@/utils/is-preview-mode';
-import { bootstrapHostSession } from '@/services/neurotrade-bridge';
+import { bootstrapHostSession, installHostBotBridge, loadHostBot } from '@/services/neurotrade-bridge';
 import { isEmbeddedMode } from '@/utils/embedded-mode';
 import { ThemeProvider } from '@deriv-com/quill-ui';
 import { setSmartChartsPublicPath } from '@deriv-com/smartcharts-champion';
@@ -184,8 +184,18 @@ const AppContent = observer(() => {
                 });
             })
             .catch(error => console.error('[NeuroTrade] host session bootstrap failed:', error));
+
+        // A bot the host built from a scan (Bot Studio opens /bot/?load=<id>):
+        // load it into the workspace so the user only has to press Run.
+        loadHostBot().catch(error => console.error('[NeuroTrade] host bot load failed:', error));
+
+        // Report Run/Stop to the host and honour the host's kill switch. This is
+        // what registers the run with the app (journal + shared recovery ledger
+        // + the account's one-engine lock).
+        const teardown = installHostBotBridge();
         return () => {
             cancelled = true;
+            teardown();
         };
     }, []);
 

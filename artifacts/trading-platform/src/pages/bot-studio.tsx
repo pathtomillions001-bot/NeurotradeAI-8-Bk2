@@ -13,12 +13,13 @@
  * must not load for users who never open Bot Studio.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearch } from "wouter";
-import { Loader2, Puzzle, RefreshCw, AlertTriangle, ExternalLink, ShieldCheck, FlaskConical } from "lucide-react";
+import { Loader2, Puzzle, RefreshCw, AlertTriangle, ExternalLink, ShieldCheck, FlaskConical, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useGetAccount } from "@workspace/api-client-react";
 import { ApiError } from "@workspace/api-client-react";
+import { useDbotRunBridge } from "@/lib/dbot-run-bridge";
 
 /**
  * Builder entry point — a SAME-ORIGIN path, deliberately never an absolute URL.
@@ -40,6 +41,8 @@ export default function BotStudio() {
   // strategies with no account. Run stays inert because there is no trading
   // socket to buy through — nothing can be executed by accident.
   const [buildOnly, setBuildOnly] = useState(false);
+  const [dbotRunning, setDbotRunning] = useState(false);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
 
   const { data: account } = useGetAccount({
     query: {
@@ -50,9 +53,18 @@ export default function BotStudio() {
     },
   } as any);
 
-  // Optional deep link: /bot-studio?load=<dbotId> preloads a generated bot.
-  const dbotId = useMemo(() => new URLSearchParams(search).get("load") ?? "", [search]);
+  // Optional deep link: /bot-studio?load=<dbotId> (also ?dbot=<dbotId>, the
+  // link "Create Deriv DBot" uses) preloads a generated bot.
+  const dbotId = useMemo(() => {
+    const params = new URLSearchParams(search);
+    return params.get("load") ?? params.get("dbot") ?? "";
+  }, [search]);
   const src = dbotId ? `${BUILDER_SRC}?load=${encodeURIComponent(dbotId)}` : BUILDER_SRC;
+
+  // The app follows the tab: Run claims the account's engine lock + starts the
+  // heartbeat that mirrors fills; Stop (here, in the badge, or on a demo/real
+  // switch) releases it.
+  useDbotRunBridge(dbotId || null, frameRef, setDbotRunning);
 
   // Give the host bridge to the builder before it boots, so its chrome can show
   // the same account the platform is on without an extra round trip.
@@ -121,6 +133,13 @@ export default function BotStudio() {
             </div>
           )}
 
+          {dbotRunning && (
+            <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border bg-emerald-500/10 border-emerald-500/30 text-emerald-300 text-xs font-medium">
+              <Activity className="w-3.5 h-3.5" />
+              DBot running — fills mirror into your journal
+            </div>
+          )}
+
           <Button variant="outline" size="sm" onClick={reload}>
             <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
             Reload builder
@@ -178,6 +197,7 @@ export default function BotStudio() {
             </div>
           )}
           <iframe
+            ref={frameRef}
             key={frameKey}
             src={src}
             title="Bot Studio — Deriv DBot builder"

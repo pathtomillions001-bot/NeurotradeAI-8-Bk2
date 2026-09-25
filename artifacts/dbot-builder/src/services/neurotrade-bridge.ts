@@ -175,3 +175,160 @@ export async function getHostSocketUrl(accountId?: string): Promise<string | nul
     }
     return data.url;
 }
+
+
+// ── Host-driven bot lifecycle (build from a scan → run → stop) ────────────────
+
+/** The bot id the host deep-linked, if any (`?load=<id>`). */
+function hostBotId(): string | null {
+    if (typeof window === 'undefined') return null;
+    const params = new URLSearchParams(window.location.search);
+    return params.get('load') ?? params.get('dbot');
+}
+
+/**
+ * Load a bot the host app built from a scan.
+ *
+ * Bot Studio opens `/bot/?load=<dbotId>` for a bot created from a scan; the XML
+ * comes from the host's own API, because the compiled program lives with the
+ * scan that produced it — not in this bundle. Loading is what makes "Create
+ * Deriv DBot" feel like opttraders: the scan, the program and the Run button are
+ * one click apart.
+ *
+ * Returns true when the workspace now holds the bot.
+ */
+export async function loadHostBot(dbotId?: string): Promise<boolean> {
+    if (!isEmbeddedMode()) return false;
+    const id = dbotId ?? hostBotId();
+    if (!id) return false;
+
+    try {
+        const res = await fetch(`/api/dbots/${encodeURIComponent(id)}/xml`, {
+            credentials: 'same-origin',
+            headers: { accept: 'application/xml' },
+        });
+        if (!res.ok) return false;
+        const xml = await res.text();
+        if (!xml.includes('<block')) return false;
+
+        // This runs while the builder is still booting, so wait for the
+        // workspace (Blockly is created well after the first paint).
+        const deadline = Date.now() + 30_000;
+        const workspaceReady = () =>
+            Boolean((window as any).Blockly?.derivWorkspace && (window as any).Blockly?.Xml);
+        while (!workspaceReady() && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 250));
+        }
+        const workspace = (window as any).Blockly?.derivWorkspace;
+        if (!workspace) return false;
+
+        const meta = await fetch(`/api/dbots/${encodeURIComponent(id)}`, {
+            credentials: 'same-origin',
+            headers: { accept: 'application/json' },
+        })
+            .then(response => (response.ok ? response.json() : null))
+            .catch(() => null);
+        const name: string = meta?.bot?.name ?? 'NeuroTrade DBot';
+
+        // `load` replaces the workspace (the host XML carries collection="false"),
+        // naming the bot exactly as the app's journal will report it.
+        const { load } = await import('@/external/bot-skeleton');
+        await load({
+            block_string: xml,
+            file_name: name,
+            workspace,
+            from: 'unsaved',
+            drop_event: null,
+            strategy_id: id,
+            showIncompatibleStrategyDialog: null,
+        });
+        return true;
+    } catch (error) {
+        console.error('[NeuroTrade] could not load the host bot:', error);
+        return false;
+    }
+}
+
+/**
+ * Keep the host app in step with what this tab is doing.
+ *
+ * Outbound: `dbot:running {running, dbotId}` — the host turns `true` into
+ * `POST /api/dbots/:id/live` and then keeps the run alive with heartbeats
+ * (which is also what mirrors fills into the app's journal and the shared
+ * recovery ledger); `false` releases the account's execution lock.
+ *
+ * Inbound: `neurotrade:stop-bot` — the host's kill switch (including an account
+ * switch, where the bot must not keep trading the old account) stops the engine
+ * in this tab, because this tab owns it.
+ *
+ * Returns a teardown function.
+ */
+export function installHostBotBridge(dbotId?: string): () => void {
+    if (!isEmbeddedMode()) return () => {};
+    const id = dbotId ?? hostBotId();
+
+    let running = false;
+    let announced: boolean | null = null;
+    const announce = (next: boolean) => {
+        if (next === announced) return;
+        announced = next;
+        window.parent?.postMessage({ type: 'dbot:running', running: next, dbotId: id }, window.location.origin);
+    };
+
+    const onRunning = () => { running = true; };
+    const onStopped = () => { running = false; };
+    let unregister: (() => void) | undefined;
+    (async () => {
+        try {
+            const { observer } = await import('@/external/bot-skeleton');
+            observer.register('bot.running', onRunning);
+            observer.register('bot.stop', onStopped);
+            unregister = () => {
+                observer.unregister('bot.running', onRunning);
+                observer.unregister('bot.stop', onStopped);
+            };
+        } catch (error) {
+            console.error('[NeuroTrade] could not subscribe to the bot lifecycle:', error);
+        }
+    })();
+
+    // Reconciliation poll: covers events that fired before this bridge was
+    // installed, and a bot that died without emitting `bot.stop`. The stop
+    // button is the builder's own running marker (see pages/main/main.tsx).
+    const timer = window.setInterval(() => {
+        const dom_running = typeof document !== 'undefined'
+            ? document.getElementById('db-animation__stop-button') !== null
+            : false;
+        announce(running && dom_running);
+    }, 2000);
+
+    const onMessage = (event: MessageEvent) => {
+        if (event.origin !== window.location.origin) return;
+        const data = event.data as { type?: string } | undefined;
+        if (data?.type === 'neurotrade:stop-bot') {
+            void (async () => {
+                try {
+                    // The run panel subscribes to this event exactly as its own
+                    // Stop button does.
+                    const { observer } = await import('@/external/bot-skeleton');
+                    observer.emit('bot.click_stop');
+                    // If the interpreter was mid-tick the event may not have
+                    // stopped it — the builder's own button is the last resort.
+                    window.setTimeout(() => {
+                        const button = document.getElementById('db-animation__stop-button') as HTMLElement | null;
+                        button?.click();
+                    }, 500);
+                } catch (error) {
+                    console.error('[NeuroTrade] could not stop the bot:', error);
+                }
+            })();
+        }
+    };
+    window.addEventListener('message', onMessage);
+
+    return () => {
+        window.clearInterval(timer);
+        window.removeEventListener('message', onMessage);
+        unregister?.();
+    };
+}

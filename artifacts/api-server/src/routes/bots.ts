@@ -818,6 +818,9 @@ router.get("/live", (req, res) => {
     const console_ =
       botId === "neuroai" ? "neuroai"
       : botId === "autonomous" ? "autonomous"
+      // A Deriv DBot runs in the user's browser (Bot Studio) — it has no
+      // catalogue entry, and its status is published by lib/dbots/registry.
+      : botId === "dbot" ? "dbot@1"
       : def ? botConsoleId(def) : "specialist@1";
     entries.push({ botId, botName: status.botName ?? def?.name ?? botId, console: console_, status });
   }

@@ -16,8 +16,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair,
+  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair, Bot, ChevronDown, ChevronUp,
 } from "lucide-react";
+import { useLocation } from "wouter";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { useGetSettings } from "@workspace/api-client-react";
@@ -109,6 +110,13 @@ export function OverUnderTurboConsole({
 }) {
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
+  // Advanced = the server-side engines (LOCKED / SWITCHING). They are still
+  // supported (unattended runs), but they are no longer the primary path: the
+  // primary path builds a Deriv DBot for the scanned market and runs it in
+  // Bot Studio, on the account this app already has selected.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [creatingDbot, setCreatingDbot] = useState(false);
+  const [, navigate] = useLocation();
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
     scanning: null, scanned: 0, total: 20,
@@ -132,6 +140,10 @@ export function OverUnderTurboConsole({
   }, [settings]);
 
   const isRunning = session?.running === true && session.botId === "overunder-turbo";
+  // A DBot for this account holds the same execution lock — the console then
+  // explains where the trading actually happens instead of pretending the
+  // server engine is running.
+  const dbotRunning = session?.running === true && session.botId === "dbot";
 
   useEffect(() => { if (isRunning) setStep("running"); }, [isRunning]);
   useEffect(() => {
@@ -229,6 +241,43 @@ export function OverUnderTurboConsole({
     } catch {
       toast.error("Could not start the bot");
     } finally { setLoading(false); }
+  };
+
+  /**
+   * Compile the scanned lock into a Deriv DBot and open Bot Studio on it.
+   *
+   * The API builds the Blockly program from the SAME numbers shown here (normal
+   * and recovery contracts, stake, TP/SL, the account's markup) and seeds its
+   * recovery ladder from the app's shared ledger, so the bot the user runs does
+   * exactly what this scan decided.
+   */
+  const handleCreateDbot = async (c: Candidate) => {
+    setCreatingDbot(true);
+    try {
+      const res = await fetch("/api/dbots", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          source: "overunder-turbo",
+          symbol: c.symbol,
+          displayName: c.displayName,
+          normal: c.normal,
+          recovery: c.recovery,
+          ...config,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.bot?.id) {
+        toast.error(data?.error ?? "Could not build the DBot");
+        return;
+      }
+      toast.success(`🤖 Deriv DBot built for ${c.displayName} — opening Bot Studio to run it`);
+      navigate(`/bot-studio?dbot=${data.bot.id}`);
+    } catch {
+      toast.error("Could not build the DBot");
+    } finally {
+      setCreatingDbot(false);
+    }
   };
 
   const handleStop = async () => {
@@ -378,44 +427,79 @@ export function OverUnderTurboConsole({
                       </p>
                     </div>
 
-                    {/* The two deploy buttons — LOCKED or SWITCHING */}
-                    <div className="grid grid-cols-2 gap-2">
-                      <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
-                              className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
-                        <Lock className="w-4 h-4 mr-2" />
-                        Locked
-                      </Button>
-                      <Button onClick={() => handleStart(scanResult.best!, "switching")} disabled={loading}
-                              variant="outline" className={`w-full h-10 ${a.outlineBtn} text-xs font-bold`}>
-                        <ArrowRightLeft className="w-4 h-4 mr-2" />
-                        Switching
-                      </Button>
-                      <p className="col-span-2 text-[9px] text-muted-foreground/60 leading-relaxed">
-                        Locked never changes market. Switching keeps these exact barriers and moves
-                        ONLY when this market stops being favorable — trading never pauses for a
-                        healthy tape.
-                      </p>
-                    </div>
+                    {/* PRIMARY: build a Deriv DBot from this exact scan. The
+                        bot runs in the user's browser through Bot Studio, on
+                        the app's active account (demo stays demo, real stays
+                        real), with the app's SL/TP and recovery ladder baked
+                        in and its fills mirrored back into the journal. */}
+                    <Button onClick={() => handleCreateDbot(scanResult.best!)} disabled={creatingDbot || loading}
+                            className={`w-full h-11 ${a.solidBtn} text-white font-bold text-sm`}>
+                      {creatingDbot
+                        ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Building the DBot…</>
+                        : <><Bot className="w-4 h-4 mr-2" /> Create Deriv DBot</>}
+                    </Button>
+                    <p className="text-[9px] text-muted-foreground/60 leading-relaxed -mt-1">
+                      Compiles this lock into a Deriv bot (normal {label(scanResult.best.normal)} → recovery{" "}
+                      {label(scanResult.best.recovery)}, stake {config.stake}, SL/TP {config.stopLoss}/{config.takeProfit}) and
+                      opens Bot Studio — press Run there and the DBot takes the trades. No second login:
+                      it uses the account already connected in Neurotrade.
+                    </p>
 
-                    {scanResult.allScored.length > 1 && (
-                      <div className="space-y-1 pt-1 border-t border-white/5">
-                        <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Runner-up markets</p>
-                        {scanResult.allScored.slice(1, 6).map((c, i) => (
-                          <div key={i} className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-white/[0.03] text-left">
-                            <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
-                            <span className="font-mono text-[10px] text-muted-foreground/70">
-                              {label(c.normal)}→{label(c.recovery)}
-                            </span>
-                            <span className={`font-mono font-bold ${c.survival >= 0.7 ? "text-green-400" : c.survival >= 0.6 ? "text-cyan-400" : "text-amber-400"}`}>
-                              {(c.survival * 100).toFixed(0)}%
-                            </span>
-                            <button onClick={() => handleStart(c, "locked")} disabled={loading}
-                                    className="text-[10px] font-bold text-sky-300 hover:text-sky-200 disabled:opacity-40"
-                                    title="Deploy this triple locked">
-                              USE
-                            </button>
+                    {/* SECONDARY (Advanced): the server-side engines, kept for
+                        unattended runs and for users who prefer them. */}
+                    <button onClick={() => setShowAdvanced(v => !v)}
+                            className="w-full flex items-center justify-center gap-1 text-[10px] font-semibold text-muted-foreground hover:text-white py-0.5">
+                      {showAdvanced ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                      Advanced — run on the server instead
+                    </button>
+
+                    {showAdvanced && (
+                      <div className="space-y-2 pt-1">
+                        <div className="grid grid-cols-2 gap-2">
+                          <Button onClick={() => handleStart(scanResult.best!, "locked")} disabled={loading}
+                                  className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}>
+                            <Lock className="w-4 h-4 mr-2" />
+                            Locked
+                          </Button>
+                          <Button onClick={() => handleStart(scanResult.best!, "switching")} disabled={loading}
+                                  variant="outline" className={`w-full h-10 ${a.outlineBtn} text-xs font-bold`}>
+                            <ArrowRightLeft className="w-4 h-4 mr-2" />
+                            Switching
+                          </Button>
+                        </div>
+                        <p className="text-[9px] text-muted-foreground/60 leading-relaxed">
+                          Runs the engine on Neurotrade's servers instead of your browser. Locked never changes
+                          market; Switching keeps these exact barriers and moves ONLY when this market stops being
+                          favorable — trading never pauses for a healthy tape. The account lock allows one engine
+                          at a time, so starting one of these stops (or is refused by) a running DBot.
+                        </p>
+
+                        {scanResult.allScored.length > 1 && (
+                          <div className="space-y-1 pt-1 border-t border-white/5">
+                            <p className="text-[10px] uppercase tracking-widest text-muted-foreground/70">Runner-up markets</p>
+                            {scanResult.allScored.slice(1, 6).map((c, i) => (
+                              <div key={i} className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs bg-white/[0.03] text-left">
+                                <span className="font-medium flex-1 truncate text-white/80">{c.displayName}</span>
+                                <span className="font-mono text-[10px] text-muted-foreground/70">
+                                  {label(c.normal)}→{label(c.recovery)}
+                                </span>
+                                <span className={`font-mono font-bold ${c.survival >= 0.7 ? "text-green-400" : c.survival >= 0.6 ? "text-cyan-400" : "text-amber-400"}`}>
+                                  {(c.survival * 100).toFixed(0)}%
+                                </span>
+                                <button onClick={() => handleCreateDbot(c)} disabled={creatingDbot || loading}
+                                        className="text-[10px] font-bold text-sky-300 hover:text-sky-200 disabled:opacity-40"
+                                        title="Build a Deriv DBot for this market">
+                                  DBOT
+                                </button>
+                                <button onClick={() => handleStart(c, "locked")} disabled={loading}
+                                        className="text-[10px] font-bold text-muted-foreground hover:text-white disabled:opacity-40"
+                                        title="Deploy this triple to the server engine (locked)">
+                                  SERVER
+                                </button>
+                              </div>
+                            ))}
                           </div>
-                        ))}
+                        )}
                       </div>
                     )}
                   </>

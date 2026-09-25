@@ -37,10 +37,12 @@ export const settingsTable = pgTable("settings", {
   recoveryStateJson: text("recovery_state_json"),
   riskAmountType: text("risk_amount_type").notNull().default("fixed"),
   riskAmountValue: numeric("risk_amount_value", { precision: 20, scale: 2 }).notNull().default("1.00"),
-  // Profit markup (%) on accumulated loss debt applied ONLY by the five
-  // specialist AI bots (AI Bot section) when sizing their recovery stake.
-  // Default 10 % matches the original fixed behaviour; users can adjust it
-  // from Risk Management settings. Never read by the shared engine recovery.
+  // Profit markup (%) on accumulated loss debt applied when a BOT (not the
+  // shared engine) sizes its recovery stake: the five specialist AI bots in the
+  // AI Bot section AND the Deriv DBots compiled by Bot Studio, whose ladder is
+  // the same debt × (1 + markup) / (payout − 1) formula. Default 10 % matches
+  // the original fixed behaviour; users can adjust it from Risk Management
+  // settings. Never read by the shared engine recovery.
   botRecoveryMarkup: numeric("bot_recovery_markup", { precision: 5, scale: 2 }).notNull().default("10"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),

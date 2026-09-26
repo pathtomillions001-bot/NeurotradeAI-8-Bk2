@@ -95,6 +95,8 @@ export interface BotDefinition {
   turbo?: boolean;
   /** Paired Edge: scan-only console that creates a synchronized two-rail DBot. */
   pairedEdge?: boolean;
+  /** Shows the Scanner badge: this console can create a strategy in Bot Builder. */
+  createsDbot?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -177,6 +179,7 @@ export const BOT_CATALOG: BotDefinition[] = [
     code: "BOT-OU-TURBO",
     family: "barrier",
     turbo: true,
+    createsDbot: true,
     contractLabel: "Over 1/2 · Under 7/8 → recovery Over 4/5 · Under 4/5",
     tagline: "Scan once. Lock the best tape. Fire non-stop.",
     description:
@@ -203,6 +206,7 @@ export const BOT_CATALOG: BotDefinition[] = [
     code: "BOT-PAIR-45",
     family: "barrier",
     pairedEdge: true,
+    createsDbot: true,
     contractLabel: "Over 4 + Under 5 → recovery Over 5 + Under 4",
     tagline: "Measure the stronger half. Build one synchronized basket bot.",
     description:

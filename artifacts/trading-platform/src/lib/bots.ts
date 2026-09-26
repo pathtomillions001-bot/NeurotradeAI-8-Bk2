@@ -59,6 +59,8 @@ export interface BotCardData {
   turbo?: boolean;
   /** Paired Edge: scan and create a synchronized paired DBot. */
   pairedEdge?: boolean;
+  /** This bot exposes Create DBot and is marked as a scanner in the arena. */
+  createsDbot?: boolean;
   /** Omni Sentinel: user-allowlisted multi-contract opportunity tournament. */
   omni?: boolean;
   /**

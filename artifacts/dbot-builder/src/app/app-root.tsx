@@ -34,10 +34,10 @@ const ErrorComponentWrapper = observer(() => {
     );
 });
 
-// How long the boot loader may stay up while `api_base.init()` is still in
-// flight before the UI is rendered anyway (the connection, auth state and
-// active-symbol list all settle in the background and update the UI live).
-const API_INIT_UI_GATE_MS = 2500;
+// Don't hold the Blockly editor behind a broker WebSocket handshake. The
+// workspace renders with local dropdowns; authentication and market metadata
+// finish asynchronously, while Run remains gated by the broker connection.
+const API_INIT_UI_GATE_MS = 400;
 
 let api_init_promise: Promise<void> | null = null;
 

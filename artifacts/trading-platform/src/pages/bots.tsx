@@ -11,7 +11,7 @@ import { useLocation, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw,
+  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw, ScanSearch, ArrowRight,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/li
 import { consoleSkew, resolveConsole } from "@/lib/console-registry";
 import { WEB_RELEASE, releasePair, type ReleaseInfo } from "@/lib/release";
 import { withTabSession } from "@/lib/tab-session";
+import { DIGIT45_SCANNER_PATH, hasCreateDbotScanner } from "@/lib/scanner-capabilities";
 
 // ── Data ──────────────────────────────────────────────────────────────────────
 
@@ -186,6 +187,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
 }) {
   const a = ACCENTS[bot.accent];
   const Icon = BOT_ICON[bot.icon] ?? Sparkles;
+  const hasScanner = hasCreateDbotScanner(bot);
   const s = bot.session;
   const profit = s?.totalProfit ?? 0;
 
@@ -204,8 +206,12 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
       >
         {/* Accent wash */}
         <div className={`absolute inset-x-0 top-0 h-px bg-gradient-to-r ${a.grad} opacity-60`} />
+        {hasScanner && <span title="Scan and Create DBot; the builder trades only after Run"
+          className="absolute top-3 right-3 z-10 rounded border border-cyan-400/40 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-200">
+          Scanner
+        </span>}
 
-        <CardContent className="p-4 flex flex-col h-full gap-3">
+        <CardContent className={`p-4 flex flex-col h-full gap-3 ${hasScanner ? "pt-9" : ""}`}>
           {/* Header */}
           <div className="flex items-start gap-3">
             <div className={`relative w-11 h-11 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}>
@@ -323,6 +329,35 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
   );
 }
 
+// ── Standalone scanner discovery (not an auto-trading catalogue bot) ────────
+function Digit45ScannerCard({ onOpen }: { onOpen: () => void }) {
+  return <Card className="relative h-full overflow-hidden border-cyan-500/25 bg-card">
+    <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-cyan-500/70 to-transparent" />
+    <span className="absolute top-3 right-3 rounded border border-cyan-400/40 bg-cyan-400/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-cyan-200">
+      Scanner
+    </span>
+    <CardContent className="flex h-full flex-col gap-3 p-4 pt-9">
+      <div className="flex items-center gap-3">
+        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-cyan-400/20 bg-cyan-500/10">
+          <ScanSearch className="h-5 w-5 text-cyan-300" />
+        </div>
+        <div><h3 className="text-sm font-bold text-white">Digit 4/5 Weakness Scanner</h3>
+          <p className="text-[10px] text-cyan-200">Create DBot in Bot Builder</p></div>
+      </div>
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        Find live markets with unusually few 4s and 5s. Scan and Create DBot place no trades;
+        you choose when to press Run in the builder.
+      </p>
+      <div className="mt-auto pt-1">
+        <Button type="button" onClick={onOpen} variant="outline"
+          className="h-9 w-full border-cyan-500/30 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/10">
+          <ArrowRight className="mr-1.5 h-3.5 w-3.5" /> Open scanner
+        </Button>
+      </div>
+    </CardContent>
+  </Card>;
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function Bots() {
@@ -436,6 +471,7 @@ export default function Bots() {
         /* Same reason as the skeleton grid: a content-sized mobile column blows
            up every card the moment one bot card renders a nowrap live strip. */
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          <Digit45ScannerCard onOpen={() => navigate(DIGIT45_SCANNER_PATH)} />
           {bots.map((bot, i) => {
             const resolution = resolveConsole(bot);
             return (

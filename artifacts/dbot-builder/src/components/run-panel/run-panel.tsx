@@ -276,13 +276,16 @@ const RunPanel = observer(() => {
     }, [onMount, onUnmount]);
 
     React.useEffect(() => {
-        if (!isDesktop) {
-            toggleDrawer(false);
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+        // The iframe can preload at desktop width off-screen and become phone-
+        // sized when first shown. Close the drawer on that breakpoint change,
+        // not only on initial mount; never let it cover the Run/Stop bar.
+        if (!isDesktop) toggleDrawer(false);
+    }, [isDesktop, toggleDrawer]);
 
-    const content = (
+    // The collapsed phone drawer needs only its handle and the separate fixed
+    // Run/Stop bar. Mounting Summary/Transactions/Journal underneath it was
+    // doing work (subscriptions, long lists) even when none were visible.
+    const content = (isDesktop || is_drawer_open || active_tour) ? (
         <DrawerContent
             active_index={active_index}
             currency={currency}
@@ -298,7 +301,7 @@ const RunPanel = observer(() => {
             won_contracts={won_contracts}
             active_tour={active_tour}
         />
-    );
+    ) : null;
 
     const footer = <DrawerFooter is_clear_stat_disabled={is_clear_stat_disabled} onClearStatClick={onClearStatClick} />;
 

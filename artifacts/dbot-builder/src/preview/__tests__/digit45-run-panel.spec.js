@@ -9,6 +9,19 @@ function panel() {
 }
 
 describe('finite paired strategy → Run panel STOP state', () => {
+    it('starts collapsed at phone/tablet widths and opens by default on desktop', () => {
+        const originalWidth = window.innerWidth;
+        try {
+            for (const [width, open] of [[390, false], [900, false], [1440, true]]) {
+                Object.defineProperty(window, 'innerWidth', { configurable: true, value: width });
+                const store = panel();
+                expect(store.is_drawer_open).toBe(open);
+                store.disposeReactionsFn();
+            }
+        } finally {
+            Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth });
+        }
+    });
     it('resets running and account-switching status after a settled pair', () => {
         const store = panel();
         store.setIsRunning(true);
@@ -39,6 +52,27 @@ describe('finite paired strategy → Run panel STOP state', () => {
         store.onBotStopEvent();
         expect(store.is_running).toBe(false);
         expect(store.contract_stage).toBe(contract_stages.NOT_RUNNING);
+        store.disposeReactionsFn();
+    });
+
+    it('keeps the phone drawer CLOSED after Run so Stop remains visible below the handle', async () => {
+        const store = panel();
+        store.core.client.is_logged_in = true;
+        store.core.ui.is_mobile = true;
+        store.core.ui.setPromptHandler = jest.fn();
+        store.root_store.summary_card.clear = jest.fn();
+        store.dbot.saveRecentWorkspace = jest.fn();
+        store.dbot.unHighlightAllBlocks = jest.fn();
+        store.dbot.shouldRunBot = jest.fn(() => true);
+        store.dbot.getStrategySounds = jest.fn(() => []);
+        store.dbot.runBot = jest.fn();
+        store.root_store.transactions = { onBotContractEvent: jest.fn() };
+        store.toggleDrawer(false);
+        await store.onRunButtonClick();
+        expect(store.dbot.runBot).toHaveBeenCalledTimes(1);
+        expect(store.is_running).toBe(true);
+        expect(store.is_drawer_open).toBe(false);
+        store.unregisterBotListeners();
         store.disposeReactionsFn();
     });
 });

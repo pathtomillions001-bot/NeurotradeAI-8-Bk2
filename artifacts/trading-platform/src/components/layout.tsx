@@ -1,6 +1,6 @@
 import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
-import { useGetAiEngineStatus, useToggleAutonomousEngine } from "@workspace/api-client-react";
+import { useGetAiEngineStatus, useGetAccount, useToggleAutonomousEngine, type ApiError } from "@workspace/api-client-react";
 import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X, Calculator, Bot, Workflow, ScanSearch } from "lucide-react";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
@@ -10,7 +10,7 @@ import { SpeedAIFab } from "./speed-ai-fab";
 import { AccountSwitcher } from "./account-switcher";
 import { LiveBotIndicator } from "./live-bot-indicator";
 import { useLiveBots } from "@/lib/live-bots";
-import { preloadBotBuilder } from "@/lib/bot-builder-frame";
+import { preloadBotBuilder, syncBotBuilderSession } from "@/lib/bot-builder-frame";
 
 const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -99,13 +99,24 @@ export function Layout({ children }: { children: ReactNode }) {
   // seconds and survives a page refresh (the poll re-runs on mount).
   const liveBots = useLiveBots();
 
-  // Boot the Deriv bot builder in the background the moment the app shell is
-  // up: the (large) builder bundle downloads and initializes while the user is
-  // anywhere else, so opening Bot Builder later is instant. The frame stays
-  // alive across visits — see lib/bot-builder-frame.ts.
+  // Boot once and keep the iframe mounted even while the app navigates. The
+  // Layout and its account query persist between routes, unlike a route-local
+  // BotBuilder query that briefly looks disconnected on every visit and could
+  // reset a running strategy's broker socket. Only actual account changes sync.
+  useEffect(() => { preloadBotBuilder(); }, []);
+  const { data: account, isPending, isError, error } = useGetAccount({
+    query: {
+      retry: (failureCount: number, reason: unknown) =>
+        (reason as ApiError | null)?.status !== 404 && failureCount < 1,
+    },
+  } as { query: any });
+  const loginId = account?.loginId ?? null;
+  const accountKnown = !isPending && (!isError || (error as ApiError | null)?.status === 404);
   useEffect(() => {
-    preloadBotBuilder();
-  }, []);
+    // On a transient API error keep the authenticated builder as-is; a 404
+    // really means disconnected and must propagate for account safety.
+    if (accountKnown) syncBotBuilderSession(Boolean(loginId), loginId);
+  }, [accountKnown, loginId]);
 
   // Close mobile menu on location change
   useEffect(() => {
@@ -171,21 +182,22 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           <span className="font-bold text-base tracking-tight">NeuroTrade</span>
         </div>
-        <div className="ml-auto flex items-center gap-2">
-          <LiveBotIndicator compact live={liveBots} />
-        </div>
+        {location !== "/bot-builder" && (
+          <div className="ml-auto flex items-center gap-2">
+            <LiveBotIndicator compact live={liveBots} />
+          </div>
+        )}
       </header>
 
-      {/* Active-engine indicator — desktop, fixed to the top-right of every
-          page. ALWAYS rendered: "No bot running" when idle, the live engine
-          (AI Bots section, NeuroAI FAB or autonomous) when trading.
-          z-30: below the z-40/50 console dialogs (which show the same bot
-          in full detail) but above all page content. */}
-      <div className="hidden md:block fixed top-3 right-4 z-30 pointer-events-none">
-        <div className="pointer-events-auto">
-          <LiveBotIndicator live={liveBots} />
+      {/* The builder owns Run/Stop in this corner; never cover them with the
+          separate server-engine indicator (including its idle state). */}
+      {location !== "/bot-builder" && (
+        <div className="hidden md:block fixed top-3 right-4 z-30 pointer-events-none">
+          <div className="pointer-events-auto">
+            <LiveBotIndicator live={liveBots} />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">

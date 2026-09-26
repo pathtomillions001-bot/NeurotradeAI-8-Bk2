@@ -15,7 +15,6 @@ export default class ActiveSymbols {
         this.has_initialization_error = false;
         this.processed_symbols = {};
         this.trading_times = trading_times;
-        this.pending_refresh = null;
     }
 
     clearCache() {
@@ -43,19 +42,7 @@ export default class ActiveSymbols {
      *   showError('Unable to load trading symbols. Please try again.');
      * }
      */
-    retrieveActiveSymbols(is_forced_update = false) {
-        // UI mount, account reconnect and market-block refresh can all request
-        // the same expensive trading_times + symbols handshake at once. Do it
-        // once rather than issuing duplicate requests and competing spinners.
-        if (this.pending_refresh) return this.pending_refresh;
-        const refresh = this.fetchActiveSymbols(is_forced_update);
-        this.pending_refresh = refresh.finally(() => {
-            this.pending_refresh = null;
-        });
-        return this.pending_refresh;
-    }
-
-    async fetchActiveSymbols(is_forced_update = false) {
+    async retrieveActiveSymbols(is_forced_update = false) {
         await this.trading_times.initialise();
 
         if (!is_forced_update && this.is_initialised) {
@@ -71,16 +58,9 @@ export default class ActiveSymbols {
             if (!api_base.active_symbols_promise) {
                 api_base.active_symbols_promise = api_base.getActiveSymbols();
             }
-            // A failed cached promise must not permanently poison the editor:
-            // let a later socket recovery trigger a fresh metadata request.
-            const pending = api_base.active_symbols_promise;
-            try {
-                const symbols = await pending;
-                this.active_symbols = symbols ?? api_base?.active_symbols ?? [];
-            } catch (error) {
-                if (api_base.active_symbols_promise === pending) api_base.active_symbols_promise = null;
-                throw error;
-            }
+            // Wait for the promise and use its resolved value
+            const symbols = await api_base.active_symbols_promise;
+            this.active_symbols = symbols ?? api_base?.active_symbols ?? [];
         }
 
         // If still no symbols after waiting, try one more time with a fresh fetch

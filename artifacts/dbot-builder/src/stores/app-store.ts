@@ -58,25 +58,13 @@ export default class AppStore {
         if (!this.dbot_store) return;
 
         blockly_store.setLoading(true);
-        try {
-            // Only Blockly needs to block the local workspace. Broker market
-            // metadata loads separately in AppContent without a full-screen wait.
-            await DBot.initWorkspace(isPreviewMode() ? `${PREVIEW_BASE_PATH}/` : '/',
-                this.dbot_store, this.api_helpers_store, ui.is_mobile, false);
-            blockly_store.setContainerSize();
-            if (ApiHelpers.instance?.active_symbols?.is_initialised) this.refreshMarketDropdowns();
-        } catch (error) {
-            // A chunk/workspace error is NOT a reason to spin forever. Show a
-            // reloadable error instead of exposing half-initialized Run blocks.
-            console.error('Bot Builder workspace failed to initialize:', error);
-            this.root_store.common.showError({
-                header: 'Bot Builder could not load its workspace',
-                message: 'The editor did not initialize. Reload the page before starting a bot.',
-            });
-            return;
-        } finally {
-            blockly_store.setLoading(false);
-        }
+        // The base path seeds `window.__webpack_public_path__`, which Blockly media and
+    // flyout image URLs are built from. In the embedded preview build the app is
+    // served under /bot/preview, so pass that base instead of '/'.
+    await DBot.initWorkspace(isPreviewMode() ? `${PREVIEW_BASE_PATH}/` : '/', this.dbot_store, this.api_helpers_store, ui.is_mobile, false);
+
+        blockly_store.setContainerSize();
+        blockly_store.setLoading(false);
 
         this.registerCurrencyReaction.call(this);
         this.registerOnAccountSwitch.call(this);
@@ -144,21 +132,6 @@ export default class AppStore {
         );
     };
 
-    refreshMarketDropdowns = () => {
-        // Market metadata may arrive after Blockly rendered from its local
-        // fallback list. Only update an IDLE workspace: firing block-change
-        // events in the middle of a live strategy could change its contracts.
-        if (this.root_store.run_panel?.is_running || DBot.is_bot_running) return;
-        const workspace = window.Blockly?.derivWorkspace;
-        if (!workspace) return;
-        workspace.getAllBlocks()
-            .filter(block => block.type === 'trade_definition_market')
-            .forEach(block => runIrreversibleEvents(() => {
-                const event = new window.Blockly.Events.BlockCreate(block);
-                window.Blockly.Events.fire(event);
-            }));
-    };
-
     registerOnAccountSwitch = () => {
         this.disposeSwitchAccountListener = reaction(
             () => this.root_store.common?.is_socket_opened,
@@ -178,16 +151,20 @@ export default class AppStore {
 
                 if (ApiHelpers?.instance && active_symbols && contracts_for) {
                     if (window.Blockly?.derivWorkspace) {
-                        active_symbols.retrieveActiveSymbols(true)
-                            .then(() => {
-                                contracts_for.disposeCache();
-                                if (!active_symbols.has_initialization_error) this.refreshMarketDropdowns();
-                            })
-                            .catch(error => console.warn('Unable to refresh builder markets:', error));
+                        active_symbols?.retrieveActiveSymbols(true).then(() => {
+                            contracts_for.disposeCache();
+                            window.Blockly?.derivWorkspace
+                                .getAllBlocks()
+                                .filter(block => block.type === 'trade_definition_market')
+                                .forEach(block => {
+                                    runIrreversibleEvents(() => {
+                                        const fake_create_event = new window.Blockly.Events.BlockCreate(block);
+                                        window.Blockly.Events.fire(fake_create_event);
+                                    });
+                                });
+                        });
                     }
-                    // A routine socket reconnect must never terminate a live
-                    // interpreter just because market options changed.
-                    if (!this.root_store.run_panel.is_running && !DBot.is_bot_running) DBot.initializeInterpreter();
+                    DBot.initializeInterpreter();
                 }
             }
         );

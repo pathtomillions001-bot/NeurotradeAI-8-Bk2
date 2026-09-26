@@ -1,6 +1,6 @@
 /**
- * The "active engine" indicator — fixed to the top-right of the app's pages
- * (mobile: top bar), EXCEPT Bot Builder where its own Run/Stop must stay clear.
+ * The always-on "active engine" indicator — fixed to the top-right of every
+ * page (mobile: top bar).
  *
  * ONE chip answers one question: which engine is trading on the CONNECTED
  * Deriv account right now? It covers every executor in the app, not just the
@@ -14,15 +14,16 @@
  * different Deriv account is never listed here, so it can never appear
  * "active" on the wrong account.
  *
- * When rendered, it shows the idle "No bot running" state or the server
- * engine's name, P&L and Open/Stop controls. Bot Builder hides the indicator
- * so it never covers that iframe's own, independent Run/Stop controls.
+ * It is always rendered: when nothing is running it shows the idle
+ * "No bot running" state (previously a separate widget inside the AI Bots
+ * page), and when an engine is live it shows its name, P&L and Open/Stop
+ * controls (previously a separate "Engine active" chip). Both merged into
+ * this one, so nothing trades invisibly and there is never two popups.
  */
 
 import { useEffect, useRef, useState } from "react";
 import { Bot, X, StopCircle, Zap, Cpu } from "lucide-react";
 import { toast } from "sonner";
-import { useLocation } from "wouter";
 import {
   stopPathForBot,
   stopBodyForBot,
@@ -49,7 +50,6 @@ function metricFor(s: LiveBot["status"]): { text: string; positive: boolean } | 
 }
 
 export function LiveBotIndicator({ compact = false, live }: { compact?: boolean; live: LiveBot[] }) {
-  const [, navigate] = useLocation();
   const [confirmStop, setConfirmStop] = useState(false);
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (confirmTimer.current) clearTimeout(confirmTimer.current); }, []);
@@ -93,9 +93,7 @@ export function LiveBotIndicator({ compact = false, live }: { compact?: boolean;
       window.dispatchEvent(new CustomEvent(OPEN_SPEED_AI_EVENT));
       return;
     }
-    // Internal console navigation must stay in the SPA. A full document load
-    // would unload the persistent DBot iframe and terminate its live strategy.
-    if (openPath) navigate(openPath);
+    if (openPath) window.location.assign(openPath);
   };
 
   const handleStop = async () => {

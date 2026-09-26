@@ -36,8 +36,6 @@ const PreviewBranding =
 
 const AppContent = observer(() => {
     const [is_api_initialized, setIsApiInitialized] = React.useState(false);
-    // The workspace is editable before market metadata arrives. Do not keep the
-    // entire builder behind the 10s+ active_symbols / trading_times requests.
     const [is_loading, setIsLoading] = React.useState(true);
 
     const store = useStore();
@@ -134,39 +132,53 @@ const AppContent = observer(() => {
         ServerTime.init(common);
         app.setDBotEngineStores();
         ApiHelpers.setInstance(app.api_helpers_store);
-        // The embedded preview does not need a separate analytics bootstrap.
-        if (!isPreviewMode()) {
-            import('@/utils/gtm').then(({ default: GTM }) => {
-                GTM.init(store);
+        import('@/utils/gtm').then(({ default: GTM }) => {
+            GTM.init(store);
+        });
+    };
+
+    const changeActiveSymbolLoadingState = () => {
+        init();
+
+        const retrieveActiveSymbols = () => {
+            const { active_symbols } = ApiHelpers.instance;
+
+            active_symbols.retrieveActiveSymbols(true).then(() => {
+                setIsLoading(false);
             });
+        };
+
+        if (ApiHelpers?.instance?.active_symbols) {
+            retrieveActiveSymbols();
+        } else {
+            // This is a workaround to fix the issue where the active symbols are not loaded immediately
+            // when the API is initialized. Should be replaced with RxJS pubsub
+            const intervalId = setInterval(() => {
+                if (ApiHelpers?.instance?.active_symbols) {
+                    clearInterval(intervalId);
+                    retrieveActiveSymbols();
+                }
+            }, 1000);
         }
     };
 
     React.useEffect(() => {
-        // Set up the Blockly stores once, even when the public broker socket is
-        // slow/offline. The workspace has local fallback dropdowns; Run still
-        // requires a valid authorized connection and live broker proposals.
-        init();
-        setIsLoading(false);
+        if (is_api_initialized) {
+            init();
+            setIsLoading(true);
+            if (!client.is_logged_in) {
+                changeActiveSymbolLoadingState();
+            }
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
+    }, [is_api_initialized]);
 
     React.useEffect(() => {
-        if (!is_api_initialized || connectionStatus !== CONNECTION_STATUS.OPENED) return;
-        const helpers = ApiHelpers.instance ?? ApiHelpers.setInstance({ ws: api_base.api, server_time: common.server_time });
-        const active_symbols = helpers.active_symbols;
-        // Refresh metadata IN THE BACKGROUND. Reconnecting the socket must not
-        // remount the whole Blockly app or show a full-page spinner again.
-        active_symbols.retrieveActiveSymbols(true)
-            .then(() => {
-                if (ApiHelpers.instance?.active_symbols === active_symbols &&
-                    !active_symbols.has_initialization_error) {
-                    app.refreshMarketDropdowns();
-                }
-            })
-            .catch(error => console.warn('Market metadata is unavailable; Blockly remains editable:', error));
+        if (client.is_logged_in && is_api_initialized) {
+            changeActiveSymbolLoadingState();
+        }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [is_api_initialized, connectionStatus, client.loginid]);
+    }, [is_api_initialized, client.loginid]);
 
     if (common?.error) return null;
 

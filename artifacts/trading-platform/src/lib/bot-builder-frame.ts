@@ -8,12 +8,11 @@
  *
  *  - the shell preloads it right after the app mounts, so the builder boots in
  *    the background while the user is on any other page;
- *  - when the Bot Builder page mounts it ADOPTS the same <iframe> element by
- *    moving it into the page container — moving an iframe within the same
- *    document does NOT reload it, so the builder appears instantly with all
- *    its state (loaded strategy, connection, workspace) intact;
- *  - when the page unmounts the frame goes back to the off-screen holder,
- *    staying warm (websocket + workspace) for the next visit.
+ *  - the iframe is NEVER re-parented. The permanent fixed holder is resized
+ *    over the Bot Builder page, avoiding the browser-dependent iframe reload
+ *    that can occur when an iframe node is moved;
+ *  - when the page unmounts only the holder moves off-screen, so the same
+ *    browsing context, websocket, Blockly workspace and running bot survive.
  */
 
 const BUILDER_PATH = "/bot/preview/";
@@ -21,26 +20,52 @@ const HOLDER_ID = "bot-builder-frame-holder";
 const FRAME_CLASS = "bot-builder-frame";
 
 let frame: HTMLIFrameElement | null = null;
+let adoptedContainer: HTMLElement | null = null;
+let containerObserver: ResizeObserver | null = null;
+let resizeListenerInstalled = false;
+
+function parkHolder(holder: HTMLDivElement): void {
+  // Never display:none and never detach/re-parent the iframe. Both can destroy
+  // or suspend the builder's browsing context, which would stop a running bot.
+  // Keeping one fixed, off-screen parent preserves Blockly, sockets and trades.
+  holder.style.left = "-20000px";
+  holder.style.top = "0";
+  holder.style.width = `${Math.max(390, window.innerWidth)}px`;
+  holder.style.height = `${Math.max(700, window.innerHeight)}px`;
+  holder.style.opacity = "0";
+  holder.style.pointerEvents = "none";
+  holder.style.zIndex = "-1";
+}
+
+function positionHolder(): void {
+  if (!adoptedContainer) return;
+  const holder = ensureHolder();
+  const rect = adoptedContainer.getBoundingClientRect();
+  holder.style.left = `${rect.left}px`;
+  holder.style.top = `${rect.top}px`;
+  holder.style.width = `${rect.width}px`;
+  holder.style.height = `${rect.height}px`;
+  holder.style.opacity = "1";
+  holder.style.pointerEvents = "auto";
+  // Below app dialogs/mobile navigation, above ordinary page content.
+  holder.style.zIndex = "20";
+}
 
 function ensureHolder(): HTMLDivElement {
   let holder = document.getElementById(HOLDER_ID) as HTMLDivElement | null;
   if (!holder) {
     holder = document.createElement("div");
     holder.id = HOLDER_ID;
-    // Parked off-screen but RENDERED at a real viewport size — a display:none
-    // iframe would give the builder a zero-size inner viewport and break the
-    // Blockly workspace layout at boot. Off-screen keeps the browsing context
-    // fully alive and warm; moving it into the page later fires the iframe's
-    // own resize so the workspace reflows.
     holder.style.position = "fixed";
-    holder.style.left = "-20000px";
-    holder.style.top = "0";
-    holder.style.width = "1600px";
-    holder.style.height = "1000px";
-    holder.style.visibility = "hidden";
-    holder.style.pointerEvents = "none";
     holder.style.overflow = "hidden";
+    holder.style.background = "white";
+    holder.style.transition = "none";
     document.body.appendChild(holder);
+    parkHolder(holder);
+  }
+  if (!resizeListenerInstalled) {
+    resizeListenerInstalled = true;
+    window.addEventListener("resize", positionHolder, { passive: true });
   }
   return holder;
 }
@@ -52,6 +77,11 @@ export function getBotBuilderFrame(): HTMLIFrameElement {
     frame.className = FRAME_CLASS;
     frame.allow = "clipboard-read; clipboard-write; fullscreen";
     frame.src = BUILDER_PATH;
+    frame.style.width = "100%";
+    frame.style.height = "100%";
+    frame.style.border = "0";
+    frame.style.display = "block";
+    frame.style.background = "white";
     // The builder is same-origin; nothing inside needs credentials beyond the
     // shared cookie jar, which flows by default.
     ensureHolder().appendChild(frame);
@@ -65,21 +95,28 @@ export function preloadBotBuilder(): void {
 }
 
 /**
- * Move the singleton frame into `container` (no reload — same-document move).
- * Returns the frame so the caller can post sync messages to it.
+ * Reveal the singleton frame over `container` WITHOUT moving the iframe node.
+ * Re-parenting an iframe can recreate its browsing context in real browsers;
+ * that would tear down a running DBot. The permanent holder is only resized.
  */
 export function adoptBotBuilderFrame(container: HTMLElement): HTMLIFrameElement {
   const iframe = getBotBuilderFrame();
-  if (iframe.parentElement !== container) {
-    container.appendChild(iframe);
-  }
+  adoptedContainer = container;
+  containerObserver?.disconnect();
+  containerObserver = new ResizeObserver(positionHolder);
+  containerObserver.observe(container);
+  positionHolder();
+  // Fonts/sidebar layout can shift after the first paint without a resize.
+  window.requestAnimationFrame(positionHolder);
   return iframe;
 }
 
-/** Park the frame back into the hidden holder (keeps it warm). */
+/** Move only the permanent holder off-screen; the iframe remains alive in it. */
 export function releaseBotBuilderFrame(): void {
-  const iframe = getBotBuilderFrame();
-  ensureHolder().appendChild(iframe);
+  adoptedContainer = null;
+  containerObserver?.disconnect();
+  containerObserver = null;
+  parkHolder(ensureHolder());
 }
 
 export const BOT_BUILDER_SYNC_MESSAGE = "NEUROTRADE_BOT_BUILDER_SYNC";

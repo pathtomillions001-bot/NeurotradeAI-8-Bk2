@@ -9,7 +9,7 @@
 
 import type { OmniSessionDetails } from "./omni";
 
-import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap } from "lucide-react";
+import { Activity, Hash, Scale, Crosshair, TrendingUp, ShieldCheck, Lock, Target, Zap, Workflow } from "lucide-react";
 
 export type AccentKey = "cyan" | "violet" | "amber" | "emerald" | "rose" | "indigo" | "sky" | "teal" | "fuchsia" | "orange" | "lime";
 
@@ -57,6 +57,10 @@ export interface BotCardData {
   navigator?: boolean;
   /** Over/Under Turbo: continuous-fire over/under (own console + routes). */
   turbo?: boolean;
+  /** Paired Edge: scan and create a synchronized paired DBot. */
+  pairedEdge?: boolean;
+  /** This bot exposes Create DBot and is marked as a scanner in the arena. */
+  createsDbot?: boolean;
   /** Omni Sentinel: user-allowlisted multi-contract opportunity tournament. */
   omni?: boolean;
   /**
@@ -796,6 +800,7 @@ export const BOT_ICON: Record<string, typeof Hash> = {
   target: Target,
   zap: Zap,
   activity: Activity,
+  workflow: Workflow,
 };
 
 /** Synthetic markets a bot may be locked to (same catalogue the FAB offers). */

@@ -12,12 +12,10 @@ import {
  *
  * - No page chrome of its own (the builder draws its own header) — the iframe
  *   gets the entire content height below the app's top bar.
- * - The builder renders at 80% scale (CSS zoom) so the whole workspace, tool
- *   panel and charts fit comfortably on screen instead of cropping.
  * - The iframe is a persistent singleton (see lib/bot-builder-frame.ts): it is
- *   preloaded when the app shell mounts and merely MOVED into this page, so
- *   opening Bot Builder is instant and the builder keeps its state between
- *   visits.
+ *   preloaded when the app shell mounts and its permanent holder is positioned
+ *   over this page without ever re-parenting the iframe. That preserves the
+ *   browsing context and any running DBot across navigation.
  */
 export default function BotBuilder() {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -72,11 +70,7 @@ export default function BotBuilder() {
       data-testid="bot-builder-page"
       className="h-[calc(100vh-3.5rem)] w-full overflow-hidden bg-background"
     >
-      <div
-        ref={containerRef}
-        className="h-full w-full [&>iframe]:h-full [&>iframe]:w-full [&>iframe]:border-0 [&>iframe]:bg-white"
-        style={{ zoom: 0.8 }}
-      />
+      <div ref={containerRef} className="h-full w-full" />
     </div>
   );
 }

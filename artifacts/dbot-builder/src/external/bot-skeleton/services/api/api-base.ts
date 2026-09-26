@@ -59,6 +59,9 @@ class APIBase {
     time_interval: ReturnType<typeof setInterval> | null = null;
     has_active_symbols = false;
     is_stopping = false;
+    // A paired buy/settlement can be ambiguous after a dropped broker response.
+    // Require account reconciliation and a fresh builder session before Run.
+    digit45Unresolved = false;
     active_symbols: any[] = [];
     current_auth_subscriptions: SubscriptionPromise[] = [];
     is_authorized = false;

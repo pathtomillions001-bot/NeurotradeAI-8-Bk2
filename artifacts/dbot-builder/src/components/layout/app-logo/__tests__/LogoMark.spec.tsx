@@ -1,5 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
-import { LOGO_CANDIDATES } from '../../../../utils/branding';
+import { getAppName, getShowAppName, LOGO_CANDIDATES } from '../../../../utils/branding';
 import { LogoMark } from '../LogoMark';
 
 // Default to the old-BFF fallback (all extension candidates) so the probing tests
@@ -15,10 +15,12 @@ jest.mock('../../../../utils/branding', () => {
     };
 });
 
-// No NEXT_PUBLIC_DERIV_APP_NAME / preview name in the test env, so getAppName()
-// resolves to brand.config.json platform.name ("Deriv Trading Bot").
+// The embedded builder is branded by the host's brand.config.json: neither
+// the fallback letter nor whether the name is visible is always 'Deriv'.
 describe('LogoMark', () => {
     const originalAppBuild = process.env.NEXT_PUBLIC_APP_BUILD;
+    const appName = getAppName();
+    const badgeLetter = appName.trim().charAt(0).toUpperCase() || 'A';
 
     beforeEach(() => {
         mockLogoCandidates = LOGO_CANDIDATES;
@@ -28,9 +30,11 @@ describe('LogoMark', () => {
         process.env.NEXT_PUBLIC_APP_BUILD = originalAppBuild;
     });
 
-    it('renders the resolved app name', () => {
+    it('honors the resolved partner name and its visibility setting', () => {
         render(<LogoMark />);
-        expect(screen.getByText('Deriv Trading Bot')).toBeInTheDocument();
+        expect(screen.getByRole('img')).toHaveAttribute('alt', appName);
+        if (getShowAppName()) expect(screen.getByText(appName)).toBeInTheDocument();
+        else expect(screen.queryByText(appName)).not.toBeInTheDocument();
     });
 
     it('renders the logo image (first candidate) by default', () => {
@@ -48,7 +52,7 @@ describe('LogoMark', () => {
         }
         expect(screen.queryByRole('img')).not.toBeInTheDocument();
         // Letter badge shows the first letter of the app name.
-        expect(screen.getByText('D')).toBeInTheDocument();
+        expect(screen.getByText(badgeLetter)).toBeInTheDocument();
     });
 
     it('skips logo file probing in the preview build and renders the letter badge', () => {
@@ -58,7 +62,7 @@ describe('LogoMark', () => {
         process.env.NEXT_PUBLIC_APP_BUILD = 'true';
         render(<LogoMark />);
         expect(screen.queryByRole('img')).not.toBeInTheDocument();
-        expect(screen.getByText('D')).toBeInTheDocument();
+        expect(screen.getByText(badgeLetter)).toBeInTheDocument();
     });
 
     it('hides the name text when preview showAppName is false', () => {
@@ -71,7 +75,7 @@ describe('LogoMark', () => {
             setPreviewShowAppName(false);
         });
         render(<LogoMark />);
-        expect(screen.queryByText('Deriv Trading Bot')).not.toBeInTheDocument();
+        expect(screen.queryByText(appName)).not.toBeInTheDocument();
         act(() => {
             setPreviewShowAppName(true);
         });
@@ -82,7 +86,7 @@ describe('LogoMark', () => {
         render(<LogoMark />);
         // The BFF said no logo ships — no <img> probe (which would 404), only the badge.
         expect(screen.queryByRole('img')).not.toBeInTheDocument();
-        expect(screen.getByText('D')).toBeInTheDocument();
+        expect(screen.getByText(badgeLetter)).toBeInTheDocument();
     });
 
     it('renders exactly the recorded logo_path when the BFF wrote one', () => {
@@ -92,6 +96,6 @@ describe('LogoMark', () => {
         // A failed load falls straight to the badge — no other extensions to guess.
         fireEvent.error(screen.getByRole('img'));
         expect(screen.queryByRole('img')).not.toBeInTheDocument();
-        expect(screen.getByText('D')).toBeInTheDocument();
+        expect(screen.getByText(badgeLetter)).toBeInTheDocument();
     });
 });

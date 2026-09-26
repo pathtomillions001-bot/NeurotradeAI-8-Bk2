@@ -24,6 +24,7 @@ export type TContractState = {
     contract?: ProposalOpenContract;
     data: number;
     id: string;
+    pairPending?: boolean;
 };
 
 export default class RunPanelStore {
@@ -573,13 +574,19 @@ export default class RunPanelStore {
             this.setIsRunning(false);
             indicateBotStopped();
         } else if (this.has_open_contract) {
-            // Bot should indicate the contract is closed in below cases:
-            // - When bot was running and an error happens
+            // A finite paired strategy (TP/SL, partial buy, recovery cap) can
+            // finish normally and call stop after BOTH sales. Don't leave Run
+            // showing as active until a new tick history subscription loads.
             this.error_type = undefined;
             this.is_sell_requested = false;
+            this.setIsRunning(false);
             this.setContractStage(contract_stages.CONTRACT_CLOSED);
             ui.setAccountSwitcherDisabledMessage();
             this.unregisterBotListeners();
+        } else {
+            // Stopped before any contract was opened.
+            this.setIsRunning(false);
+            indicateBotStopped();
         }
 
         this.setHasOpenContract(false);
@@ -621,8 +628,12 @@ export default class RunPanelStore {
                 break;
             }
             case 'contract.sold': {
-                this.is_sell_requested = false;
-                this.setContractStage(contract_stages.CONTRACT_CLOSED);
+                // Each paired leg settles independently. Keep the Run panel
+                // in the purchase state until the OTHER leg has also sold.
+                if (!contract_status.pairPending) {
+                    this.is_sell_requested = false;
+                    this.setContractStage(contract_stages.CONTRACT_CLOSED);
+                }
                 if (contract_status.contract) GTM.onTransactionClosed(contract_status.contract);
                 break;
             }
@@ -645,8 +656,8 @@ export default class RunPanelStore {
         observer.emit('statistics.clear');
     };
 
-    onBotContractEvent = (data: { is_sold?: boolean }) => {
-        if (data?.is_sold) {
+    onBotContractEvent = (data: { is_sold?: boolean; pairPending?: boolean }) => {
+        if (data?.is_sold && !data.pairPending) {
             this.is_sell_requested = false;
             this.setContractStage(contract_stages.CONTRACT_CLOSED);
         }

@@ -8,6 +8,7 @@ import aiRouter from "./ai";
 import settingsRouter from "./settings";
 import speedAiRouter from "./speed-ai";
 import botsRouter from "./bots";
+import digit45ScannerRouter from "./digit45-scanner";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use("/ai", aiRouter);
 router.use("/settings", settingsRouter);
 router.use("/speed-ai", speedAiRouter);
 router.use("/bots", botsRouter);
+router.use("/scanners/digit-45", digit45ScannerRouter);
 
 export default router;

@@ -9,8 +9,6 @@ const getBotInterface = tradeEngine => {
         start: (...args) => tradeEngine.start(...args),
         stop: (...args) => tradeEngine.stop(...args),
         purchase: contract_type => tradeEngine.purchase(contract_type),
-        purchasePair: (over_type, over_barrier, under_type, under_barrier, stake) =>
-            tradeEngine.purchasePair(over_type, over_barrier, under_type, under_barrier, stake),
         getAskPrice: contract_type => Number(getProposal(contract_type, tradeEngine).ask_price),
         getPayout: contract_type => Number(getProposal(contract_type, tradeEngine).payout),
         getPurchaseReference: () => tradeEngine.getPurchaseReference(),

@@ -143,21 +143,9 @@ const AppContent = observer(() => {
         const retrieveActiveSymbols = () => {
             const { active_symbols } = ApiHelpers.instance;
 
-            // Reuse the in-flight/initialised symbol catalogue. Forcing a second
-            // network refresh here created another full-screen loading cycle
-            // after the builder shell was already ready.
-            const loadingGuard = window.setTimeout(() => {
-                // The workspace can render from its built-in market catalogue;
-                // live symbols will hydrate when the request eventually lands.
+            active_symbols.retrieveActiveSymbols(true).then(() => {
                 setIsLoading(false);
-            }, 3500);
-            active_symbols
-                .retrieveActiveSymbols(false)
-                .catch(error => console.warn('[builder] Active symbols will hydrate in the background:', error))
-                .finally(() => {
-                    window.clearTimeout(loadingGuard);
-                    setIsLoading(false);
-                });
+            });
         };
 
         if (ApiHelpers?.instance?.active_symbols) {

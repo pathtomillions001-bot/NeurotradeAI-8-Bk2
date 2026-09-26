@@ -184,22 +184,6 @@ describe('Over/Under Turbo → Deriv DBot strategy', () => {
         return xml;
     };
 
-    it('loads the Paired Edge XML and generates the custom atomic basket call', () => {
-        loadFixture('paired-edge-r100');
-        const tops = workspace.getTopBlocks(false).map(b => b.type).sort();
-        expect(tops).toEqual(['after_purchase', 'before_purchase', 'trade_definition']);
-        const pairs = workspace.getBlocksByType('purchase_pair', false);
-        expect(pairs).toHaveLength(2);
-        expect(pairs.map(block => [
-            block.getInputTargetBlock('OVER_BARRIER').getFieldValue('NUM'),
-            block.getInputTargetBlock('UNDER_BARRIER').getFieldValue('NUM'),
-        ])).toEqual(expect.arrayContaining([[4, 5], [5, 4]]));
-        const code = buildRunner(workspace);
-        expect(code).toContain("Bot.purchasePair('DIGITOVER', 4, 'DIGITUNDER', 5");
-        expect(code).toContain("Bot.purchasePair('DIGITOVER', 5, 'DIGITUNDER', 4");
-        expect(code).toContain("symbol              : 'R_100'");
-    });
-
     it('loads into the real builder with every Deriv root block in place', () => {
         loadFixture('turbo-r100-over2-over4');
         const tops = workspace.getTopBlocks(false).map(b => b.type).sort();

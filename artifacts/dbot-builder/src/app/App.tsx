@@ -1,18 +1,21 @@
+import { lazy, Suspense } from 'react';
 import React from 'react';
 import { createBrowserRouter, createRoutesFromElements, Route, RouterProvider } from 'react-router';
 import { cleanupUrl, handleOAuthCallback } from '@/external/deriv-core';
-import Layout from '../components/layout';
-import AppRoot from './app-root';
+import ChunkLoader from '@/components/loader/chunk-loader';
 import LocalStorageSyncWrapper from '@/components/localStorage-sync-wrapper';
 import RoutePromptDialog from '@/components/route-prompt-dialog';
 import { useAccountSwitching } from '@/hooks/useAccountSwitching';
 import { useLanguageFromURL } from '@/hooks/useLanguageFromURL';
 import { StoreProvider } from '@/hooks/useStore';
 import { isPreviewMode, PREVIEW_BASE_PATH } from '@/utils/is-preview-mode';
-import { TranslationProvider } from '@deriv-com/translations';
+import { localize, TranslationProvider } from '@deriv-com/translations';
 import CoreStoreProvider from './CoreStoreProvider';
 import i18nInstance from './i18n';
 import './app-root.scss';
+
+const Layout = lazy(() => import('../components/layout'));
+const AppRoot = lazy(() => import('./app-root'));
 
 /**
  * Component wrapper to handle language URL parameter
@@ -33,18 +36,22 @@ const router = createBrowserRouter(
         <Route
             path='/'
             element={
-                <TranslationProvider defaultLang='EN' i18nInstance={i18nInstance}>
-                    <LanguageHandler>
-                        <StoreProvider>
-                            <LocalStorageSyncWrapper>
-                                <RoutePromptDialog />
-                                <CoreStoreProvider>
-                                    <Layout />
-                                </CoreStoreProvider>
-                            </LocalStorageSyncWrapper>
-                        </StoreProvider>
-                    </LanguageHandler>
-                </TranslationProvider>
+                <Suspense
+                    fallback={<ChunkLoader message={localize('Please wait while we connect to the server...')} />}
+                >
+                    <TranslationProvider defaultLang='EN' i18nInstance={i18nInstance}>
+                        <LanguageHandler>
+                            <StoreProvider>
+                                <LocalStorageSyncWrapper>
+                                    <RoutePromptDialog />
+                                    <CoreStoreProvider>
+                                        <Layout />
+                                    </CoreStoreProvider>
+                                </LocalStorageSyncWrapper>
+                            </StoreProvider>
+                        </LanguageHandler>
+                    </TranslationProvider>
+                </Suspense>
             }
         >
             {/* All child routes will be passed as children to Layout */}

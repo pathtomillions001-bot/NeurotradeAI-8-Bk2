@@ -23,11 +23,8 @@
 
     @include mobile-or-tablet-screen {
         width: 100vw !important;
-        // Keep the summary handle clearly ABOVE the persistent Run/Stop bar.
-        // Previously it sat in the same bottom zone and obscured the primary
-        // control until users opened the whole drawer.
-        height: calc(100% - 11.7rem) !important;
-        top: calc(100% - 11.4rem) !important;
+        height: calc(100% - 10.1rem) !important;
+        top: calc(100% - 9.8rem) !important;
     }
 
     &__container {

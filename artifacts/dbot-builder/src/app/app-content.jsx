@@ -1,10 +1,9 @@
-import React, { lazy, Suspense, useEffect } from 'react';
+import React, { lazy, Suspense, useEffect, useLayoutEffect } from 'react';
 import { observer } from 'mobx-react-lite';
 import { ToastContainer } from 'react-toastify';
 import AuthLoadingWrapper from '@/components/auth-loading-wrapper';
 import { botNotification } from '@/components/bot-notification/bot-notification';
 import useLiveChat from '@/components/chat/useLiveChat';
-import ChunkLoader from '@/components/loader/chunk-loader';
 import { lazyWithRetry } from '@/utils/lazy-retry';
 import { getUrlBase } from '@/components/shared';
 import TransactionDetailsModal from '@/components/transaction-details';
@@ -35,7 +34,13 @@ const PreviewBranding =
 
 const AppContent = observer(() => {
     const [is_api_initialized, setIsApiInitialized] = React.useState(false);
-    const [is_loading, setIsLoading] = React.useState(true);
+    // Whether the Deriv symbol catalogue has arrived. It is NOT a render gate:
+    // the builder shell, workspace and Run panel paint immediately and the
+    // market dropdowns refresh in place once the catalogue lands (see
+    // `loadActiveSymbols` below). Blocking the whole UI on this round-trip was
+    // the "Initializing Deriv Bot account..." splash users waited on at every
+    // single boot.
+    const [are_symbols_loaded, setAreSymbolsLoaded] = React.useState(false);
 
     const store = useStore();
     const { app, transactions, common, client } = store;
@@ -127,55 +132,69 @@ const AppContent = observer(() => {
         };
     }, [is_api_initialized, client.is_logged_in, client.loginid, handleMessage, connectionStatus]);
 
-    const init = () => {
+    const init = React.useCallback(() => {
         ServerTime.init(common);
         app.setDBotEngineStores();
         ApiHelpers.setInstance(app.api_helpers_store);
         import('@/utils/gtm').then(({ default: GTM }) => {
             GTM.init(store);
         });
-    };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [app, common, store]);
 
-    const changeActiveSymbolLoadingState = () => {
+    // Wire the DBot engine stores BEFORE the first paint of <BotBuilder />.
+    // `app.onMount()` (which injects the Blockly workspace) needs
+    // `app.dbot_store`, and a layout effect here runs before the children's
+    // mount effects — so the workspace starts building in the very first
+    // frame instead of waiting for the websocket handshake.
+    useLayoutEffect(() => {
         init();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
+    /**
+     * Fetch the symbol catalogue in the BACKGROUND and refresh the market
+     * dropdowns of any block already on the canvas when it arrives. Nothing
+     * here blocks rendering: `trade_definition_market` falls back to the
+     * built-in market list until the live one lands.
+     */
+    const loadActiveSymbols = React.useCallback(() => {
         const retrieveActiveSymbols = () => {
-            const { active_symbols } = ApiHelpers.instance;
+            const { active_symbols } = ApiHelpers.instance ?? {};
+            if (!active_symbols) return;
 
-            active_symbols.retrieveActiveSymbols(true).then(() => {
-                setIsLoading(false);
-            });
+            active_symbols
+                .retrieveActiveSymbols(true)
+                .then(() => {
+                    setAreSymbolsLoaded(true);
+                    app.refreshMarketBlocks();
+                })
+                .catch(error => {
+                    // eslint-disable-next-line no-console
+                    console.error('Failed to load active symbols:', error);
+                });
         };
 
         if (ApiHelpers?.instance?.active_symbols) {
             retrieveActiveSymbols();
-        } else {
-            // This is a workaround to fix the issue where the active symbols are not loaded immediately
-            // when the API is initialized. Should be replaced with RxJS pubsub
-            const intervalId = setInterval(() => {
-                if (ApiHelpers?.instance?.active_symbols) {
-                    clearInterval(intervalId);
-                    retrieveActiveSymbols();
-                }
-            }, 1000);
+            return undefined;
         }
-    };
 
-    React.useEffect(() => {
-        if (is_api_initialized) {
-            init();
-            setIsLoading(true);
-            if (!client.is_logged_in) {
-                changeActiveSymbolLoadingState();
+        // ApiHelpers is created by `init()` above, but the socket may replace
+        // the instance while reconnecting — poll briefly instead of failing.
+        const intervalId = setInterval(() => {
+            if (ApiHelpers?.instance?.active_symbols) {
+                clearInterval(intervalId);
+                retrieveActiveSymbols();
             }
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [is_api_initialized]);
+        }, 500);
+        return () => clearInterval(intervalId);
+    }, [app]);
 
     React.useEffect(() => {
-        if (client.is_logged_in && is_api_initialized) {
-            changeActiveSymbolLoadingState();
-        }
+        if (!is_api_initialized) return undefined;
+        init();
+        return loadActiveSymbols();
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [is_api_initialized, client.loginid]);
 
@@ -185,25 +204,21 @@ const AppContent = observer(() => {
         <React.Fragment>
             {PreviewBranding && (
                 <Suspense fallback={null}>
-                    <PreviewBranding uiReady={!is_loading} />
+                    <PreviewBranding uiReady={are_symbols_loaded} />
                 </Suspense>
             )}
-            {is_loading ? (
-                <ChunkLoader message={localize('Initializing Deriv Bot account...')} />
-            ) : (
-                <AuthLoadingWrapper>
-                    <ThemeProvider theme={is_dark_mode_on ? 'dark' : 'light'}>
-                        <BlocklyLoading />
-                        <div className='bot-dashboard bot' data-testid='dt_bot_dashboard'>
-                            <Audio />
-                            <Main />
-                            <BotBuilder />
-                            <TransactionDetailsModal />
-                            <ToastContainer limit={3} draggable={false} />
-                        </div>
-                    </ThemeProvider>
-                </AuthLoadingWrapper>
-            )}
+            <AuthLoadingWrapper>
+                <ThemeProvider theme={is_dark_mode_on ? 'dark' : 'light'}>
+                    <BlocklyLoading />
+                    <div className='bot-dashboard bot' data-testid='dt_bot_dashboard'>
+                        <Audio />
+                        <Main />
+                        <BotBuilder />
+                        <TransactionDetailsModal />
+                        <ToastContainer limit={3} draggable={false} />
+                    </div>
+                </ThemeProvider>
+            </AuthLoadingWrapper>
         </React.Fragment>
     );
 });

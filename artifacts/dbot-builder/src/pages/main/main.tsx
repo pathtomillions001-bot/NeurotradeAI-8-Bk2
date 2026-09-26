@@ -303,7 +303,11 @@ const AppWrapper = observer(() => {
 
     React.useEffect(() => {
         const trashcan_init_id = setTimeout(() => {
-            if (active_tab === BOT_BUILDER && Blockly?.derivWorkspace?.trashcan) {
+            // `window.Blockly` (not the bare identifier): Blockly is now loaded
+            // lazily, so before it lands the bare `Blockly?.` read throws
+            // "ReferenceError: Blockly is not defined" — optional chaining does
+            // not guard an undeclared global.
+            if (active_tab === BOT_BUILDER && window.Blockly?.derivWorkspace?.trashcan) {
                 const trashcanY = window.innerHeight - 250;
                 let trashcanX;
                 if (is_drawer_open) {
@@ -311,7 +315,7 @@ const AppWrapper = observer(() => {
                 } else {
                     trashcanX = isDbotRTL() ? 20 : window.innerWidth - 100;
                 }
-                Blockly?.derivWorkspace?.trashcan?.setTrashcanPosition(trashcanX, trashcanY);
+                window.Blockly?.derivWorkspace?.trashcan?.setTrashcanPosition(trashcanX, trashcanY);
             }
         }, 100);
 

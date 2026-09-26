@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useRef, useState } from 'react';
+import { Suspense, useEffect } from 'react';
 import { observer } from 'mobx-react-lite';
 import ErrorBoundary from '@/components/error-component/error-boundary';
 import ErrorComponent from '@/components/error-component/error-component';
@@ -34,11 +34,6 @@ const ErrorComponentWrapper = observer(() => {
     );
 });
 
-// How long the boot loader may stay up while `api_base.init()` is still in
-// flight before the UI is rendered anyway (the connection, auth state and
-// active-symbol list all settle in the background and update the UI live).
-const API_INIT_UI_GATE_MS = 2500;
-
 let api_init_promise: Promise<void> | null = null;
 
 /**
@@ -55,7 +50,7 @@ const startApiInit = () => {
         api_init_promise = api_base
             .init()
             .then(() => {
-                // settle regardless — the gate only controls when the UI shows
+                // settle regardless — nothing in the UI waits on this
             })
             .catch((error: unknown) => {
                 console.error('API initialization failed:', error);
@@ -69,28 +64,18 @@ startApiInit();
 
 const AppRoot = () => {
     const store = useStore();
-    const api_init_started = useRef(false);
-    const [is_api_initialized, setIsApiInitialized] = useState(false);
 
-    // Initialize API (module-scope call above usually already resolved this).
+    // The socket handshake is kicked off at module evaluation (above) and
+    // again here for safety, but the UI NEVER waits for it: the builder shell,
+    // the workspace and the Run panel all render straight away and the
+    // connection, auth state and active-symbol list flow in live. Gating first
+    // paint on the handshake used to add a full-screen "Loading..." splash to
+    // every boot for no benefit.
     useEffect(() => {
-        const timeoutId = setTimeout(() => {
-            setIsApiInitialized(true);
-        }, API_INIT_UI_GATE_MS);
-
-        startApiInit().finally(() => {
-            setIsApiInitialized(true);
-            clearTimeout(timeoutId);
-        });
-
-        return () => clearTimeout(timeoutId);
+        startApiInit();
     }, []);
 
-    useEffect(() => {
-        api_init_started.current = true;
-    }, []);
-
-    if (!store || !is_api_initialized) return <AppRootLoader />;
+    if (!store) return <AppRootLoader />;
 
     return (
         <Suspense fallback={<AppRootLoader />}>

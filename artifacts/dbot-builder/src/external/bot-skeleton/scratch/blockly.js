@@ -60,13 +60,26 @@ export const loadBlockly = async isDarkMode => {
 // `window.Blockly.JavaScript` unset while the first is still awaiting.
 let blockly_load_promise = null;
 
+/**
+ * True only when Blockly is loaded AND the Deriv block definitions have been
+ * registered. `window.Blockly.JavaScript` alone is NOT a valid readiness
+ * signal: `loadBlockly` assigns it halfway through, before `./blocks` has
+ * run, so a second caller that checked only the generator raced ahead and
+ * crashed in `DBot.initWorkspace` with
+ * "Cannot set properties of undefined (setting 'onchange')".
+ */
+const isBlocklyFullyLoaded = () =>
+    Boolean(window.Blockly?.JavaScript?.javascriptGenerator && window.Blockly?.Blocks?.trade_definition_tradetype);
+
 export const ensureBlocklyLoaded = (isDarkMode = false) => {
-    if (window.Blockly?.JavaScript?.javascriptGenerator) return Promise.resolve();
-    if (!blockly_load_promise) {
-        blockly_load_promise = loadBlockly(isDarkMode).catch(error => {
-            blockly_load_promise = null;
-            throw error;
-        });
-    }
+    // An in-flight load ALWAYS wins: every caller awaits the same attempt and
+    // therefore only continues once the block definitions exist too.
+    if (blockly_load_promise) return blockly_load_promise;
+    if (isBlocklyFullyLoaded()) return Promise.resolve();
+
+    blockly_load_promise = loadBlockly(isDarkMode).catch(error => {
+        blockly_load_promise = null;
+        throw error;
+    });
     return blockly_load_promise;
 };

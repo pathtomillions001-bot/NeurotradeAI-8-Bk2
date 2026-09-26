@@ -105,9 +105,28 @@ export function Layout({ children }: { children: ReactNode }) {
   // Boot the Deriv bot builder in the background the moment the app shell is
   // up: the (large) builder bundle downloads and initializes while the user is
   // anywhere else, so opening Bot Builder later is instant. The frame stays
-  // alive across visits — see lib/bot-builder-frame.ts.
+  // alive across visits and is never re-parented — see lib/bot-builder-frame.ts.
+  //
+  // On the Bot Builder page itself the page starts it immediately; everywhere
+  // else it waits for the first idle slice so the builder's ~2 MB of assets
+  // never compete with the page the user is actually looking at.
   useEffect(() => {
-    preloadBotBuilder();
+    if (location === "/bot-builder") {
+      preloadBotBuilder();
+      return;
+    }
+    const idle = (window as any).requestIdleCallback as
+      | ((cb: () => void, opts?: { timeout: number }) => number)
+      | undefined;
+    if (idle) {
+      const handle = idle(() => preloadBotBuilder(), { timeout: 2000 });
+      return () => (window as any).cancelIdleCallback?.(handle);
+    }
+    const timer = window.setTimeout(() => preloadBotBuilder(), 1200);
+    return () => window.clearTimeout(timer);
+    // Runs once for the shell; `location` is only read to skip the idle delay
+    // when the user deep-links straight into the builder.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Close mobile menu on location change

@@ -4,15 +4,33 @@
     --drawer-content-height: calc(100vh - 394px);
     --drawer-content-height-no-stat: calc(100vh - 233px);
     --drawer-scroll-height: calc(100vh - 365px);
-    --drawer-content-height-mobile: calc(100% - 233px);
     --tab-content-height: calc(100vh - 16.6rem);
-    // Mobile chrome at the bottom is now: run/stop bar (this) + drawer handle
-    // and peek. The bar's height is subtracted from the tab content so the
-    // workspace/chart never slides underneath the always-visible Run/Stop bar.
-    // Desktop keeps --tab-content-height untouched above.
+    // ── Mobile-only bottom chrome ───────────────────────────────────────────
+    // Bottom of a phone screen, from the bottom edge up:
+    //   [ Run/Stop bar ][ drawer handle ][ workspace / chart ]
+    // `--mobile-run-bar-total` is the single source of truth every mobile rule
+    // (drawer position, drawer height, stats strip, tab content) offsets by, so
+    // the bar is ALWAYS visible and nothing is ever drawn underneath it.
+    // Desktop keeps --tab-content-height and the side drawer untouched.
     --mobile-run-bar-height: 6.2rem;
-    --tab-content-height-mobile: calc(100vh - 12.6rem - var(--mobile-run-bar-height));
+    --mobile-run-bar-total: calc(var(--mobile-run-bar-height) + env(safe-area-inset-bottom, 0px));
+    --mobile-drawer-handle-height: 3.6rem;
+    --tab-content-height-mobile: calc(100vh - 12.6rem - var(--mobile-run-bar-total));
+    // Inside the opened mobile drawer, top to bottom:
+    //   [ handle ][ Summary | Transactions | Journal ][ tab content ][ stats ]
+    // The tab content is position:fixed against the drawer, so it has to be
+    // sized from the drawer's own height minus the three fixed-height pieces.
+    --mobile-drawer-tabs-height: 4.8rem;
+    --mobile-drawer-stats-height: 15.7rem;
+    --drawer-content-height-mobile: calc(
+        100% - var(--mobile-drawer-handle-height) - var(--mobile-drawer-tabs-height) -
+            var(--mobile-drawer-stats-height)
+    );
     --zindex-drawer: 5;
+    // Must stay ABOVE the run panel drawer (popover_zindex.RUN_PANEL = 6) or
+    // the closed drawer paints over the Run/Stop bar and swallows its taps.
+    // Still below snackbars (8) so toasts are never hidden behind the bar.
+    --zindex-mobile-run-bar: 7;
     --zindex-modal: 6;
     --zindex-draggable-modal: 7;
     --zindex-snackbar: 8;

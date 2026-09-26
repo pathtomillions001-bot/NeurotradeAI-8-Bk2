@@ -18,6 +18,7 @@ import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
 import BotBuilder from "./pages/bot-builder";
 import Bots from "./pages/bots";
+import Digit45Scanner from "./pages/digit45-scanner";
 import { onSessionChange, withTabSession } from "@/lib/tab-session";
 import {
   isLandingDismissed,
@@ -233,6 +234,7 @@ function Router() {
         <Route path="/" component={Dashboard} />
         <Route path="/markets" component={Markets} />
         <Route path="/markets/:symbol" component={MarketDetail} />
+        <Route path="/scanners/digit-45" component={Digit45Scanner} />
         <Route path="/bots" component={Bots} />
         <Route path="/bot-builder" component={BotBuilder} />
         <Route path="/trades" component={Trades} />

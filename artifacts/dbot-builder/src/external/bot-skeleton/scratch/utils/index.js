@@ -82,7 +82,7 @@ export const validateErrorOnBlockDelete = () => {
     const blockX = blockRect?.left || 0;
     const blockY = blockRect?.top || 0;
     const mandatory_trade_option_block = getSelectedTradeType();
-    const required_block_types = [mandatory_trade_option_block, 'trade_definition', 'purchase', 'before_purchase'];
+    const required_block_types = [mandatory_trade_option_block, 'trade_definition', 'purchase', 'purchase_digit45_pair', 'before_purchase'];
     if (required_block_types?.includes(window.Blockly?.getSelected()?.type)) {
         if (
             blockY >= translate_Y - translate_offset &&
@@ -454,7 +454,20 @@ export const isAllRequiredBlocksEnabled = workspace => {
 
     const mandatory_trade_option_block = getSelectedTradeType(workspace);
     const { mandatoryMainBlocks } = config();
-    const required_block_types = [mandatory_trade_option_block, ...mandatoryMainBlocks];
+    const pair_blocks = workspace.getAllBlocks().filter(block => block.type === 'purchase_digit45_pair');
+    const stock_purchases = workspace.getAllBlocks().filter(block => block.type === 'purchase');
+    if (pair_blocks.length > 0) {
+        // A stock purchase silently ignores a second buy; never permit it to
+        // coexist with a paired purchase. Both modes must be present and active.
+        if (stock_purchases.length || pair_blocks.length !== 2 ||
+            pair_blocks.some(block => block.disabled || block.getTopParent()?.type !== 'before_purchase') ||
+            !['normal', 'recovery'].every(mode => pair_blocks.some(block => block.getFieldValue('MODE') === mode))) {
+            globalObserver.emit('ui.log.error', 'Digit 4/5 strategy requires one normal and one recovery paired-purchase block, and no single-purchase blocks.');
+            return false;
+        }
+    }
+    const required_block_types = [mandatory_trade_option_block,
+        ...mandatoryMainBlocks.map(type => type === 'purchase' && pair_blocks.length ? 'purchase_digit45_pair' : type)];
 
     const required_blocks_check = getAllRequiredBlocks(workspace, required_block_types);
 

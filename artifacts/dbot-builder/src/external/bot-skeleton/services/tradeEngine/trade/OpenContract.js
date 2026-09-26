@@ -11,6 +11,10 @@ export default Engine =>
                 if (data.msg_type === 'proposal_open_contract') {
                     const contract = data.proposal_open_contract;
 
+                    // Paired Digit 4/5 strategies own TWO independent contract
+                    // IDs. Reconcile them together; the ordinary single-trade
+                    // path below must not advance after the first leg sells.
+                    if (this.handleDigit45OpenContract?.(contract)) return;
                     if (!contract || !this.expectedContractId(contract?.contract_id)) {
                         return;
                     }

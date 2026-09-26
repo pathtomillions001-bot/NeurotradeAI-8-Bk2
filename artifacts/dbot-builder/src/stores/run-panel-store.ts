@@ -3,6 +3,7 @@ import { action, computed, makeObservable, observable, reaction, runInAction } f
 import { botNotification } from '@/components/bot-notification/bot-notification';
 import { notification_message } from '@/components/bot-notification/bot-notification-utils';
 import { generateOAuthURL, isSafari, mobileOSDetect, standalone_routes } from '@/components/shared';
+import { MAX_TABLET_WIDTH } from '@/components/shared/utils/screen';
 import { contract_stages, TContractStage } from '@/constants/contract-stage';
 import { run_panel } from '@/constants/run-panel';
 import { ErrorTypes, MessageTypes, observer, unrecoverable_errors } from '@/external/bot-skeleton';
@@ -24,6 +25,7 @@ export type TContractState = {
     contract?: ProposalOpenContract;
     data: number;
     id: string;
+    pairPending?: boolean;
 };
 
 export default class RunPanelStore {
@@ -105,7 +107,10 @@ export default class RunPanelStore {
     has_open_contract = false;
     is_running = false;
     is_statistics_info_modal_open = false;
-    is_drawer_open = true;
+    // Match the drawer's responsive breakpoint at first render, before its
+    // React effects run: mobile/tablet users should see Run/Stop immediately
+    // without mounting Summary, Transactions or Journal underneath it.
+    is_drawer_open = typeof window === 'undefined' || window.innerWidth > MAX_TABLET_WIDTH;
     is_dialog_open = false;
     is_sell_requested = false;
     show_bot_stop_message = false;
@@ -208,7 +213,10 @@ export default class RunPanelStore {
         runInAction(() => {
             this.setIsRunning(true);
             ui.setPromptHandler(true);
-            this.toggleDrawer(true);
+            // On mobile/tablet Run/Stop is in a dedicated fixed bar below the
+            // drawer handle. Starting a strategy must not force Summary open;
+            // only tapping the handle shows Summary/Transactions/Journal.
+            this.toggleDrawer(!ui.is_mobile && window.innerWidth > MAX_TABLET_WIDTH);
             this.run_id = `run-${Date.now()}`;
 
             summary_card.clear();
@@ -573,13 +581,19 @@ export default class RunPanelStore {
             this.setIsRunning(false);
             indicateBotStopped();
         } else if (this.has_open_contract) {
-            // Bot should indicate the contract is closed in below cases:
-            // - When bot was running and an error happens
+            // A finite paired strategy (TP/SL, partial buy, recovery cap) can
+            // finish normally and call stop after BOTH sales. Don't leave Run
+            // showing as active until a new tick history subscription loads.
             this.error_type = undefined;
             this.is_sell_requested = false;
+            this.setIsRunning(false);
             this.setContractStage(contract_stages.CONTRACT_CLOSED);
             ui.setAccountSwitcherDisabledMessage();
             this.unregisterBotListeners();
+        } else {
+            // Stopped before any contract was opened.
+            this.setIsRunning(false);
+            indicateBotStopped();
         }
 
         this.setHasOpenContract(false);
@@ -621,8 +635,12 @@ export default class RunPanelStore {
                 break;
             }
             case 'contract.sold': {
-                this.is_sell_requested = false;
-                this.setContractStage(contract_stages.CONTRACT_CLOSED);
+                // Each paired leg settles independently. Keep the Run panel
+                // in the purchase state until the OTHER leg has also sold.
+                if (!contract_status.pairPending) {
+                    this.is_sell_requested = false;
+                    this.setContractStage(contract_stages.CONTRACT_CLOSED);
+                }
                 if (contract_status.contract) GTM.onTransactionClosed(contract_status.contract);
                 break;
             }
@@ -645,8 +663,8 @@ export default class RunPanelStore {
         observer.emit('statistics.clear');
     };
 
-    onBotContractEvent = (data: { is_sold?: boolean }) => {
-        if (data?.is_sold) {
+    onBotContractEvent = (data: { is_sold?: boolean; pairPending?: boolean }) => {
+        if (data?.is_sold && !data.pairPending) {
             this.is_sell_requested = false;
             this.setContractStage(contract_stages.CONTRACT_CLOSED);
         }

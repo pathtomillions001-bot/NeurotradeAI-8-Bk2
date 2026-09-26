@@ -285,6 +285,14 @@ class DBot {
      */
     runBot() {
         if (api_base.is_stopping) return;
+        if (api_base.digit45Unresolved) {
+            globalObserver.emit('ui.log.error',
+                'A Digit 4/5 paired order is unresolved. Reconcile BOTH contract IDs in your Deriv account, then reload the builder before running again.');
+            // RunPanel has already set is_running before invoking runBot(). It
+            // must be told no interpreter started or its Run button stays lit.
+            globalObserver.emit('bot.stop');
+            return;
+        }
 
         // The Run button can become clickable while `loadBlockly` is still
         // resolving (its completion is what defines `window.Blockly.JavaScript`).
@@ -293,17 +301,33 @@ class DBot {
         // stopped the bot and surfaced an error dialog. Await readiness first.
         const start = () => {
             try {
-                api_base.is_stopping = false;
+                if (api_base.is_stopping) return;
+                if (api_base.digit45Unresolved) {
+                    globalObserver.emit('ui.log.error',
+                        'A Digit 4/5 paired order is unresolved. Reconcile BOTH contract IDs before restarting.');
+                    globalObserver.emit('bot.stop');
+                    return;
+                }
                 const code = this.generateCode();
                 if (!this.interpreter.bot.tradeEngine.checkTicksPromiseExists()) this.interpreter = Interpreter();
 
                 this.is_bot_running = true;
 
                 api_base.setIsRunning(true);
-                this.interpreter.run(code).catch(error => {
-                    globalObserver.emit('Error', error);
-                    this.stopBot();
-                });
+                const session = this.interpreter;
+                session.run(code)
+                    .then(() => {
+                        // No trade_again (partial fill, TP/SL or recovery cap)
+                        // means the strategy has FINISHED. Leave the Run panel
+                        // and tear down subscriptions instead of looking active
+                        // forever with no interpreter loop left to trade.
+                        if (this.interpreter === session && this.is_bot_running) void this.stopBot();
+                    })
+                    .catch(error => {
+                        if (this.interpreter !== session) return;
+                        globalObserver.emit('Error', error);
+                        void this.stopBot();
+                    });
             } catch (error) {
                 globalObserver.emit('Error', error);
 
@@ -415,10 +439,9 @@ class DBot {
                 await this.interpreter.stop();
             }
         } catch (error) {
-            // Stopping is best-effort. Whatever the broker said, the local
-            // engine must end up in a clean, re-runnable state — otherwise the
-            // next Run click hits `if (api_base.is_stopping) return` and the
-            // builder looks permanently frozen.
+            // Stopping is best-effort. Release the generic stopping flag even
+            // on broker failure. Ambiguous paired orders stay separately locked
+            // via digit45Unresolved until the user reconciles and reloads.
             console.warn('Interpreter stop failed (ignored, resetting engine):', error?.message ?? error);
         } finally {
             this.is_bot_running = false;

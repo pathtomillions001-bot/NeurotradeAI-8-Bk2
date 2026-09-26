@@ -360,6 +360,53 @@
     }
 }
 
+// ── Mobile-only: always-visible Run/Stop bar ────────────────────────────────
+// Pinned to the bottom of the viewport (below the raised drawer handle) so
+// users can start/stop the bot without opening the Summary/Transactions/
+// Journal drawer first. Rendered only by MobileDrawerFooter, which itself is
+// mobile-only; desktop keeps the side drawer exactly as it was.
+.controls__section {
+    &--mobile-run-bar {
+        display: none;
+
+        @include mobile-or-tablet-screen {
+            // Fill the gap the drawer now leaves at the bottom:
+            // closed geometry ... [tabs peek][drawer handle][THIS BAR]
+            // open geometry   ..... [drawer][THIS BAR]
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: fixed;
+            inset-inline: 0;
+            bottom: 0;
+            z-index: var(--zindex-drawer);
+            min-height: var(--mobile-run-bar-height, 6.2rem);
+            padding: 0.9rem 1.2rem calc(0.9rem + env(safe-area-inset-bottom, 0px));
+            background: var(--general-main-1);
+            border-top: 1px solid var(--general-section-1);
+
+            .controls__buttons {
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                width: 100%;
+                max-width: 44.8rem;
+            }
+
+            .animation__wrapper {
+                width: 100%;
+                justify-content: center;
+            }
+
+            .animation__container {
+                flex: 1;
+                min-width: 0;
+                max-width: 22rem;
+            }
+        }
+    }
+}
+
 .limits__wrapper {
     @include mobile-or-tablet-screen {
         position: fixed;

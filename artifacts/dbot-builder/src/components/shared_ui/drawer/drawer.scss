@@ -24,7 +24,10 @@
     @include mobile-or-tablet-screen {
         width: 100vw !important;
         height: calc(100% - 10.1rem) !important;
-        top: calc(100% - 9.8rem) !important;
+        // Raised by the mobile run/stop bar height: the bar owns the bottom
+        // 6.2rem of the viewport now, so the drawer handle sits just above it
+        // instead of covering where the bar needs to be.
+        top: calc(100% - 9.8rem - var(--mobile-run-bar-height, 6.2rem)) !important;
     }
 
     &__container {
@@ -120,7 +123,12 @@
 
     &--open {
         @include mobile-or-tablet-screen {
-            transform: translateY(calc(-100% + 3.6rem));
+            // Extra + run-bar height: keeps the OPEN drawer at the same
+            // position as before (its bottom edge stops right above the
+            // always-visible Run/Stop bar) now that the closed position moved
+            // up. Geometry: translate is a % of the drawer height, which did
+            // not change, so the shift must be added here.
+            transform: translateY(calc(-100% + 3.6rem + var(--mobile-run-bar-height, 6.2rem)));
         }
     }
 }

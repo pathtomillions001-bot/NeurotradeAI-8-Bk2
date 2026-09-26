@@ -1,10 +1,6 @@
 import { useEffect } from 'react';
 import { useStore } from '@/hooks/useStore';
-import {
-    BOT_BUILDER_SYNC_MESSAGE,
-    resetEmbeddedPreviewSession,
-    syncEmbeddedPreviewSession,
-} from './session-bridge';
+import { BOT_BUILDER_SYNC_MESSAGE, syncEmbeddedPreviewSession } from './session-bridge';
 import {
     BOT_BUILDER_LOAD_STRATEGY_MESSAGE,
     handleHostStrategyMessage,
@@ -45,8 +41,12 @@ export default function PreviewBranding({ uiReady }: PreviewBrandingProps) {
 
             if (type !== BOT_BUILDER_SYNC_MESSAGE) return;
 
+            // Everything — connected or not — goes through syncEmbeddedPreviewSession,
+            // which clears the session on disconnect itself. It also refuses to touch
+            // the socket while a strategy is running, so host-side sync messages can
+            // never stop a live run (the clear then applies on the first tick after
+            // the user presses Stop or SL/TP fires).
             if (!event.data.connected) {
-                resetEmbeddedPreviewSession();
                 await syncEmbeddedPreviewSession(null);
                 return;
             }

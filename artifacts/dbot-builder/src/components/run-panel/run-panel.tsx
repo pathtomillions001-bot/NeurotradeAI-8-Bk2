@@ -181,8 +181,13 @@ const DrawerFooter = ({ is_clear_stat_disabled, onClearStatClick }: TDrawerFoote
 );
 
 const MobileDrawerFooter = () => {
+    // Always-visible Run/Stop bar pinned to the bottom of the viewport on
+    // mobile (previous builds let it render unstyled behind the drawer peek,
+    // so the only way to reach Run was opening the summary drawer first).
+    // Styling lives in run-panel.scss under mobile-or-tablet-screen — desktop
+    // renders the desktop-side drawer and keeps its existing controls.
     return (
-        <div className='controls__section'>
+        <div className='controls__section controls__section--mobile-run-bar'>
             <div className='controls__buttons'>
                 <TradeAnimation className='controls__animation' should_show_overlay />
             </div>

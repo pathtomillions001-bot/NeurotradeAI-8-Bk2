@@ -13,8 +13,14 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { CONSOLE_REGISTRY, consoleSkew, implementedConsoleIds, resolveConsole } from "./console-registry.js";
-import { WEB_CONSOLE_IDS } from "./console-contract.js";
+import {
+  CONSOLE_REGISTRY,
+  consoleHasScanner,
+  consoleSkew,
+  implementedConsoleIds,
+  resolveConsole,
+} from "./console-registry.js";
+import { WEB_CONSOLE_IDS, type WebConsoleId } from "./console-contract.js";
 
 /**
  * Console ids the API catalogue currently emits (`botConsoleId()` in
@@ -57,7 +63,6 @@ describe("resolveConsole", () => {
     assert.equal(resolution.ok, true);
     assert.equal(resolution.ok && resolution.Console, CONSOLE_REGISTRY["dual-lock@1"]);
   });
-
   it("reports (never falls back for) a console this bundle lacks", () => {
     const resolution = resolveConsole({ console: "dual-lock@2" });
     assert.equal(resolution.ok, false);
@@ -114,5 +119,29 @@ describe("consoleSkew", () => {
     const skew = consoleSkew([], ["specialist@1", "dual-lock@1"], ["specialist@1"]);
     assert.equal(skew.skewed, true);
     assert.deepEqual(skew.missing, ["dual-lock@1"]);
+  });
+});
+
+describe("scanner badge contract", () => {
+  it("marks exactly the consoles that carry the Create DBot action", () => {
+    // The SCANNER tag on a Bot Arena card must mean "this console can build a
+    // DBot from its current lock". Today that is Over/Under Turbo only — if a
+    // console gains (or loses) a Create DBot action, update SCANNER_CONSOLE_IDS
+    // alongside the console change; this test pins the pair.
+    for (const id of WEB_CONSOLE_IDS) {
+      assert.equal(
+        consoleHasScanner({ console: id }),
+        id === "overunder-turbo@2",
+        `scanner mismatch for "${id}" — is the badge contract drift-free with the console's Create DBot action?`,
+      );
+    }
+  });
+
+  it("treats a catalogue bot without a console id as a non-scanner (specialist fallback)", () => {
+    assert.equal(consoleHasScanner({}), false);
+  });
+
+  it("flags the overunder-turbo bot as a scanner regardless of accent/session extras", () => {
+    assert.equal(consoleHasScanner({ console: "overunder-turbo@2" as WebConsoleId }), true);
   });
 });

@@ -11,12 +11,12 @@ import { useLocation, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw,
+  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw, Radar,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
-import { consoleSkew, resolveConsole } from "@/lib/console-registry";
+import { consoleHasScanner, consoleSkew, resolveConsole } from "@/lib/console-registry";
 import { WEB_RELEASE, releasePair, type ReleaseInfo } from "@/lib/release";
 import { withTabSession } from "@/lib/tab-session";
 
@@ -188,6 +188,9 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
   const Icon = BOT_ICON[bot.icon] ?? Sparkles;
   const s = bot.session;
   const profit = s?.totalProfit ?? 0;
+  // Scanner bots (their console carries the Create DBot action) can scan the
+  // markets and take the trades themselves — flag it so they stand out.
+  const isScanner = consoleHasScanner(bot);
 
   return (
     <motion.div
@@ -205,9 +208,21 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
         {/* Accent wash */}
         <div className={`absolute inset-x-0 top-0 h-px bg-gradient-to-r ${a.grad} opacity-60`} />
 
+        {/* Scanner capability tag — top-right, always visible */}
+        {isScanner && (
+          <span
+            data-testid="scanner-badge"
+            title="This bot scans the markets and can take the trades at the same time (includes Create DBot)"
+            className={`absolute top-2 right-2 z-10 flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${a.badgeBg} ${a.text} ${a.panelBorder}`}
+          >
+            <Radar className="w-2.5 h-2.5" aria-hidden="true" />
+            Scanner
+          </span>
+        )}
+
         <CardContent className="p-4 flex flex-col h-full gap-3">
           {/* Header */}
-          <div className="flex items-start gap-3">
+          <div className={`flex items-start gap-3 ${isScanner ? "pr-16" : ""}`}>
             <div className={`relative w-11 h-11 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}>
               <Icon className={`w-5 h-5 ${a.text}`} />
               {isThisRunning && (

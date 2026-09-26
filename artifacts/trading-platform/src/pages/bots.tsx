@@ -11,7 +11,7 @@ import { useLocation, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw, ScanSearch,
+  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -204,18 +204,10 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
       >
         {/* Accent wash */}
         <div className={`absolute inset-x-0 top-0 h-px bg-gradient-to-r ${a.grad} opacity-60`} />
-        {bot.createsDbot && (
-          <div
-            title="Scanner bot — analyses markets and can create a strategy in Bot Builder"
-            className={`absolute right-3 top-3 z-10 flex items-center gap-1 rounded-full border ${a.iconBorder} ${a.badgeBg} px-2 py-1 text-[8px] font-bold tracking-widest ${a.text}`}
-          >
-            <ScanSearch className="h-2.5 w-2.5" /> SCANNER
-          </div>
-        )}
 
         <CardContent className="p-4 flex flex-col h-full gap-3">
           {/* Header */}
-          <div className={`flex items-start gap-3 ${bot.createsDbot ? "pr-20" : ""}`}>
+          <div className="flex items-start gap-3">
             <div className={`relative w-11 h-11 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}>
               <Icon className={`w-5 h-5 ${a.text}`} />
               {isThisRunning && (

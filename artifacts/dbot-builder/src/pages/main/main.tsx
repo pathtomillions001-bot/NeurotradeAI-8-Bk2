@@ -13,11 +13,10 @@ import TradeTypeConfirmationModal from '@/components/trade-type-confirmation-mod
 import TradingViewModal from '@/components/trading-view-chart/trading-view-modal';
 import { DBOT_TABS, TAB_IDS } from '@/constants/bot-contents';
 import { api_base, updateWorkspaceName } from '@/external/bot-skeleton';
-import { observer as globalObserver } from '@/external/bot-skeleton/utils/observer';
+import { CONNECTION_STATUS } from '@/external/bot-skeleton/services/api/observables/connection-status-stream';
 import { isDbotRTL } from '@/external/bot-skeleton/utils/workspace';
 import { useApiBase } from '@/hooks/useApiBase';
 import { useStore } from '@/hooks/useStore';
-import { DISCONNECT_GRACE_MS, getConnectionAction } from '@/utils/connection-state';
 import { isPreviewMode } from '@/utils/is-preview-mode';
 import {
     disableUrlParameterApplication,
@@ -186,44 +185,16 @@ const AppWrapper = observer(() => {
         };
     }, [is_preview_mode]);
 
-    /**
-     * Stop a running bot ONLY on a real, sustained disconnect.
-     *
-     * Previously this fired for every status that was not `OPENED`, including
-     * the `UNKNOWN` value the stream starts with and the momentary `CLOSED`
-     * that every routine socket refresh produces. That flipped
-     * `is_web_socket_intialised` to false and it was never set back to true, so
-     * an "offline" state stuck around while the user was plainly online. Now:
-     *
-     *  - `OPENED` always clears the offline flag (self-healing);
-     *  - `UNKNOWN` (boot, before the first connection) is ignored;
-     *  - `CLOSED` waits out a short grace period, so a reconnect that lands
-     *    within it never touches a running bot.
-     */
     React.useEffect(() => {
-        const connection_action = getConnectionAction(connectionStatus);
-        if (connection_action === 'online') {
-            setWebSocketState(true);
-            return undefined;
-        }
-        if (connection_action === 'pending') return undefined;
-
-        const timeout = window.setTimeout(() => {
+        if (connectionStatus !== CONNECTION_STATUS.OPENED) {
             const is_bot_running = document.getElementById('db-animation__stop-button') !== null;
-            if (!is_bot_running) return;
-            clear();
-            stopBot();
-            api_base.setIsRunning(false);
-            setWebSocketState(false);
-            // Reported in the journal rather than a modal: there is no Reports
-            // page in this app, so the old dialog's only actions were dead ends.
-            globalObserver.emit(
-                'ui.log.error',
-                localize('Connection lost. The bot was stopped — check your open contracts before running it again.')
-            );
-        }, DISCONNECT_GRACE_MS);
-
-        return () => window.clearTimeout(timeout);
+            if (is_bot_running) {
+                clear();
+                stopBot();
+                api_base.setIsRunning(false);
+                setWebSocketState(false);
+            }
+        }
     }, [clear, connectionStatus, setWebSocketState, stopBot]);
 
     // Update tab shadows height to match bot builder height

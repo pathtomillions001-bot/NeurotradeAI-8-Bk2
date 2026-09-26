@@ -228,6 +228,49 @@
     }
 }
 
+.bot-stopped-dialog {
+    @include mobile-or-tablet-screen {
+        padding: 2rem;
+    }
+
+    .dc-dialog {
+        position: relative;
+
+        &__header-wrapper {
+            margin: 0 0 2.4rem;
+        }
+
+        &__content {
+            &__header {
+                display: flex;
+                justify-content: space-between;
+                margin: 0 0 2.4rem;
+
+                .dc-icon {
+                    cursor: pointer;
+                }
+            }
+        }
+
+        @include mobile-or-tablet-screen {
+            &__footer {
+                flex-wrap: unset;
+
+                .dc-dialog__button {
+                    padding: 0;
+                    width: 40%;
+                    min-width: unset;
+                    flex-basis: unset;
+
+                    &:first-child {
+                        margin-right: 1rem;
+                    }
+                }
+            }
+        }
+    }
+}
+
 .dashboard {
     &__chart-wrapper {
         position: relative;

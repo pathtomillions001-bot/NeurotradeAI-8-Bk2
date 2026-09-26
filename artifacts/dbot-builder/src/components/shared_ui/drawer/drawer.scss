@@ -21,13 +21,23 @@
         left: calc(100vw - 16px);
     }
 
+    // ── Mobile/tablet geometry ─────────────────────────────────────────────
+    // The Run/Stop bar owns the bottom `--mobile-run-bar-total` of the screen
+    // and is always visible, so the drawer is anchored ON TOP of it:
+    //
+    //   closed →  [ … workspace … ][ handle ][ Run/Stop bar ]
+    //   open   →  [ tabs ][ summary / transactions / journal ][ Run/Stop bar ]
+    //
+    // Closed, ONLY the 3.6rem handle is on screen (the panel body continues
+    // below the fold, behind the bar) — tapping it slides the panel up by
+    // exactly its own height minus the handle, so its bottom edge lands on the
+    // top edge of the bar. Desktop (>=1280px) keeps the side drawer untouched.
     @include mobile-or-tablet-screen {
+        $handle-height: var(--mobile-drawer-handle-height, 3.6rem);
+
         width: 100vw !important;
-        height: calc(100% - 10.1rem) !important;
-        // Raised by the mobile run/stop bar height: the bar owns the bottom
-        // 6.2rem of the viewport now, so the drawer handle sits just above it
-        // instead of covering where the bar needs to be.
-        top: calc(100% - 9.8rem - var(--mobile-run-bar-height, 6.2rem)) !important;
+        height: calc(100% - 10.1rem - var(--mobile-run-bar-total, 6.2rem)) !important;
+        top: calc(100% - #{$handle-height} - var(--mobile-run-bar-total, 6.2rem)) !important;
     }
 
     &__container {
@@ -45,7 +55,7 @@
         }
 
         @include mobile-or-tablet-screen {
-            height: calc(100% - 3.6rem);
+            height: calc(100% - var(--mobile-drawer-handle-height, 3.6rem));
         }
     }
 
@@ -82,9 +92,14 @@
         cursor: pointer;
 
         @include mobile-or-tablet-screen {
-            position: unset;
+            // `relative` + z-index (not `unset`/static): the run panel's tab
+            // content is position:fixed inside this drawer and would otherwise
+            // paint over the handle once the drawer is open, swallowing the
+            // tap that is supposed to close it again.
+            position: relative;
+            z-index: 2;
             width: 100%;
-            height: 3.6rem;
+            height: var(--mobile-drawer-handle-height, 3.6rem);
             justify-content: center;
             background-color: var(--general-main-1);
             border-top: solid 1px var(--general-section-1);
@@ -123,12 +138,10 @@
 
     &--open {
         @include mobile-or-tablet-screen {
-            // Extra + run-bar height: keeps the OPEN drawer at the same
-            // position as before (its bottom edge stops right above the
-            // always-visible Run/Stop bar) now that the closed position moved
-            // up. Geometry: translate is a % of the drawer height, which did
-            // not change, so the shift must be added here.
-            transform: translateY(calc(-100% + 3.6rem + var(--mobile-run-bar-height, 6.2rem)));
+            // -100% of the drawer's OWN height + the handle that is already on
+            // screen: the panel ends up sitting exactly on top of the Run/Stop
+            // bar, with its handle (now a down-chevron) at the top.
+            transform: translateY(calc(-100% + var(--mobile-drawer-handle-height, 3.6rem)));
         }
     }
 }

@@ -1,60 +1,170 @@
 /**
  * Singleton Deriv bot-builder iframe.
  *
- * The builder is a ~large standalone React app; mounting its iframe only when
- * the user opens the Bot Builder page meant a multi-second blank wait on every
- * visit. Instead we create the iframe ONCE per browser session and keep it
- * alive in a hidden holder attached to <body>:
+ * The builder is a large standalone React app (Blockly + SmartCharts). Booting
+ * it costs seconds, so NeuroTrade boots it ONCE per browser session and keeps
+ * that browsing context alive for the rest of the session.
+ *
+ * ── Why the iframe is never re-parented ──────────────────────────────────────
+ * The previous implementation parked the iframe in a hidden holder and MOVED it
+ * into the Bot Builder page on every visit, on the assumption that a
+ * same-document move preserves the browsing context. It does not: per the HTML
+ * spec every browser discards an iframe's document when the element is removed
+ * from (or re-inserted into) the DOM, so each visit silently re-ran the entire
+ * builder boot — socket handshake, chunk downloads, Blockly injection — which
+ * is exactly the "the bot builder page opens fast but then loads forever" the
+ * user reported. Leaving the page re-parented it a second time, killing a bot
+ * that was mid-run.
+ *
+ * So the frame now lives in ONE fixed-position host attached to <body> that is
+ * created on first use and never moved again:
  *
  *  - the shell preloads it right after the app mounts, so the builder boots in
  *    the background while the user is on any other page;
- *  - when the Bot Builder page mounts it ADOPTS the same <iframe> element by
- *    moving it into the page container — moving an iframe within the same
- *    document does NOT reload it, so the builder appears instantly with all
- *    its state (loaded strategy, connection, workspace) intact;
- *  - when the page unmounts the frame goes back to the off-screen holder,
- *    staying warm (websocket + workspace) for the next visit.
+ *  - the Bot Builder page renders an empty SLOT and calls `showBotBuilderFrame`
+ *    with it. The host is positioned (fixed) over that slot and tracks it via a
+ *    ResizeObserver, so it lines up with the page exactly like an inline
+ *    element — with zero DOM movement;
+ *  - leaving the page only hides the host off-screen (`hideBotBuilderFrame`).
+ *    The document, websocket, workspace and any RUNNING bot stay alive, and
+ *    coming back is a visibility flip: instant, no reload, no loading screens.
+ *
+ * Nothing here ever changes the host's SIZE while hiding it, because a resize
+ * would make Blockly re-layout the workspace for nothing.
  */
 
 const BUILDER_PATH = "/bot/preview/";
-const HOLDER_ID = "bot-builder-frame-holder";
+const HOST_ID = "bot-builder-frame-host";
 const FRAME_CLASS = "bot-builder-frame";
+/** Matches the Bot Builder page's own `zoom` so the whole workspace fits. */
+const BUILDER_ZOOM = 0.8;
+/** Parked far off-screen; the element keeps its size, so no re-layout. */
+const OFFSCREEN_TRANSFORM = "translate3d(-200vw, 0, 0)";
 
+type Rect = { top: number; left: number; width: number; height: number };
+
+let host: HTMLDivElement | null = null;
+let zoomLayer: HTMLDivElement | null = null;
 let frame: HTMLIFrameElement | null = null;
+let slot: HTMLElement | null = null;
+let slotObserver: ResizeObserver | null = null;
+let trackingListenersBound = false;
+let lastRect: Rect | null = null;
 
-function ensureHolder(): HTMLDivElement {
-  let holder = document.getElementById(HOLDER_ID) as HTMLDivElement | null;
-  if (!holder) {
-    holder = document.createElement("div");
-    holder.id = HOLDER_ID;
-    // Parked off-screen but RENDERED at a real viewport size — a display:none
-    // iframe would give the builder a zero-size inner viewport and break the
-    // Blockly workspace layout at boot. Off-screen keeps the browsing context
-    // fully alive and warm; moving it into the page later fires the iframe's
-    // own resize so the workspace reflows.
-    holder.style.position = "fixed";
-    holder.style.left = "-20000px";
-    holder.style.top = "0";
-    holder.style.width = "1600px";
-    holder.style.height = "1000px";
-    holder.style.visibility = "hidden";
-    holder.style.pointerEvents = "none";
-    holder.style.overflow = "hidden";
-    document.body.appendChild(holder);
+/**
+ * Where the builder will be shown, predicted from the shell's layout, so the
+ * background boot already happens at the final size and opening the page needs
+ * no resize at all. Mirrors `components/layout.tsx` (fixed 3.5rem mobile top
+ * bar, 14rem/16rem desktop sidebar) and the Bot Builder page container.
+ */
+function predictedRect(): Rect {
+  const vw = Math.max(320, window.innerWidth || 1024);
+  const vh = Math.max(480, window.innerHeight || 768);
+  const isDesktop = window.matchMedia("(min-width: 768px)").matches;
+  const isLarge = window.matchMedia("(min-width: 1024px)").matches;
+  const left = isDesktop ? (isLarge ? 256 : 224) : 0;
+  const top = isDesktop ? 0 : 56;
+  return { top, left, width: Math.max(320, vw - left), height: Math.max(360, vh - 56) };
+}
+
+function applyRect(rect: Rect): void {
+  if (!host) return;
+  const rounded: Rect = {
+    top: Math.round(rect.top),
+    left: Math.round(rect.left),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+  };
+  if (
+    lastRect &&
+    lastRect.top === rounded.top &&
+    lastRect.left === rounded.left &&
+    lastRect.width === rounded.width &&
+    lastRect.height === rounded.height
+  ) {
+    return;
   }
-  return holder;
+  lastRect = rounded;
+  host.style.top = `${rounded.top}px`;
+  host.style.left = `${rounded.left}px`;
+  host.style.width = `${rounded.width}px`;
+  host.style.height = `${rounded.height}px`;
+}
+
+/** Re-align the host with the slot the Bot Builder page rendered. */
+function syncToSlot(): void {
+  if (!host || !slot) return;
+  const rect = slot.getBoundingClientRect();
+  // A collapsed slot means the page is mid-layout; keep the previous geometry
+  // rather than resizing the builder to nothing.
+  if (rect.width < 1 || rect.height < 1) return;
+  applyRect(rect);
+}
+
+function bindTrackingListeners(): void {
+  if (trackingListenersBound) return;
+  trackingListenersBound = true;
+  window.addEventListener("resize", syncToSlot);
+  window.addEventListener("orientationchange", syncToSlot);
+  // `true` → capture, so scrolling of any ancestor container is picked up.
+  window.addEventListener("scroll", syncToSlot, true);
+}
+
+function ensureHost(): HTMLDivElement {
+  if (host) return host;
+
+  host = document.createElement("div");
+  host.id = HOST_ID;
+  host.setAttribute("aria-hidden", "true");
+  Object.assign(host.style, {
+    position: "fixed",
+    top: "0px",
+    left: "0px",
+    width: "0px",
+    height: "0px",
+    overflow: "hidden",
+    // Parked off-screen until the Bot Builder page asks for it. The element is
+    // still RENDERED at its real size, which is what keeps the Blockly
+    // workspace laid out correctly while it boots in the background.
+    transform: OFFSCREEN_TRANSFORM,
+    visibility: "hidden",
+    pointerEvents: "none",
+    zIndex: "0",
+    background: "#fff",
+  } satisfies Partial<CSSStyleDeclaration>);
+
+  zoomLayer = document.createElement("div");
+  Object.assign(zoomLayer.style, {
+    width: "100%",
+    height: "100%",
+    zoom: String(BUILDER_ZOOM),
+  } satisfies Partial<CSSStyleDeclaration>);
+  host.appendChild(zoomLayer);
+
+  document.body.appendChild(host);
+  applyRect(predictedRect());
+  bindTrackingListeners();
+  return host;
 }
 
 export function getBotBuilderFrame(): HTMLIFrameElement {
+  const hostEl = ensureHost();
   if (!frame) {
     frame = document.createElement("iframe");
     frame.title = "Deriv Bot Builder";
     frame.className = FRAME_CLASS;
     frame.allow = "clipboard-read; clipboard-write; fullscreen";
-    frame.src = BUILDER_PATH;
+    Object.assign(frame.style, {
+      display: "block",
+      width: "100%",
+      height: "100%",
+      border: "0",
+      background: "#fff",
+    } satisfies Partial<CSSStyleDeclaration>);
     // The builder is same-origin; nothing inside needs credentials beyond the
     // shared cookie jar, which flows by default.
-    ensureHolder().appendChild(frame);
+    frame.src = BUILDER_PATH;
+    (zoomLayer ?? hostEl).appendChild(frame);
   }
   return frame;
 }
@@ -65,21 +175,52 @@ export function preloadBotBuilder(): void {
 }
 
 /**
- * Move the singleton frame into `container` (no reload — same-document move).
- * Returns the frame so the caller can post sync messages to it.
+ * Show the builder over `slotEl` (the Bot Builder page's placeholder) and keep
+ * it aligned with it. No DOM move happens, so the builder is NOT reloaded and
+ * appears in the same frame the page paints.
  */
-export function adoptBotBuilderFrame(container: HTMLElement): HTMLIFrameElement {
+export function showBotBuilderFrame(slotEl: HTMLElement): HTMLIFrameElement {
   const iframe = getBotBuilderFrame();
-  if (iframe.parentElement !== container) {
-    container.appendChild(iframe);
+  const hostEl = ensureHost();
+
+  slot = slotEl;
+  syncToSlot();
+
+  if (typeof ResizeObserver !== "undefined") {
+    slotObserver?.disconnect();
+    slotObserver = new ResizeObserver(() => syncToSlot());
+    slotObserver.observe(slotEl);
   }
+  // The slot's final position can land a frame later (page transition, fonts,
+  // scrollbar). Re-sync on the next two frames instead of trusting one read.
+  requestAnimationFrame(() => {
+    syncToSlot();
+    requestAnimationFrame(syncToSlot);
+  });
+
+  hostEl.style.transform = "";
+  hostEl.style.visibility = "visible";
+  hostEl.style.pointerEvents = "auto";
+  hostEl.style.zIndex = "10";
+  hostEl.removeAttribute("aria-hidden");
+
   return iframe;
 }
 
-/** Park the frame back into the hidden holder (keeps it warm). */
-export function releaseBotBuilderFrame(): void {
-  const iframe = getBotBuilderFrame();
-  ensureHolder().appendChild(iframe);
+/**
+ * Park the builder off-screen again. It keeps its size (no workspace
+ * re-layout), its document, its socket and any bot that is mid-run.
+ */
+export function hideBotBuilderFrame(): void {
+  slotObserver?.disconnect();
+  slotObserver = null;
+  slot = null;
+  if (!host) return;
+  host.style.transform = OFFSCREEN_TRANSFORM;
+  host.style.visibility = "hidden";
+  host.style.pointerEvents = "none";
+  host.style.zIndex = "0";
+  host.setAttribute("aria-hidden", "true");
 }
 
 export const BOT_BUILDER_SYNC_MESSAGE = "NEUROTRADE_BOT_BUILDER_SYNC";
@@ -189,10 +330,10 @@ export function loadStrategyIntoBotBuilder(
 
 /**
  * Push the NeuroTrade-connected Deriv account into the builder, no matter
- * where the frame currently lives (visible on the Bot Builder page or parked
- * in the hidden holder). The builder's session bridge answers this by
- * reconnecting its Deriv socket to the SAME account the user enabled in the
- * app — so Run always trades the active demo/real account.
+ * whether the frame is currently shown or parked off-screen. The builder's
+ * session bridge answers this by reconnecting its Deriv socket to the SAME
+ * account the user enabled in the app — so Run always trades the active
+ * demo/real account.
  */
 export function syncBotBuilderSession(connected: boolean, loginId: string | null): void {
   const iframe = getBotBuilderFrame();
@@ -211,4 +352,3 @@ export function syncBotBuilderSession(connected: boolean, loginId: string | null
     // fetch of /api/auth/bot-builder/session covers initial connection.
   }
 }
-

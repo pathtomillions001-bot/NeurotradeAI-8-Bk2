@@ -66,11 +66,11 @@
         @include mobile-or-tablet-screen {
             margin: 0;
             position: fixed;
-
-            /* Fix for iOS devices to prevent stats panel overlap */
-            @supports (-webkit-touch-callout: none) {
-                padding-bottom: env(safe-area-inset-bottom, 0);
-            }
+            // No safe-area padding here any more: the strip sits inside the
+            // drawer, which stops at the top of the Run/Stop bar, and the bar
+            // is what absorbs the inset. Adding it here only made the strip
+            // taller than --mobile-drawer-stats-height and pushed the tab
+            // content out of alignment on notched devices.
         }
 
         &--info {
@@ -110,6 +110,8 @@
 
         &--mobile {
             width: 100%;
+            // Pinned to the drawer's own bottom edge, which now stops exactly
+            // where the always-visible Run/Stop bar starts.
             bottom: 0;
         }
     }
@@ -162,16 +164,15 @@
 
             &--mobile {
                 display: flex;
-                height: var(--drawer-content-height-mobile);
                 position: fixed;
-                bottom: 15.7rem;
+                // `position: fixed` resolves against the DRAWER here (its
+                // will-change/transform makes it the containing block), and the
+                // drawer now spans exactly [handle .. top of the Run/Stop bar].
+                // So: sit under the handle, on top of the 15.7rem stats strip.
+                bottom: var(--mobile-drawer-stats-height, 15.7rem);
+                height: var(--drawer-content-height-mobile);
                 width: 100vw;
                 padding: 0.4rem 0;
-
-                /* Fix for iOS devices to prevent tab content overlap with bottom controls */
-                @supports (-webkit-touch-callout: none) {
-                    bottom: calc(15.7rem + env(safe-area-inset-bottom, 0));
-                }
             }
 
             &--summary-tab {
@@ -370,18 +371,26 @@
         display: none;
 
         @include mobile-or-tablet-screen {
-            // Fill the gap the drawer now leaves at the bottom:
-            // closed geometry ... [tabs peek][drawer handle][THIS BAR]
-            // open geometry   ..... [drawer][THIS BAR]
+            // Bottom-most strip of the screen, ALWAYS visible:
+            //   closed drawer → [ workspace ][ handle ][ THIS BAR ]
+            //   open drawer   → [ summary / transactions / journal ][ THIS BAR ]
+            // Run/Stop is therefore one tap away at all times — no need to
+            // open the drawer or scroll first.
             display: flex;
             align-items: center;
             justify-content: center;
             position: fixed;
             inset-inline: 0;
+            // Beats the base .controls__section iOS rule, which lifts the bar
+            // by the safe-area inset; the inset is handled by padding below so
+            // the bar's total height stays exactly --mobile-run-bar-total.
             bottom: 0;
-            z-index: var(--zindex-drawer);
-            min-height: var(--mobile-run-bar-height, 6.2rem);
-            padding: 0.9rem 1.2rem calc(0.9rem + env(safe-area-inset-bottom, 0px));
+            // ABOVE the drawer (z-index 6) — with the drawer on top, the bar
+            // was painted over by the closed panel and its taps never landed.
+            z-index: var(--zindex-mobile-run-bar, 8);
+            box-sizing: border-box;
+            height: var(--mobile-run-bar-total, 6.2rem);
+            padding: 0.8rem 1.2rem calc(0.8rem + env(safe-area-inset-bottom, 0px));
             background: var(--general-main-1);
             border-top: 1px solid var(--general-section-1);
 
@@ -391,11 +400,17 @@
                 justify-content: center;
                 width: 100%;
                 max-width: 44.8rem;
+                height: 100%;
+                min-height: 0;
+                margin: 0;
+                padding: 0;
             }
 
             .animation__wrapper {
                 width: 100%;
+                height: 100%;
                 justify-content: center;
+                align-items: center;
             }
 
             .animation__container {

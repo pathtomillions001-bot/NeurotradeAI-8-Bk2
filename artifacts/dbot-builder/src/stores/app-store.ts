@@ -22,6 +22,7 @@ export default class AppStore {
         makeObservable(this, {
             onMount: action,
             onUnmount: action,
+            refreshMarketBlocks: action,
             registerCurrencyReaction: action,
             registerOnAccountSwitch: action,
 
@@ -55,6 +56,13 @@ export default class AppStore {
             }
         }, 10000);
 
+        // The engine stores are normally wired by app-content's layout effect
+        // before this runs. Wire them here too if they are missing: bailing
+        // out silently (the old behaviour) meant a single ordering change left
+        // the Bot Builder tab permanently empty, with no error anywhere.
+        if (!this.dbot_store) {
+            this.setDBotEngineStores();
+        }
         if (!this.dbot_store) return;
 
         blockly_store.setLoading(true);
@@ -132,6 +140,34 @@ export default class AppStore {
         );
     };
 
+    /**
+     * Re-populate the market/submarket/symbol dropdowns of every
+     * `trade_definition_market` block from the CURRENT symbol catalogue.
+     *
+     * The builder paints before the catalogue has arrived (the symbol fetch is
+     * a background round-trip, no longer a full-screen gate), so the blocks
+     * come up with the built-in fallback list; this re-fires the block-create
+     * event Blockly listens to, which refreshes them in place the moment the
+     * live list lands. Safe to call at any time — it is a no-op until both the
+     * workspace and the catalogue exist.
+     */
+    refreshMarketBlocks = () => {
+        const workspace = window.Blockly?.derivWorkspace;
+        if (!workspace) return;
+        if (!ApiHelpers?.instance?.active_symbols) return;
+
+        ApiHelpers.instance.contracts_for?.disposeCache?.();
+        workspace
+            .getAllBlocks()
+            .filter((block: { type: string }) => block.type === 'trade_definition_market')
+            .forEach((block: unknown) => {
+                runIrreversibleEvents(() => {
+                    const fake_create_event = new window.Blockly.Events.BlockCreate(block);
+                    window.Blockly.Events.fire(fake_create_event);
+                });
+            });
+    };
+
     registerOnAccountSwitch = () => {
         this.disposeSwitchAccountListener = reaction(
             () => this.root_store.common?.is_socket_opened,
@@ -151,18 +187,7 @@ export default class AppStore {
 
                 if (ApiHelpers?.instance && active_symbols && contracts_for) {
                     if (window.Blockly?.derivWorkspace) {
-                        active_symbols?.retrieveActiveSymbols(true).then(() => {
-                            contracts_for.disposeCache();
-                            window.Blockly?.derivWorkspace
-                                .getAllBlocks()
-                                .filter(block => block.type === 'trade_definition_market')
-                                .forEach(block => {
-                                    runIrreversibleEvents(() => {
-                                        const fake_create_event = new window.Blockly.Events.BlockCreate(block);
-                                        window.Blockly.Events.fire(fake_create_event);
-                                    });
-                                });
-                        });
+                        active_symbols?.retrieveActiveSymbols(true).then(() => this.refreshMarketBlocks());
                     }
                     DBot.initializeInterpreter();
                 }

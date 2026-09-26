@@ -29,6 +29,7 @@ export const WEB_CONSOLE_IDS = [
   "overunder-navigator@1",
   /** Over/Under Turbo — continuous-fire over/under: scan once, lock, trade non-stop. */
   "overunder-turbo@2",
+  "digit-forge@1",
   /** Parity Forge — Even/Odd parity specialist with recovery-first intelligence. */
   "parity-forge@1",
   /** Vector Surge — Rise/Fall momentum specialist with recovery-first intelligence. */

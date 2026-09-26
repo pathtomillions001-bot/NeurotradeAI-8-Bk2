@@ -16,6 +16,7 @@ import { describe, it } from "node:test";
 import {
   CONSOLE_REGISTRY,
   consoleHasScanner,
+  consoleIsForge,
   consoleSkew,
   implementedConsoleIds,
   resolveConsole,
@@ -133,6 +134,29 @@ describe("scanner badge contract", () => {
         consoleHasScanner({ console: id }),
         id === "overunder-turbo@2",
         `scanner mismatch for "${id}" — is the badge contract drift-free with the console's Create DBot action?`,
+      );
+    }
+  });
+
+  it("marks exactly the consoles whose primary action forges a DBot", () => {
+    // FORGE means "this card builds a Deriv Bot instead of trading here".
+    // Digit Forge is the only such console today; adding another means adding
+    // it to FORGE_CONSOLE_IDS at the same time.
+    for (const id of WEB_CONSOLE_IDS) {
+      assert.equal(
+        consoleIsForge({ console: id }),
+        id === "digit-forge@1",
+        `forge mismatch for "${id}" — is the badge contract drift-free with the console's primary action?`,
+      );
+    }
+    assert.equal(consoleIsForge({}), false);
+  });
+
+  it("never tags one console as both a scanner and a forge", () => {
+    for (const id of WEB_CONSOLE_IDS) {
+      assert.ok(
+        !(consoleHasScanner({ console: id }) && consoleIsForge({ console: id })),
+        `"${id}" claims both badges — scan-and-trade and build-only are different promises`,
       );
     }
   });

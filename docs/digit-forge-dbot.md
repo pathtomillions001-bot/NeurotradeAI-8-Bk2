@@ -12,6 +12,16 @@ opportunity is — without the generated bot throwing errors when it runs?
 NeuroTrade around the run.** Everything else is buildable, and roughly 70 % of
 it already exists in this repository.
 
+> **UPDATE — §1 and §6-Option-C are superseded by
+> `docs/digit-forge-market-switching.md`.** The "cannot live inside the XML"
+> constraint is true for *stock* Deriv blocks only. Because this repo vendors
+> its own builder, in-XML switching is a small additive engine change. Read
+> Part II for the switching design, the in-XML maths kit and the new failure
+> modes; everything else below still stands.
+>
+> **Phases 1–3 are now BUILT — see `docs/digit-forge-as-built.md` (Part III)
+> for the shipped behaviour, file map and acceptance tests.**
+
 ---
 
 ## 1. The one hard constraint, proven from the vendored engine
@@ -292,7 +302,14 @@ NeuroTrade watches the run and rotates automatically. Needs three additions:
 Dead time per switch ≈ 1–3 s. Because the builder iframe is now persistent
 (this branch), the supervisor keeps working while the user browses the app.
 
-**Option C · Multi-market inside one XML — not possible.** See §1.
+**Option C · Multi-market inside one XML — possible in OUR builder only.**
+Superseded: see **`docs/digit-forge-market-switching.md`**. The constraint in §1
+holds for *stock* Deriv blocks, but this repo vendors its own builder, where
+`TicksService` is already multi-symbol, the engine re-reads `options.symbol` on
+every trade cycle, and anything added to `getTicksInterface` is auto-bound as an
+async `Bot.*` native. Three new blocks + three natives (~150 additive lines) give
+in-XML switching between contracts, at the cost of the XML no longer loading on
+app.deriv.com.
 
 **Recommendation: A now, B behind an explicit "Auto-rotate markets" switch,
 default off, with a visible log of every rotation decision.**

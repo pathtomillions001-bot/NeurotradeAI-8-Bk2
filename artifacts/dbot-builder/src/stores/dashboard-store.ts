@@ -34,7 +34,6 @@ export interface IDashboardStore {
     dialog_options: TDialogOptions;
     faq_search_value: string | null;
     has_mobile_preview_loaded: boolean;
-    is_web_socket_intialised: boolean;
     initInfoPanel: () => void;
     is_dialog_open: boolean;
     is_file_supported: boolean;
@@ -48,7 +47,6 @@ export interface IDashboardStore {
     setFAQSearchValue: (faq_search_value: string) => void;
     setInfoPanelVisibility: (visibility: boolean) => void;
     setIsFileSupported: (is_file_supported: boolean) => void;
-    setWebSocketState: (is_web_socket_intialised: boolean) => void;
     setOpenSettings: (toast_message: NOTIFICATION_TYPE) => void;
     setPreviewOnDialog: (has_mobile_preview_loaded: boolean) => void;
     setStrategySaveType: (param: string) => void;
@@ -87,14 +85,12 @@ export default class DashboardStore implements IDashboardStore {
             is_info_panel_visible: observable,
             is_preview_on_popup: observable,
             is_tour_dialog_visible: observable,
-            is_web_socket_intialised: observable,
             tutorials_combined_content: observable,
             onCloseDialog: action.bound,
             onCloseTour: action.bound,
             onTourEnd: action.bound,
             setActiveTab: action.bound,
             setActiveTabTutorial: action.bound,
-            setWebSocketState: action.bound,
             setFAQSearchValue: action.bound,
             faq_title: observable,
             setFaqTitle: action.bound,
@@ -197,7 +193,6 @@ export default class DashboardStore implements IDashboardStore {
     show_mobile_tour_dialog = false;
     strategy_save_type = 'unsaved';
     toast_message = '';
-    is_web_socket_intialised = true;
     search_param = '';
     guide_tab_content = user_guide_content;
     video_tab_content = guide_content;
@@ -278,10 +273,6 @@ export default class DashboardStore implements IDashboardStore {
 
     setShowMobileTourDialog = (show_mobile_tour_dialog: boolean) => {
         this.show_mobile_tour_dialog = show_mobile_tour_dialog;
-    };
-
-    setWebSocketState = (is_web_socket_intialised: boolean) => {
-        this.is_web_socket_intialised = is_web_socket_intialised;
     };
 
     setOpenSettings = (toast_message: NOTIFICATION_TYPE) => {

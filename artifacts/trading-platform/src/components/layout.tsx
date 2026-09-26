@@ -92,6 +92,10 @@ export function Layout({ children }: { children: ReactNode }) {
   // The builder draws its own Run/Stop cluster in the same top-right corner,
   // so the floating NeuroAI button would sit on top of it on that page.
   const showSpeedAiFab = location !== "/bot-builder";
+  // Same collision: the always-on "Active Engine / No bot running" chip is
+  // pinned top-right on desktop — exactly where the embedded Deriv builder
+  // puts its Run/Stop button — so it is hidden on the Bot Builder page.
+  const showLiveBotIndicatorDesktop = location !== "/bot-builder";
   const [mobileOpen, setMobileOpen] = useState(false);
   // The single source of truth for "which bot is live right now" — polled
   // every 5s + SSE, so a bot that starts in the background appears within
@@ -176,15 +180,19 @@ export function Layout({ children }: { children: ReactNode }) {
       </header>
 
       {/* Active-engine indicator — desktop, fixed to the top-right of every
-          page. ALWAYS rendered: "No bot running" when idle, the live engine
-          (AI Bots section, NeuroAI FAB or autonomous) when trading.
+          page EXCEPT Bot Builder, where it would cover the embedded builder's
+          own Run/Stop cluster. ALWAYS rendered elsewhere: "No bot running"
+          when idle, the live engine (AI Bots section, NeuroAI FAB or
+          autonomous) when trading.
           z-30: below the z-40/50 console dialogs (which show the same bot
           in full detail) but above all page content. */}
-      <div className="hidden md:block fixed top-3 right-4 z-30 pointer-events-none">
-        <div className="pointer-events-auto">
-          <LiveBotIndicator live={liveBots} />
+      {showLiveBotIndicatorDesktop && (
+        <div className="hidden md:block fixed top-3 right-4 z-30 pointer-events-none">
+          <div className="pointer-events-auto">
+            <LiveBotIndicator live={liveBots} />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">

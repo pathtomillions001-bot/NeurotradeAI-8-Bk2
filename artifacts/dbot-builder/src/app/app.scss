@@ -6,7 +6,12 @@
     --drawer-scroll-height: calc(100vh - 365px);
     --drawer-content-height-mobile: calc(100% - 233px);
     --tab-content-height: calc(100vh - 16.6rem);
-    --tab-content-height-mobile: calc(100vh - 12.6rem);
+    // Mobile chrome at the bottom is now: run/stop bar (this) + drawer handle
+    // and peek. The bar's height is subtracted from the tab content so the
+    // workspace/chart never slides underneath the always-visible Run/Stop bar.
+    // Desktop keeps --tab-content-height untouched above.
+    --mobile-run-bar-height: 6.2rem;
+    --tab-content-height-mobile: calc(100vh - 12.6rem - var(--mobile-run-bar-height));
     --zindex-drawer: 5;
     --zindex-modal: 6;
     --zindex-draggable-modal: 7;

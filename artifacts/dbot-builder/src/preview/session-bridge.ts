@@ -160,13 +160,25 @@ export async function syncEmbeddedPreviewSession(expectedLoginId?: string | null
     }
 
     try {
+        const { api_base } = await import('@/external/bot-skeleton');
+
+        // A running strategy OWNS the socket: tearing the connection down to
+        // re-authorize (or rebuilding it) would kill the user's live trades —
+        // this is exactly what users saw as "the bot stops when I open another
+        // page in the app" whenever the host's periodic session sync landed.
+        // Skip the sync while the bot runs; `sync_login_id` is intentionally
+        // left as-is so the next sync tick applies the change the moment the
+        // user hits Stop (or the strategy's SL/TP ends the run).
+        if (api_base.is_running) {
+            return;
+        }
+
         if (!expectedLoginId) {
             // NeuroTrade disconnected: drop the builder's seeded state FIRST so
             // the reconnect below comes up anonymous instead of re-authorizing
             // the account the app just disabled.
             clearPreviewSessionState();
         }
-        const { api_base } = await import('@/external/bot-skeleton');
         await api_base.init(true);
     } catch (error) {
         console.error('[preview] Failed to synchronize NeuroTrade Deriv session:', error);

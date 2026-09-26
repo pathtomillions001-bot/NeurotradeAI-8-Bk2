@@ -53,6 +53,22 @@ export function implementedConsoleIds(): string[] {
   return Object.keys(CONSOLE_REGISTRY).sort();
 }
 
+/**
+ * Consoles that include the "Create DBot" action — bots driven by these
+ * consoles scan the markets AND can take the resulting trades (they hand the
+ * current lock straight into the Deriv bot builder). The Bot Arena flags
+ * those cards with a SCANNER badge (pages/bots.tsx) so users can spot the
+ * scan-and-trade bots at a glance without opening each console.
+ */
+export const SCANNER_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
+  "overunder-turbo@2",
+]);
+
+/** True when the bot's console can scan *and* take trades (has Create DBot). */
+export function consoleHasScanner(bot: Pick<BotCardData, "console">): boolean {
+  return SCANNER_CONSOLE_IDS.has(bot.console ?? "specialist@1");
+}
+
 export type ConsoleResolution =
   | { ok: true; id: string; Console: ComponentType<BotConsoleProps> }
   | { ok: false; id: string };

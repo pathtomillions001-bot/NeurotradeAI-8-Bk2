@@ -65,6 +65,13 @@ class APIBase {
     active_symbols_promise: Promise<any[] | undefined> | null = null;
     common_store: CommonStore | undefined;
     reconnection_attempts: number = 0;
+    // Guards against reconnect storms: `init()` used to register a NEW pair of
+    // window online/focus listeners on every reconnect, so each event fanned
+    // out into several concurrent `init(true)` calls — each tearing the socket
+    // down and rebuilding it, which showed up to the user as constant loading
+    // (and previously killed running bots via the old closed-socket stop path).
+    private window_listeners_registered = false;
+    private reconnect_in_flight: Promise<void> | null = null;
 
     // Constants for timeouts - extracted magic numbers for better maintainability
     private readonly ACTIVE_SYMBOLS_TIMEOUT_MS = 10000; // 10 seconds
@@ -216,10 +223,13 @@ class APIBase {
     }
 
     initEventListeners() {
-        if (window) {
-            window.addEventListener('online', this.reconnectIfNotConnected);
-            window.addEventListener('focus', this.reconnectIfNotConnected);
-        }
+        if (typeof window === 'undefined') return;
+        // Register these ONCE — init() runs again on every reconnect, and every
+        // extra pair of listeners multiplies the reconnect bursts they trigger.
+        if (this.window_listeners_registered) return;
+        this.window_listeners_registered = true;
+        window.addEventListener('online', this.reconnectIfNotConnected);
+        window.addEventListener('focus', this.reconnectIfNotConnected);
     }
 
     async createNewInstance(account_id: string) {
@@ -229,27 +239,40 @@ class APIBase {
     }
 
     reconnectIfNotConnected = () => {
-        if (this.api?.connection?.readyState && this.api?.connection?.readyState > 1) {
-            this.reconnection_attempts += 1;
+        if (!(this.api?.connection?.readyState && this.api.connection.readyState > 1)) return;
+        // Dedupe concurrent triggers (socket `close` + `focus` + `online` fire
+        // together when connectivity flaps): only one socket teardown/rebuild
+        // may run at a time.
+        if (this.reconnect_in_flight) return;
 
-            if (this.reconnection_attempts >= this.MAX_RECONNECTION_ATTEMPTS) {
-                // Reset reconnection counter
-                this.reconnection_attempts = 0;
+        this.reconnection_attempts += 1;
 
-                // Properly handle logout through the API
-                setIsAuthorized(false);
-                setAccountList([]);
-                setAuthData(null);
+        if (this.reconnection_attempts >= this.MAX_RECONNECTION_ATTEMPTS) {
+            // Reset reconnection counter
+            this.reconnection_attempts = 0;
 
-                // Clear necessary storage items
-                localStorage.removeItem('active_loginid');
-                localStorage.removeItem('account_type');
-                localStorage.removeItem('accountsList');
-                localStorage.removeItem('clientAccounts');
-            }
+            // Properly handle logout through the API
+            setIsAuthorized(false);
+            setAccountList([]);
+            setAuthData(null);
 
-            this.init(true);
+            // Clear necessary storage items
+            localStorage.removeItem('active_loginid');
+            localStorage.removeItem('account_type');
+            localStorage.removeItem('accountsList');
+            localStorage.removeItem('clientAccounts');
         }
+
+        this.reconnect_in_flight = this.init(true);
+        this.reconnect_in_flight
+            .catch((error: unknown) => {
+                // The socket layer retries on its own; a failed attempt must not
+                // surface as an unhandled rejection every time the network flaps.
+                console.error('[APIBase] reconnect failed:', error);
+            })
+            .finally(() => {
+                this.reconnect_in_flight = null;
+            });
     };
 
     async authorizeAndSubscribe() {

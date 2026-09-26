@@ -12,10 +12,8 @@ import Tabs from '@/components/shared_ui/tabs/tabs';
 import TradeTypeConfirmationModal from '@/components/trade-type-confirmation-modal';
 import TradingViewModal from '@/components/trading-view-chart/trading-view-modal';
 import { DBOT_TABS, TAB_IDS } from '@/constants/bot-contents';
-import { api_base, updateWorkspaceName } from '@/external/bot-skeleton';
-import { CONNECTION_STATUS } from '@/external/bot-skeleton/services/api/observables/connection-status-stream';
+import { updateWorkspaceName } from '@/external/bot-skeleton';
 import { isDbotRTL } from '@/external/bot-skeleton/utils/workspace';
-import { useApiBase } from '@/hooks/useApiBase';
 import { useStore } from '@/hooks/useStore';
 import { isPreviewMode } from '@/utils/is-preview-mode';
 import {
@@ -49,8 +47,7 @@ const ChartWrapper = isPreviewMode() ? null : lazy(() => import('../chart/chart-
 const Tutorial = isPreviewMode() ? null : lazy(() => import('../tutorials'));
 
 const AppWrapper = observer(() => {
-    const { connectionStatus } = useApiBase();
-    const { dashboard, load_modal, run_panel, quick_strategy, summary_card, blockly_store } = useStore();
+    const { dashboard, load_modal, run_panel, quick_strategy, blockly_store } = useStore();
     const { is_loading } = blockly_store;
     const {
         active_tab,
@@ -58,25 +55,16 @@ const AppWrapper = observer(() => {
         is_chart_modal_visible,
         is_trading_view_modal_visible,
         setActiveTab,
-        setWebSocketState,
         setActiveTour,
         setTourDialogVisibility,
     } = dashboard;
     const { dashboard_strategies } = load_modal;
-    const {
-        is_dialog_open,
-        is_drawer_open,
-        dialog_options,
-        onCancelButtonClick,
-        onCloseDialog,
-        onOkButtonClick,
-        stopBot,
-    } = run_panel;
+    const { is_dialog_open, is_drawer_open, dialog_options, onCancelButtonClick, onCloseDialog, onOkButtonClick } =
+        run_panel;
     const { is_open } = quick_strategy;
     const { cancel_button_text, ok_button_text, title, message, dismissable, is_closed_on_cancel } = dialog_options as {
         [key: string]: string;
     };
-    const { clear } = summary_card;
     const { DASHBOARD, BOT_BUILDER } = DBOT_TABS;
     const init_render = React.useRef(true);
     const is_preview_mode = isPreviewMode();
@@ -185,17 +173,15 @@ const AppWrapper = observer(() => {
         };
     }, [is_preview_mode]);
 
-    React.useEffect(() => {
-        if (connectionStatus !== CONNECTION_STATUS.OPENED) {
-            const is_bot_running = document.getElementById('db-animation__stop-button') !== null;
-            if (is_bot_running) {
-                clear();
-                stopBot();
-                api_base.setIsRunning(false);
-                setWebSocketState(false);
-            }
-        }
-    }, [clear, connectionStatus, setWebSocketState, stopBot]);
+    // NOTE: The old effect that stopped a running bot whenever the websocket
+    // reported anything but OPENED (and surfaced the "You're back online — the
+    // bot has stopped, check the Reports page" dialog) was removed on purpose:
+    //  - transient connection flutters (brief reconnects, tab focus churn) were
+    //    killing live strategies even while the session was healthy, and
+    //  - the dialog pointed at a Reports page this deployment does not have.
+    // The socket layer (api-base) reconnects by itself and the interpreter
+    // resumes once reconnected; the bot now only stops via the user's Stop
+    // button or the strategy's own SL/TP logic.
 
     // Update tab shadows height to match bot builder height
     const updateTabShadowsHeight = () => {

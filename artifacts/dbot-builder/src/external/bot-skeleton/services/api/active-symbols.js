@@ -43,9 +43,17 @@ export default class ActiveSymbols {
      * }
      */
     async retrieveActiveSymbols(is_forced_update = false) {
-        await this.trading_times.initialise();
+        // Trading times and the symbol catalogue are independent API calls, so
+        // they are fetched in PARALLEL — serially awaiting trading_times first
+        // added one full round-trip to the "Initializing Deriv Bot account…"
+        // splash on every load. The noop catch avoids a spurious "unhandled
+        // rejection" if it settles before the await below; the await still
+        // surfaces the error where the old sequential code did.
+        const trading_times_promise = this.trading_times.initialise();
+        trading_times_promise.catch(() => {});
 
         if (!is_forced_update && this.is_initialised) {
+            await trading_times_promise;
             await this.init_promise;
             return this.active_symbols;
         }
@@ -84,6 +92,10 @@ export default class ActiveSymbols {
 
         this.is_initialised = true;
         this.processed_symbols = this.processActiveSymbols();
+
+        // Ensure trading times are ready before wiring the open/close handler —
+        // same ordering guarantee the original serial await provided.
+        await trading_times_promise;
 
         this.trading_times.onMarketOpenCloseChanged = changes => {
             Object.keys(changes).forEach(symbol_name => {

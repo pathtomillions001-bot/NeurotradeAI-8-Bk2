@@ -3,10 +3,8 @@ import { config } from '../constants/config';
 export const hasAllRequiredBlocks = () => {
     const blocks_in_workspace = window.Blockly.derivWorkspace.getAllBlocks();
     const { mandatoryMainBlocks } = config();
+    const required_block_types = ['trade_definition_tradeoptions', ...mandatoryMainBlocks];
     const all_block_types = blocks_in_workspace.map(block => block.type);
-    const required_block_types = ['trade_definition_tradeoptions',
-        ...mandatoryMainBlocks.map(type => type === 'purchase' && all_block_types.includes('purchase_digit45_pair')
-            ? 'purchase_digit45_pair' : type)];
     const has_all_required_blocks = required_block_types.every(required_block_type =>
         all_block_types.includes(required_block_type)
     );

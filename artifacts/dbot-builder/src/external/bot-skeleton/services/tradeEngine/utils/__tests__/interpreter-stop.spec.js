@@ -39,7 +39,6 @@ jest.mock('../../Interface', () =>
 jest.mock('../../../api/api-base', () => ({
     api_base: {
         is_stopping: false,
-        digit45Unresolved: false,
         clearSubscriptions: jest.fn(),
         setIsRunning: jest.fn(),
     },
@@ -49,9 +48,7 @@ jest.mock('@deriv/js-interpreter', () => function JSInterpreter() {});
 
 describe('interpreter.stop()', () => {
     beforeEach(() => {
-        jest.clearAllMocks();
         api_base.is_stopping = false;
-        api_base.digit45Unresolved = false;
         jest.useRealTimers();
     });
 
@@ -74,46 +71,6 @@ describe('interpreter.stop()', () => {
         await interpreter.stop();
         expect(on_stop).toHaveBeenCalled();
         globalObserver.unregister('bot.stop', on_stop);
-    });
-
-    it('waits for BOTH paired settlements before Stop tears down the subscriptions', async () => {
-        const Interface = require('../../Interface');
-        let resolvePair;
-        let active = true;
-        const pairSettled = new Promise(resolve => { resolvePair = resolve; });
-        Interface.mockImplementationOnce(() => ({ tradeEngine: {
-            hasActiveDigit45Pair: () => active,
-            waitForDigit45PairSettled: () => pairSettled,
-            contractId: '', options: {}, data: { contract: {} },
-        } }));
-        const interpreter = Interpreter();
-        const stop = interpreter.stop();
-        expect(api_base.is_stopping).toBe(true);
-        expect(api_base.clearSubscriptions).not.toHaveBeenCalled();
-        active = false;
-        resolvePair();
-        await expect(stop).resolves.toBeUndefined();
-        expect(api_base.is_stopping).toBe(false);
-        expect(api_base.digit45Unresolved).toBe(false);
-        expect(api_base.clearSubscriptions).toHaveBeenCalled();
-    });
-
-    it('releases the Stop UI after 45 seconds but LOCKS Run if a pair stays unresolved', async () => {
-        jest.useFakeTimers();
-        const Interface = require('../../Interface');
-        Interface.mockImplementationOnce(() => ({ tradeEngine: {
-            hasActiveDigit45Pair: () => true,
-            waitForDigit45PairSettled: () => new Promise(() => {}),
-            contractId: '', options: {}, data: { contract: {} },
-        } }));
-        const interpreter = Interpreter();
-        const stop = interpreter.stop();
-        expect(api_base.is_stopping).toBe(true);
-        jest.advanceTimersByTime(45000);
-        await expect(stop).resolves.toBeUndefined();
-        expect(api_base.is_stopping).toBe(false);
-        expect(api_base.digit45Unresolved).toBe(true);
-        jest.useRealTimers();
     });
 
     it('does not hang when the ticks service never settles (watchdog)', async () => {

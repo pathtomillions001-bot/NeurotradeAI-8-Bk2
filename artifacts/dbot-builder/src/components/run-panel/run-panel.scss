@@ -6,20 +6,6 @@
 .run-panel {
     height: 0;
 
-    // On mobile/tablet the collapsed handle sits ABOVE the persistent Run/Stop
-    // bar, instead of covering it. The handle still opens Summary, Transactions
-    // and Journal. Scope to this drawer so other Deriv drawers are unchanged.
-    @include mobile-or-tablet-screen {
-        &.dc-drawer {
-            top: calc(100% - 10.8rem - env(safe-area-inset-bottom, 0px)) !important;
-        }
-
-        .dc-drawer__toggle {
-            min-height: 3.6rem;
-            touch-action: manipulation;
-        }
-    }
-
     &__container {
         height: var(--bot-content-height) !important;
         top: 10.4rem !important;
@@ -217,9 +203,17 @@
         border-top: solid 2px var(--general-section-1);
         z-index: 8;
 
-        // Keep the buttons above the home indicator without lifting the whole
-        // bar twice; the handle's offset includes the same safe-area inset.
-        padding-bottom: env(safe-area-inset-bottom, 0px);
+        /* Fix for iOS devices to respect safe area */
+        @supports (-webkit-touch-callout: none) {
+            bottom: env(safe-area-inset-bottom, 0);
+            padding-bottom: env(safe-area-inset-bottom, 0);
+        }
+
+        /* Additional class for iOS detection via JS */
+        &.ios-device {
+            bottom: env(safe-area-inset-bottom, 0);
+            padding-bottom: env(safe-area-inset-bottom, 0);
+        }
     }
 
     &__buttons {

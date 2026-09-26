@@ -175,13 +175,13 @@ function money(n: number): string {
 }
 
 /** A statement block: `inner` holds its fields/values/statements, `next` chains. */
-export interface Stmt {
+interface Stmt {
   type: string;
   inner: string;
   attrs?: string;
 }
 
-export class XmlBuilder {
+class XmlBuilder {
   private seq = 0;
   private readonly vars = new Map<string, string>();
 

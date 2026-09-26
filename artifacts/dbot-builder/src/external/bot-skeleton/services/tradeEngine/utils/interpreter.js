@@ -133,11 +133,6 @@ const Interpreter = () => {
         );
         js_interpreter.setProperty(
             pseudo_bot_interface,
-            'purchaseDigit45Pair',
-            createAsync(js_interpreter, bot_interface.purchaseDigit45Pair)
-        );
-        js_interpreter.setProperty(
-            pseudo_bot_interface,
             'sellAtMarket',
             createAsync(js_interpreter, bot_interface.sellAtMarket)
         );
@@ -192,19 +187,8 @@ const Interpreter = () => {
             // wait on the broker forever. Multiplier contracts wait for
             // `contract.sold` below, which simply never arrives if the user
             // stopped before entry or the socket dropped mid-contract.
-            const is_pair_active = bot.tradeEngine.hasActiveDigit45Pair?.() ?? false;
-            const STOP_WATCHDOG_MS = is_pair_active ? 45000 : 10000;
-            const watchdog = setTimeout(() => {
-                if (!is_pair_active || !bot.tradeEngine.hasActiveDigit45Pair?.()) return settle();
-                // Even if tick unsubscribe / forget HANGS, release Stop after a
-                // bounded wait, but keep Run locked. Never restart an unknown
-                // paired exposure until the user reconciles the account.
-                api_base.digit45Unresolved = true;
-                globalObserver.emit('ui.log.error',
-                    'Paired contract settlement is still unknown. Check BOTH contract IDs in your Deriv account, then reload the builder before running again.');
-                void terminateSession().catch(() => {});
-                settle();
-            }, STOP_WATCHDOG_MS);
+            const STOP_WATCHDOG_MS = 10000;
+            const watchdog = setTimeout(() => settle(), STOP_WATCHDOG_MS);
 
             const on_contract_sold = async contractStatus => {
                 if (contractStatus?.id !== 'contract.sold') return;
@@ -221,17 +205,12 @@ const Interpreter = () => {
                     timeout => global_timeouts[timeout].is_cancellable
                 );
 
-                if (is_pair_active) {
-                    api_base.is_stopping = true; // no new paired orders while Stop awaits settlement
-                    bot.tradeEngine.waitForDigit45PairSettled()
-                        .then(() => terminateSession())
-                        .then(() => settle(), error => settle(error));
-                } else if (!bot.tradeEngine.contractId && is_timeouts_cancellable) {
+                if (!bot.tradeEngine.contractId && is_timeouts_cancellable) {
                     api_base.is_stopping = true;
                     // When user is rate limited, allow them to stop the bot immediately
                     // granted there is no active contract.
                     global_timeouts.forEach(timeout => clearTimeout(global_timeouts[timeout]));
-                    terminateSession().then(() => settle(), error => settle(error));
+                    terminateSession().finally(() => settle());
                 } else if (
                     bot.tradeEngine.isSold === false &&
                     !$scope.is_error_triggered &&
@@ -245,7 +224,7 @@ const Interpreter = () => {
                     did_register_contract_listener = true;
                 } else {
                     api_base.is_stopping = true;
-                    terminateSession().then(() => settle(), error => settle(error));
+                    terminateSession().finally(() => settle());
                 }
             } catch (e) {
                 settle(e);

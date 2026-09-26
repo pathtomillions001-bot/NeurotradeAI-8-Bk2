@@ -131,6 +131,15 @@ const Interpreter = () => {
             'purchase',
             createAsync(js_interpreter, bot_interface.purchase)
         );
+        // NeuroTrade paired purchase: like `purchase`, it returns a promise that
+        // resolves once BOTH legs are acknowledged. Without an async binding the
+        // interpreter would not wait for the buys and the purchase conditions
+        // stack would spin while the basket was still in flight.
+        js_interpreter.setProperty(
+            pseudo_bot_interface,
+            'purchasePair',
+            createAsync(js_interpreter, bot_interface.purchasePair)
+        );
         js_interpreter.setProperty(
             pseudo_bot_interface,
             'sellAtMarket',

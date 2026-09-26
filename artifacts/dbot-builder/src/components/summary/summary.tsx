@@ -1,7 +1,7 @@
 import classnames from 'classnames';
 import { observer } from 'mobx-react-lite';
+import { useRunPanelLayout } from '@/hooks/useRunPanelLayout';
 import { useStore } from '@/hooks/useStore';
-import { useDevice } from '@deriv-com/ui';
 import ThemedScrollbars from '../shared_ui/themed-scrollbars';
 import SummaryCard from './summary-card';
 
@@ -13,13 +13,14 @@ const Summary = observer(({ is_drawer_open }: TSummary) => {
     const { dashboard, summary_card } = useStore();
     const { is_contract_loading, contract_info, is_bot_running } = summary_card;
     const { active_tour } = dashboard;
-    const { isDesktop } = useDevice();
+    // Tab sizing follows the run-panel layout (docked drawer vs bottom sheet).
+    const { is_side_layout } = useRunPanelLayout();
     return (
         <div
             className={classnames({
-                'run-panel-tab__content': isDesktop,
-                'run-panel-tab__content--mobile': !isDesktop && is_drawer_open,
-                'run-panel-tab__content--summary-tab': (isDesktop && is_drawer_open) || active_tour,
+                'run-panel-tab__content': is_side_layout,
+                'run-panel-tab__content--mobile': !is_side_layout && is_drawer_open,
+                'run-panel-tab__content--summary-tab': (is_side_layout && is_drawer_open) || active_tour,
             })}
             data-testid='mock-summary'
         >
@@ -27,7 +28,8 @@ const Summary = observer(({ is_drawer_open }: TSummary) => {
                 className={classnames({
                     summary: (!is_contract_loading && !contract_info) || is_bot_running,
                     'summary--loading':
-                        (!isDesktop && is_contract_loading) || (!isDesktop && !is_contract_loading && contract_info),
+                        (!is_side_layout && is_contract_loading) ||
+                        (!is_side_layout && !is_contract_loading && contract_info),
                 })}
             >
                 <SummaryCard

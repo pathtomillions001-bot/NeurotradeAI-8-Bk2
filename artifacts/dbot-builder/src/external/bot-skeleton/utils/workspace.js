@@ -1,4 +1,5 @@
 import { config } from '../constants/config';
+import { isMandatoryBlockPresent } from './mandatory-blocks';
 
 export const hasAllRequiredBlocks = () => {
     const blocks_in_workspace = window.Blockly.derivWorkspace.getAllBlocks();
@@ -6,7 +7,8 @@ export const hasAllRequiredBlocks = () => {
     const required_block_types = ['trade_definition_tradeoptions', ...mandatoryMainBlocks];
     const all_block_types = blocks_in_workspace.map(block => block.type);
     const has_all_required_blocks = required_block_types.every(required_block_type =>
-        all_block_types.includes(required_block_type)
+        // Custom stand-ins count (e.g. `purchase_pair` fulfils `purchase`).
+        isMandatoryBlockPresent(required_block_type, all_block_types)
     );
 
     return has_all_required_blocks;

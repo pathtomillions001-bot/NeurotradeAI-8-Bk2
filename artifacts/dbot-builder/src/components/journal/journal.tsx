@@ -3,10 +3,10 @@ import classnames from 'classnames';
 import { observer } from 'mobx-react-lite';
 import Text from '@/components/shared_ui/text';
 import { contract_stages } from '@/constants/contract-stage';
+import { useRunPanelLayout } from '@/hooks/useRunPanelLayout';
 import { useStore } from '@/hooks/useStore';
 import { DerivLightEmptyCardboardBoxIcon } from '@deriv/quill-icons/Illustration';
 import { Localize } from '@deriv-com/translations';
-import { useDevice } from '@deriv-com/ui';
 import DataList from '../data-list';
 import { TCheckedFilters, TFilterMessageValues, TJournalDataListArgs } from './journal.types';
 import { JournalItem, JournalLoader, JournalTools } from './journal-components';
@@ -26,12 +26,12 @@ const Journal = observer(() => {
 
     const filtered_messages_length = Array.isArray(filtered_messages) && filtered_messages.length;
     const unfiltered_messages_length = Array.isArray(unfiltered_messages) && unfiltered_messages.length;
-    const { isDesktop } = useDevice();
+    const { is_side_layout } = useRunPanelLayout();
 
     return (
         <div
             className={classnames('journal run-panel-tab__content--no-stat', {
-                'run-panel-tab__content': isDesktop,
+                'run-panel-tab__content': is_side_layout,
             })}
             data-testid='dt_mock_journal'
         >
@@ -56,7 +56,7 @@ const Journal = observer(() => {
                         !!Object.keys(checked_filters as TCheckedFilters).length &&
                         !unfiltered_messages_length &&
                         is_stop_button_visible ? (
-                            <JournalLoader is_mobile={!isDesktop} />
+                            <JournalLoader is_mobile={!is_side_layout} />
                         ) : (
                             <div className='journal-empty'>
                                 <DerivLightEmptyCardboardBoxIcon

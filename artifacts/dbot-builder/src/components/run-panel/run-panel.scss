@@ -9,7 +9,9 @@
     &__container {
         height: var(--bot-content-height) !important;
         top: 10.4rem !important;
-        width: 36.6rem !important;
+        // Trimmed from 36.6rem (~80%) so the docked results drawer leaves more
+        // of the embedded builder visible. Mirrors RUN_PANEL_DESKTOP_WIDTH.
+        width: 29.3rem !important;
         right: 0;
 
         &--mobile {
@@ -60,11 +62,13 @@
         @include flex-center(flex-start, flex-end);
 
         flex-direction: column;
-        width: 35rem;
+        width: 100%;
+        max-width: 29.3rem;
         background-color: var(--general-section-2);
 
-        @include mobile-or-tablet-screen {
+        .dc-drawer--sheet & {
             margin: 0;
+            max-width: none;
             position: fixed;
 
             /* Fix for iOS devices to prevent stats panel overlap */
@@ -122,9 +126,10 @@
         flex-direction: column;
 
         &-button {
-            width: 318px;
+            width: calc(100% - 3.2rem);
+            max-width: 254px;
             height: 32px !important;
-            margin: 12px 24px;
+            margin: 12px 16px;
         }
     }
 
@@ -181,7 +186,7 @@
     }
 
     &__clear-button {
-        @include mobile-or-tablet-screen {
+        .dc-drawer--sheet & {
             position: absolute !important;
             top: 0.5rem;
             right: 1.6rem;

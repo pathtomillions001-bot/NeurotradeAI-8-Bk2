@@ -9,10 +9,10 @@ import Text from '@/components/shared_ui/text';
 import { TContractInfo } from '@/components/summary/summary-card.types';
 import { contract_stages } from '@/constants/contract-stage';
 import { transaction_elements } from '@/constants/transactions';
+import { useRunPanelLayout } from '@/hooks/useRunPanelLayout';
 import { useStore } from '@/hooks/useStore';
 import { DerivLightEmptyCardboardBoxIcon } from '@deriv/quill-icons/Illustration';
 import { Localize } from '@deriv-com/translations';
-import { useDevice } from '@deriv-com/ui';
 import ThemedScrollbars from '../shared_ui/themed-scrollbars';
 import Transaction from './transaction';
 
@@ -59,7 +59,7 @@ const Transactions = observer(({ is_drawer_open }: TTransactions) => {
     const { run_panel, transactions } = useStore();
     const { contract_stage } = run_panel;
     const { transactions: transaction_list, toggleTransactionDetailsModal, recoverPendingContracts } = transactions;
-    const { isDesktop } = useDevice();
+    const { is_side_layout } = useRunPanelLayout();
 
     React.useEffect(() => {
         window.addEventListener('click', onClickOutsideTransaction);
@@ -99,8 +99,8 @@ const Transactions = observer(({ is_drawer_open }: TTransactions) => {
     return (
         <div
             className={classnames('transactions', {
-                'run-panel-tab__content': isDesktop,
-                'run-panel-tab__content--mobile': !isDesktop && is_drawer_open,
+                'run-panel-tab__content': is_side_layout,
+                'run-panel-tab__content--mobile': !is_side_layout && is_drawer_open,
             })}
         >
             <div className='download__container transaction-details__button-container'>
@@ -130,8 +130,8 @@ const Transactions = observer(({ is_drawer_open }: TTransactions) => {
             </div>
             <div
                 className={classnames({
-                    transactions__content: isDesktop,
-                    'transactions__content--mobile': !isDesktop,
+                    transactions__content: is_side_layout,
+                    'transactions__content--mobile': !is_side_layout,
                 })}
             >
                 <div className='transactions__scrollbar'>

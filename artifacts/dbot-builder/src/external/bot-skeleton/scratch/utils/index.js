@@ -7,6 +7,11 @@ import { LogTypes } from '../../constants/messages';
 import { error_message_map } from '../../utils/error-config';
 import { saveWorkspaceToRecent } from '../../utils/local-storage';
 import { observer as globalObserver } from '../../utils/observer';
+import {
+    expandMandatoryBlockTypes,
+    getMandatoryBlockFamily,
+    isMandatoryBlockPresent,
+} from '../../utils/mandatory-blocks';
 import { removeLimitedBlocks } from '../../utils/workspace';
 import BlockConversion from '../backward-compatibility';
 import DBotStore from '../dbot-store';
@@ -82,7 +87,12 @@ export const validateErrorOnBlockDelete = () => {
     const blockX = blockRect?.left || 0;
     const blockY = blockRect?.top || 0;
     const mandatory_trade_option_block = getSelectedTradeType();
-    const required_block_types = [mandatory_trade_option_block, 'trade_definition', 'purchase', 'before_purchase'];
+    const required_block_types = expandMandatoryBlockTypes([
+        mandatory_trade_option_block,
+        'trade_definition',
+        'purchase',
+        'before_purchase',
+    ]);
     if (required_block_types?.includes(window.Blockly?.getSelected()?.type)) {
         if (
             blockY >= translate_Y - translate_offset &&
@@ -406,22 +416,27 @@ const getAllRequiredBlocks = (workspace, required_block_types) => {
 };
 
 const getMissingBlocks = (workspace, required_block_types) => {
-    return required_block_types.filter(blockType => {
-        return !workspace.getAllBlocks().some(block => block.type === blockType);
-    });
+    const present_block_types = workspace.getAllBlocks().map(block => block.type);
+    // A custom stand-in (e.g. `purchase_pair` for `purchase`) satisfies the
+    // requirement — see utils/mandatory-blocks.
+    return required_block_types.filter(blockType => !isMandatoryBlockPresent(blockType, present_block_types));
 };
 
 const getDisabledBlocks = required_blocks_check => {
     const workspace = window.Blockly.derivWorkspace;
-    const required_block_types = [getSelectedTradeType(workspace), ...config().mandatoryMainBlocks];
-    const disabled_blocks = Object.fromEntries(
-        workspace
-            .getAllBlocks()
-            .filter(block => required_block_types.includes(block.type))
-            .map(block => [block.type, block.disabled])
-    );
+    const required_block_types = expandMandatoryBlockTypes([
+        getSelectedTradeType(workspace),
+        ...config().mandatoryMainBlocks,
+    ]);
+    const blocks_in_workspace = workspace.getAllBlocks().filter(block => required_block_types.includes(block.type));
     const mandatory_blocks = ['before_purchase', 'purchase', 'trade_definition', 'trade_definition_tradeoptions'];
-    const has_disabled_blocks = mandatory_blocks.some(type => disabled_blocks[type]);
+    // A mandatory block counts as disabled only when EVERY block of its family
+    // (the block itself plus its accepted stand-ins) is present and disabled.
+    const has_disabled_blocks = mandatory_blocks.some(type => {
+        const family = getMandatoryBlockFamily(type);
+        const family_blocks = blocks_in_workspace.filter(block => family.includes(block.type));
+        return family_blocks.length > 0 && family_blocks.every(block => block.disabled);
+    });
 
     return has_disabled_blocks
         ? required_blocks_check.filter(block => block.disabled || block.childBlocks_?.some(child => child.disabled))
@@ -456,7 +471,8 @@ export const isAllRequiredBlocksEnabled = workspace => {
     const { mandatoryMainBlocks } = config();
     const required_block_types = [mandatory_trade_option_block, ...mandatoryMainBlocks];
 
-    const required_blocks_check = getAllRequiredBlocks(workspace, required_block_types);
+    // Stand-ins must be inspected too, or a disabled `purchase_pair` would slip through.
+    const required_blocks_check = getAllRequiredBlocks(workspace, expandMandatoryBlockTypes(required_block_types));
 
     const missing_blocks = getMissingBlocks(workspace, required_block_types);
     const disabled_blocks = getDisabledBlocks(required_blocks_check);

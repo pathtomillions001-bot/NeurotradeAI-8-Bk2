@@ -200,6 +200,37 @@ describe('Over/Under Turbo → Deriv DBot strategy', () => {
         expect(code).toContain("symbol              : 'R_100'");
     });
 
+    // Regression: running the generated Paired Edge bot logged
+    // "The Purchase block is mandatory and cannot be deleted/disabled." in the
+    // journal and refused to start, because the strategy replaces the stock
+    // `purchase` block with the atomic `purchase_pair` basket.
+    it('accepts purchase_pair as the mandatory Purchase block before running', async () => {
+        loadFixture('paired-edge-r100');
+        window.Blockly.derivWorkspace = workspace;
+
+        const { isAllRequiredBlocksEnabled } = await import('../../external/bot-skeleton/scratch/utils');
+        const { observer } = await import('../../external/bot-skeleton/utils/observer');
+        const logged_errors = [];
+        const listener = message => logged_errors.push(message);
+        observer.register('ui.log.error', listener);
+
+        try {
+            expect(isAllRequiredBlocksEnabled(workspace)).toBe(true);
+            expect(logged_errors).toEqual([]);
+        } finally {
+            observer.unregister('ui.log.error', listener);
+        }
+    });
+
+    it('still reports a genuinely missing purchase block', async () => {
+        loadFixture('paired-edge-r100');
+        workspace.getBlocksByType('purchase_pair', false).forEach(block => block.dispose(false));
+        window.Blockly.derivWorkspace = workspace;
+
+        const { isAllRequiredBlocksEnabled } = await import('../../external/bot-skeleton/scratch/utils');
+        expect(isAllRequiredBlocksEnabled(workspace)).toBe(false);
+    });
+
     it('loads into the real builder with every Deriv root block in place', () => {
         loadFixture('turbo-r100-over2-over4');
         const tops = workspace.getTopBlocks(false).map(b => b.type).sort();

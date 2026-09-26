@@ -206,6 +206,20 @@ export const config = () => ({
     ],
     mainBlocks: ['trade_definition', 'before_purchase', 'during_purchase', 'after_purchase'],
     mandatoryMainBlocks: ['trade_definition', 'purchase', 'before_purchase'],
+    /**
+     * NeuroTrade: blocks that fulfil a mandatory block in its place.
+     *
+     * The strategies our API generates (e.g. Paired Edge) buy two rails as ONE
+     * engine operation through the custom `purchase_pair` block, so the stock
+     * `purchase` block is intentionally absent. Without this map the
+     * required-block validation reported "The Purchase block is mandatory and
+     * cannot be deleted/disabled." and refused to run a perfectly valid
+     * strategy. Any block listed here counts as its key for every
+     * missing/disabled check.
+     */
+    mandatoryBlockAlternatives: {
+        purchase: ['purchase_pair'],
+    } as Record<string, string[]>,
     procedureDefinitionBlocks: ['procedures_defnoreturn', 'procedures_defreturn'],
     single_instance_blocks: ['trade_definition', 'before_purchase', 'during_purchase', 'after_purchase'],
     TRADE_TYPE_TO_CONTRACT_CATEGORY_MAPPING: {

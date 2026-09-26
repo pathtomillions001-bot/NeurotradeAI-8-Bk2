@@ -1,4 +1,15 @@
-@use 'components/shared/styles/devices' as *;
+/**
+ * Drawer layouts.
+ *
+ * `--side`  : docked to the right edge of the workspace (desktop).
+ * `--sheet` : bottom sheet whose handle sits above the Run/Stop bar (touch).
+ *
+ * Both classes are set by the component from `useRunPanelLayout()`, NOT by a
+ * media query. The old `mobile-or-tablet-screen` (max-width: 1279px) rules
+ * turned the desktop drawer into a bottom sheet whenever the builder's iframe
+ * was narrower than 1280px, which is the normal case inside the NeuroTrade
+ * shell on a laptop.
+ */
 
 /** @define dc-drawer */
 .dc-drawer {
@@ -21,7 +32,7 @@
         left: calc(100vw - 16px);
     }
 
-    @include mobile-or-tablet-screen {
+    &--sheet {
         width: 100vw !important;
         // Keep the summary handle clearly ABOVE the persistent Run/Stop bar.
         // Previously it sat in the same bottom zone and obscured the primary
@@ -44,7 +55,7 @@
             padding-inline-start: $toggler-width;
         }
 
-        @include mobile-or-tablet-screen {
+        .dc-drawer--sheet & {
             height: calc(100% - 3.6rem);
         }
     }
@@ -81,7 +92,7 @@
         background-color: var(--general-section-5);
         cursor: pointer;
 
-        @include mobile-or-tablet-screen {
+        .dc-drawer--sheet & {
             position: unset;
             width: 100%;
             height: 3.6rem;
@@ -115,15 +126,13 @@
                 transform: rotate(0);
             }
 
-            @include mobile-or-tablet-screen {
+            .dc-drawer--sheet & {
                 transform: rotate(180deg);
             }
         }
     }
 
-    &--open {
-        @include mobile-or-tablet-screen {
-            transform: translateY(calc(-100% + 3.6rem));
-        }
+    &--open#{&}--sheet {
+        transform: translateY(calc(-100% + 3.6rem));
     }
 }

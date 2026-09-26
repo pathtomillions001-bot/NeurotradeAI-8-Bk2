@@ -1,7 +1,6 @@
 .bot {
     --bot-content-height: calc(100vh - 140px);
-    // Keep in sync with RUN_PANEL_DESKTOP_WIDTH (components/run-panel).
-    --bot-content-width: calc(100vw - 293px);
+    --bot-content-width: calc(100vw - 366px);
     --drawer-content-height: calc(100vh - 394px);
     --drawer-content-height-no-stat: calc(100vh - 233px);
     --drawer-scroll-height: calc(100vh - 365px);

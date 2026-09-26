@@ -16,6 +16,7 @@ import { ApexConsole } from "@/components/apex-console";
 import { BastionConsole } from "@/components/bastion-console";
 import { OverUnderNavigatorConsole } from "@/components/overunder-navigator-console";
 import { OverUnderTurboConsole } from "@/components/overunder-turbo-console";
+import { PairedEdgeConsole } from "@/components/paired-edge-console";
 import { ParityForgeConsole } from "@/components/parity-forge-console";
 import { SurgeConsole } from "@/components/surge-console";
 import { BotConsole } from "@/components/bot-console";
@@ -40,6 +41,7 @@ export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProp
   "bastion@1": BastionConsole,
   "overunder-navigator@1": OverUnderNavigatorConsole,
   "overunder-turbo@2": OverUnderTurboConsole,
+  "paired-edge@1": PairedEdgeConsole,
   "parity-forge@1": ParityForgeConsole,
   "surge@1": SurgeConsole,
   "specialist@1": BotConsole,

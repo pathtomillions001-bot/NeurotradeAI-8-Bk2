@@ -64,6 +64,7 @@ describe("bot console contract", () => {
     assert.equal(botConsoleId(getBotDefinition("killshot")!), "killshot@1");
     assert.equal(botConsoleId(getBotDefinition("ks-overunder")!), "killshot-family@1");
     assert.equal(botConsoleId(getBotDefinition("surge")!), "surge@1");
+    assert.equal(botConsoleId(getBotDefinition("paired-edge")!), "paired-edge@1");
   });
 
   it("falls back to the specialist console for family bots with no dedicated UI", () => {
@@ -81,6 +82,7 @@ describe("bot console contract", () => {
       "omni@2",
       "overunder-navigator@1",
       "overunder-turbo@2",
+      "paired-edge@1",
       "parity-forge@1",
       "specialist@1",
       "surge@1",

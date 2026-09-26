@@ -93,6 +93,8 @@ export interface BotDefinition {
    * own /overunder-turbo endpoints.
    */
   turbo?: boolean;
+  /** Paired Edge: scan-only console that creates a synchronized two-rail DBot. */
+  pairedEdge?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -194,6 +196,32 @@ export const BOT_CATALOG: BotDefinition[] = [
     sides: [],
     nominalWinRate: "simulated survival",
     nominalPayout: "barrier quote",
+  },
+  {
+    id: "paired-edge",
+    name: "Paired Edge Architect",
+    code: "BOT-PAIR-45",
+    family: "barrier",
+    pairedEdge: true,
+    contractLabel: "Over 4 + Under 5 → recovery Over 5 + Under 4",
+    tagline: "Measure the stronger half. Build one synchronized basket bot.",
+    description:
+      "Scans every digit market for a statistically defensible imbalance between the complementary Over 4 and Under 5 halves. Autocorrelation-corrected Bayesian bounds, a contextual Markov chain, χ² evidence, entropy and block-stationarity reject lucky or drifting skews. It does not deploy an app executor: Create DBot opens a purpose-built paired strategy in Bot Builder. Both rails are bought together and settled as one basket; recovery uses Over 5 + Under 4 and the exact combined realised debt.",
+    edge: [
+      "Beta-Binomial posterior with effective sample size n(1−ρ)/(1+ρ) and a one-sided 95% lower bound on the stronger half",
+      "Order-1 two-state Markov context shrunk toward the marginal posterior, plus Pearson χ² and binary entropy diagnostics",
+      "Five-block stationarity screen rejects regime drift before a market can be recommended",
+      "Custom paired DBot runtime buys both rails together, waits for both settlements, and halts on an exit-tick mismatch",
+      "Basket accounting records exact net P&L; it never claims synchronized Over 4 + Under 5 can both lose on one digit",
+      "Recovery pair Over 5 + Under 4 sizes from total basket debt and a conservative quoted net-return factor",
+    ],
+    accent: "violet",
+    icon: "workflow",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "measured edge",
+    nominalPayout: "two live quotes",
   },
   {
     id: "apex",
@@ -639,6 +667,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
+  if (bot.pairedEdge) return "paired-edge@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

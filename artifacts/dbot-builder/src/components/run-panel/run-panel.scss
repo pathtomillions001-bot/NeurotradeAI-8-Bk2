@@ -186,6 +186,16 @@
             position: absolute !important;
             top: 0.5rem;
             right: 1.6rem;
+            // Keep it ABOVE the drawer handle. This button is absolutely
+            // positioned against `.dc-drawer` (position: fixed), so `top:
+            // 0.5rem` lands it inside the first `--mobile-drawer-handle-height`
+            // of the panel — the handle strip, which is `position: relative;
+            // z-index: 2` with an OPAQUE background. With the default `auto`
+            // z-index the handle painted straight over it, so Reset was
+            // rendered but invisible on mobile, while desktop (where Reset
+            // lives in the drawer footer) was unaffected. 3 clears both the
+            // handle and the run panel's position:fixed tab content.
+            z-index: 3;
             height: 2.6rem !important;
             min-width: 8rem;
         }

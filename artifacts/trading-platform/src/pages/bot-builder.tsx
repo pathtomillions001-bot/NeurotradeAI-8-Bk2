@@ -72,7 +72,24 @@ export default function BotBuilder() {
   return (
     <div
       data-testid="bot-builder-page"
-      className="h-[calc(100vh-3.5rem)] w-full overflow-hidden bg-background"
+      // Height MUST track the *visible* viewport, not `100vh`.
+      //
+      // On phones `100vh` is the LARGE viewport — the height the page would
+      // have if the browser's URL bar were hidden. While that bar is on screen
+      // (which is exactly the state after a page refresh) this slot therefore
+      // runs ~50-100px below the fold, and since the builder iframe is
+      // positioned over the slot, its bottom edge goes with it. The builder's
+      // mobile Run/Stop bar is `position: fixed; bottom: 0` INSIDE that iframe,
+      // so it rode off-screen and looked "lost" — while arriving from a bot
+      // console (client-side navigation, URL bar already collapsed) left the
+      // visible viewport equal to `100vh` and the bar correctly placed.
+      //
+      // `100dvh` is the dynamic viewport: it always matches what the user can
+      // actually see and re-resolves as the URL bar shows/hides, and the
+      // ResizeObserver in lib/bot-builder-frame.ts re-syncs the iframe to it.
+      // Desktop is untouched — with no dynamic browser chrome, dvh == vh. The
+      // app shell (components/layout.tsx) already sizes itself this way.
+      className="h-[calc(100vh-3.5rem)] supports-[height:100dvh]:h-[calc(100dvh-3.5rem)] w-full overflow-hidden bg-background"
     >
       {/* The builder iframe is positioned over this slot — see
           lib/bot-builder-frame.ts. */}

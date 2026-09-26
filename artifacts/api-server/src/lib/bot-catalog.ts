@@ -93,6 +93,14 @@ export interface BotDefinition {
    * own /overunder-turbo endpoints.
    */
   turbo?: boolean;
+  /**
+   * Digit Forge: the DBot factory. It never scans and never trades — the
+   * console collects settings and "Create DBot" renders a Deriv Bot (Blockly)
+   * strategy that carries its OWN in-workspace analysis (Agresti–Coull lower
+   * bound, two-state Markov G² test, streak cooldown) plus the shared recovery
+   * ladder. Execution belongs to Deriv's own Run button, not to NeuroTrade.
+   */
+  forge?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -193,6 +201,32 @@ export const BOT_CATALOG: BotDefinition[] = [
     hasDigitLock: false,
     sides: [],
     nominalWinRate: "simulated survival",
+    nominalPayout: "barrier quote",
+  },
+  {
+    id: "digit-forge",
+    name: "Digit Forge",
+    code: "BOT-DF-FORGE",
+    family: "barrier",
+    forge: true,
+    contractLabel: "Over 1/2 · Under 7/8 → recovery Over 4/5 · Under 4/5",
+    tagline: "No scan. Set it, forge it, run it on Deriv.",
+    description:
+      "The DBot factory. Digit Forge never analyses anything here and never places a trade — you set your barriers, stake, boundaries and gate, press Create DBot, and it renders a Deriv Bot strategy that carries the analysis INSIDE itself. The generated bot measures its own tape every tick: an Agresti–Coull lower confidence bound on the normal barrier's hit rate against the live break-even, a two-state Markov chain with a G² likelihood-ratio test so sequence structure is only trusted when it is statistically real, and a streak cooldown sized to the window's expected worst run. It fires normally only when every clause agrees, switches to your recovery barrier the moment it owes money, and sizes that recovery with the same debt ladder every NeuroTrade bot uses. You verify the blocks in the Bot Builder and press Deriv's own Run.",
+    edge: [
+      "Zero server analysis: the strategy is a pure function of your settings, so there is nothing to scan, nothing to wait for and nothing that can disagree with what the bot does later",
+      "The gate lives in the workspace: p_lo = p̃ − z·√(p̃(1−p̃)/ñ) over a rolling digit window, compared against 1/payout using the REALISED payout the bot refreshes after every win",
+      "Two-state Markov with a χ²(1) gate: the conditional rate only gets a vote when G² > 3.84, because a 10×10 digit chain has 90 free parameters and a 1 000-tick window cannot fill it",
+      "Streak cooldown at ln(W(1−q))/ln(1/q) + 2σ — clustered losses are what turn a depth-4 ladder into a depth-7 event",
+      "Recovery is deliberately ungated: debt is cleared at the 50 %/40 % barriers where one win repays ~1.1 losses instead of the 4.3 a normal barrier needs",
+      "Same shared recovery ladder as every other bot — debt × (1 + markup) / (payout − 1), floored at 0.35, capped by your max stake and live balance, rounded up to the cent",
+    ],
+    accent: "fuchsia",
+    icon: "workflow",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "gated by measurement",
     nominalPayout: "barrier quote",
   },
   {
@@ -639,6 +673,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
+  if (bot.forge) return "digit-forge@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

@@ -16,6 +16,7 @@ import { ApexConsole } from "@/components/apex-console";
 import { BastionConsole } from "@/components/bastion-console";
 import { OverUnderNavigatorConsole } from "@/components/overunder-navigator-console";
 import { OverUnderTurboConsole } from "@/components/overunder-turbo-console";
+import { DigitForgeConsole } from "@/components/digit-forge-console";
 import { ParityForgeConsole } from "@/components/parity-forge-console";
 import { SurgeConsole } from "@/components/surge-console";
 import { BotConsole } from "@/components/bot-console";
@@ -40,6 +41,7 @@ export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProp
   "bastion@1": BastionConsole,
   "overunder-navigator@1": OverUnderNavigatorConsole,
   "overunder-turbo@2": OverUnderTurboConsole,
+  "digit-forge@1": DigitForgeConsole,
   "parity-forge@1": ParityForgeConsole,
   "surge@1": SurgeConsole,
   "specialist@1": BotConsole,
@@ -67,6 +69,24 @@ export const SCANNER_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
 /** True when the bot's console can scan *and* take trades (has Create DBot). */
 export function consoleHasScanner(bot: Pick<BotCardData, "console">): boolean {
   return SCANNER_CONSOLE_IDS.has(bot.console ?? "specialist@1");
+}
+
+/**
+ * Consoles that BUILD a Deriv Bot instead of trading here — their primary
+ * action is "Create DBot" and they own no session, no scan and no stop. The
+ * Bot Arena flags those cards FORGE so a user can tell at a glance that the
+ * card hands work to the Bot Builder rather than running it in NeuroTrade.
+ *
+ * Kept separate from SCANNER_CONSOLE_IDS on purpose: SCANNER means "scans the
+ * markets and can take the trades", which is the opposite promise.
+ */
+export const FORGE_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
+  "digit-forge@1",
+]);
+
+/** True when the bot's console forges a DBot rather than trading in-app. */
+export function consoleIsForge(bot: Pick<BotCardData, "console">): boolean {
+  return FORGE_CONSOLE_IDS.has(bot.console ?? "specialist@1");
 }
 
 export type ConsoleResolution =

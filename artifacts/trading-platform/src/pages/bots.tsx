@@ -11,12 +11,12 @@ import { useLocation, useSearch } from "wouter";
 import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw, Radar,
+  Bot, Sparkles, Lock, Activity, ChevronRight, AlertTriangle, RefreshCw, Radar, Hammer,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
-import { consoleHasScanner, consoleSkew, resolveConsole } from "@/lib/console-registry";
+import { consoleHasScanner, consoleIsForge, consoleSkew, resolveConsole } from "@/lib/console-registry";
 import { WEB_RELEASE, releasePair, type ReleaseInfo } from "@/lib/release";
 import { withTabSession } from "@/lib/tab-session";
 
@@ -191,6 +191,9 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
   // Scanner bots (their console carries the Create DBot action) can scan the
   // markets and take the trades themselves — flag it so they stand out.
   const isScanner = consoleHasScanner(bot);
+  // Forge bots build a Deriv Bot instead of trading here — a different promise
+  // from SCANNER, so it gets its own tag in the same slot.
+  const isForge = consoleIsForge(bot);
 
   return (
     <motion.div
@@ -208,6 +211,18 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
         {/* Accent wash */}
         <div className={`absolute inset-x-0 top-0 h-px bg-gradient-to-r ${a.grad} opacity-60`} />
 
+        {/* Forge capability tag — this card builds a DBot, it does not trade */}
+        {isForge && (
+          <span
+            data-testid="forge-badge"
+            title="This bot does not trade here — it builds a Deriv Bot you run in the Bot Builder (Create DBot)"
+            className={`absolute top-2 right-2 z-10 flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${a.badgeBg} ${a.text} ${a.panelBorder}`}
+          >
+            <Hammer className="w-2.5 h-2.5" aria-hidden="true" />
+            Forge
+          </span>
+        )}
+
         {/* Scanner capability tag — top-right, always visible */}
         {isScanner && (
           <span
@@ -222,7 +237,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
 
         <CardContent className="p-4 flex flex-col h-full gap-3">
           {/* Header */}
-          <div className={`flex items-start gap-3 ${isScanner ? "pr-16" : ""}`}>
+          <div className={`flex items-start gap-3 ${isScanner || isForge ? "pr-16" : ""}`}>
             <div className={`relative w-11 h-11 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}>
               <Icon className={`w-5 h-5 ${a.text}`} />
               {isThisRunning && (

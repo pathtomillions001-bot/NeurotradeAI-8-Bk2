@@ -14,9 +14,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
+import { useLocation } from "wouter";
 import {
   Loader2, StopCircle, ScanSearch, AlertTriangle, RefreshCw, Lock,
-  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair,
+  ChevronLeft, X, ShieldCheck, Zap, ArrowRightLeft, Crosshair, Workflow,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -24,6 +25,7 @@ import { useGetSettings } from "@workspace/api-client-react";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
+import { loadStrategyIntoBotBuilder } from "@/lib/bot-builder-frame";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
 
@@ -109,6 +111,8 @@ export function OverUnderTurboConsole({
 }) {
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
+  const [buildingDbot, setBuildingDbot] = useState(false);
+  const [, navigate] = useLocation();
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
     scanning: null, scanned: 0, total: 20,
@@ -229,6 +233,55 @@ export function OverUnderTurboConsole({
     } catch {
       toast.error("Could not start the bot");
     } finally { setLoading(false); }
+  };
+
+  /**
+   * CREATE DBOT — same scanned triple and session numbers as Locked, but instead
+   * of starting NeuroTrade's executor the API renders a stock Deriv-Bot strategy
+   * (market, Over/Under barriers, stake, TP/SL, the shared recovery ladder) and
+   * we hand it to the embedded Deriv bot builder. The user verifies the blocks
+   * and presses Deriv's own Run — Deriv Bot executes, not Turbo.
+   */
+  const handleCreateDbot = async (c: Candidate) => {
+    setBuildingDbot(true);
+    try {
+      const res = await fetch("/api/bots/overunder-turbo/dbot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: c.symbol,
+          normal: c.normal,
+          recovery: c.recovery,
+          analysis: c,
+          ...config,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.xml) {
+        toast.error(data?.error ?? "Could not build the DBot strategy");
+        return;
+      }
+      const loaded = loadStrategyIntoBotBuilder({ name: data.name, xml: data.xml, symbol: c.symbol });
+      toast.info(
+        `Building your DBot for ${c.displayName} — ${label(c.normal)} → ${label(c.recovery)}…`,
+      );
+      onOpenChange(false);
+      navigate("/bot-builder");
+      const ok = await loaded;
+      if (ok) {
+        toast.success(
+          `DBot ready: ${c.displayName} · ${label(c.normal)} normal → ${label(c.recovery)} recovery · ` +
+            `stake $${config.stake} · TP $${config.takeProfit} · SL $${config.stopLoss}. Verify the blocks, then press Run.`,
+          { duration: 12_000 },
+        );
+      } else {
+        toast.error("The bot builder did not confirm the strategy loaded — open Bot Builder and try Create DBot again.");
+      }
+    } catch {
+      toast.error("Could not reach the analysis engine to build the DBot");
+    } finally {
+      setBuildingDbot(false);
+    }
   };
 
   const handleStop = async () => {
@@ -394,6 +447,22 @@ export function OverUnderTurboConsole({
                         Locked never changes market. Switching keeps these exact barriers and moves
                         ONLY when this market stops being favorable — trading never pauses for a
                         healthy tape.
+                      </p>
+
+                      {/* CREATE DBOT — hand this exact lock to the Deriv bot builder */}
+                      <Button onClick={() => handleCreateDbot(scanResult.best!)} disabled={loading || buildingDbot}
+                              data-testid="turbo-create-dbot"
+                              className="col-span-2 w-full h-10 bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white font-bold text-xs">
+                        {buildingDbot
+                          ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          : <Workflow className="w-4 h-4 mr-2" />}
+                        {buildingDbot ? "Building DBot…" : "Create DBot"}
+                      </Button>
+                      <p className="col-span-2 text-[9px] text-muted-foreground/60 leading-relaxed">
+                        Builds a Deriv Bot for <span className="text-white/80">{scanResult.best.displayName}</span> —{" "}
+                        {label(scanResult.best.normal)} normal → {label(scanResult.best.recovery)} recovery, your stake,
+                        TP/SL and the same recovery ladder — and opens it in the Bot Builder. You verify the blocks and
+                        press Run; Deriv Bot then executes the trades instead of Turbo.
                       </p>
                     </div>
 

@@ -28,7 +28,7 @@ export const WEB_CONSOLE_IDS = [
   /** Over/Under Navigator — configurable normal/recovery digit bands. */
   "overunder-navigator@1",
   /** Over/Under Turbo — continuous-fire over/under: scan once, lock, trade non-stop. */
-  "overunder-turbo@1",
+  "overunder-turbo@2",
   /** Parity Forge — Even/Odd parity specialist with recovery-first intelligence. */
   "parity-forge@1",
   /** Vector Surge — Rise/Fall momentum specialist with recovery-first intelligence. */

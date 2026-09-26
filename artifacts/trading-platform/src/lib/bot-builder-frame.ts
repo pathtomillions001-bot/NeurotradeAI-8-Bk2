@@ -83,6 +83,109 @@ export function releaseBotBuilderFrame(): void {
 }
 
 export const BOT_BUILDER_SYNC_MESSAGE = "NEUROTRADE_BOT_BUILDER_SYNC";
+/** Host → builder: load this Blockly XML into the workspace. */
+export const BOT_BUILDER_LOAD_STRATEGY_MESSAGE = "NEUROTRADE_BOT_BUILDER_LOAD_STRATEGY";
+/** Builder → host: the strategy with this requestId is (or is not) in the workspace. */
+export const BOT_BUILDER_STRATEGY_LOADED_MESSAGE = "NEUROTRADE_BOT_BUILDER_STRATEGY_LOADED";
+
+export interface BotBuilderStrategy {
+  /** File / strategy name shown in the builder. */
+  name: string;
+  /** Deriv-Bot Blockly workspace XML. */
+  xml: string;
+  /** Deriv symbol the trade definition targets (builder verifies market path). */
+  symbol?: string;
+}
+
+type PendingLoad = {
+  requestId: string;
+  strategy: BotBuilderStrategy;
+  resolve: (ok: boolean) => void;
+  timer: number;
+  ticker: number;
+};
+
+let pendingLoad: PendingLoad | null = null;
+let loadListenerInstalled = false;
+
+function installLoadListener(): void {
+  if (loadListenerInstalled) return;
+  loadListenerInstalled = true;
+  window.addEventListener("message", (event: MessageEvent) => {
+    if (event.origin !== window.location.origin) return;
+    const data = event.data as { type?: string; requestId?: string; ok?: boolean; error?: string } | null;
+    if (!data || data.type !== BOT_BUILDER_STRATEGY_LOADED_MESSAGE) return;
+    if (!pendingLoad || data.requestId !== pendingLoad.requestId) return;
+    const done = pendingLoad;
+    pendingLoad = null;
+    window.clearTimeout(done.timer);
+    window.clearInterval(done.ticker);
+    done.resolve(data.ok !== false);
+  });
+}
+
+function postLoad(load: PendingLoad): void {
+  const iframe = getBotBuilderFrame();
+  try {
+    iframe.contentWindow?.postMessage(
+      {
+        type: BOT_BUILDER_LOAD_STRATEGY_MESSAGE,
+        source: "neurotrade-web",
+        requestId: load.requestId,
+        name: load.strategy.name,
+        xml: load.strategy.xml,
+        symbol: load.strategy.symbol ?? null,
+      },
+      window.location.origin,
+    );
+  } catch {
+    // Builder document not ready yet — the ticker retries until it acks.
+  }
+}
+
+/**
+ * Push a generated strategy into the (possibly still booting) Deriv bot
+ * builder. The message is re-sent every second until the builder acknowledges
+ * it has loaded the workspace, so it is safe to call before the iframe's
+ * document exists or before the user has ever opened the Bot Builder page.
+ * Resolves `true` once the blocks are in the workspace, `false` on timeout
+ * or if the builder rejected the XML.
+ */
+export function loadStrategyIntoBotBuilder(
+  strategy: BotBuilderStrategy,
+  timeoutMs = 45_000,
+): Promise<boolean> {
+  installLoadListener();
+  // Make sure the frame is booting.
+  getBotBuilderFrame();
+
+  if (pendingLoad) {
+    // A newer request supersedes an older one that never got acked.
+    const stale = pendingLoad;
+    pendingLoad = null;
+    window.clearTimeout(stale.timer);
+    window.clearInterval(stale.ticker);
+    stale.resolve(false);
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const requestId = `nt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const load: PendingLoad = {
+      requestId,
+      strategy,
+      resolve,
+      timer: window.setTimeout(() => {
+        if (pendingLoad?.requestId !== requestId) return;
+        pendingLoad = null;
+        window.clearInterval(load.ticker);
+        resolve(false);
+      }, timeoutMs),
+      ticker: window.setInterval(() => postLoad(load), 1000),
+    };
+    pendingLoad = load;
+    postLoad(load);
+  });
+}
 
 /**
  * Push the NeuroTrade-connected Deriv account into the builder, no matter

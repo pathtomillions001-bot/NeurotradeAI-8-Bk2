@@ -1,6 +1,6 @@
 # Over/Under Turbo
 
-`BOT-OU-TURBO` / bot id `overunder-turbo` / console contract `overunder-turbo@1`.
+`BOT-OU-TURBO` / bot id `overunder-turbo` / console contract `overunder-turbo@2`.
 
 The continuous-fire Over/Under specialist: a dedicated engine, not a preset of
 the specialist engine or of the Over/Under Navigator. All analysis happens ONCE,
@@ -91,10 +91,56 @@ anti-flap cooldown. A healthy market is NEVER interrupted for scanning.
 - Paper mode settles against the market's REAL next digit (no synthetic
   coin-flip), matching Dual-Lock.
 
+## Create DBot (Deriv Bot executes the lock)
+
+Next to **Locked** / **Switching** the scan result offers **Create DBot**. It
+does NOT start the Turbo engine. Instead:
+
+1. `POST /api/bots/overunder-turbo/dbot` (same body and validation as `/start`)
+   renders a stock Deriv-Bot Blockly strategy for the scanned triple —
+   `overunder-turbo-dbot.ts` — quoting the payout multipliers the engine itself
+   would use (`resolveRecoveryPayout`) and reading the account's recovery markup
+   / max stake from settings.
+2. The web app posts the XML into the embedded Deriv bot builder
+   (`NEUROTRADE_BOT_BUILDER_LOAD_STRATEGY`, `lib/bot-builder-frame.ts`), opens the
+   Bot Builder page and waits for the builder's acknowledgement
+   (`NEUROTRADE_BOT_BUILDER_STRATEGY_LOADED`). The builder side is
+   `artifacts/dbot-builder/src/preview/strategy-bridge.ts`, which loads the XML
+   through Deriv's own `load()` — no patches to Deriv's builder.
+3. The user verifies the blocks and presses Deriv's **Run**. From then on Deriv
+   Bot executes the trades, not NeuroTrade.
+
+The generated bot is the Turbo engine's **LOCKED** mode, block for block:
+
+- market fixed to the scanned symbol, 1-tick Over/Under, contract type "both";
+- **arm once** — purchase conditions wait until the normal contract hits ≥ its
+  break-even (1 / payout) over the last 40 digits, or 30 evaluations elapse;
+- normal contract while there is no debt, recovery contract while there is;
+- recovery stake = debt × (1 + markup %) / (payout − 1), floored at 0.35,
+  capped at max trade stake and live balance, rounded UP to cents — identical to
+  `getBotRecoveryStake`; a recovery win pays its net profit into the debt and
+  recovery ends the moment debt is zero (partial wins keep it open);
+- circuit breaker at `round(p95 recovery depth) + 2` consecutive losses;
+- take-profit / stop-loss on Deriv's total-profit counter.
+
+Switching mode cannot be expressed in a DBot (Deriv fixes the market in the trade
+definition), so **Create DBot always produces a locked bot**.
+
+Only stock builder blocks are used (`TURBO_DBOT_BLOCK_TYPES`). The builder's jest
+suite (`src/preview/__tests__/turbo-dbot-strategy.spec.js`) loads the committed
+fixtures into the REAL Deriv Blockly with every block definition, generates code
+the way `dbot.generateCode()` does and executes it against a scripted market to
+pin the ladder (1.00 → 1.16 → 2.51 → back to base), TP, SL, breaker and partial
+recovery. `overunder-turbo-dbot.test.ts` keeps those fixtures in sync with the
+generator (`npx tsx src/lib/overunder-turbo-dbot.fixtures.ts --write`).
+
 ## Files
 
 - `artifacts/api-server/src/lib/overunder-turbo-analysis.ts` — fixed vocabulary, scan ranking, arm-entry read, market health.
 - `artifacts/api-server/src/lib/overunder-turbo-engine.ts` — continuous execution engine.
-- `artifacts/api-server/src/routes/overunder-turbo.ts` — scan/start/stop/status/contracts routes (mounted at `/api/bots/overunder-turbo`).
-- `artifacts/trading-platform/src/components/overunder-turbo-console.tsx` — the tailored console (scan → lock proposal → Locked/Switching buttons → live turbo monitor with switch board).
-- Tests: `overunder-turbo-analysis.test.ts`, `overunder-turbo-engine.test.ts`.
+- `artifacts/api-server/src/routes/overunder-turbo.ts` — scan/start/stop/status/contracts/dbot routes (mounted at `/api/bots/overunder-turbo`).
+- `artifacts/api-server/src/lib/overunder-turbo-dbot.ts` — Deriv-Bot (Blockly XML) strategy generator for "Create DBot".
+- `artifacts/dbot-builder/src/preview/strategy-bridge.ts` — builder-side listener that loads a host strategy through Deriv's `load()`.
+- `artifacts/trading-platform/src/components/overunder-turbo-console.tsx` — the tailored console (scan → lock proposal → Locked/Switching/Create DBot buttons → live turbo monitor with switch board).
+- `artifacts/trading-platform/src/lib/bot-builder-frame.ts` — singleton builder iframe + `loadStrategyIntoBotBuilder` handshake.
+- Tests: `overunder-turbo-analysis.test.ts`, `overunder-turbo-engine.test.ts`, `overunder-turbo-dbot.test.ts`, builder `turbo-dbot-strategy.spec.js`.

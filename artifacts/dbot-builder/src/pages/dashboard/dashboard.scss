@@ -1,8 +1,9 @@
 @use 'components/shared/styles/mixins' as *;
 
 .bot-dashboard {
-    --translate-panel-rtl: -367px;
-    --translate-panel-ltr: 367px;
+    // Docked run-panel width (RUN_PANEL_DESKTOP_WIDTH) + 1px border.
+    --translate-panel-rtl: -294px;
+    --translate-panel-ltr: 294px;
     --translate-panel-reset: 0px;
 
     position: relative;
@@ -46,7 +47,9 @@
     }
 
     .dc-drawer--open {
-        @include desktop-screen {
+        // Class-based (set from useRunPanelLayout), not a 1280px media query:
+        // the builder's iframe is routinely narrower than that on a laptop.
+        &.dc-drawer--side {
             transform: translateX(var(--translate-panel-reset)) !important;
         }
 

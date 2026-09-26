@@ -57,6 +57,12 @@ export interface BotCardData {
   navigator?: boolean;
   /** Over/Under Turbo: continuous-fire over/under (own console + routes). */
   turbo?: boolean;
+  /** Dual-Lock Navigator: same-tick dual-leg hedged scanner with Create DBot. */
+  twinRail?: boolean;
+  /**
+   * Scanner bots expose a Create DBot button and get a SCANNER badge on the card.
+   */
+  scanner?: boolean;
   /** Omni Sentinel: user-allowlisted multi-contract opportunity tournament. */
   omni?: boolean;
   /**
@@ -274,6 +280,23 @@ export interface TurboLockStatus {
   signals: string[];
 }
 
+/** Dual-Lock Navigator (Twin Rail) only: the frozen lock + its pre-deploy telemetry. */
+export interface TwinRailLockStatus {
+  symbol: string;
+  displayName: string;
+  normal: string;
+  recovery: string;
+  marketMode: string;
+  survival: number;
+  ruin: number;
+  clusterRatio: number;
+  normalLcb: number;
+  recoveryConditional: number;
+  expectedMaxLossRun: number;
+  recoveryDepthP95: number;
+  signals: string[];
+}
+
 /** Over/Under Turbo only: the live arm/trade monitor. */
 export interface TurboWatchStatus {
   /** arming = waiting for the entry tick; trading = non-stop turbo. */
@@ -313,6 +336,8 @@ export interface BotSessionStatus {
   turboLock?: TurboLockStatus;
   /** Over/Under Turbo only: live arm/trade monitor state. */
   turboWatch?: TurboWatchStatus;
+  /** Dual-Lock Navigator (Twin Rail) only: the frozen (market, normal, recovery) lock. */
+  twinLock?: TwinRailLockStatus;
   /** Parity Forge only: the measured card it deployed. */
   parityForgeDeployed?: ParityForgeDeployedStatus;
   /** Parity Forge only: live parity/recovery watch state. */

@@ -95,6 +95,22 @@ export interface BotDefinition {
   turbo?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
+  /**
+   * Scanner bots expose a "Create DBot" button that builds a stock Deriv Bot
+   * for the scanned market/settings, and get a SCANNER badge on their card.
+   */
+  scanner?: boolean;
+  /**
+   * Over/Under Twin Rail: same-tick dual-leg hedged scanner. Normal = Over 4 +
+   * Under 5 simultaneous; recovery = Over 5 + Under 4 simultaneous; only
+   * enters recovery when the hedged pair loses (the broker toll / slippage
+   * case) and sizes legs to clear the total lost amount. Scans all digit
+   * markets for low 4/5 frequency and clustering (those are the only digits
+   * that can double-lose the recovery pair), then exposes a Create DBot
+   * button that builds a stock Deriv-Bot strategy firing both legs on the
+   * same tick.
+   */
+  twinRail?: boolean;
   icon: string;
   /** Whether the user picks a side (over/under, rise/fall, even/odd). */
   hasSides: boolean;
@@ -142,6 +158,7 @@ export const BOT_CATALOG: BotDefinition[] = [
     code: "BOT-NAVIGATOR",
     family: "barrier",
     navigator: true,
+    scanner: true,
     contractLabel: "Custom Over / Under → custom recovery",
     tagline: "Your digits. A frozen recovery bar. Best shot hunts.",
     description:
@@ -175,6 +192,7 @@ export const BOT_CATALOG: BotDefinition[] = [
     code: "BOT-OU-TURBO",
     family: "barrier",
     turbo: true,
+    scanner: true,
     contractLabel: "Over 1/2 · Under 7/8 → recovery Over 4/5 · Under 4/5",
     tagline: "Scan once. Lock the best tape. Fire non-stop.",
     description:
@@ -194,6 +212,32 @@ export const BOT_CATALOG: BotDefinition[] = [
     sides: [],
     nominalWinRate: "simulated survival",
     nominalPayout: "barrier quote",
+  },
+  {
+    id: "twinrail",
+    name: "Dual-Lock Navigator",
+    code: "BOT-TWINRAIL",
+    family: "barrier",
+    twinRail: true,
+    scanner: true,
+    contractLabel: "Over 4 + Under 5 → Over 5 + Under 4 (same-tick dual)",
+    tagline: "Same-tick dual-leg scanner. Create DBot fires both legs on one tick.",
+    description:
+      "A scanner built around simultaneous dual-leg execution: every tick buys BOTH Over 4 and Under 5 for the same stake (normal) and — only when the hedged pair nets a loss — switches to buying BOTH Over 5 and Under 4 at a sized recovery stake, still on the same tick. The scanner's ONLY job is to find the market where digits 4 and 5 (the only digits that can double-lose the recovery pair) are rare and non-clustered; it then returns the best market and exposes a Create DBot button that builds a stock Deriv Bot firing both legs on the same digit, at the same stake, closing at the same time. The recovery ladder is the shared one used by every other bot; TP/SL/max-steps are yours.",
+    edge: [
+      "Same-tick dual-leg execution — Over 4 + Under 5 (normal) and Over 5 + Under 4 (recovery) fire as back-to-back purchases on the incoming tick so both legs settle on the same digit, same latency",
+      "Scanner ranks markets by P(TP before SL) through the twin-rail engine rules, with hard penalties for 4/5 frequency (the only recovery double-loss digits) and for clustering (consecutive 4s or 5s breaks the ladder)",
+      "Recovery enters ONLY when the hedged pair nets a loss, and legs are sized so a single winning leg (≈2.43×) pays the losing leg plus the total debt — matching the 'recover 2× the lost amount' rule",
+      "Create DBot generates a stock Deriv-Bot strategy with the same recovery ladder, TP/SL and stake — both legs fire in the same before_purchase stack so they share the same digit",
+      "Frozen risk parameters once scanned, plus a circuit breaker when the live 4/5 cluster run exceeds the modelled p95 depth",
+    ],
+    accent: "teal",
+    icon: "activity",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "pair hedge · 80%+ win/leg",
+    nominalPayout: "1.95× · 2.43× recovery",
   },
   {
     id: "apex",
@@ -493,6 +537,7 @@ export const BOT_CATALOG: BotDefinition[] = [
     accent: "indigo",
     icon: "lock",
     preLocked: true,
+    scanner: true,
     hasSides: false,
     hasDigitLock: false,
     sides: [
@@ -639,6 +684,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
+  if (bot.twinRail) return "twinrail@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";
   if (bot.killShotFamily) return "killshot-family@1";

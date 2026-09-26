@@ -12,17 +12,19 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { toast } from "sonner";
+import { useLocation } from "wouter";
 import {
-  Activity,
-  Crosshair,
-  Loader2,
-  Lock,
-  RefreshCw,
-  ScanSearch,
-  ShieldCheck,
-  Shuffle,
-  StopCircle,
-  X,
+    Activity,
+    Crosshair,
+    Loader2,
+    Lock,
+    RefreshCw,
+    ScanSearch,
+    ShieldCheck,
+    Shuffle,
+    StopCircle,
+    Workflow,
+    X,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -30,6 +32,7 @@ import { Card, CardContent } from "./ui/card";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
+import { loadStrategyIntoBotBuilder } from "@/lib/bot-builder-frame";
 
 type Step = "config" | "scanning" | "result" | "running";
 type Side = "both" | "over" | "under";
@@ -296,6 +299,8 @@ export function OverUnderNavigatorConsole({
 }) {
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
+  const [buildingDbot, setBuildingDbot] = useState(false);
+  const [, navigate] = useLocation();
   const [scan, setScan] = useState<ScanResult | null>(null);
   const [progress, setProgress] = useState({
     scanning: "",
@@ -458,6 +463,59 @@ export function OverUnderNavigatorConsole({
       setLoading(false);
     }
   };
+  const handleCreateDbot = async (candidate: any) => {
+    setBuildingDbot(true);
+    try {
+      // Map the Navigator candidate's chosen plan to a turbo-style contract
+      // pair that the stock turbo DBot generator already understands.
+      // Navigator sides: "both" | "over" | "under" — "over" arms DIGITOVER,
+      // "under" arms DIGITUNDER, "both" arms both.
+      const normalPrimary = normalSide !== "under"
+        ? { side: "DIGITOVER" as const, barrier: normalOver }
+        : null;
+      const normalSecondary = normalSide !== "over"
+        ? { side: "DIGITUNDER" as const, barrier: normalUnder }
+        : null;
+      const recoveryPrimary = recoverySide !== "under"
+        ? { side: "DIGITOVER" as const, barrier: recoveryOver }
+        : null;
+      const recoverySecondary = recoverySide !== "over"
+        ? { side: "DIGITUNDER" as const, barrier: recoveryUnder }
+        : null;
+      // Pick the best of the armed sides (same heuristic as turbo).
+      const normal = normalPrimary && (!normalSecondary || (candidate?.normalHitRate ?? 0) >= (candidate?.normalHitRate ?? 0)) ? normalPrimary : normalSecondary ?? normalPrimary;
+      const recovery = recoveryPrimary && (!recoverySecondary || (candidate?.recoveryHitRate ?? 0) >= (candidate?.recoveryHitRate ?? 0)) ? recoveryPrimary : recoverySecondary ?? recoveryPrimary;
+      if (!normal || !recovery) { toast.error("Arm at least one Over and one Under side to create a DBot"); return; }
+      const res = await fetch("/api/bots/overunder-turbo/dbot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          symbol: candidate.symbol,
+          normal,
+          recovery,
+          analysis: candidate,
+          stake: risk.stake,
+          takeProfit: risk.takeProfit,
+          stopLoss: risk.stopLoss,
+          maxRecoverySteps: risk.maxRecoverySteps,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.xml) { toast.error(data?.error ?? "Could not build the DBot strategy"); return; }
+      const loaded = loadStrategyIntoBotBuilder({ name: data.name, xml: data.xml, symbol: candidate.symbol });
+      toast.info(`Building your DBot for ${candidate.displayName}…`);
+      onOpenChange(false);
+      navigate("/bot-builder");
+      const ok = await loaded;
+      if (ok) {
+        toast.success(`DBot ready: ${candidate.displayName} · verify blocks then press Run.`, { duration: 12_000 });
+      } else {
+        toast.error("The bot builder did not confirm the strategy loaded — open Bot Builder and try Create DBot again.");
+      }
+    } catch {
+      toast.error("Could not reach the analysis engine to build the DBot");
+    } finally { setBuildingDbot(false); }
+  };
   const handleStop = async () => {
     setLoading(true);
     try {
@@ -490,7 +548,10 @@ export function OverUnderNavigatorConsole({
           <Icon className={`h-4 w-4 ${a.text}`} />
         </div>
         <div className="min-w-0">
-          <h2 className="text-sm font-bold text-white">{bot.name}</h2>
+          <h2 className="text-sm font-bold text-white flex items-center gap-2">
+            {bot.name}
+            <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300">SCANNER</span>
+          </h2>
           <p className="text-[10px] text-muted-foreground">
             Custom barriers · recovery-first execution
           </p>
@@ -787,9 +848,18 @@ export function OverUnderNavigatorConsole({
               >
                 <Shuffle className="mr-2 h-3.5 w-3.5" /> Smart Switching
               </Button>
+              <Button
+                onClick={() => handleCreateDbot(candidate)}
+                disabled={loading || buildingDbot}
+                data-testid="navigator-create-dbot"
+                className="w-full h-9 bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white font-bold text-xs"
+              >
+                {buildingDbot ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : <Workflow className="mr-2 h-3.5 w-3.5" />}
+                {buildingDbot ? "Building DBot…" : "Create DBot"}
+              </Button>
               <p className="text-[9px] leading-relaxed text-muted-foreground">
                 Lock stays on this market. Switching can hunt recovery
-                opportunities elsewhere.
+                opportunities elsewhere. Create DBot exports the locked plan to Bot Builder.
               </p>
             </div>
           </CardContent>

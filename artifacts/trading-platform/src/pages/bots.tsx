@@ -222,6 +222,11 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="text-sm font-bold text-white truncate">{bot.name}</h3>
+                {bot.scanner && (
+                  <span className="flex items-center gap-1 text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300" title="Scan + Create DBot — picks the best market, exports to Bot Builder">
+                    SCANNER
+                  </span>
+                )}
                 {isThisRunning && (
                   <span className={`flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text}`}>
                     <span className={`w-1 h-1 rounded-full ${a.dot} animate-pulse`} /> LIVE

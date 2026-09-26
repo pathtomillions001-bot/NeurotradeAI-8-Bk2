@@ -331,7 +331,6 @@ export function OverUnderTurboConsole({
                 <div className="min-w-0">
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
                     {bot.name}
-                    <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-fuchsia-500/20 text-fuchsia-300">SCANNER</span>
                     <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${a.badgeBg} ${a.text} font-normal`}>{bot.code}</span>
                   </h3>
                   <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{bot.tagline}</p>

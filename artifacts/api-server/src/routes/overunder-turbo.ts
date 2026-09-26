@@ -11,8 +11,10 @@
 import { Router } from "express";
 import { AUTOMATED_DERIV_MARKETS, isAutomatedMarket } from "../lib/deriv";
 import { logger } from "../lib/logger";
-import { db, settingsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, accountsTable, settingsTable } from "@workspace/db";
+import { and, eq } from "drizzle-orm";
+import { resolveRecoveryPayout } from "../lib/recovery-payout";
+import { buildTurboDbotStrategy } from "../lib/overunder-turbo-dbot";
 import {
   TURBO_BOT_ID,
   getOwnerSessionId,
@@ -185,6 +187,130 @@ router.post("/start", async (req, res): Promise<void> => {
     return;
   }
   res.json({ ok: true, status: visibleStatus(req.sessionId) });
+});
+
+/**
+ * Build a stock Deriv Bot strategy for the scanned lock. Nothing starts here —
+ * the web app hands the XML to the embedded Deriv bot builder, the user checks
+ * the blocks and presses Deriv's Run. Validation mirrors /start exactly so a
+ * DBot can only ever be built for a triple the scan is allowed to deploy.
+ */
+router.post("/dbot", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+
+  const normal = parseContract(body.normal);
+  const recovery = parseContract(body.recovery);
+  if (!normal || !isNormalContract(normal.side, normal.barrier)) {
+    res.status(400).json({
+      error: "normal must be one of Over 1, Over 2, Under 7, Under 8 — run the scan first",
+    });
+    return;
+  }
+  if (!recovery || !isRecoveryContract(recovery.side, recovery.barrier)) {
+    res.status(400).json({
+      error: "recovery must be one of Over 4, Over 5, Under 4, Under 5 — run the scan first",
+    });
+    return;
+  }
+
+  const symbol = typeof body.symbol === "string" ? body.symbol : "";
+  const market = symbol && isAutomatedMarket(symbol)
+    ? AUTOMATED_DERIV_MARKETS.find((m) => m.symbol === symbol)
+    : undefined;
+  if (!market?.digitEnabled) {
+    res.status(400).json({
+      error: "Run the scan first — a measured digit market is required",
+    });
+    return;
+  }
+
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+
+  try {
+    const params = await simParams(req.sessionId, body);
+
+    // Account currency — the builder's trade options are denominated in it.
+    let currency = "USD";
+    try {
+      let accounts = await db
+        .select()
+        .from(accountsTable)
+        .where(and(eq(accountsTable.sessionId, req.sessionId), eq(accountsTable.isActive, true)))
+        .limit(1);
+      if (accounts.length === 0) {
+        accounts = await db
+          .select()
+          .from(accountsTable)
+          .where(eq(accountsTable.sessionId, req.sessionId))
+          .limit(1);
+      }
+      if (accounts[0]?.currency) currency = accounts[0].currency;
+    } catch {
+      /* default currency */
+    }
+
+    // Seed payout multipliers exactly the way the engine quotes them before a
+    // fire (live $1 proposal, canonical schedule as fallback). The generated bot
+    // refreshes each leg from its realised payout after every win.
+    const [normalQuote, recoveryQuote] = await Promise.all([
+      resolveRecoveryPayout({
+        symbol: market.symbol,
+        contractType: normal.side,
+        barrier: normal.barrier,
+        duration: 1,
+        durationUnit: "t",
+        currency,
+      }),
+      resolveRecoveryPayout({
+        symbol: market.symbol,
+        contractType: recovery.side,
+        barrier: recovery.barrier,
+        duration: 1,
+        durationUnit: "t",
+        currency,
+      }),
+    ]);
+
+    const analysis = body.analysis && typeof body.analysis === "object" ? body.analysis : undefined;
+    const predictedDepth = Math.max(
+      3,
+      Math.round(Number(analysis?.metrics?.recoveryDepthP95) || 4),
+    );
+
+    const strategy = buildTurboDbotStrategy({
+      symbol: market.symbol,
+      displayName: market.displayName,
+      normal,
+      recovery,
+      stake: body.stake,
+      takeProfit: Number(body.takeProfit) > 0 ? Number(body.takeProfit) : params.takeProfit,
+      stopLoss: Number(body.stopLoss) > 0 ? Number(body.stopLoss) : params.stopLoss,
+      maxRecoverySteps: Math.max(
+        1,
+        Math.min(10, Number(body.maxRecoverySteps) || params.maxRecoverySteps),
+      ),
+      markupPercent: params.markupPercent,
+      maxStake: params.maxStake,
+      normalPayout: normalQuote.payoutMultiplier,
+      recoveryPayout: recoveryQuote.payoutMultiplier,
+      breakerDepth: predictedDepth + 2,
+      currency,
+    });
+
+    res.json({
+      ok: true,
+      ...strategy,
+      payoutSource: { normal: normalQuote.source, recovery: recoveryQuote.source },
+    });
+  } catch (err) {
+    logger.error({ err }, "Over/Under Turbo DBot build failed");
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Could not build the DBot strategy",
+    });
+  }
 });
 
 router.post("/stop", (req, res) => {

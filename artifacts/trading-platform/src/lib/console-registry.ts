@@ -39,7 +39,7 @@ export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProp
   "apex@1": ApexConsole,
   "bastion@1": BastionConsole,
   "overunder-navigator@1": OverUnderNavigatorConsole,
-  "overunder-turbo@1": OverUnderTurboConsole,
+  "overunder-turbo@2": OverUnderTurboConsole,
   "parity-forge@1": ParityForgeConsole,
   "surge@1": SurgeConsole,
   "specialist@1": BotConsole,

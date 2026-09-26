@@ -58,6 +58,8 @@ export function stopPathForBot(botId: string): string {
       return "/api/bots/apex/stop";
     case "duallock":
       return "/api/bots/duallock/stop";
+    case "twinrail":
+      return "/api/bots/twinrail/stop";
     case "killshot":
       return "/api/bots/killshot/stop";
     case "ks-overunder":

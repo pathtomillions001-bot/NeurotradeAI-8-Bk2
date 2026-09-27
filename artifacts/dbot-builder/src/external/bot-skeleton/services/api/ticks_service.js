@@ -69,26 +69,27 @@ export default class TicksService {
     }
 
     async request(options) {
-        return new Promise((resolve, reject) => {
-            const { symbol, granularity } = options;
+        const { symbol, granularity } = options;
 
-            const style = getType(granularity);
+        const style = getType(granularity);
 
-            if (style === 'ticks' && this.ticks.has(symbol)) {
-                resolve(this.ticks.get(symbol));
-            }
+        // Serve straight from the live cache. Once a symbol is subscribed its
+        // tape is kept fresh by the tick stream, so re-issuing ticks_history
+        // here would be pure request-storm: the old code resolved with the
+        // cache but STILL fell through and fired a fresh ticks_history +
+        // subscribe for every call. With multi-market scans (Digit Forge
+        // analyses up to 9 symbols per cycle) that produced dozens of
+        // redundant requests per minute — the main trigger for RateLimit /
+        // "Request failed for: ticks_history, retrying in 2.5s" journal spam.
+        if (style === 'ticks' && this.ticks.has(symbol)) {
+            return this.ticks.get(symbol);
+        }
 
-            if (style === 'candles' && this.candles.hasIn([symbol, Number(granularity)])) {
-                resolve(this.candles.getIn([symbol, Number(granularity)]));
-            }
-            this.requestStream({ ...options, style })
-                .then(res => {
-                    resolve(res);
-                })
-                .catch(e => {
-                    reject(e);
-                });
-        });
+        if (style === 'candles' && this.candles.hasIn([symbol, Number(granularity)])) {
+            return this.candles.getIn([symbol, Number(granularity)]);
+        }
+
+        return this.requestStream({ ...options, style });
     }
 
     monitor(options) {
@@ -225,38 +226,80 @@ export default class TicksService {
     }
 
     requestStream(options) {
-        const { style } = options;
-        const stringified_options = JSON.stringify(options);
+        const { symbol, granularity, style } = options;
+        // Key on the request identity only (never on caller hints such as
+        // retry_limit) so concurrent callers for the same stream share one
+        // in-flight promise.
+        const stringified_options = JSON.stringify({ symbol, granularity: granularity ?? null, style });
 
-        if (style === 'ticks') {
-            // Check if we already have a promise for these exact options
-            if (!this.ticks_history_promise || this.ticks_history_promise.stringified_options !== stringified_options) {
-                this.ticks_history_promise = {
-                    promise: this.requestPipSizes().then(() => this.requestTicks(options)),
-                    stringified_options,
-                };
+        // The legacy implementation kept a SINGLE cached promise slot per
+        // style. With one symbol that was a working dedupe; with multi-market
+        // scans every new symbol overwrote the slot, so parallel requests for
+        // 9 symbols thrashed the cache and each subsequent call re-sent
+        // ticks_history over the wire. This keyed map dedupes per stream while
+        // `ticks_history_promise` is preserved (it backs
+        // `checkTicksPromiseExists()` in the trade engine).
+        if (!this.stream_promises) this.stream_promises = {};
+
+        if (style === 'ticks' || style === 'candles') {
+            if (!this.stream_promises[stringified_options]) {
+                const promise = this.requestPipSizes().then(() => this.requestTicks(options));
+                // A failed stream must not be cached forever — clear the slot so
+                // the next cycle can retry with a fresh request.
+                promise.catch(() => {
+                    delete this.stream_promises[stringified_options];
+                    if (this.ticks_history_promise?.stringified_options === stringified_options) {
+                        this.ticks_history_promise = null;
+                    }
+                    if (this.candles_promise?.stringified_options === stringified_options) {
+                        this.candles_promise = null;
+                    }
+                });
+                this.stream_promises[stringified_options] = promise;
             }
 
-            return this.ticks_history_promise.promise;
-        }
-
-        if (style === 'candles') {
-            // Check if we already have a promise for these exact options
-            if (!this.candles_promise || this.candles_promise.stringified_options !== stringified_options) {
-                this.candles_promise = {
-                    promise: this.requestPipSizes().then(() => this.requestTicks(options)),
-                    stringified_options,
-                };
+            const promise = this.stream_promises[stringified_options];
+            if (style === 'ticks') {
+                this.ticks_history_promise = { promise, stringified_options };
+            } else {
+                this.candles_promise = { promise, stringified_options };
             }
-
-            return this.candles_promise.promise;
+            return promise;
         }
 
         return [];
     }
 
+    /**
+     * Resolves once the underlying socket reports OPEN (readyState === 1), or
+     * after `timeout_ms` as a fail-safe (doUntilDone still owns retries after
+     * that). The engine used to fire ticks_history the instant Run was
+     * pressed — often while the socket was still CONNECTING or mid-reconnect —
+     * so the very first request failed and the journal opened with
+     * "Request failed for: ticks_history, retrying in 2.5s" before a single
+     * tick arrived. Polling (rather than an event listener) deliberately
+     * survives api_base swapping in a brand-new connection object on
+     * reconnect.
+     */
+    waitForConnectionOpen(timeout_ms = 10000) {
+        return new Promise(resolve => {
+            if (api_base.api?.connection?.readyState === 1 || !api_base.api?.connection) {
+                resolve();
+                return;
+            }
+            const started = Date.now();
+            const poll = setInterval(() => {
+                const is_open = api_base.api?.connection?.readyState === 1;
+                if (is_open || Date.now() - started >= timeout_ms) {
+                    clearInterval(poll);
+                    resolve();
+                }
+            }, 250);
+        });
+    }
+
     requestTicks(options) {
-        const { symbol, granularity, style } = options;
+        const { symbol, granularity, style, retry_limit } = options;
         const request_object = {
             ticks_history: symbol === 'na' ? 'R_100' : symbol,
             subscribe: 1,
@@ -266,8 +309,17 @@ export default class TicksService {
             style,
         };
         return new Promise((resolve, reject) => {
-            if (!api_base.api) resolve([]);
-            doUntilDone(() => api_base.api.send(request_object), ['AlreadySubscribed'], api_base)
+            if (!api_base.api) {
+                // The old code resolved([]) here but FELL THROUGH and still
+                // called doUntilDone on a null api — the reject from that
+                // throw raced the early resolve. Return explicitly.
+                resolve([]);
+                return;
+            }
+            this.waitForConnectionOpen()
+                .then(() =>
+                    doUntilDone(() => api_base.api.send(request_object), ['AlreadySubscribed'], api_base, retry_limit)
+                )
                 .then(r => {
                     if (style === 'ticks') {
                         const ticks = historyToTicks(r.history);

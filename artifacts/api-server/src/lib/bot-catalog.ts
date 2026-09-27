@@ -101,6 +101,17 @@ export interface BotDefinition {
    * ladder. Execution belongs to Deriv's own Run button, not to NeuroTrade.
    */
   forge?: boolean;
+  /**
+   * Omni Forge: the fully user-configurable DBot factory. Like Digit Forge it
+   * never scans and never trades — but the user chooses ANY mix of digit
+   * contracts (Over/Under barriers, Even/Odd, Matches/Differs) for the normal
+   * set AND an independent mix for the recovery set. "Create DBot" renders a
+   * Deriv Bot strategy whose in-workspace ranker (Beta-shrunk probability,
+   * Wilson lower bound, loss-conditioned Markov timing, clustering and
+   * instability penalties) picks the best contract AND market every cycle,
+   * plus the shared recovery ladder. Execution belongs to Deriv's Run button.
+   */
+  omniForge?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -228,6 +239,32 @@ export const BOT_CATALOG: BotDefinition[] = [
     sides: [],
     nominalWinRate: "gated by measurement",
     nominalPayout: "barrier quote",
+  },
+  {
+    id: "omni-forge",
+    name: "Omni Forge",
+    code: "BOT-OF-FORGE",
+    family: "multi",
+    omniForge: true,
+    contractLabel: "Your contracts: Over/Under · Even/Odd · Matches/Differs",
+    tagline: "Total freedom. Your contracts, your recovery, one forged DBot.",
+    description:
+      "The fully user-configurable DBot factory. Omni Forge never analyses anything here and never places a trade — you choose ANY mix of digit contracts for normal trades (Over 1, Under 8, Even, Matches 5 — whatever you believe in) and an INDEPENDENT mix for recovery (maybe Even/Odd, maybe Over 4, maybe all of them), press Create DBot, and it renders a Deriv Bot strategy that carries the analysis INSIDE itself. Every tick, the running bot ranks every contract you chose across up to eight markets: a Beta-shrunk win probability so short tapes cannot fake an edge, a Wilson one-sided lower confidence bound against each contract's own break-even, a two-state Markov chain that times recovery entries on P(win | previous loss) — the state a recovery shot actually fires from — and loss-clustering and stability penalties. It fires the best qualifying contract, switches markets safely between contracts when another tape is measurably stronger, and sizes every recovery with the same debt ladder every NeuroTrade bot uses. You verify the blocks in the Bot Builder and press Deriv's own Run.",
+    edge: [
+      "Total contract freedom: any subset of Over 0–8, Under 1–9, Even, Odd, Matches 0–9 (or auto), Differs 0–9 (or auto) — one set for normal, a different set for recovery, mixed categories welcome",
+      "One workspace, every category: the vendored builder's just-in-time purchase native sets the digit for Over/Under/Matches/Differs and strips it for Even/Odd, so a single generated bot can trade all of them",
+      "The ranker IS the gate: Beta(20·p0) prior + Wilson 90% lower bound vs each contract's own break-even — the bot trades its worst plausible rate, never its point estimate",
+      "Recovery timed, not blind: the Markov estimand shifts to P(win | previous loss) — the exact state a recovery entry fires from — with looser thresholds because repayment speed beats selectivity, but a hard refusal when losses cluster",
+      "Best market AND best contract per cycle: up to eight watched markets ranked every evaluation, with safe between-contract market switching when a stronger tape appears",
+      "Same shared recovery ladder as every other bot — debt × (1 + markup) / (payout − 1), floored at 0.35, capped by your max stake and live balance, rounded up to the cent",
+    ],
+    accent: "teal",
+    icon: "target",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "gated by measurement",
+    nominalPayout: "contract quote",
   },
   {
     id: "apex",
@@ -673,6 +710,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
+  if (bot.omniForge) return "omni-forge@1";
   if (bot.forge) return "digit-forge@1";
   if (bot.preLocked) return "dual-lock@1";
   if (bot.oneShot) return "killshot@1";

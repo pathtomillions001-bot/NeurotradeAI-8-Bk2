@@ -9,6 +9,7 @@ import './tick_analysis';
 import './last_digit';
 import './lastDigitList';
 import './neurotrade_digit_rotator';
+import './neurotrade_contract_forge';
 import './neurotrade_turbo_recovery';
 import './stat';
 import './stat_list';

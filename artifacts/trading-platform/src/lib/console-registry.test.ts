@@ -16,6 +16,7 @@ import { describe, it } from "node:test";
 import {
   CONSOLE_REGISTRY,
   consoleHasScanner,
+  consoleIsCustomForge,
   consoleIsForge,
   consoleSkew,
   implementedConsoleIds,
@@ -36,6 +37,8 @@ const API_CONSOLE_IDS = [
   "overunder-navigator@1",
   "overunder-turbo@2",
   "parity-forge@1",
+  "digit-forge@1",
+  "omni-forge@1",
   "specialist@1",
   "surge@1",
   "dual-lock@1",
@@ -113,7 +116,7 @@ describe("consoleSkew", () => {
       skew.bots.map(entry => entry.name),
       ["Echo Apex", "Dual-Lock Range Sentinel"],
     );
-    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "dual-lock@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
+    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "digit-forge@1", "dual-lock@1", "omni-forge@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {
@@ -152,11 +155,26 @@ describe("scanner badge contract", () => {
     assert.equal(consoleIsForge({}), false);
   });
 
-  it("never tags one console as both a scanner and a forge", () => {
+  it("marks exactly the consoles that forge a DBot from USER-COMPOSED contract sets", () => {
+    // CUSTOM FORGE means "builds a Deriv Bot from contract sets the user
+    // assembles" — Omni Forge is the only such console today; adding another
+    // means adding it to CUSTOM_FORGE_CONSOLE_IDS at the same time.
     for (const id of WEB_CONSOLE_IDS) {
+      assert.equal(
+        consoleIsCustomForge({ console: id }),
+        id === "omni-forge@1",
+        `custom-forge mismatch for "${id}" — is the badge contract drift-free with the console's primary action?`,
+      );
+    }
+    assert.equal(consoleIsCustomForge({}), false);
+  });
+
+  it("never tags one console with more than one capability badge", () => {
+    for (const id of WEB_CONSOLE_IDS) {
+      const badges = [consoleHasScanner({ console: id }), consoleIsForge({ console: id }), consoleIsCustomForge({ console: id })];
       assert.ok(
-        !(consoleHasScanner({ console: id }) && consoleIsForge({ console: id })),
-        `"${id}" claims both badges — scan-and-trade and build-only are different promises`,
+        badges.filter(Boolean).length <= 1,
+        `"${id}" claims more than one badge — scan-and-trade, fixed forge and custom forge are different promises`,
       );
     }
   });

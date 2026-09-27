@@ -117,6 +117,26 @@ export class XmlBuilder {
       inner: `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field><field name="WINDOW">${esc(window)}</field>`,
     };
   }
+  /** Omni Forge: run the user-defined contract-set ranker inside the bot runtime. */
+  ntAnalyseContracts(mode: "NORMAL" | "RECOVERY", markets: string[], contractsCsv: string, window: number): Stmt {
+    return {
+      type: "nt_analyse_contracts",
+      inner:
+        `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field>` +
+        `<field name="CONTRACTS">${esc(contractsCsv)}</field><field name="WINDOW">${esc(window)}</field>`,
+    };
+  }
+  /** Omni Forge runtime decision field (vendored builder only). */
+  ntForgeDecision(field: string): string {
+    return `<block type="nt_contract_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
+  /** Omni Forge: buy any digit contract type with a just-in-time prediction. */
+  ntPurchaseContract(contract: string, barrier: string): Stmt {
+    return {
+      type: "nt_purchase_contract",
+      inner: `<value name="CONTRACT">${contract}</value><value name="BARRIER">${barrier}</value>`,
+    };
+  }
   /** Analyse WHEN to execute a fixed Over/Under Turbo recovery contract. */
   ntAnalyseTurboRecovery(
     contract: "DIGITOVER" | "DIGITUNDER",

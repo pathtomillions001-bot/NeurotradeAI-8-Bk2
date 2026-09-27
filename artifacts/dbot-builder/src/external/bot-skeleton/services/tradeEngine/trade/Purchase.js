@@ -33,12 +33,18 @@ export default Engine =>
         }
 
         purchase(contract_type) {
-            // Prevent calling purchase twice
-            if (this.store.getState().scope !== BEFORE_PURCHASE) {
+            // Prevent calling purchase twice or while an existing purchase request is in-flight
+            if (this.is_purchasing || this.store.getState().scope !== BEFORE_PURCHASE) {
                 return Promise.resolve();
             }
+            this.is_purchasing = true;
+
+            const resetPurchasing = () => {
+                this.is_purchasing = false;
+            };
 
             const onSuccess = response => {
+                resetPurchasing();
                 // Don't unnecessarily send a forget request for a purchased contract.
                 const { buy } = response;
 
@@ -79,7 +85,10 @@ export default Engine =>
                 });
 
                 if (!this.options.timeMachineEnabled) {
-                    return doUntilDone(action).then(onSuccess);
+                    return doUntilDone(action).then(onSuccess).catch(err => {
+                        resetPurchasing();
+                        throw err;
+                    });
                 }
 
                 return recoverFromError(
@@ -102,7 +111,10 @@ export default Engine =>
                     },
                     ['PriceMoved', 'InvalidContractProposal'],
                     delayIndex++
-                ).then(onSuccess);
+                ).then(onSuccess).catch(err => {
+                    resetPurchasing();
+                    throw err;
+                });
             }
             const trade_option = tradeOptionToBuy(contract_type, this.tradeOptions);
             const action = () => api_base.api.send(trade_option);
@@ -115,7 +127,10 @@ export default Engine =>
             });
 
             if (!this.options.timeMachineEnabled) {
-                return doUntilDone(action).then(onSuccess);
+                return doUntilDone(action).then(onSuccess).catch(err => {
+                    resetPurchasing();
+                    throw err;
+                });
             }
 
             return recoverFromError(
@@ -134,7 +149,10 @@ export default Engine =>
                 },
                 ['PriceMoved', 'InvalidContractProposal'],
                 delayIndex++
-            ).then(onSuccess);
+            ).then(onSuccess).catch(err => {
+                resetPurchasing();
+                throw err;
+            });
         }
         getPurchaseReference = () => purchase_reference;
         regeneratePurchaseReference = () => {

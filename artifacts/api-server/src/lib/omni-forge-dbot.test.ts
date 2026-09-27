@@ -1,0 +1,206 @@
+/**
+ * Omni Forge → DBot generator tests.
+ *
+ * Three layers, mirroring the Digit Forge suite:
+ *   1. The generator is a pure function that REFUSES illegal input loudly.
+ *   2. The emitted XML only uses block types the vendored builder registers
+ *      (the builder's `load()` rejects a whole workspace on ONE unknown type).
+ *   3. The committed builder fixtures equal the current generator output, so
+ *      the API and the builder suite can never drift apart silently — the
+ *      builder's jest side then loads those same files into the REAL Blockly
+ *      and executes them against a scripted market.
+ */
+
+import { describe, it } from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+import {
+  buildOmniForgeStrategy,
+  normaliseForgeSet,
+  forgeCsv,
+  forgePayout,
+  forgeFairRate,
+  forgeLabel,
+  OMNI_FORGE_BLOCK_TYPES,
+  type OmniForgeInput,
+} from "./omni-forge-dbot";
+import { OMNI_FORGE_FIXTURES, fixturesDir, renderFixture } from "./omni-forge-dbot.fixtures";
+
+const BASE: OmniForgeInput = {
+  symbol: "R_50",
+  displayName: "Volatility 50 Index",
+  normal: [
+    { type: "DIGITOVER", digit: 1 },
+    { type: "DIGITUNDER", digit: 8 },
+  ],
+  recovery: [
+    { type: "DIGITEVEN", digit: -1 },
+    { type: "DIGITOVER", digit: 4 },
+  ],
+  stake: 1,
+  takeProfit: 10,
+  stopLoss: 5,
+  maxRecoverySteps: 3,
+  markupPercent: 10,
+  maxStake: 500,
+  breakerDepth: 6,
+  currency: "USD",
+  window: 120,
+  watchMarkets: ["R_10", "R_25", "R_75"],
+};
+
+describe("omni-forge input validation", () => {
+  it("rejects an empty normal set", () => {
+    assert.throws(() => buildOmniForgeStrategy({ ...BASE, normal: [] }), /at least one contract/);
+  });
+  it("rejects an empty recovery set", () => {
+    assert.throws(() => buildOmniForgeStrategy({ ...BASE, recovery: [] }), /at least one contract/);
+  });
+  it("rejects out-of-range Over/Under barriers", () => {
+    assert.throws(() => normaliseForgeSet([{ type: "DIGITOVER", digit: 9 }], "normal"), /Over needs a barrier 0–8/);
+    assert.throws(() => normaliseForgeSet([{ type: "DIGITUNDER", digit: 0 }], "normal"), /Under needs a barrier 1–9/);
+  });
+  it("rejects unknown contract types", () => {
+    assert.throws(
+      () => normaliseForgeSet([{ type: "CALL" as never, digit: -1 }], "normal"),
+      /unknown contract type/,
+    );
+  });
+  it("rejects more than six contracts per set", () => {
+    const overMany = Array.from({ length: 7 }, (_, i) => ({ type: "DIGITOVER" as const, digit: Math.min(8, i) }));
+    assert.throws(() => normaliseForgeSet(overMany, "normal"), /at most 6/);
+  });
+  it("deduplicates repeated specs and strips digits from parity contracts", () => {
+    const set = normaliseForgeSet(
+      [
+        { type: "DIGITEVEN", digit: 4 },
+        { type: "DIGITEVEN", digit: 7 },
+        { type: "DIGITOVER", digit: 2 },
+        { type: "DIGITOVER", digit: 2 },
+      ],
+      "normal",
+    );
+    assert.deepEqual(set, [
+      { type: "DIGITEVEN", digit: -1 },
+      { type: "DIGITOVER", digit: 2 },
+    ]);
+  });
+  it("accepts auto digits for Matches/Differs only", () => {
+    const set = normaliseForgeSet(
+      [
+        { type: "DIGITMATCH", digit: -1 },
+        { type: "DIGITDIFF", digit: 3 },
+      ],
+      "recovery",
+    );
+    assert.equal(set.length, 2);
+    assert.throws(() => normaliseForgeSet([{ type: "DIGITMATCH", digit: 12 }], "recovery"), /0–9 or auto/);
+  });
+  it("rejects a sub-minimum stake and a bad symbol", () => {
+    assert.throws(() => buildOmniForgeStrategy({ ...BASE, stake: 0.1 }), /stake/);
+    assert.throws(() => buildOmniForgeStrategy({ ...BASE, symbol: "R_50; DROP" }), /symbol/);
+  });
+});
+
+describe("omni-forge forge-time maths", () => {
+  it("prices every contract type from the canonical tables", () => {
+    assert.equal(forgePayout({ type: "DIGITOVER", digit: 1 }), 1.23);
+    assert.equal(forgePayout({ type: "DIGITUNDER", digit: 8 }), 1.23);
+    assert.equal(forgePayout({ type: "DIGITEVEN", digit: -1 }), 1.95);
+    assert.equal(forgePayout({ type: "DIGITODD", digit: -1 }), 1.95);
+    assert.equal(forgePayout({ type: "DIGITMATCH", digit: 5 }), 8.93);
+    assert.equal(forgePayout({ type: "DIGITDIFF", digit: 5 }), 1.09);
+  });
+  it("knows every contract's fair win rate", () => {
+    assert.equal(forgeFairRate({ type: "DIGITOVER", digit: 1 }), 0.8);
+    assert.equal(forgeFairRate({ type: "DIGITUNDER", digit: 8 }), 0.8);
+    assert.equal(forgeFairRate({ type: "DIGITEVEN", digit: -1 }), 0.5);
+    assert.equal(forgeFairRate({ type: "DIGITMATCH", digit: 3 }), 0.1);
+    assert.equal(forgeFairRate({ type: "DIGITDIFF", digit: 3 }), 0.9);
+  });
+  it("labels specs the way the console shows them", () => {
+    assert.equal(forgeLabel({ type: "DIGITOVER", digit: 1 }), "Over 1");
+    assert.equal(forgeLabel({ type: "DIGITMATCH", digit: -1 }), "Matches auto");
+    assert.equal(forgeLabel({ type: "DIGITDIFF", digit: 7 }), "Differs 7");
+  });
+  it("emits the runtime CSV wire format the vendored block parses", () => {
+    const csv = forgeCsv([
+      { type: "DIGITOVER", digit: 1 },
+      { type: "DIGITEVEN", digit: -1 },
+      { type: "DIGITMATCH", digit: -1 },
+    ]);
+    assert.equal(csv, "DIGITOVER:1:1.23,DIGITEVEN:-1:1.95,DIGITMATCH:-1:8.93");
+  });
+});
+
+describe("omni-forge strategy shape", () => {
+  it("emits only block types the vendored builder registers", () => {
+    const { xml } = buildOmniForgeStrategy(BASE);
+    const types = [...xml.matchAll(/<(?:block|shadow) type="([^"]+)"/g)].map((m) => m[1]!);
+    const allowed = new Set<string>(OMNI_FORGE_BLOCK_TYPES);
+    const unknown = [...new Set(types.filter((t) => !allowed.has(t)))];
+    assert.deepEqual(unknown, [], `unexpected block types: ${unknown.join(", ")}`);
+  });
+
+  it("declares the trade type of the first normal contract and carries both CSVs", () => {
+    const mixed = buildOmniForgeStrategy(BASE);
+    assert.match(mixed.xml, /<field name="TRADETYPE_LIST">overunder<\/field>/);
+    assert.match(mixed.xml, /DIGITOVER:1:1.23,DIGITUNDER:8:1.23/);
+    assert.match(mixed.xml, /DIGITEVEN:-1:1.95,DIGITOVER:4:1.95/);
+
+    const parity = buildOmniForgeStrategy({ ...BASE, normal: [{ type: "DIGITODD", digit: -1 }] });
+    assert.match(parity.xml, /<field name="TRADETYPE_LIST">evenodd<\/field>/);
+    // Even/Odd trade options must not carry a prediction input.
+    assert.ok(!parity.xml.includes('<value name="PREDICTION">'));
+
+    const md = buildOmniForgeStrategy({ ...BASE, normal: [{ type: "DIGITMATCH", digit: 5 }] });
+    assert.match(md.xml, /<field name="TRADETYPE_LIST">matchesdiffers<\/field>/);
+    assert.ok(md.xml.includes('<value name="PREDICTION">'));
+  });
+
+  it("keeps the starting market first in the watchlist and caps it at eight", () => {
+    const { summary } = buildOmniForgeStrategy({
+      ...BASE,
+      watchMarkets: ["R_10", "R_25", "R_75", "R_100", "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V"],
+    });
+    assert.equal(summary.watchMarkets[0], "R_50");
+    assert.equal(summary.watchMarkets.length, 8);
+  });
+
+  it("uses the WORST recovery payout and fair rate for the ladder disclosure", () => {
+    const { summary } = buildOmniForgeStrategy(BASE);
+    // Recovery set: Even (1.95, 50%) and Over 4 (1.95, 50%) → both 1.95/0.5.
+    assert.equal(summary.ladder.debtGrowthPerStep, 2.158);
+    const withMatch = buildOmniForgeStrategy({
+      ...BASE,
+      recovery: [{ type: "DIGITEVEN", digit: -1 }, { type: "DIGITMATCH", digit: -1 }],
+    });
+    // Matches pays 8.93 but wins 10% — failure odds must reflect the 10%.
+    assert.ok(withMatch.summary.ladder.failureProbability > summary.ladder.failureProbability);
+  });
+
+  it("is deterministic and well-formed", () => {
+    const a = buildOmniForgeStrategy(BASE).xml;
+    const b = buildOmniForgeStrategy(BASE).xml;
+    assert.equal(a, b);
+    const opens = (a.match(/<block /g) ?? []).length;
+    const closes = (a.match(/<\/block>/g) ?? []).length;
+    assert.equal(opens, closes, "unbalanced <block> tags");
+    assert.match(a, /^<xml xmlns="https:\/\/developers.google.com\/blockly\/xml" is_dbot="true"/);
+  });
+});
+
+describe("committed builder fixtures", () => {
+  it("match the current generator output for every fixture", () => {
+    for (const name of Object.keys(OMNI_FORGE_FIXTURES)) {
+      const committed = readFileSync(join(fixturesDir(), `${name}.xml`), "utf8");
+      assert.equal(
+        committed,
+        renderFixture(name),
+        `${name}.xml is stale — regenerate with: npx tsx src/lib/omni-forge-dbot.fixtures.ts --write`,
+      );
+    }
+  });
+});

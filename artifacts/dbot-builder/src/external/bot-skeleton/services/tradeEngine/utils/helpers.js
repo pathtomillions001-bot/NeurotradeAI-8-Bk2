@@ -149,7 +149,11 @@ const getBackoffDelayInMs = (error_obj, delay_index) => {
 
     if (code) {
         const error_details = {
-            message_type: error.msg_type,
+            // `error.msg_type` is frequently absent on transport-level failures,
+            // which used to print "Request failed for: , retrying in 2.5s".
+            // Fall back to the response-level msg_type so the journal always
+            // names the request that failed (e.g. "ticks_history").
+            message_type: error.msg_type ?? msg_type ?? localize('unknown'),
             delay: next_delay_in_seconds,
             request: echo_req?.req_id,
             message: message || localize('The market is closed'),
@@ -266,7 +270,12 @@ export const recoverFromError = (promiseFn, recoverFn, errors_to_ignore, delay_i
                             };
 
                             globalObserver.setState({ global_timeouts });
-                        })
+                        }),
+                    // Additive third argument: lets callers (doUntilDone with a
+                    // retry cap) reject with the REAL error once the cap is hit
+                    // instead of a synthetic one. Existing recoverFns that take
+                    // two parameters are unaffected.
+                    error
                 );
             });
         } else {
@@ -279,13 +288,30 @@ export const recoverFromError = (promiseFn, recoverFn, errors_to_ignore, delay_i
  * @param {*} promiseFn api call - it could be api call or subscription
  * @param {*} errors_to_ignore list of errors to ignore
  * @param {*} api_base instance of APIBase class to check if the bot is running or not
+ * @param {number} [max_attempts=Infinity] optional retry cap. The default keeps the
+ *     historical retry-forever behaviour (correct for the active symbol's stream and
+ *     for purchases); scan-style reads (e.g. Digit Forge's multi-market analysis)
+ *     pass a small cap so one dead/closed market cannot spam the journal with
+ *     "Request failed … retrying" forever — the scan simply skips that market
+ *     this cycle and tries again on the next one.
  * @returns a new promise
  */
-export const doUntilDone = (promiseFn, errors_to_ignore, api_base) => {
+export const doUntilDone = (promiseFn, errors_to_ignore, api_base, max_attempts = Infinity) => {
     let delay_index = 1;
 
     return new Promise((resolve, reject) => {
-        const recoverFn = (error_code, makeDelay) => {
+        const recoverFn = (error_code, makeDelay, error) => {
+            if (delay_index >= max_attempts) {
+                reject(
+                    error ?? {
+                        error: {
+                            code: error_code ?? 'RequestFailed',
+                            message: localize('Request retry limit reached'),
+                        },
+                    }
+                );
+                return;
+            }
             delay_index++;
             makeDelay().then(repeatFn);
         };

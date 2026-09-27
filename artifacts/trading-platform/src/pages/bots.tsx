@@ -16,7 +16,7 @@ import {
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { ACCENTS, BOT_ICON, type BotCardData, type BotSessionStatus } from "@/lib/bots";
-import { consoleHasScanner, consoleIsForge, consoleSkew, resolveConsole } from "@/lib/console-registry";
+import { consoleHasScanner, consoleIsCustomForge, consoleIsForge, consoleSkew, resolveConsole } from "@/lib/console-registry";
 import { WEB_RELEASE, releasePair, type ReleaseInfo } from "@/lib/release";
 import { withTabSession } from "@/lib/tab-session";
 
@@ -194,6 +194,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
   // Forge bots build a Deriv Bot instead of trading here — a different promise
   // from SCANNER, so it gets its own tag in the same slot.
   const isForge = consoleIsForge(bot);
+  const isCustomForge = consoleIsCustomForge(bot);
 
   return (
     <motion.div
@@ -223,6 +224,18 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
           </span>
         )}
 
+        {/* Custom Forge tag — this card builds a DBot from the USER'S OWN contract mix */}
+        {isCustomForge && (
+          <span
+            data-testid="custom-forge-badge"
+            title="This bot does not trade here — you compose the normal and recovery contract sets yourself and it forges a Deriv Bot you run in the Bot Builder"
+            className={`absolute top-2 right-2 z-10 flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${a.badgeBg} ${a.text} ${a.panelBorder}`}
+          >
+            <Hammer className="w-2.5 h-2.5" aria-hidden="true" />
+            Custom Forge
+          </span>
+        )}
+
         {/* Scanner capability tag — top-right, always visible */}
         {isScanner && (
           <span
@@ -237,7 +250,7 @@ function BotCard({ bot, isThisRunning, anotherRunning, unsupportedConsole, onOpe
 
         <CardContent className="p-4 flex flex-col h-full gap-3">
           {/* Header */}
-          <div className={`flex items-start gap-3 ${isScanner || isForge ? "pr-16" : ""}`}>
+          <div className={`flex items-start gap-3 ${isScanner || isForge || isCustomForge ? "pr-16" : ""}`}>
             <div className={`relative w-11 h-11 rounded-xl ${a.iconBg} ${a.iconBorder} flex items-center justify-center flex-shrink-0`}>
               <Icon className={`w-5 h-5 ${a.text}`} />
               {isThisRunning && (

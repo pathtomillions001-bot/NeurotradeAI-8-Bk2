@@ -10,6 +10,28 @@ let purchase_reference;
 
 export default Engine =>
     class Purchase extends Engine {
+        /**
+         * Omni Forge: buy ANY digit contract type with a just-in-time
+         * prediction. Stock XML bakes one trade type (e.g. overunder) into the
+         * workspace, so its static `prediction` is right for barrier contracts
+         * only. This native adjusts `tradeOptions.prediction` for the contract
+         * actually being bought — set for Over/Under/Matches/Differs, removed
+         * for Even/Odd (a parity buy must not carry a barrier) — then defers
+         * to the standard purchase path (scope guard, retries, logging).
+         */
+        ntPurchaseContract(contract_type, barrier) {
+            const type = String(contract_type || '').toUpperCase();
+            const digit = Math.trunc(Number(barrier));
+            if (this.tradeOptions) {
+                if (type === 'DIGITEVEN' || type === 'DIGITODD' || !Number.isFinite(digit) || digit < 0) {
+                    delete this.tradeOptions.prediction;
+                } else {
+                    this.tradeOptions.prediction = digit;
+                }
+            }
+            return this.purchase(type);
+        }
+
         purchase(contract_type) {
             // Prevent calling purchase twice
             if (this.store.getState().scope !== BEFORE_PURCHASE) {

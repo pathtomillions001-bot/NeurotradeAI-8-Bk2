@@ -122,9 +122,20 @@ export default Engine =>
             const windowSize = Math.max(20, Math.min(300, Number(requestedWindow) || 120));
             const z = 1.282; // one-sided 90%; strict enough to reject noise without 30-minute silence
             const rows = [];
-            await Promise.all(markets.map(async symbol => {
+            // Scan in small batches instead of one 9-symbol burst. The first
+            // cycle is the only one that actually hits the wire (afterwards
+            // every tape is served from TicksService's live cache), but that
+            // first burst of parallel ticks_history+subscribe calls was enough
+            // to trip rate limiting and fill the journal with
+            // "Request failed … retrying" lines. Batching keeps the socket
+            // polite; retry_limit stops a closed/unavailable market from
+            // retrying forever — the scan just skips it this cycle (the catch
+            // below) and tries again next cycle.
+            const SCAN_BATCH = 3;
+            const SCAN_RETRY_LIMIT = 3;
+            const scanOne = async symbol => {
                 try {
-                    const ticks = await this.$scope.ticksService.request({ symbol });
+                    const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: SCAN_RETRY_LIMIT });
                     const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
                     const digits = ticks.slice(-windowSize).map(t => getLastDigit(Number(t.quote).toFixed(pip)));
                     if (digits.length < 20) return;
@@ -160,7 +171,10 @@ export default Engine =>
                         rows.push({ symbol, ...c, samples: n, probability, lowerBound, breakEven, ev, markov, clustering, instability, score, eligible });
                     }
                 } catch (_) { /* one unavailable market must not stop the bot */ }
-            }));
+            };
+            for (let i = 0; i < markets.length; i += SCAN_BATCH) {
+                await Promise.all(markets.slice(i, i + SCAN_BATCH).map(scanOne));
+            }
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
             if (!best) {
@@ -183,6 +197,148 @@ export default Engine =>
 
         async ntDigitDecision(field) {
             const value = this.nt_digit_decision?.[field];
+            return value === undefined ? (field === 'reason' ? 'analysis warming up' : 0) : value;
+        }
+
+        /**
+         * Omni Forge: rank a USER-DEFINED candidate set — any mix of
+         * Over/Under barriers, Even/Odd, Matches/Differs — across all watched
+         * markets. Same runtime philosophy as ntAnalyseDigitMarkets (no server
+         * or hidden AI in the loop after Run), but the candidate list is not
+         * hardcoded: the generated XML carries it as `TYPE:DIGIT:PAYOUT` CSV
+         * entries (DIGIT −1 = none for parity contracts / auto-pick for
+         * Matches & Differs).
+         *
+         * Mathematics per candidate per market, over the last W digits:
+         *   · Beta(20·p0, 20·(1−p0)) prior shrinks short tapes to fair odds
+         *   · Wilson one-sided 90% lower bound vs the payout's break-even
+         *   · 2-state Markov chain (add-one smoothed); RECOVERY mode weighs
+         *     P(win | previous loss) because that is its true entry state —
+         *     this is what times the recovery shot instead of firing blind
+         *   · loss-clustering ratio and split-half instability as penalties
+         * NORMAL mode demands a proven edge; RECOVERY mode is deliberately
+         * looser (repayment speed beats selectivity) but still refuses tapes
+         * where losses cluster or the candidate is under water.
+         */
+        async ntAnalyseContracts(mode = 'NORMAL', marketsCsv = '', contractsCsv = '', requestedWindow = 120) {
+            const isRecovery = mode === 'RECOVERY';
+            const KNOWN = ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF'];
+            const FALLBACK_PAYOUT = { DIGITOVER: 1.95, DIGITUNDER: 1.95, DIGITEVEN: 1.95, DIGITODD: 1.95, DIGITMATCH: 8.93, DIGITDIFF: 1.09 };
+            const specs = String(contractsCsv)
+                .split(',').map(s => s.trim()).filter(Boolean).slice(0, 12)
+                .map(raw => {
+                    const [type = '', digitRaw = '-1', payoutRaw = ''] = raw.split(':');
+                    const t = type.toUpperCase();
+                    const digit = Math.trunc(Number(digitRaw));
+                    const payout = Number(payoutRaw);
+                    return {
+                        type: t,
+                        digit: Number.isFinite(digit) ? digit : -1,
+                        payout: Number.isFinite(payout) && payout > 1 ? payout : (FALLBACK_PAYOUT[t] ?? 1.95),
+                    };
+                })
+                .filter(c => KNOWN.includes(c.type));
+            const markets = [...new Set(String(marketsCsv).split(',').map(s => s.trim()).filter(Boolean))].slice(0, 8);
+            if (!markets.includes(this.symbol)) markets.unshift(this.symbol);
+            const windowSize = Math.max(20, Math.min(300, Number(requestedWindow) || 120));
+            const z = 1.282; // one-sided 90% — rejects noise without endless silence
+            const rows = [];
+            const fallbackSpec = specs[0] ?? { type: 'DIGITOVER', digit: isRecovery ? 4 : 2, payout: FALLBACK_PAYOUT.DIGITOVER };
+            const SCAN_BATCH = 3;
+            const SCAN_RETRY_LIMIT = 3;
+            const scanOne = async symbol => {
+                try {
+                    const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: SCAN_RETRY_LIMIT });
+                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
+                    const digits = ticks.slice(-windowSize).map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    if (digits.length < 20) return;
+                    const counts = Array.from({ length: 10 }, () => 0);
+                    for (const d of digits) counts[d] += 1;
+                    for (const spec of specs) {
+                        // Resolve the candidate to a concrete (winFn, p0, digit).
+                        let digit = spec.digit;
+                        let winOf;
+                        let p0;
+                        if (spec.type === 'DIGITOVER') {
+                            if (digit < 0 || digit > 8) continue;
+                            winOf = d => d > digit; p0 = (9 - digit) / 10;
+                        } else if (spec.type === 'DIGITUNDER') {
+                            if (digit < 1 || digit > 9) continue;
+                            winOf = d => d < digit; p0 = digit / 10;
+                        } else if (spec.type === 'DIGITEVEN') {
+                            digit = -1; winOf = d => d % 2 === 0; p0 = 0.5;
+                        } else if (spec.type === 'DIGITODD') {
+                            digit = -1; winOf = d => d % 2 === 1; p0 = 0.5;
+                        } else if (spec.type === 'DIGITMATCH') {
+                            // Auto (−1): the hottest digit of this tape.
+                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.max(...counts));
+                            winOf = d => d === digit; p0 = 0.1;
+                        } else {
+                            // DIGITDIFF — auto (−1): the coldest digit of this tape.
+                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.min(...counts));
+                            winOf = d => d !== digit; p0 = 0.9;
+                        }
+                        const wins = digits.map(winOf);
+                        const n = wins.length;
+                        const hits = wins.filter(Boolean).length;
+                        const probability = (hits + 20 * p0) / (n + 20);
+                        const denom = 1 + z * z / n;
+                        const centre = probability + z * z / (2 * n);
+                        const spread = z * Math.sqrt((probability * (1 - probability) + z * z / (4 * n)) / n);
+                        const lowerBound = (centre - spread) / denom;
+                        const breakEven = 1 / spec.payout;
+                        const ev = probability * spec.payout - 1;
+                        let ll = 0, lw = 0, wl = 0, ww = 0;
+                        for (let i = 1; i < n; i++) {
+                            if (!wins[i - 1] && !wins[i]) ll++; else if (!wins[i - 1]) lw++;
+                            else if (!wins[i]) wl++; else ww++;
+                        }
+                        const afterLoss = (lw + 1) / (ll + lw + 2);
+                        const afterWin = (ww + 1) / (wl + ww + 2);
+                        const markov = wins[n - 1] ? afterWin : afterLoss;
+                        const lossRate = 1 - probability;
+                        const clustering = ((ll + 1) / (ll + lw + 2)) / Math.max(0.01, lossRate);
+                        const half = Math.max(10, Math.floor(n / 2));
+                        const recent = wins.slice(-half).filter(Boolean).length / half;
+                        const prior = wins.slice(0, half).filter(Boolean).length / half;
+                        const instability = Math.abs(recent - prior);
+                        // RECOVERY conditions on the loss state it actually enters from.
+                        const conditionalEdge = (isRecovery ? afterLoss : markov) - breakEven;
+                        const score = 100 * ((lowerBound - breakEven) * 0.55 + conditionalEdge * 0.25 + ev * 0.2 - instability * 0.2 - Math.max(0, clustering - 1) * 0.08);
+                        const eligible = isRecovery
+                            ? n >= 20 && ev > -0.01 && lowerBound > breakEven - 0.05 && clustering < 1.6
+                            : n >= 30 && ev > 0 && lowerBound > breakEven - 0.025 && instability < 0.16 && clustering < 1.45;
+                        rows.push({ symbol, contract: spec.type, barrier: digit, payout: spec.payout, samples: n, probability, lowerBound, breakEven, ev, markov, clustering, instability, score, eligible });
+                    }
+                } catch (_) { /* one unavailable market must not stop the bot */ }
+            };
+            for (let i = 0; i < markets.length; i += SCAN_BATCH) {
+                await Promise.all(markets.slice(i, i + SCAN_BATCH).map(scanOne));
+            }
+            rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+            const best = rows[0];
+            if (!best) {
+                this.nt_contract_decision = { symbol: this.symbol, contract: fallbackSpec.type, barrier: fallbackSpec.digit, payout: fallbackSpec.payout, eligible: false, score: -999, samples: 0, reason: 'feed unavailable; retrying', changedMarket: false };
+                return false;
+            }
+            const blockers = [];
+            if (best.samples < (isRecovery ? 20 : 30)) blockers.push(`samples ${best.samples}/${isRecovery ? 20 : 30}`);
+            if (best.ev <= (isRecovery ? -0.01 : 0)) blockers.push(`EV ${(best.ev * 100).toFixed(2)}%`);
+            if (best.lowerBound <= best.breakEven - (isRecovery ? 0.05 : 0.025)) blockers.push(`lower bound ${(best.lowerBound * 100).toFixed(1)}% vs BE ${(best.breakEven * 100).toFixed(1)}%`);
+            if (!isRecovery && best.instability >= 0.16) blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
+            if (best.clustering >= (isRecovery ? 1.6 : 1.45)) blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
+            this.nt_contract_decision = {
+                ...best,
+                changedMarket: best.symbol !== this.symbol,
+                reason: best.eligible
+                    ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%`
+                    : `HOLD: ${blockers.join(', ') || 'no qualified edge'}`,
+            };
+            return best.eligible;
+        }
+
+        async ntContractDecision(field) {
+            const value = this.nt_contract_decision?.[field];
             return value === undefined ? (field === 'reason' ? 'analysis warming up' : 0) : value;
         }
 

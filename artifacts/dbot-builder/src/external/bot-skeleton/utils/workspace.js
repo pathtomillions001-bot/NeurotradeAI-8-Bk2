@@ -1,13 +1,18 @@
 import { config } from '../constants/config';
 
+// NeuroTrade: `nt_purchase_contract` is Omni Forge's purchase mechanism and
+// stands in for the stock `purchase` block (see scratch/utils/index.js).
+const MANDATORY_BLOCK_ALIASES = { purchase: ['purchase', 'nt_purchase_contract'] };
+
 export const hasAllRequiredBlocks = () => {
     const blocks_in_workspace = window.Blockly.derivWorkspace.getAllBlocks();
     const { mandatoryMainBlocks } = config();
     const required_block_types = ['trade_definition_tradeoptions', ...mandatoryMainBlocks];
     const all_block_types = blocks_in_workspace.map(block => block.type);
-    const has_all_required_blocks = required_block_types.every(required_block_type =>
-        all_block_types.includes(required_block_type)
-    );
+    const has_all_required_blocks = required_block_types.every(required_block_type => {
+        const accepted = MANDATORY_BLOCK_ALIASES[required_block_type] ?? [required_block_type];
+        return accepted.some(type => all_block_types.includes(type));
+    });
 
     return has_all_required_blocks;
 };

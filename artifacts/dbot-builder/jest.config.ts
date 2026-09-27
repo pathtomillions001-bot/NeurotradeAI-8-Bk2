@@ -12,11 +12,12 @@ import type { Config } from 'jest';
 // resolve it via node resolution — it must be mapped to the package directory.
 // Resolve that directory robustly for both the monorepo (npm workspaces hoist
 // it to the repo root) and a standalone build (local node_modules).
+const rootDir = process.cwd();
 const derivComUiDir =
     [
-        path.join(__dirname, 'node_modules/@deriv-com/ui'),
-        path.join(__dirname, '../../node_modules/@deriv-com/ui'),
-    ].find(candidate => fs.existsSync(candidate)) ?? path.join(__dirname, 'node_modules/@deriv-com/ui');
+        path.join(rootDir, 'node_modules/@deriv-com/ui'),
+        path.join(rootDir, '../../node_modules/@deriv-com/ui'),
+    ].find(candidate => fs.existsSync(candidate)) ?? path.join(rootDir, 'node_modules/@deriv-com/ui');
 
 const config: Config = {
     // All imported modules in your tests should be mocked automatically
@@ -145,7 +146,7 @@ const config: Config = {
     // restoreMocks: false,
 
     // The root directory that Jest should scan for tests and modules within
-    rootDir: __dirname,
+    rootDir,
 
     // A list of paths to directories that Jest should use to search for files in
     // roots: [

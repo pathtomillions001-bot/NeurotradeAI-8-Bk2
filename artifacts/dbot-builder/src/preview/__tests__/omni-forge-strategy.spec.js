@@ -458,6 +458,20 @@ describe('Omni Forge → Deriv DBot strategy', () => {
         expect(loser.state.notifications.some(m => /Stop loss 5.00 USD hit/.test(m))).toBe(true);
     });
 
+    it('executes normal Differs with a concrete auto-picked digit when its edge qualifies', () => {
+        loadFixture('omni-forge-r10-matchdiff-forced');
+        const code = buildRunner(workspace);
+        // Digit 0 is absent, so auto-Differs resolves 0 and wins 100%. It must
+        // enter from analysis immediately — not via the patience fallback — and
+        // the actual purchase must carry 0, never the internal -1 sentinel.
+        const noZeroTape = Array.from({ length: 200 }, (_, index) => (index % 9) + 1);
+        const market = fakeMarket({ results: ['W'], digits: () => noZeroTape });
+        expect(runStrategy(code, market)).toBe('exhausted');
+        expect(market.state.beforeEvaluations).toBeLessThanOrEqual(2);
+        expect(market.state.trades[0]).toMatchObject({ type: 'DIGITDIFF', prediction: 0 });
+        expect(market.state.notifications.some(m => /Patience limit/.test(m))).toBe(false);
+    });
+
     it('honours the patience limit and round-trips auto digits for Matches/Differs', () => {
         loadFixture('omni-forge-r10-matchdiff-forced');
         const code = buildRunner(workspace);

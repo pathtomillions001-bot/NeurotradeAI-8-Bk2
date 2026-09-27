@@ -298,6 +298,18 @@ function tradeTypeFor(spec: ForgeContractSpec): { tradeType: string; hasPredicti
   }
 }
 
+/**
+ * `-1` is Omni Forge's CSV sentinel for "auto-pick", not a legal Deriv
+ * prediction. Keep it in the analyser wire format, but seed the live Trade
+ * Definition with digit 0 until the first analysis resolves a concrete digit.
+ * This prevents an invalid `barrier: -1` quote from blocking BEFORE_PURCHASE.
+ */
+function safeRuntimeDigit(spec: ForgeContractSpec): number {
+  if (spec.type === "DIGITEVEN" || spec.type === "DIGITODD") return -1;
+  const digit = spec.digit ?? -1;
+  return digit >= 0 && digit <= 9 ? digit : 0;
+}
+
 // ── Strategy generator ────────────────────────────────────────────────────────
 
 export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy {
@@ -360,7 +372,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     x.set(V.baseStake, x.num(input.stake)),
     x.set(V.stake, x.get(V.baseStake)),
     x.set(V.contract, x.text(firstNormal.type)),
-    x.set(V.barrier, x.num(firstNormal.digit ?? -1)),
+    x.set(V.barrier, x.num(safeRuntimeDigit(firstNormal))),
     x.set(V.debt, x.num(0)),
     x.set(V.inRecovery, x.bool(false)),
     x.set(V.step, x.num(0)),
@@ -396,7 +408,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     `<value name="DURATION"><shadow type="math_number_positive" id="ofdur"><field name="NUM">1</field></shadow></value>` +
     `<value name="AMOUNT"><shadow type="math_number_positive" id="ofamt"><field name="NUM">${esc(input.stake)}</field></shadow>${x.get(V.stake)}</value>` +
     (hasPrediction
-      ? `<value name="PREDICTION"><shadow type="math_number_positive" id="ofprd"><field name="NUM">${Math.max(0, firstNormal.digit ?? 0)}</field></shadow>${x.get(V.barrier)}</value>`
+      ? `<value name="PREDICTION"><shadow type="math_number_positive" id="ofprd"><field name="NUM">${safeRuntimeDigit(firstNormal)}</field></shadow>${x.get(V.barrier)}</value>`
       : "") +
     `</block>`;
 
@@ -561,7 +573,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     x.set(V.debt, x.get(V.lastStake)),
     // Defaults until the next analysis cycle re-ranks the recovery set.
     x.set(V.contract, x.text(firstRecovery.type)),
-    x.set(V.barrier, x.num(firstRecovery.digit ?? -1)),
+    x.set(V.barrier, x.num(safeRuntimeDigit(firstRecovery))),
     x.set(V.recPayout, x.num(forgePayout(firstRecovery))),
   ];
   const deepenRecovery: Stmt[] = [
@@ -578,7 +590,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     x.set(V.inRecovery, x.bool(false)),
     x.set(V.step, x.num(0)),
     x.set(V.contract, x.text(firstNormal.type)),
-    x.set(V.barrier, x.num(firstNormal.digit ?? -1)),
+    x.set(V.barrier, x.num(safeRuntimeDigit(firstNormal))),
     x.set(V.stake, x.get(V.baseStake)),
     // Back to normal means back behind the gate: the next entry must re-qualify.
     x.set(V.gate, x.bool(false)),

@@ -10,6 +10,7 @@ import { expectPositiveInteger } from '../utils/sanitize';
 import * as constants from './state/constants';
 import { analyseDualLockEntry, DUAL_LOCK_ENTRY_DEFAULTS } from './dual-lock-entry';
 import { analyseTurboRecovery } from './turbo-recovery-analysis';
+import { analyseDigitForgeCandidate, DIGIT_FORGE_ANALYSIS_LIMITS } from './digit-forge-analysis';
 
 let tickListenerKey;
 // The symbol `tickListenerKey` belongs to. Without it, `watchTicks` asked the
@@ -110,13 +111,14 @@ export default Engine =>
          * runtime primitive intentionally exposed through Blockly: no server or
          * hidden AI decides a trade after the strategy has been forged.
          *
-         * Score = conservative EV + conditional Markov edge - instability -
-         * loss-clustering risk.  A Beta(20*p0,20*(1-p0)) prior shrinks short
-         * tapes toward the uniform-digit model; Wilson's one-sided 90% bound is
-         * the hard edge test.  Recovery uses the same evidence but gives extra
-         * weight to P(win|previous loss), because that is its actual entry state.
+         * Score = recency-weighted posterior edge + loss-conditioned edge -
+         * instability - clustering - adverse-run risk. A Beta prior shrinks
+         * short tapes toward uniform digit odds. Recovery additionally requires
+         * short/medium-window agreement and the same candidate to qualify on two
+         * distinct ticks, so a debt-sized buy cannot fire on one noisy snapshot.
          */
         async ntAnalyseDigitMarkets(mode = 'NORMAL', csv = '', requestedWindow = 120) {
+            const recoveryMode = String(mode).toUpperCase() === 'RECOVERY';
             const normal = [
                 { contract: 'DIGITOVER', barrier: 1, payout: 1.23 },
                 { contract: 'DIGITOVER', barrier: 2, payout: 1.4 },
@@ -129,59 +131,28 @@ export default Engine =>
                 { contract: 'DIGITUNDER', barrier: 5, payout: 1.95 },
                 { contract: 'DIGITUNDER', barrier: 4, payout: 2.43 },
             ];
-            const candidates = mode === 'RECOVERY' ? recovery : normal;
+            const candidates = recoveryMode ? recovery : normal;
             const markets = [...new Set(String(csv).split(',').map(s => s.trim()).filter(Boolean))].slice(0, 8);
             if (!markets.includes(this.symbol)) markets.unshift(this.symbol);
-            const windowSize = Math.max(20, Math.min(300, Number(requestedWindow) || 120));
-            const z = 1.282; // one-sided 90%; strict enough to reject noise without 30-minute silence
+            const windowSize = Math.max(50, Math.min(300, Number(requestedWindow) || 120));
             const rows = [];
-            // Scan in small batches instead of one 9-symbol burst. The first
-            // cycle is the only one that actually hits the wire (afterwards
-            // every tape is served from TicksService's live cache), but that
-            // first burst of parallel ticks_history+subscribe calls was enough
-            // to trip rate limiting and fill the journal with
-            // "Request failed … retrying" lines. Batching keeps the socket
-            // polite; retry_limit stops a closed/unavailable market from
-            // retrying forever — the scan just skips it this cycle (the catch
-            // below) and tries again next cycle.
             const SCAN_BATCH = 3;
             const SCAN_RETRY_LIMIT = 3;
             const scanOne = async symbol => {
                 try {
                     const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: SCAN_RETRY_LIMIT });
                     const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
-                    const digits = ticks.slice(-windowSize).map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    const tail = ticks.slice(-windowSize);
+                    const digits = tail.map(t => getLastDigit(Number(t.quote).toFixed(pip)));
                     if (digits.length < 20) return;
-                    for (const c of candidates) {
-                        const wins = digits.map(d => c.contract === 'DIGITOVER' ? d > c.barrier : d < c.barrier);
-                        const n = wins.length;
-                        const p0 = c.contract === 'DIGITOVER' ? (9 - c.barrier) / 10 : c.barrier / 10;
-                        const hits = wins.filter(Boolean).length;
-                        const probability = (hits + 20 * p0) / (n + 20);
-                        const denom = 1 + z * z / n;
-                        const centre = probability + z * z / (2 * n);
-                        const spread = z * Math.sqrt((probability * (1 - probability) + z * z / (4 * n)) / n);
-                        const lowerBound = (centre - spread) / denom;
-                        const breakEven = 1 / c.payout;
-                        const ev = probability * c.payout - 1;
-                        let ll = 0, lw = 0, wl = 0, ww = 0;
-                        for (let i = 1; i < n; i++) {
-                            if (!wins[i - 1] && !wins[i]) ll++; else if (!wins[i - 1]) lw++;
-                            else if (!wins[i]) wl++; else ww++;
-                        }
-                        const afterLoss = (lw + 1) / (ll + lw + 2);
-                        const afterWin = (ww + 1) / (wl + ww + 2);
-                        const markov = wins[n - 1] ? afterWin : afterLoss;
-                        const lossRate = 1 - probability;
-                        const clustering = ((ll + 1) / (ll + lw + 2)) / Math.max(0.01, lossRate);
-                        const half = Math.max(10, Math.floor(n / 2));
-                        const recent = wins.slice(-half).filter(Boolean).length / half;
-                        const prior = wins.slice(0, half).filter(Boolean).length / half;
-                        const instability = Math.abs(recent - prior);
-                        const conditionalEdge = (mode === 'RECOVERY' ? afterLoss : markov) - breakEven;
-                        const score = 100 * ((lowerBound - breakEven) * 0.55 + conditionalEdge * 0.25 + ev * 0.2 - instability * 0.2 - Math.max(0, clustering - 1) * 0.08);
-                        const eligible = n >= 30 && ev > 0 && lowerBound > breakEven - 0.025 && instability < 0.16 && clustering < 1.45;
-                        rows.push({ symbol, ...c, samples: n, probability, lowerBound, breakEven, ev, markov, clustering, instability, score, eligible });
+                    const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
+                    for (const candidate of candidates) {
+                        const analysis = analyseDigitForgeCandidate({
+                            digits,
+                            ...candidate,
+                            mode: recoveryMode ? 'RECOVERY' : 'NORMAL',
+                        });
+                        rows.push({ symbol, ...candidate, ...analysis, tickEpoch });
                     }
                 } catch (_) { /* one unavailable market must not stop the bot */ }
             };
@@ -191,21 +162,55 @@ export default Engine =>
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
             if (!best) {
-                this.nt_digit_decision = { symbol: this.symbol, contract: 'DIGITOVER', barrier: mode === 'RECOVERY' ? 4 : 2, eligible: false, score: -999, samples: 0, reason: 'feed unavailable; retrying', changedMarket: false };
+                this.nt_digit_recovery_confirmation = undefined;
+                this.nt_digit_decision = {
+                    symbol: this.symbol,
+                    contract: 'DIGITOVER',
+                    barrier: recoveryMode ? 4 : 2,
+                    payout: recoveryMode ? 1.95 : 1.4,
+                    eligible: false,
+                    score: -999,
+                    samples: 0,
+                    reason: 'feed unavailable; retrying',
+                    changedMarket: false,
+                };
                 return false;
             }
-            const blockers = [];
-            if (best.samples < 30) blockers.push(`samples ${best.samples}/30`);
-            if (best.ev <= 0) blockers.push(`EV ${(best.ev * 100).toFixed(2)}%`);
-            if (best.lowerBound <= best.breakEven - 0.025) blockers.push(`lower bound ${(best.lowerBound * 100).toFixed(1)}% vs BE ${(best.breakEven * 100).toFixed(1)}%`);
-            if (best.instability >= 0.16) blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
-            if (best.clustering >= 1.45) blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
+
+            // Debt-sized entries need persistence, not one flattering snapshot.
+            // Count confirmations only on DISTINCT ticks and only while the same
+            // market/contract/barrier remains best. Repeated interpreter passes
+            // over one tick therefore cannot accidentally arm a recovery buy.
+            let eligible = best.eligible;
+            let confirmations = 0;
+            if (recoveryMode && best.eligible) {
+                const key = `${best.symbol}:${best.contract}:${best.barrier}`;
+                const previous = this.nt_digit_recovery_confirmation;
+                if (previous?.key === key && previous.epoch !== best.tickEpoch) {
+                    confirmations = previous.count + 1;
+                } else if (previous?.key === key && previous.epoch === best.tickEpoch) {
+                    confirmations = previous.count;
+                } else {
+                    confirmations = 1;
+                }
+                this.nt_digit_recovery_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
+                eligible = confirmations >= DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations;
+            } else {
+                this.nt_digit_recovery_confirmation = undefined;
+            }
+
             this.nt_digit_decision = {
                 ...best,
+                eligible,
+                confirmations,
                 changedMarket: best.symbol !== this.symbol,
-                reason: best.eligible ? `READY score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%` : `HOLD: ${blockers.join(', ') || 'no qualified edge'}`,
+                reason: !best.eligible
+                    ? best.reason
+                    : recoveryMode && !eligible
+                      ? `HOLD · confirming recovery setup ${confirmations}/${DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations} on a fresh tick`
+                      : best.reason,
             };
-            return best.eligible;
+            return eligible;
         }
 
         async ntDigitDecision(field) {

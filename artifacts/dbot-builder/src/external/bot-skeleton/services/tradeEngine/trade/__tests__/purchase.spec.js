@@ -86,4 +86,23 @@ describe('Purchase engine concurrency & ntPurchaseContract safety', () => {
         await engine.ntPurchaseContract('DIGITEVEN', -1);
         expect(engine.tradeOptions.prediction).toBeUndefined();
     });
+
+    it('never sends the auto sentinel -1 for Matches/Differs', async () => {
+        const engine = new PurchaseEngine();
+        api_base.api.send.mockResolvedValue({
+            buy: { transaction_id: 111, contract_id: 222, buy_price: 1 },
+        });
+
+        // A resolved auto digit is carried normally.
+        await engine.ntPurchaseContract('DIGITDIFF', 7);
+        expect(engine.tradeOptions.prediction).toBe(7);
+        expect(api_base.api.send.mock.calls[0][0].parameters.barrier).toBe(7);
+
+        engine.scope = BEFORE_PURCHASE;
+        // If an old/imported workspace still supplies -1, preserve the last
+        // legal seed instead of deleting prediction and sending an invalid buy.
+        await engine.ntPurchaseContract('DIGITDIFF', -1);
+        expect(engine.tradeOptions.prediction).toBe(7);
+        expect(api_base.api.send.mock.calls[1][0].parameters.barrier).toBe(7);
+    });
 });

@@ -5,9 +5,11 @@ what it does at runtime, and how each promise is held down by a test. Where the
 build deviates from the design, the deviation is stated here and this document
 wins.
 
-Status: **phases 1–3 complete.** Phase 4 (in-XML market rotation via the
-vendored-builder engine extension) is not built; the generator already accepts
-and echoes the watch list so the switch has a landing place.
+Status: **phases 1–4 complete.** Digit Forge now emits a NeuroTrade-adaptive
+XML that ranks all four normal barriers and all four recovery barriers across a
+validated eight-market watchlist. The vendored builder safely retargets the
+trade engine between contracts, removes the old tick listener, clears proposal
+state and forces a fresh quote before another purchase.
 
 ---
 
@@ -145,9 +147,14 @@ cd artifacts/dbot-builder && npm install && npx jest src/preview/__tests__/
   non-zero default; an impatient default would undo the gate.
 - **`exitRecovery` also resets `Gate Pass` and `Evaluations`**, so the first
   normal entry after a recovery must re-qualify from scratch.
-- **`watchMarkets` is accepted, validated and echoed in the summary only.** It
-  is the phase-4 landing place; a comment in `after_purchase` marks where the
-  in-XML switch belongs. No non-stock blocks are emitted today.
+- **Adaptive XML is NeuroTrade-builder-only.** `nt_analyse_digit_markets`,
+  `nt_digit_decision` and `nt_switch_market` are registered by the vendored
+  builder. The ranker combines Beta shrinkage, Wilson lower bounds, expected
+  value, a two-state Markov conditional rate, window stability and loss
+  clustering. Stock app.deriv.com does not know these blocks.
+- **The journal is diagnostic.** Every ten refused evaluations it reports the
+  active market, score and exact blocker; market changes are announced and
+  explicitly confirm that stale proposals were cleared.
 
 ---
 

@@ -155,11 +155,16 @@ router.post("/dbot", async (req, res): Promise<void> => {
 
   // Rotator candidates are validated here so the phase-4 switch can never be
   // handed a market the app does not trade.
-  const watchMarkets = Array.isArray(body.watchMarkets)
-    ? (body.watchMarkets as unknown[])
-        .filter((s): s is string => typeof s === "string" && isAutomatedMarket(s))
-        .slice(0, 8)
+  const requestedWatchMarkets = Array.isArray(body.watchMarkets)
+    ? (body.watchMarkets as unknown[]).filter((s): s is string => typeof s === "string" && isAutomatedMarket(s))
     : [];
+  // Adaptive mode is the default: if the client does not provide a watchlist,
+  // seed it from every digit-enabled market (the generator caps subscriptions
+  // at eight and always keeps the selected starting market first).
+  const watchMarkets = (requestedWatchMarkets.length > 0
+    ? requestedWatchMarkets
+    : AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map((m) => m.symbol))
+    .slice(0, 8);
 
   try {
     const [{ markupPercent, maxStake }, currency] = await Promise.all([

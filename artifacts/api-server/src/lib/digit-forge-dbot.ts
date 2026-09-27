@@ -44,18 +44,13 @@
  *      window's expected maximum, ln(W(1−q))/ln(1/q) + 2·1.2825/ln(1/q).
  *      Clustered losses are what turn a depth-4 ladder into a depth-7 event.
  *
- * WHY EVERY BLOCK IS STOCK
- * ────────────────────────
- *   Only block types the vendored builder registers are emitted
- *   (`DIGIT_FORGE_BLOCK_TYPES`), because `load()` rejects the whole workspace
- *   on one unknown type. That keeps this XML loadable in the unmodified Deriv
- *   bot builder as well as ours.
- *
- *   In-XML MARKET SWITCHING (the Rotator mode) is phase 4 and needs three
- *   NeuroTrade blocks in the vendored builder — see
- *   docs/digit-forge-market-switching.md §2. `watchMarkets` is accepted and
- *   echoed in the summary now so the panel and API contract do not change when
- *   the rotator lands.
+ * NEUROTRADE ADAPTIVE BLOCKS
+ * ──────────────────────────
+ *   The generated strategy uses three blocks registered by our vendored builder:
+ *   `nt_analyse_digit_markets`, `nt_digit_decision`, and `nt_switch_market`.
+ *   They rank every legal normal/recovery barrier across the watchlist and
+ *   safely retarget the engine between contracts. This adaptive XML therefore
+ *   runs in NeuroTrade's builder, not the unmodified app.deriv.com builder.
  */
 
 import {
@@ -165,6 +160,9 @@ export const DIGIT_FORGE_BLOCK_TYPES = Object.freeze([
   "total_profit",
   "balance",
   "lastDigitList",
+  "nt_analyse_digit_markets",
+  "nt_digit_decision",
+  "nt_switch_market",
   "lists_getSublist",
   "lists_length",
   "controls_forEach",
@@ -270,7 +268,9 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
   const normalLabel = contractLabel(input.normal);
   const recoveryLabel = contractLabel(input.recovery);
   const currency = /^[A-Za-z]{3,5}$/.test(input.currency) ? input.currency.toUpperCase() : "USD";
-  const watchMarkets = (input.watchMarkets ?? []).filter((s) => /^[A-Za-z0-9_]+$/.test(s)).slice(0, 8);
+  const watchMarkets = [input.symbol, ...(input.watchMarkets ?? [])]
+    .filter((s, i, all) => /^[A-Za-z0-9_]+$/.test(s) && all.indexOf(s) === i)
+    .slice(0, 8);
 
   const zSquared = Math.round(z * z * 1e6) / 1e6;
   const halfZSquared = Math.round((z * z) / 2 * 1e6) / 1e6;
@@ -316,6 +316,9 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     gate: "Gate Pass",
     fire: "Fire",
     evalTicks: "Evaluations",
+    activeSymbol: "Active Market",
+    decisionReason: "Analysis Reason",
+    decisionScore: "Analysis Score",
     // Settlement
     profit: "Profit",
     lastStake: "Last Stake",
@@ -345,6 +348,9 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     x.set(V.normPayout, x.num(Math.round(input.normalPayout * 1000) / 1000)),
     x.set(V.recPayout, x.num(Math.round(input.recoveryPayout * 1000) / 1000)),
     x.set(V.evalTicks, x.num(0)),
+    x.set(V.activeSymbol, x.text(input.symbol)),
+    x.set(V.decisionReason, x.text("analysis warming up")),
+    x.set(V.decisionScore, x.num(0)),
     x.set(V.gate, x.bool(false)),
     x.notify(
       "info",
@@ -578,43 +584,55 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
   // ── 4. Purchase conditions ─────────────────────────────────────────────────
   const waitingReport: Stmt[] = [
     x.joinInto(V.message, [
-      x.text("Holding fire —"),
-      x.get(V.pLo),
-      x.text("worst-case vs"),
-      x.get(V.breakEven),
-      x.text("break-even, adverse run"),
-      x.get(V.runNow),
+      x.text("ANALYSING · market"), x.get(V.activeSymbol),
+      x.text("· score"), x.get(V.decisionScore), x.text("·"), x.get(V.decisionReason),
     ]),
     x.notify("info", x.get(V.message)),
   ];
 
-  const normalEntry: Stmt[] = [
-    x.set(V.evalTicks, x.arith("ADD", x.get(V.evalTicks), x.num(1))),
-    x.call(MEASURE_PROC),
+  const readAdaptiveDecision: Stmt[] = [
+    x.set(V.activeSymbol, x.ntDecision("symbol")),
+    x.set(V.contract, x.ntDecision("contract")),
+    x.set(V.barrier, x.ntDecision("barrier")),
+    x.set(V.decisionScore, x.ntDecision("score")),
+    x.set(V.decisionReason, x.ntDecision("reason")),
+    x.set(V.gate, x.ntDecision("eligible")),
     x.ifElse(
-      [
-        { cond: x.compare("EQ", x.get(V.gate), x.bool(true)), then: [x.set(V.fire, x.bool(true))] },
-        ...(forceEntryAfter > 0
-          ? [
-              {
-                cond: x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
-                then: [
-                  x.notify(
-                    "warn",
-                    x.text(
-                      `Patience limit of ${forceEntryAfter} evaluations reached — entering ${normalLabel} without a confirmed edge`,
-                    ),
-                  ),
-                  x.set(V.fire, x.bool(true)),
-                ],
-              },
-            ]
-          : []),
-        {
-          cond: x.compare("EQ", x.mod(x.get(V.evalTicks), x.num(25)), x.num(0)),
-          then: waitingReport,
-        },
-      ],
+      [{
+        cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+        then: [x.set(V.recPayout, x.ntDecision("payout"))],
+      }],
+      [x.set(V.normPayout, x.ntDecision("payout"))],
+    ),
+  ];
+
+  const adaptiveEntry: Stmt[] = [
+    x.set(V.evalTicks, x.arith("ADD", x.get(V.evalTicks), x.num(1))),
+    x.ifElse(
+      [{ cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)), then: [x.ntAnalyse("RECOVERY", watchMarkets, windowSize)] }],
+      [x.ntAnalyse("NORMAL", watchMarkets, windowSize)],
+    ),
+    ...readAdaptiveDecision,
+    x.ifElse(
+      [{
+        cond: x.compare("EQ", x.ntDecision("changedMarket"), x.bool(true)),
+        then: [
+          x.ntSwitchMarket(x.get(V.activeSymbol)),
+          x.joinInto(V.message, [x.text("SWITCHED MARKET · now analysing"), x.get(V.activeSymbol), x.text("· stale proposals cleared")]),
+          x.notify("info", x.get(V.message)),
+        ],
+      }, {
+        cond: x.compare("EQ", x.get(V.gate), x.bool(true)),
+        then: [x.set(V.fire, x.bool(true))],
+      },
+      ...(forceEntryAfter > 0 ? [{
+        cond: x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
+        then: [x.notify("warn", x.text(`Patience limit ${forceEntryAfter}: taking the highest-ranked candidate`)), x.set(V.fire, x.bool(true))],
+      }] : []),
+      {
+        cond: x.compare("EQ", x.mod(x.get(V.evalTicks), x.num(10)), x.num(0)),
+        then: waitingReport,
+      }],
     ),
   ];
 
@@ -622,19 +640,10 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     "before_purchase",
     `<statement name="BEFOREPURCHASE_STACK">${x.chain([
       x.set(V.fire, x.bool(false)),
-      // Recovery never waits for a gate: the ladder exists to clear debt fast.
-      x.ifElse([{ cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)), then: [x.set(V.fire, x.bool(true))] }], normalEntry),
-      x.ifElse([
-        {
-          cond: x.compare("EQ", x.get(V.fire), x.bool(true)),
-          then: [
-            x.ifElse(
-              [{ cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")), then: [x.purchase("DIGITOVER")] }],
-              [x.purchase("DIGITUNDER")],
-            ),
-          ],
-        },
-      ]),
+      ...adaptiveEntry,
+      x.ifElse([{ cond: x.compare("EQ", x.get(V.fire), x.bool(true)), then: [
+        x.ifElse([{ cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")), then: [x.purchase("DIGITOVER")] }], [x.purchase("DIGITUNDER")]),
+      ] }]),
     ])}</statement>`,
     0,
     900,

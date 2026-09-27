@@ -10,6 +10,9 @@ const getTicksInterface = tradeEngine => {
         getOhlcFromEnd: (...args) => tradeEngine.getOhlcFromEnd(...args),
         getOhlc: (...args) => tradeEngine.getOhlc(...args),
         getLastDigitList: (...args) => tradeEngine.getLastDigitList(...args),
+        ntAnalyseDigitMarkets: (...args) => tradeEngine.ntAnalyseDigitMarkets(...args),
+        ntDigitDecision: (...args) => tradeEngine.ntDigitDecision(...args),
+        ntSwitchMarket: (...args) => tradeEngine.ntSwitchMarket(...args),
     };
 };
 

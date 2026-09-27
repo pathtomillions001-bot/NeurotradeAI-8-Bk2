@@ -106,6 +106,21 @@ export class XmlBuilder {
   lastDigitList(): string {
     return `<block type="lastDigitList" id="${this.id()}"></block>`;
   }
+  /** NeuroTrade Digit Forge runtime decision field (vendored builder only). */
+  ntDecision(field: string): string {
+    return `<block type="nt_digit_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
+  /** Run the adaptive multi-market/barrier ranker inside the bot runtime. */
+  ntAnalyse(mode: "NORMAL" | "RECOVERY", markets: string[], window: number): Stmt {
+    return {
+      type: "nt_analyse_digit_markets",
+      inner: `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field><field name="WINDOW">${esc(window)}</field>`,
+    };
+  }
+  /** Safely retarget the vendored trade engine between contracts. */
+  ntSwitchMarket(symbol: string): Stmt {
+    return { type: "nt_switch_market", inner: `<value name="SYMBOL">${symbol}</value>` };
+  }
   lastN(list: string, n: number): string {
     return (
       `<block type="lists_getSublist" id="${this.id()}"><mutation at1="true" at2="false"></mutation>` +

@@ -20,7 +20,17 @@ const parseOhlc = ohlc => ({
 
 const parseCandles = candles => candles.map(t => parseOhlc(t));
 
-const updateTicks = (ticks, newTick) => (getLast(ticks).epoch >= newTick.epoch ? ticks : [...ticks.slice(1), newTick]);
+// A tape can legitimately be empty (an exchange that returned no history, or a
+// cache that was just refreshed): `getLast([])` is undefined, and reading
+// `.epoch` off it threw a TypeError *inside the socket message handler*, which
+// killed the handler for every symbol — one of the ways a running bot went
+// silent. Seed the tape instead.
+const updateTicks = (ticks, newTick) => {
+    if (!Array.isArray(ticks) || ticks.length === 0) return [newTick];
+    const last = getLast(ticks);
+    if (!last || typeof last.epoch !== 'number') return [...ticks.slice(1), newTick];
+    return last.epoch >= newTick.epoch ? ticks : [...ticks.slice(1), newTick];
+};
 
 const updateCandles = (candles, ohlc) => {
     const lastCandle = getLast(candles);
@@ -50,6 +60,11 @@ export default class TicksService {
         this.ticks_history_promise = null;
         this.active_symbols_promise = null;
         this.candles_promise = null;
+        // Stream health: when the last tick of each subscribed symbol arrived,
+        // and when we last forced it back to life (see startStallWatchdog).
+        this.last_tick_at = {};
+        this.last_recovery_at = {};
+        this.stall_watchdog = null;
 
         this.observe();
     }
@@ -100,9 +115,18 @@ export default class TicksService {
 
             const key = getUUID();
             this.request(options)
-                .then(() => {
+                .then(async () => {
                     if (type === 'ticks') {
+                        // A resolved `request()` does NOT prove the stream is
+                        // live: it may have come from a memoised promise whose
+                        // cache entry has since been dropped (this is what a
+                        // market switch used to do). Attaching a listener to
+                        // that symbol produced a bot that waited forever for a
+                        // tick which could never be delivered. Prove liveness,
+                        // and re-subscribe if it is gone.
+                        if (!this.ticks.has(symbol)) await this.refreshTickStream(symbol);
                         this.tickListeners = this.tickListeners.setIn([symbol, key], callback);
+                        this.startStallWatchdog();
                         globalObserver.emit('bot.bot_ready');
                         api_base.toggleRunButton(false);
                     } else {
@@ -143,7 +167,16 @@ export default class TicksService {
 
         if (tickListener && !tickListener.size) {
             this.tickListeners = this.tickListeners.delete(symbol);
-            this.ticks = this.ticks.delete(symbol);
+            // DO NOT drop the tape here. The tick subscription for this symbol
+            // stays open (only `unsubscribeFromTicksService` forgets streams),
+            // and `observe()` ignores every incoming tick for a symbol that is
+            // absent from `this.ticks`. Deleting the entry therefore froze the
+            // symbol permanently: the ranker could still request it (served by
+            // the memoised promise from the first call) but no tick would ever
+            // reach a listener again — which is exactly how a switching bot
+            // stopped trading, silently, after returning to an earlier market.
+            // Bounded cost: ≤ 1000 ticks × the handful of symbols a generated
+            // bot watches, all of which the ranker re-reads every cycle anyway.
             needToUnsubscribe = true;
         }
 
@@ -165,9 +198,17 @@ export default class TicksService {
 
         const subscription = [...(ohlcSubscriptions ? Array.from(ohlcSubscriptions.values()) : [])];
 
-        Promise.all(subscription.map(id => doUntilDone(() => api_base.api.forget(id))));
+        Promise.all(subscription.map(id => doUntilDone(() => api_base.api.forget(id)))).catch(() => {
+            // Forgetting is best-effort; the server may have dropped it already.
+        });
 
-        this.subscriptions = new Map();
+        // Only this symbol's candle ids were forgotten, so only those may be
+        // dropped from the registry. The old `new Map()` wiped the ids of every
+        // OTHER symbol too, leaving live streams the service could no longer
+        // identify (and `forget` could no longer target).
+        if (this.subscriptions.hasIn(['ohlc', symbol])) {
+            this.subscriptions = this.subscriptions.deleteIn(['ohlc', symbol]);
+        }
     }
 
     updateTicksAndCallListeners(symbol, ticks) {
@@ -202,6 +243,7 @@ export default class TicksService {
                 if (data.msg_type === 'tick') {
                     const { tick } = data;
                     const { symbol, id } = tick;
+                    this.last_tick_at[symbol] = Date.now();
                     if (this.ticks.has(symbol)) {
                         this.subscriptions = this.subscriptions.setIn(['tick', symbol], id);
                         this.updateTicksAndCallListeners(symbol, updateTicks(this.ticks.get(symbol), parseTick(tick)));
@@ -225,6 +267,85 @@ export default class TicksService {
         }
     }
 
+    /**
+     * Force a symbol's tick stream back to life: drop the memoised promise and
+     * the (possibly stale) tape, then re-issue `ticks_history … subscribe: 1`.
+     *
+     * Every failure mode we have seen ends in the same place — no tick reaches
+     * the engine, so `watch('before')` never resolves and the generated bot
+     * sits silent with no error. This is the single recovery path for all of
+     * them (switched-away symbol, dropped stream, rate-limited subscribe).
+     */
+    async refreshTickStream(symbol) {
+        if (!symbol) return [];
+        const stringified_options = JSON.stringify({ symbol, granularity: null, style: 'ticks' });
+        if (this.stream_promises) delete this.stream_promises[stringified_options];
+        this.ticks = this.ticks.delete(symbol);
+        this.last_recovery_at[symbol] = Date.now();
+        try {
+            const ticks = await this.requestStream({ symbol, style: 'ticks' });
+            this.last_tick_at[symbol] = Date.now();
+            return ticks;
+        } catch (error) {
+            // A closed market or a transient socket error must never propagate
+            // into the trade engine; the watchdog simply tries again later.
+            return [];
+        }
+    }
+
+    /**
+     * Watchdog: while any symbol is being monitored, verify that its stream is
+     * still delivering. A symbol that has gone quiet for longer than
+     * `STALL_MS` is force-refreshed (at most once per `STALL_MS`, so a closed
+     * market cannot turn into a request storm).
+     */
+    startStallWatchdog() {
+        if (this.stall_watchdog) return;
+        const STALL_MS = 20000;
+        const now = Date.now();
+        this.tickListeners.keySeq().forEach(symbol => {
+            if (!this.last_tick_at[symbol]) this.last_tick_at[symbol] = now;
+        });
+        this.stall_watchdog = setInterval(() => {
+            try {
+                const monitored = this.tickListeners.keySeq().toArray();
+                if (monitored.length === 0) {
+                    this.stopStallWatchdog();
+                    return;
+                }
+                const at = Date.now();
+                monitored.forEach(symbol => {
+                    const last = this.last_tick_at[symbol] ?? 0;
+                    const recovered = this.last_recovery_at[symbol] ?? 0;
+                    if (at - last < STALL_MS || at - recovered < STALL_MS) return;
+                    globalObserver.emit(
+                        'ui.log.info',
+                        `No ticks from ${symbol} for ${Math.round((at - last) / 1000)}s — resubscribing`
+                    );
+                    this.refreshTickStream(symbol).then(ticks => {
+                        // Waking the engine needs a listener call, which
+                        // `updateTicksAndCallListeners` only makes when the tape
+                        // changed identity — a fresh array always has.
+                        if (Array.isArray(ticks) && ticks.length > 0) {
+                            this.updateTicksAndCallListeners(symbol, ticks);
+                        }
+                    });
+                });
+            } catch (error) {
+                // The watchdog must never be the thing that breaks a run.
+            }
+        }, 5000);
+        // Node/jest: never hold the process open for a background timer.
+        if (typeof this.stall_watchdog?.unref === 'function') this.stall_watchdog.unref();
+    }
+
+    stopStallWatchdog() {
+        if (this.stall_watchdog) {
+            clearInterval(this.stall_watchdog);
+            this.stall_watchdog = null;
+        }
+    }
+
     requestStream(options) {
         const { symbol, granularity, style } = options;
         // Key on the request identity only (never on caller hints such as
@@ -242,23 +363,43 @@ export default class TicksService {
         if (!this.stream_promises) this.stream_promises = {};
 
         if (style === 'ticks' || style === 'candles') {
-            if (!this.stream_promises[stringified_options]) {
-                const promise = this.requestPipSizes().then(() => this.requestTicks(options));
-                // A failed stream must not be cached forever — clear the slot so
-                // the next cycle can retry with a fresh request.
-                promise.catch(() => {
-                    delete this.stream_promises[stringified_options];
-                    if (this.ticks_history_promise?.stringified_options === stringified_options) {
-                        this.ticks_history_promise = null;
-                    }
-                    if (this.candles_promise?.stringified_options === stringified_options) {
-                        this.candles_promise = null;
-                    }
-                });
-                this.stream_promises[stringified_options] = promise;
+            // A SETTLED memo whose cache entry has since disappeared is a
+            // corpse: returning it hands the caller a stale tape and — worse —
+            // skips the re-subscribe, so no tick will ever arrive again. Only
+            // reuse a memo while it is still in flight (that is the dedupe that
+            // keeps multi-market scans off the wire) or while its data is
+            // actually live. Anything else is re-requested.
+            const memo = this.stream_promises[stringified_options];
+            const is_cached_live =
+                style === 'ticks' ? this.ticks.has(symbol) : this.candles.hasIn([symbol, Number(granularity)]);
+            if (memo && !memo.pending && !is_cached_live) {
+                delete this.stream_promises[stringified_options];
             }
 
-            const promise = this.stream_promises[stringified_options];
+            if (!this.stream_promises[stringified_options]) {
+                const entry = { pending: true };
+                const promise = this.requestPipSizes().then(() => this.requestTicks(options));
+                entry.promise = promise;
+                // A failed stream must not be cached forever — clear the slot so
+                // the next cycle can retry with a fresh request.
+                promise
+                    .then(() => {
+                        entry.pending = false;
+                    })
+                    .catch(() => {
+                        entry.pending = false;
+                        delete this.stream_promises[stringified_options];
+                        if (this.ticks_history_promise?.stringified_options === stringified_options) {
+                            this.ticks_history_promise = null;
+                        }
+                        if (this.candles_promise?.stringified_options === stringified_options) {
+                            this.candles_promise = null;
+                        }
+                    });
+                this.stream_promises[stringified_options] = entry;
+            }
+
+            const { promise } = this.stream_promises[stringified_options];
             if (style === 'ticks') {
                 this.ticks_history_promise = { promise, stringified_options };
             } else {
@@ -343,6 +484,12 @@ export default class TicksService {
                         } else if (style === 'candles' && this.candles.hasIn([symbol, Number(granularity)])) {
                             resolve(this.candles.getIn([symbol, Number(granularity)]));
                         } else {
+                            // Subscribed but with nothing cached: register an
+                            // empty tape so `observe()` stops discarding this
+                            // symbol's ticks and the stream refills it. Without
+                            // the seed the symbol stayed invisible forever and
+                            // every cycle re-sent ticks_history.
+                            if (style === 'ticks') this.ticks = this.ticks.set(symbol, []);
                             resolve([]);
                         }
                         return;
@@ -402,6 +549,18 @@ export default class TicksService {
             // interpreter.stop() and pinned api_base.is_stopping at true.
             const done = () => {
                 this.ticks_history_promise = null;
+                this.candles_promise = null;
+                // Every stream has just been forgotten, so every cached tape is
+                // now orphaned. Leaving them behind made the NEXT run serve a
+                // frozen tape from cache and skip the re-subscribe entirely —
+                // a bot that never traded after a Stop → Run cycle.
+                this.stopStallWatchdog();
+                this.ticks = this.ticks.clear();
+                this.candles = this.candles.clear();
+                this.subscriptions = this.subscriptions.clear();
+                this.stream_promises = {};
+                this.last_tick_at = {};
+                this.last_recovery_at = {};
                 resolve();
             };
 

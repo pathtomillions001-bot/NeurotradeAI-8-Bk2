@@ -12,29 +12,41 @@ import { analyseDualLockEntry, DUAL_LOCK_ENTRY_DEFAULTS } from './dual-lock-entr
 import { analyseTurboRecovery } from './turbo-recovery-analysis';
 
 let tickListenerKey;
+// The symbol `tickListenerKey` belongs to. Without it, `watchTicks` asked the
+// ticks service to stop the NEW symbol's monitor using the OLD symbol's key —
+// a no-op that silently left the previous monitor registered.
+let tickListenerSymbol;
 
 export default Engine =>
     class Ticks extends Engine {
         async watchTicks(symbol) {
             if (symbol && this.symbol !== symbol) {
+                const previous = tickListenerSymbol ?? this.symbol;
                 this.symbol = symbol;
                 const { ticksService } = this.$scope;
 
-                await ticksService.stopMonitor({
-                    symbol,
-                    key: tickListenerKey,
-                });
+                if (tickListenerKey && previous) {
+                    await ticksService.stopMonitor({
+                        symbol: previous,
+                        key: tickListenerKey,
+                    });
+                }
                 const callback = ticks => {
                     if (this.is_proposal_subscription_required) {
                         this.checkProposalReady();
                     }
-                    const lastTick = ticks.slice(-1)[0];
-                    const { epoch } = lastTick;
-                    this.store.dispatch({ type: constants.NEW_TICK, payload: epoch });
+                    const lastTick = Array.isArray(ticks) ? ticks[ticks.length - 1] : undefined;
+                    // A tape can be momentarily empty (a stream that was just
+                    // re-subscribed). Destructuring `undefined` here threw
+                    // inside the tick callback, which killed the listener and
+                    // left the bot waiting for a tick that never came.
+                    if (!lastTick || lastTick.epoch === undefined) return;
+                    this.store.dispatch({ type: constants.NEW_TICK, payload: lastTick.epoch });
                 };
 
                 const key = await ticksService.monitor({ symbol, callback });
                 tickListenerKey = key;
+                tickListenerSymbol = symbol;
             }
         }
 
@@ -492,9 +504,26 @@ export default Engine =>
                 return false;
             }
             const old = this.symbol;
-            if (tickListenerKey) await this.$scope.ticksService.stopMonitor({ symbol: old, key: tickListenerKey });
-            this.symbol = undefined;
-            await this.watchTicks(next);
+            try {
+                if (tickListenerKey && tickListenerSymbol) {
+                    await this.$scope.ticksService.stopMonitor({ symbol: tickListenerSymbol, key: tickListenerKey });
+                }
+                this.symbol = undefined;
+                await this.watchTicks(next);
+            } catch (error) {
+                // Roll back. Leaving `this.symbol` undefined (the old failure
+                // mode) broke every later tape read, and the bot stopped
+                // trading with no explanation. Staying on the previous market
+                // costs nothing: the ranker simply proposes the switch again.
+                this.symbol = undefined;
+                try {
+                    await this.watchTicks(old);
+                } catch (_) {
+                    this.symbol = old;
+                }
+                globalObserver.emit('ui.log.warn', `Market switch to ${next} failed — staying on ${old}`);
+                return false;
+            }
             this.options.symbol = next;
             if (this.tradeOptions) this.tradeOptions.symbol = next;
             this.data.proposals = [];

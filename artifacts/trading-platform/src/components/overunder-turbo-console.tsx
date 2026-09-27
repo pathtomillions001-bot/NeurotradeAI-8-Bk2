@@ -237,7 +237,7 @@ export function OverUnderTurboConsole({
 
   /**
    * CREATE DBOT — same scanned triple and session numbers as Locked, but instead
-   * of starting NeuroTrade's executor the API renders a stock Deriv-Bot strategy
+   * of starting NeuroTrade's executor the API renders a vendored Deriv-Bot strategy
    * (market, Over/Under barriers, stake, TP/SL, the shared recovery ladder) and
    * we hand it to the embedded Deriv bot builder. The user verifies the blocks
    * and presses Deriv's own Run — Deriv Bot executes, not Turbo.
@@ -271,7 +271,8 @@ export function OverUnderTurboConsole({
       if (ok) {
         toast.success(
           `DBot ready: ${c.displayName} · ${label(c.normal)} normal → ${label(c.recovery)} recovery · ` +
-            `stake $${config.stake} · TP $${config.takeProfit} · SL $${config.stopLoss}. Verify the blocks, then press Run.`,
+            `stake $${config.stake} · TP $${config.takeProfit} · SL $${config.stopLoss}. ` +
+            `Every recovery attempt now waits for its in-bot Bayesian timing gate. Verify the blocks, then press Run.`,
           { duration: 12_000 },
         );
       } else {
@@ -461,8 +462,9 @@ export function OverUnderTurboConsole({
                       <p className="col-span-2 text-[9px] text-muted-foreground/60 leading-relaxed">
                         Builds a Deriv Bot for <span className="text-white/80">{scanResult.best.displayName}</span> —{" "}
                         {label(scanResult.best.normal)} normal → {label(scanResult.best.recovery)} recovery, your stake,
-                        TP/SL and the same recovery ladder — and opens it in the Bot Builder. You verify the blocks and
-                        press Run; Deriv Bot then executes the trades instead of Turbo.
+                        TP/SL and the same recovery ladder — and opens it in the Bot Builder. Normal entries keep the
+                        Turbo cadence; every recovery attempt waits until its Bayesian probability bound, loss clustering,
+                        stability and balance-aware utility agree. You verify the blocks and press Run.
                       </p>
                     </div>
 

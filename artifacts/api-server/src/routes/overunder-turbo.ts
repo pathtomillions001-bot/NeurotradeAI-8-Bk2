@@ -190,7 +190,7 @@ router.post("/start", async (req, res): Promise<void> => {
 });
 
 /**
- * Build a stock Deriv Bot strategy for the scanned lock. Nothing starts here —
+ * Build a NeuroTrade Deriv Bot strategy for the scanned lock. Nothing starts here —
  * the web app hands the XML to the embedded Deriv bot builder, the user checks
  * the blocks and presses Deriv's Run. Validation mirrors /start exactly so a
  * DBot can only ever be built for a triple the scan is allowed to deploy.

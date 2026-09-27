@@ -18,16 +18,41 @@
  *   live hit-rate, and every recovery attempt waits for an in-bot Bayesian
  *   timing gate (`nt_analyse_turbo_recovery` / `nt_turbo_recovery_decision`).
  *
- *   The Dual-Lock DBot does NONE of that. The analysis already happened during
- *   the scan that produced the lock; the generated bot simply EXECUTES it:
+ *   The Dual-Lock DBot does almost none of that. The analysis already happened
+ *   during the scan that produced the lock; the generated bot simply EXECUTES
+ *   it. The ONE thing it times is the very first entry of the run (see below):
  *     · it fires the locked normal contract every tick, no arming, no gate;
  *     · on a loss it fires the locked recovery contract every tick at the
  *       recovery-ladder stake — again no timing analysis;
  *     · it keeps going until take-profit, stop-loss, the circuit breaker, or
  *       the user stops the bot.
- *   Consequently this generator emits only stock Deriv-Bot blocks (including the
- *   real `purchase` block) — no `nt_*` analysis blocks at all — so it loads and
- *   runs through the builder's normal path exactly like a hand-built strategy.
+ *   Apart from the first-entry gate this generator emits only stock Deriv-Bot
+ *   blocks (including the real `purchase` block), so it loads and runs through
+ *   the builder's normal path exactly like a hand-built strategy.
+ *
+ * FIRST-ENTRY TIMING (the only in-bot analysis, and it runs at most once)
+ * ──────────────────────────────────────────────────────────────────────
+ *   Pressing Run is a human event; the tape does not care. Starting inside a
+ *   burst of range violations dragged the very first trade into the recovery
+ *   ladder. So before the FIRST purchase — and only that one — the bot asks
+ *   `nt_analyse_dual_lock_entry` whether the next tick is a defensible start:
+ *
+ *     · recency-weighted Beta baseline of the locked contract's hit rate;
+ *     · state-conditional Markov confidence, shrunk toward that baseline;
+ *     · violation-cluster guards (clean ticks since the last miss, misses in
+ *       the last 5);
+ *     · a threshold that DECAYS from the tape's optimistic rate to its
+ *       pessimistic rate across a patience budget (default 12 ticks), so the
+ *       bar is expressed in the tape's own units — meaningful on every market
+ *       and every locked barrier without tuning — and cannot deadlock;
+ *     · a hard deadline: at the patience budget the gate opens regardless
+ *       (even with a dead tick feed), bounding the wait to ~12 ticks so the
+ *       scanned edge cannot go stale.
+ *
+ *   The gate can only DELAY the start. It never changes the market, side,
+ *   barrier, stake or ladder, and once the first trade is placed the bot is
+ *   the same non-stop executor it has always been — no further analysis on any
+ *   later normal or recovery trade.
  *
  * WHAT THE GENERATED BOT DOES (1:1 with Dual-Lock's locked, non-stop executor)
  * ──────────────────────────────────────────────────────────────────────────
@@ -77,6 +102,10 @@ export interface DualLockDbotInput {
   /** Consecutive losses that halt the bot (engine: p95 ladder depth + 2). */
   breakerDepth: number;
   currency: string;
+  /** Digits the first-entry timing gate inspects (default 120, 40–300). */
+  entryWindow?: number;
+  /** Hard deadline for the first-entry gate, in ticks (default 12, 3–40). */
+  entryPatience?: number;
 }
 
 export interface DualLockDbotStrategy {
@@ -102,6 +131,10 @@ export interface DualLockDbotStrategy {
     recoveryPayout: number;
     breakerDepth: number;
     currency: string;
+    /** Digits the first-entry timing gate inspects. */
+    entryWindow: number;
+    /** Hard deadline for the first-entry gate, in ticks. */
+    entryPatience: number;
   };
 }
 
@@ -124,6 +157,10 @@ export const DUAL_LOCK_DBOT_BLOCK_TYPES = Object.freeze([
   "after_purchase",
   "purchase",
   "trade_again",
+  // The ONLY in-bot analysis: the first-entry timing gate (runs once per run).
+  "nt_analyse_dual_lock_entry",
+  "nt_dual_lock_entry_decision",
+  "math_modulo",
   "contract_check_result",
   "read_details",
   "total_profit",
@@ -172,6 +209,8 @@ export function buildDualLockDbotStrategy(input: DualLockDbotInput): DualLockDbo
   const maxRecoverySteps = Math.max(1, Math.min(10, Math.round(input.maxRecoverySteps)));
   const markupPercent = Math.max(0, input.markupPercent);
   const maxStake = input.maxStake > 0 ? input.maxStake : 500;
+  const entryWindow = Math.max(40, Math.min(300, Math.round(input.entryWindow ?? 120)));
+  const entryPatience = Math.max(3, Math.min(40, Math.round(input.entryPatience ?? 12)));
   const { market, submarket } = marketPathForSymbol(input.symbol);
   const normalLabel = contractLabel(input.normal);
   const recoveryLabel = contractLabel(input.recovery);
@@ -195,6 +234,8 @@ export function buildDualLockDbotStrategy(input: DualLockDbotInput): DualLockDbo
     lastStake: "Last Stake",
     lastReturn: "Last Return",
     message: "Message",
+    entryTimed: "First Entry Timed",
+    entryWaits: "Entry Ticks Waited",
   } as const;
 
   const RECOVERY_PROC = "Size recovery stake";
@@ -211,12 +252,15 @@ export function buildDualLockDbotStrategy(input: DualLockDbotInput): DualLockDbo
     x.set(V.lossRun, x.num(0)),
     x.set(V.normPayout, x.num(Math.round(input.normalPayout * 1000) / 1000)),
     x.set(V.recPayout, x.num(Math.round(input.recoveryPayout * 1000) / 1000)),
+    x.set(V.entryTimed, x.bool(false)),
+    x.set(V.entryWaits, x.num(0)),
     x.notify(
       "info",
       x.text(
         `NeuroTrade Dual-Lock · ${input.displayName} · ${normalLabel} normal → ${recoveryLabel} recovery · ` +
           `stake ${money(input.stake)} · TP ${money(input.takeProfit)} · SL ${money(input.stopLoss)} · ` +
-          `no in-bot analysis — executes the scanned lock non-stop · markup ${markupPercent}% · ` +
+          `first entry timed within ${entryPatience} ticks, then executes the scanned lock non-stop · ` +
+          `markup ${markupPercent}% · ` +
           `circuit breaker ${breakerDepth} losses`,
       ),
     ),
@@ -259,16 +303,63 @@ export function buildDualLockDbotStrategy(input: DualLockDbotInput): DualLockDbo
   // ── 3. Purchase conditions — fire the locked contract, NO analysis ─────────
   // The whole point of Dual-Lock's DBot: the analysis was already done during
   // the scan, so here it just buys the current (normal or recovery) contract
-  // every tick. No arming gate, no recovery-timing gate.
+  // every tick. No arming gate, no recovery-timing gate — the first entry is
+  // timed once (§3b) and every trade after it fires straight away.
   const purchaseCurrentContract = () =>
     x.ifElse(
       [{ cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")), then: [x.purchase("DIGITOVER")] }],
       [x.purchase("DIGITUNDER")],
     );
 
+  // ── 3b. First-entry timing gate — runs ONLY until the first purchase ───────
+  // Every evaluation while `First Entry Timed` is false: count the tick, ask
+  // the in-bot gate, and either start (and latch the gate open forever) or wait.
+  // The gate's own deadline guarantees the latch flips within `entryPatience`
+  // ticks, so the bot can never sit idle and the scanned edge cannot go stale.
+  const timeFirstEntry: Stmt[] = [
+    x.set(V.entryWaits, x.arith("ADD", x.get(V.entryWaits), x.num(1))),
+    x.ntAnalyseDualLockEntry(
+      input.normal.side,
+      input.normal.barrier,
+      entryWindow,
+      entryPatience,
+      x.get(V.entryWaits),
+    ),
+    x.ifElse(
+      [
+        {
+          cond: x.compare("EQ", x.ntDualLockEntryDecision("ready"), x.bool(true)),
+          then: [
+            // Latch: from here on the bot never consults the tape again.
+            x.set(V.entryTimed, x.bool(true)),
+            x.joinInto(V.message, [
+              x.text(`${normalLabel} on ${input.displayName} —`),
+              x.ntDualLockEntryDecision("reason"),
+            ]),
+            x.notify("success", x.get(V.message)),
+            purchaseCurrentContract(),
+          ],
+        },
+        {
+          // Throttled progress line so the Journal shows the wait is deliberate.
+          cond: x.compare("EQ", x.mod(x.get(V.entryWaits), x.num(3)), x.num(0)),
+          then: [
+            x.joinInto(V.message, [x.text("Waiting for a clean start —"), x.ntDualLockEntryDecision("reason")]),
+            x.notify("info", x.get(V.message)),
+          ],
+        },
+      ],
+    ),
+  ];
+
   const beforePurchase = x.topLevel(
     "before_purchase",
-    `<statement name="BEFOREPURCHASE_STACK">${x.chain([purchaseCurrentContract()])}</statement>`,
+    `<statement name="BEFOREPURCHASE_STACK">${x.chain([
+      x.ifElse(
+        [{ cond: x.compare("EQ", x.get(V.entryTimed), x.bool(true)), then: [purchaseCurrentContract()] }],
+        timeFirstEntry,
+      ),
+    ])}</statement>`,
     0,
     900,
   );
@@ -473,6 +564,8 @@ export function buildDualLockDbotStrategy(input: DualLockDbotInput): DualLockDbo
       recoveryPayout: input.recoveryPayout,
       breakerDepth,
       currency,
+      entryWindow,
+      entryPatience,
     },
   };
 }

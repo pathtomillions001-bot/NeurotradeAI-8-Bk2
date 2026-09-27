@@ -360,6 +360,13 @@ describe('Omni Forge → Deriv DBot strategy', () => {
         expect(market.state.notifications[0]).toMatch(
             /NeuroTrade Omni Forge · Volatility 50 Index · normal \[Over 1, Under 8\] → recovery \[Even, Over 4\]/
         );
+
+        // Journal transparency, deliberately minimal: the user sees the state
+        // and the subject of each decision, never the model behind it.
+        expect(market.state.notifications.some(m => /^ENTRY · R_50 · DIGITOVER · setup qualified$/.test(m))).toBe(true);
+        for (const message of market.state.notifications.slice(1)) {
+            expect(message).not.toMatch(/score|EV |lower bound|LCB|Markov|clustering/i);
+        }
     });
 
     it('refuses to trade when EVERY chosen contract is EV-negative, and never throws while waiting', () => {
@@ -371,7 +378,11 @@ describe('Omni Forge → Deriv DBot strategy', () => {
         expect(runStrategy(code, market)).toBe('never-fired');
         expect(market.state.trades).toHaveLength(0);
         expect(market.state.beforeEvaluations).toBeGreaterThan(100);
-        expect(market.state.notifications.some(m => /ANALYSING/.test(m))).toBe(true);
+        expect(
+            market.state.notifications.some(m => /^ANALYSING R_50 · no qualified setup yet — holding$/.test(m))
+        ).toBe(true);
+        // Holding is reported without leaking the statistics behind it.
+        expect(market.state.notifications.some(m => /score|lower bound|clustering/i.test(m))).toBe(false);
     });
 
     it('switches to a stronger market between contracts before firing', () => {

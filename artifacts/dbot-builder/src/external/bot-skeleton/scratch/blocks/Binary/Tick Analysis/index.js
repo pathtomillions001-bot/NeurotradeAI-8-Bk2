@@ -11,5 +11,6 @@ import './lastDigitList';
 import './neurotrade_digit_rotator';
 import './neurotrade_contract_forge';
 import './neurotrade_turbo_recovery';
+import './neurotrade_dual_lock_entry';
 import './stat';
 import './stat_list';

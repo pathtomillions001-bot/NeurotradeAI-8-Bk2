@@ -8,6 +8,7 @@ import { api_base } from '../../api/api-base';
 import { getDirection, getLastDigit } from '../utils/helpers';
 import { expectPositiveInteger } from '../utils/sanitize';
 import * as constants from './state/constants';
+import { analyseDualLockEntry, DUAL_LOCK_ENTRY_DEFAULTS } from './dual-lock-entry';
 import { analyseTurboRecovery } from './turbo-recovery-analysis';
 
 let tickListenerKey;
@@ -408,6 +409,77 @@ export default Engine =>
         async ntTurboRecoveryDecision(field) {
             const value = this.nt_turbo_recovery_decision?.[field];
             return value === undefined ? (field === 'reason' ? 'HOLD · recovery analysis warming up' : 0) : value;
+        }
+
+        /**
+         * Time the FIRST entry of a generated Dual-Lock Range Sentinel bot.
+         *
+         * The scan owns the market, side and barrier; this read only answers
+         * whether the next tick is a defensible moment to START. The generated
+         * strategy calls it once per tick until it returns true, then never
+         * again for the rest of the run — every later trade (normal and
+         * recovery) fires with no analysis at all, exactly as before.
+         *
+         * The wait is bounded by `patience` evaluations: at the deadline the
+         * gate opens unconditionally, including when the tick feed is
+         * unavailable, so a generated bot can never sit idle.
+         */
+        async ntAnalyseDualLockEntry(
+            contract = 'DIGITOVER',
+            barrier = 1,
+            requestedWindow = DUAL_LOCK_ENTRY_DEFAULTS.window,
+            patience = DUAL_LOCK_ENTRY_DEFAULTS.patience,
+            waited = 0
+        ) {
+            const patienceTicks = Math.max(
+                3,
+                Math.min(40, Math.trunc(Number(patience)) || DUAL_LOCK_ENTRY_DEFAULTS.patience)
+            );
+            const waitedTicks = Math.max(0, Math.trunc(Number(waited)) || 0);
+            try {
+                const windowSize = Math.max(
+                    40,
+                    Math.min(300, Number(requestedWindow) || DUAL_LOCK_ENTRY_DEFAULTS.window)
+                );
+                const ticks = await this.$scope.ticksService.request({ symbol: this.symbol });
+                const pip = this.$scope.ticksService.pipSizes?.[this.symbol] ?? this.getPipSize() ?? 2;
+                const digits = ticks.slice(-windowSize).map(tick => getLastDigit(Number(tick.quote).toFixed(pip)));
+
+                this.nt_dual_lock_entry_decision = analyseDualLockEntry({
+                    digits,
+                    contract,
+                    barrier,
+                    waited: waitedTicks,
+                    patience: patienceTicks,
+                });
+            } catch (_) {
+                // A missing tape must never strand the bot: honour the deadline.
+                const forced = waitedTicks >= patienceTicks;
+                this.nt_dual_lock_entry_decision = {
+                    ready: forced,
+                    forced,
+                    contract: contract === 'DIGITUNDER' ? 'DIGITUNDER' : 'DIGITOVER',
+                    barrier: Number(barrier) || 0,
+                    samples: 0,
+                    baseline: 0,
+                    confidence: 0,
+                    threshold: 0,
+                    quietTicks: 0,
+                    burst: 0,
+                    waited: waitedTicks,
+                    patience: patienceTicks,
+                    state: 'UNKNOWN',
+                    reason: forced
+                        ? `TIMED ENTRY · ${patienceTicks}-tick patience budget reached — starting the scanned lock`
+                        : `TIMING ${waitedTicks}/${patienceTicks} · tick feed unavailable; retrying`,
+                };
+            }
+            return this.nt_dual_lock_entry_decision.ready;
+        }
+
+        async ntDualLockEntryDecision(field) {
+            const value = this.nt_dual_lock_entry_decision?.[field];
+            return value === undefined ? (field === 'reason' ? 'entry timing warming up' : 0) : value;
         }
 
         /** Safe between-contract retarget: remove the old listener, clear stale

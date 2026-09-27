@@ -426,12 +426,26 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   );
 
   // ── 3. Purchase conditions — the ranker IS the gate ───────────────────────
+  // ── Journal transparency (deliberately minimal) ───────────────────────────
+  // The user asked to SEE that the bot is thinking, not to read its model. So
+  // the Journal carries the state and the subject only — which market, which
+  // contract, holding vs entering — and never the score, EV, lower bound,
+  // Markov row or clustering ratio that make up the decision.
   const waitingReport: Stmt[] = [
     x.joinInto(V.message, [
-      x.text("ANALYSING · market"), x.get(V.activeSymbol),
-      x.text("· score"), x.get(V.decisionScore), x.text("·"), x.get(V.decisionReason),
+      x.text("ANALYSING"), x.get(V.activeSymbol),
+      x.text("· no qualified setup yet — holding"),
     ]),
     x.notify("info", x.get(V.message)),
+  ];
+
+  // A factory, not a shared array: every emission needs its own block ids.
+  const entryReport = (): Stmt[] => [
+    x.joinInto(V.message, [
+      x.text("ENTRY ·"), x.get(V.activeSymbol), x.text("·"), x.get(V.contract),
+      x.text("· setup qualified"),
+    ]),
+    x.notify("success", x.get(V.message)),
   ];
 
   const readDecision: Stmt[] = [
@@ -462,19 +476,23 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
         cond: x.compare("EQ", x.ntForgeDecision("changedMarket"), x.bool(true)),
         then: [
           x.ntSwitchMarket(x.get(V.activeSymbol)),
-          x.joinInto(V.message, [x.text("SWITCHED MARKET · now analysing"), x.get(V.activeSymbol), x.text("· stale proposals cleared")]),
+          x.joinInto(V.message, [x.text("SWITCHED MARKET · now analysing"), x.get(V.activeSymbol)]),
           x.notify("info", x.get(V.message)),
         ],
       }, {
         cond: x.compare("EQ", x.get(V.gate), x.bool(true)),
-        then: [x.set(V.fire, x.bool(true))],
+        then: [...entryReport(), x.set(V.fire, x.bool(true))],
       },
       ...(forceEntryAfter > 0 ? [{
         cond: x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
-        then: [x.notify("warn", x.text(`Patience limit ${forceEntryAfter}: taking the highest-ranked candidate`)), x.set(V.fire, x.bool(true))],
+        then: [
+          x.notify("warn", x.text(`Patience limit ${forceEntryAfter}: entering on the best available setup`)),
+          ...entryReport(),
+          x.set(V.fire, x.bool(true)),
+        ],
       }] : []),
       {
-        cond: x.compare("EQ", x.mod(x.get(V.evalTicks), x.num(10)), x.num(0)),
+        cond: x.compare("EQ", x.mod(x.get(V.evalTicks), x.num(5)), x.num(0)),
         then: waitingReport,
       }],
     ),

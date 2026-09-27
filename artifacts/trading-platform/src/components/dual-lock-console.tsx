@@ -286,10 +286,13 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
    * vendored Deriv-Bot strategy (market, Over/Under barriers, stake, TP/SL, the
    * shared recovery ladder) and we hand it to the embedded Deriv bot builder.
    *
-   * Unlike the Over/Under Turbo DBot, this one does NO analysis while it runs —
+   * Unlike the Over/Under Turbo DBot, this one does no analysis while it runs —
    * the scan already chose the lock, so the generated bot just takes trades
    * (normal, then the recovery ladder) until TP/SL/breaker or the user stops it.
-   * The user verifies the blocks and presses Deriv's own Run.
+   * The single exception is the FIRST entry: pressing Run is a human event, so
+   * the bot waits (at most ~12 ticks, then enters regardless) for a tick that
+   * isn't inside a burst of range violations before it starts. Every trade after
+   * that fires immediately. The user verifies the blocks and presses Deriv's Run.
    */
   const handleCreateDbot = async (c: Candidate) => {
     setBuildingDbot(true);
@@ -319,7 +322,8 @@ export function DualLockConsole({ bot, open, onOpenChange, session, onSession }:
         toast.success(
           `DBot ready: ${c.displayName} · ${label(c.normal)} normal → ${label(c.recovery)} recovery · ` +
             `stake $${config.stake} · TP $${config.takeProfit} · SL $${config.stopLoss}. ` +
-            `It executes the locked contracts with the shared recovery ladder — no in-bot analysis. ` +
+            `It waits for a well-timed first entry (max ~12 ticks), then executes the locked ` +
+            `contracts non-stop with the shared recovery ladder. ` +
             `Verify the blocks, then press Run.`,
           { duration: 12_000 },
         );

@@ -459,7 +459,15 @@ export default class TicksService {
             }
             this.waitForConnectionOpen()
                 .then(() =>
-                    doUntilDone(() => api_base.api.send(request_object), ['AlreadySubscribed'], api_base, retry_limit)
+                    // `errors_to_ignore` is a misleading legacy name: entries
+                    // in this list are RETRIED by doUntilDone. Retrying
+                    // AlreadySubscribed can never succeed while Deriv's
+                    // original subscription is still alive; it only emits
+                    // "Request failed for: ticks_history" every 2.5s while the
+                    // bot continues to receive that original stream. Let the
+                    // error reach the handler below instead, where we attach to
+                    // the live subscription without logging or retrying.
+                    doUntilDone(() => api_base.api.send(request_object), [], api_base, retry_limit)
                 )
                 .then(r => {
                     if (style === 'ticks') {

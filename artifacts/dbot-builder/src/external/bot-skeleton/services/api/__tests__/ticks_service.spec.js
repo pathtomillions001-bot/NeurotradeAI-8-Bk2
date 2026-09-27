@@ -179,14 +179,24 @@ describe('TicksService — stream resilience for switching bots', () => {
         expect(service.ticks.get('R_50')).toHaveLength(1);
     });
 
-    it('seeds a tape when the socket says AlreadySubscribed so the stream can refill it', async () => {
-        api.send.mockImplementationOnce(() => Promise.reject({ error: { code: 'AlreadySubscribed' } }));
+    it('attaches to an existing subscription without retrying or journalling a false failure', async () => {
+        api.send.mockRejectedValue({
+            error: { code: 'AlreadySubscribed', msg_type: 'ticks_history' },
+            msg_type: 'ticks_history',
+        });
+
         await expect(service.request({ symbol: 'R_50' })).resolves.toEqual([]);
 
-        // The symbol is now visible to observe(), so live ticks land instead of
-        // being discarded — and no further ticks_history is needed.
+        // AlreadySubscribed is success-equivalent here: retrying the same
+        // subscribe request cannot succeed and used to produce the recurring
+        // "Request failed for: ticks_history, retrying in 2.5s" journal line.
+        expect(api.send).toHaveBeenCalledTimes(1);
+
+        // The symbol is now visible to observe(), so ticks from Deriv's
+        // original live subscription land without another history request.
         api.pushTick('R_50', 5000);
         expect(service.ticks.get('R_50')).toHaveLength(1);
+        expect(api.send).toHaveBeenCalledTimes(1);
     });
 
     it('swallows a failed refresh (closed market) instead of breaking the run', async () => {

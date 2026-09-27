@@ -66,6 +66,10 @@ export function implementedConsoleIds(): string[] {
  */
 export const SCANNER_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
   "overunder-turbo@2",
+  // Dual-Lock Range Sentinel scans the markets AND can take the trades — either
+  // in NeuroTrade's executor (Lock & Deploy) or by handing the scanned lock to
+  // the Deriv bot builder (Create DBot).
+  "dual-lock@1",
 ]);
 
 /** True when the bot's console can scan *and* take trades (has Create DBot). */

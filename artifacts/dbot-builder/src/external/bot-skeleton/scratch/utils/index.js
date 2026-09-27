@@ -405,20 +405,52 @@ const getAllRequiredBlocks = (workspace, required_block_types) => {
     });
 };
 
+/**
+ * NeuroTrade — mandatory-block aliases.
+ *
+ * Omni Forge (and any strategy that needs to buy an arbitrary contract type with
+ * a just-in-time digit) purchases through the `nt_purchase_contract` block
+ * instead of the stock `purchase` block. That block IS the strategy's purchase
+ * mechanism, so it satisfies the mandatory "purchase" requirement exactly the
+ * way `purchase` does. Without this the run-button gate rejects a perfectly
+ * valid Omni Forge workspace with "The Purchase block is mandatory…".
+ */
+const MANDATORY_BLOCK_ALIASES = Object.freeze({
+    purchase: ['purchase', 'nt_purchase_contract'],
+});
+
+/** The block types that can satisfy a given required block type. */
+const acceptedTypesFor = required_block_type => MANDATORY_BLOCK_ALIASES[required_block_type] ?? [required_block_type];
+
+/** True when the workspace holds at least one block that satisfies `required_block_type`. */
+const workspaceHasRequiredBlock = (workspace, required_block_type) => {
+    const accepted = acceptedTypesFor(required_block_type);
+    return workspace.getAllBlocks().some(block => accepted.includes(block.type));
+};
+
 const getMissingBlocks = (workspace, required_block_types) => {
-    return required_block_types.filter(blockType => {
-        return !workspace.getAllBlocks().some(block => block.type === blockType);
-    });
+    return required_block_types.filter(blockType => !workspaceHasRequiredBlock(workspace, blockType));
 };
 
 const getDisabledBlocks = required_blocks_check => {
     const workspace = window.Blockly.derivWorkspace;
     const required_block_types = [getSelectedTradeType(workspace), ...config().mandatoryMainBlocks];
+    // The set of concrete block types that count towards a required slot,
+    // including NeuroTrade purchase aliases.
+    const accepted_block_types = new Set(required_block_types.flatMap(acceptedTypesFor));
+    // Map an alias (e.g. nt_purchase_contract) back onto the required slot it
+    // fills (purchase), so a disabled alias is reported against that slot.
+    const canonicalRequiredType = block_type => {
+        for (const required of required_block_types) {
+            if (acceptedTypesFor(required).includes(block_type)) return required;
+        }
+        return block_type;
+    };
     const disabled_blocks = Object.fromEntries(
         workspace
             .getAllBlocks()
-            .filter(block => required_block_types.includes(block.type))
-            .map(block => [block.type, block.disabled])
+            .filter(block => accepted_block_types.has(block.type))
+            .map(block => [canonicalRequiredType(block.type), block.disabled])
     );
     const mandatory_blocks = ['before_purchase', 'purchase', 'trade_definition', 'trade_definition_tradeoptions'];
     const has_disabled_blocks = mandatory_blocks.some(type => disabled_blocks[type]);

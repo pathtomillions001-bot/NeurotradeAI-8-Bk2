@@ -51,8 +51,10 @@ import {
   isRecoveryContract,
   type DualLockContract,
 } from "../lib/dual-lock-analysis";
-import { db, settingsTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { db, settingsTable, accountsTable } from "@workspace/db";
+import { and, eq } from "drizzle-orm";
+import { resolveRecoveryPayout } from "../lib/recovery-payout";
+import { buildDualLockDbotStrategy } from "../lib/dual-lock-dbot";
 import { logger } from "../lib/logger";
 
 const router = Router();
@@ -399,6 +401,144 @@ router.post("/duallock/start", async (req, res): Promise<void> => {
     return;
   }
   res.json({ ok: true, status: visibleDualStatus(req.sessionId) });
+});
+
+/**
+ * Build a NeuroTrade Deriv Bot strategy for the scanned Dual-Lock triple.
+ * Nothing starts here — the web app hands the XML to the embedded Deriv bot
+ * builder, the user checks the blocks and presses Deriv's Run. Unlike the
+ * Over/Under Turbo DBot the generated bot carries NO in-bot analysis: the scan
+ * already picked the lock, so the bot simply executes it (normal contract, then
+ * the shared recovery ladder) until TP/SL/breaker. Validation mirrors
+ * /duallock/start so a DBot can only be built for a triple the scan committed.
+ */
+router.post("/duallock/dbot", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const parseContract = (raw: any): DualLockContract | null => {
+    if (!raw) return null;
+    const side = raw.side === "DIGITOVER" || raw.side === "DIGITUNDER" ? raw.side : null;
+    const barrier = Number(raw.barrier);
+    if (!side || !Number.isInteger(barrier)) return null;
+    return { side, barrier };
+  };
+
+  const normal = parseContract(body.normal);
+  const recovery = parseContract(body.recovery);
+  if (!normal || !isNormalContract(normal.side, normal.barrier)) {
+    res.status(400).json({ error: "normal must be one of Over 1, Under 8, Over 2, Under 7 — run the scan first" });
+    return;
+  }
+  if (!recovery || !isRecoveryContract(recovery.side, recovery.barrier)) {
+    res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 5, Under 4 — run the scan first" });
+    return;
+  }
+
+  const symbol = typeof body.symbol === "string" ? body.symbol : "";
+  const market = symbol && isAutomatedMarket(symbol)
+    ? AUTOMATED_DERIV_MARKETS.find(m => m.symbol === symbol)
+    : undefined;
+  if (!market?.digitEnabled) {
+    res.status(400).json({ error: "Run the scan first — a measured digit market is required" });
+    return;
+  }
+
+  // Dual-Lock commits the session's risk numbers on the first scan; the DBot
+  // must be built from those exact committed values, never fresh body numbers.
+  const committed = dualLock.getCommittedParams(req.sessionId);
+  if (!committed) {
+    res.status(409).json({ error: "Run the Dual-Lock analysis first — a DBot may only be built for a scanned lock." });
+    return;
+  }
+  if (committed.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+
+  try {
+    // Recovery markup + max single stake from this account's settings.
+    let markupPercent = 10;
+    let maxStake = 500;
+    try {
+      const rows = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
+      if (rows.length > 0) {
+        const v = Number((rows[0] as any).botRecoveryMarkup);
+        if (Number.isFinite(v)) markupPercent = v;
+        const m = Number((rows[0] as any).maxTradeStake);
+        if (Number.isFinite(m) && m > 0) maxStake = m;
+      }
+    } catch { /* defaults */ }
+
+    // Account currency — the builder's trade options are denominated in it.
+    let currency = "USD";
+    try {
+      let accounts = await db
+        .select()
+        .from(accountsTable)
+        .where(and(eq(accountsTable.sessionId, req.sessionId), eq(accountsTable.isActive, true)))
+        .limit(1);
+      if (accounts.length === 0) {
+        accounts = await db
+          .select()
+          .from(accountsTable)
+          .where(eq(accountsTable.sessionId, req.sessionId))
+          .limit(1);
+      }
+      if (accounts[0]?.currency) currency = accounts[0].currency;
+    } catch { /* default currency */ }
+
+    // Seed payout multipliers the way the engine quotes them before a fire
+    // (live $1 proposal, canonical schedule as fallback). The generated bot
+    // refreshes each leg from its realised payout after every win.
+    const [normalQuote, recoveryQuote] = await Promise.all([
+      resolveRecoveryPayout({
+        symbol: market.symbol,
+        contractType: normal.side,
+        barrier: normal.barrier,
+        duration: 1,
+        durationUnit: "t",
+        currency,
+      }),
+      resolveRecoveryPayout({
+        symbol: market.symbol,
+        contractType: recovery.side,
+        barrier: recovery.barrier,
+        duration: 1,
+        durationUnit: "t",
+        currency,
+      }),
+    ]);
+
+    const analysis = body.analysis && typeof body.analysis === "object" ? body.analysis : undefined;
+    const predictedDepth = Math.max(3, Math.round(Number(analysis?.metrics?.recoveryDepthP95) || 4));
+
+    const strategy = buildDualLockDbotStrategy({
+      symbol: market.symbol,
+      displayName: market.displayName,
+      normal,
+      recovery,
+      stake: committed.stake,
+      takeProfit: committed.takeProfit,
+      stopLoss: committed.stopLoss,
+      maxRecoverySteps: committed.maxRecoverySteps,
+      markupPercent,
+      maxStake,
+      normalPayout: normalQuote.payoutMultiplier,
+      recoveryPayout: recoveryQuote.payoutMultiplier,
+      breakerDepth: predictedDepth + 2,
+      currency,
+    });
+
+    res.json({
+      ok: true,
+      ...strategy,
+      payoutSource: { normal: normalQuote.source, recovery: recoveryQuote.source },
+    });
+  } catch (err) {
+    logger.error({ err }, "Dual-Lock DBot build failed");
+    res.status(500).json({
+      error: err instanceof Error ? err.message : "Could not build the DBot strategy",
+    });
+  }
 });
 
 router.post("/duallock/stop", (req, res) => {

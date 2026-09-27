@@ -21,6 +21,7 @@ import path from 'path';
 import { localize } from '@deriv-com/translations';
 import { loadBlockly } from '../../external/bot-skeleton/scratch/blockly';
 import DBotStore from '../../external/bot-skeleton/scratch/dbot-store';
+import { isAllRequiredBlocksEnabled } from '../../external/bot-skeleton/scratch/utils';
 
 localize.mockImplementation((text, args) =>
     typeof text === 'string' ? text.replace(/{{\s*(\w+)\s*}}/g, (match, key) => (args && key in args ? args[key] : match)) : text
@@ -321,6 +322,23 @@ describe('Omni Forge → Deriv DBot strategy', () => {
 
         const names = workspace.getAllVariables().map(v => v.name);
         expect(names).toEqual(expect.arrayContaining(['Gate Pass', 'Fire', 'Evaluations', 'Active Market', 'Recovery Debt', 'Recovery Payout']));
+    });
+
+    it('passes the run-button gate — nt_purchase_contract satisfies the mandatory Purchase block', () => {
+        // Reproduces the "The Purchase block is mandatory and cannot be
+        // deleted/disabled." failure: Omni Forge buys through
+        // `nt_purchase_contract` (no stock `purchase` block), so the gate must
+        // accept it — otherwise Deriv's Run button refuses to start the bot.
+        for (const fixture of ['omni-forge-r50-mixed', 'omni-forge-1hz100v-under7-even', 'omni-forge-r10-matchdiff-forced']) {
+            workspace.dispose();
+            workspace = new window.Blockly.Workspace();
+            loadFixture(fixture);
+            // getDisabledBlocks reads the active workspace off this global.
+            window.Blockly.derivWorkspace = workspace;
+            expect(workspace.getBlocksByType('purchase', false)).toHaveLength(0);
+            expect(workspace.getBlocksByType('nt_purchase_contract', false)).toHaveLength(1);
+            expect(isAllRequiredBlocksEnabled(workspace)).toBe(true);
+        }
     });
 
     it('compiles to runnable code, ranks the user set and buys the best contract with its own digit', () => {

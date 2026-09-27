@@ -128,14 +128,16 @@ describe("consoleSkew", () => {
 
 describe("scanner badge contract", () => {
   it("marks exactly the consoles that carry the Create DBot action", () => {
-    // The SCANNER tag on a Bot Arena card must mean "this console can build a
-    // DBot from its current lock". Today that is Over/Under Turbo only — if a
-    // console gains (or loses) a Create DBot action, update SCANNER_CONSOLE_IDS
-    // alongside the console change; this test pins the pair.
+    // The SCANNER tag on a Bot Arena card must mean "this console scans the
+    // markets and can take the trades (including a Create DBot action)". Today
+    // that is Over/Under Turbo and Dual-Lock Range Sentinel — if a console
+    // gains (or loses) a Create DBot action, update SCANNER_CONSOLE_IDS
+    // alongside the console change; this test pins the set.
+    const scanners = new Set(["overunder-turbo@2", "dual-lock@1"]);
     for (const id of WEB_CONSOLE_IDS) {
       assert.equal(
         consoleHasScanner({ console: id }),
-        id === "overunder-turbo@2",
+        scanners.has(id),
         `scanner mismatch for "${id}" — is the badge contract drift-free with the console's Create DBot action?`,
       );
     }

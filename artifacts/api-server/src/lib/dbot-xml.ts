@@ -117,6 +117,28 @@ export class XmlBuilder {
       inner: `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field><field name="WINDOW">${esc(window)}</field>`,
     };
   }
+  /** Analyse WHEN to execute a fixed Over/Under Turbo recovery contract. */
+  ntAnalyseTurboRecovery(
+    contract: "DIGITOVER" | "DIGITUNDER",
+    barrier: number,
+    payout: string,
+    window: number,
+    stake: string,
+  ): Stmt {
+    return {
+      type: "nt_analyse_turbo_recovery",
+      inner:
+        `<field name="CONTRACT">${contract}</field>` +
+        `<field name="BARRIER">${esc(barrier)}</field>` +
+        `<field name="WINDOW">${esc(window)}</field>` +
+        `<value name="PAYOUT">${payout}</value>` +
+        `<value name="STAKE">${stake}</value>`,
+    };
+  }
+  /** Read a field from the latest Turbo recovery timing decision. */
+  ntTurboRecoveryDecision(field: string): string {
+    return `<block type="nt_turbo_recovery_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
   /** Safely retarget the vendored trade engine between contracts. */
   ntSwitchMarket(symbol: string): Stmt {
     return { type: "nt_switch_market", inner: `<value name="SYMBOL">${symbol}</value>` };

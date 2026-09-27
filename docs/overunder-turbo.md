@@ -97,7 +97,7 @@ Next to **Locked** / **Switching** the scan result offers **Create DBot**. It
 does NOT start the Turbo engine. Instead:
 
 1. `POST /api/bots/overunder-turbo/dbot` (same body and validation as `/start`)
-   renders a stock Deriv-Bot Blockly strategy for the scanned triple —
+   renders a NeuroTrade Deriv-Bot Blockly strategy for the scanned triple —
    `overunder-turbo-dbot.ts` — quoting the payout multipliers the engine itself
    would use (`resolveRecoveryPayout`) and reading the account's recovery markup
    / max stake from settings.
@@ -115,7 +115,12 @@ The generated bot is the Turbo engine's **LOCKED** mode, block for block:
 - market fixed to the scanned symbol, 1-tick Over/Under, contract type "both";
 - **arm once** — purchase conditions wait until the normal contract hits ≥ its
   break-even (1 / payout) over the last 40 digits, or 30 evaluations elapse;
-- normal contract while there is no debt, recovery contract while there is;
+- normal entries retain Turbo's continuous cadence while there is no debt;
+- every recovery attempt is timed inside the running DBot: a recency-weighted
+  hierarchical Beta/Markov model must put its one-sided 90% lower bound above
+  the live proposal's break-even, while loss clustering stays ≤ 1.08,
+  half-window instability stays below 14 points and balance-aware expected log
+  utility remains positive; otherwise the bot waits and reports the blocker;
 - recovery stake = debt × (1 + markup %) / (payout − 1), floored at 0.35,
   capped at max trade stake and live balance, rounded UP to cents — identical to
   `getBotRecoveryStake`; a recovery win pays its net profit into the debt and
@@ -126,12 +131,15 @@ The generated bot is the Turbo engine's **LOCKED** mode, block for block:
 Switching mode cannot be expressed in a DBot (Deriv fixes the market in the trade
 definition), so **Create DBot always produces a locked bot**.
 
-Only stock builder blocks are used (`TURBO_DBOT_BLOCK_TYPES`). The builder's jest
-suite (`src/preview/__tests__/turbo-dbot-strategy.spec.js`) loads the committed
+The strategy uses stock blocks plus two NeuroTrade recovery-analysis blocks
+registered by the vendored builder (`TURBO_DBOT_BLOCK_TYPES`), so it must run in
+NeuroTrade's embedded Bot Builder. The builder's jest suite
+(`src/preview/__tests__/turbo-dbot-strategy.spec.js`) loads the committed
 fixtures into the REAL Deriv Blockly with every block definition, generates code
 the way `dbot.generateCode()` does and executes it against a scripted market to
-pin the ladder (1.00 → 1.16 → 2.51 → back to base), TP, SL, breaker and partial
-recovery. `overunder-turbo-dbot.test.ts` keeps those fixtures in sync with the
+pin the ladder (1.00 → 1.16 → 2.51 → back to base), qualified recovery waits,
+permanent cold-tape refusal, TP, SL, breaker and partial recovery.
+`overunder-turbo-dbot.test.ts` keeps those fixtures in sync with the
 generator (`npx tsx src/lib/overunder-turbo-dbot.fixtures.ts --write`).
 
 ## Files

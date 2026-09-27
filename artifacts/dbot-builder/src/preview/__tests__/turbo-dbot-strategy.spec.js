@@ -78,7 +78,7 @@ function buildRunner(workspace) {
 }
 
 /** Scripted Deriv: `results` are the outcomes of successive purchases. */
-function fakeMarket({ results, digits = () => GOOD_DIGITS, balance = 1000 }) {
+function fakeMarket({ results, digits = () => GOOD_DIGITS, balance = 1000, recoveryReady = () => true }) {
     const state = {
         trades: [],
         notifications: [],
@@ -88,6 +88,8 @@ function fakeMarket({ results, digits = () => GOOD_DIGITS, balance = 1000 }) {
         tradeOptions: null,
         init: null,
         beforeEvaluations: 0,
+        recoveryAnalyses: 0,
+        recoveryDecision: null,
         exhausted: false,
     };
     const contract = { buy_price: 0, sell_price: 0, profit: 0, result: 'win' };
@@ -117,6 +119,21 @@ function fakeMarket({ results, digits = () => GOOD_DIGITS, balance = 1000 }) {
         getTotalProfit: () => state.totalProfit,
         getBalance: () => state.balance,
         getLastDigitList: () => digits(state),
+        ntAnalyseTurboRecovery: () => {
+            state.recoveryAnalyses += 1;
+            const eligible = recoveryReady(state);
+            state.recoveryDecision = {
+                eligible,
+                probability: eligible ? 0.72 : 0.48,
+                lowerBound: eligible ? 0.61 : 0.42,
+                breakEven: 1 / 1.95,
+                reason: eligible
+                    ? 'READY · scripted recovery edge'
+                    : 'HOLD · scripted recovery edge unavailable',
+            };
+            return eligible;
+        },
+        ntTurboRecoveryDecision: field => state.recoveryDecision?.[field] ?? 0,
         notify: n => state.notifications.push(n.message),
         isTradeAgain: () => {},
         getLastTick: () => ({ epoch: Date.now() }),
@@ -138,6 +155,7 @@ function runStrategy(code, market) {
         return 'stopped';
     } catch (error) {
         if (error.message === 'SCRIPT_EXHAUSTED') return 'exhausted';
+        if (error.message === 'purchase conditions never purchased') return 'waiting';
         throw error;
     }
 }
@@ -202,6 +220,8 @@ describe('Over/Under Turbo → Deriv DBot strategy', () => {
         // Every call resolved to the single recovery-stake procedure (no auto-created duplicates).
         expect(workspace.getBlocksByType('procedures_defnoreturn', false)).toHaveLength(1);
         expect(workspace.getBlocksByType('procedures_callnoreturn', false).length).toBeGreaterThanOrEqual(2);
+        expect(workspace.getBlocksByType('nt_analyse_turbo_recovery', false)).toHaveLength(1);
+        expect(workspace.getBlocksByType('nt_turbo_recovery_decision', false).length).toBeGreaterThanOrEqual(4);
     });
 
     it('generates runnable code that arms once, trades the lock and recovers like the Turbo engine', () => {
@@ -209,6 +229,8 @@ describe('Over/Under Turbo → Deriv DBot strategy', () => {
         const code = buildRunner(workspace);
         expect(code).toContain("symbol              : 'R_100'");
         expect(code).toContain('"DIGITOVER","DIGITUNDER"');
+        expect(code).toContain('Bot.ntAnalyseTurboRecovery');
+        expect(code).toContain('Bot.ntTurboRecoveryDecision');
 
         // Arming: first 3 evaluations see a dead tape (Over 2 never hits), then a healthy one.
         const market = fakeMarket({
@@ -231,9 +253,39 @@ describe('Over/Under Turbo → Deriv DBot strategy', () => {
             ['DIGITOVER', 4, 2.51, 'W'], // recovery: ceil₂(2.16 × 1.1 / 0.95) = 2.51 → +2.38 clears debt
             ['DIGITOVER', 2, 1, 'W'], // straight back to the normal leg at base stake
         ]);
-        expect(market.state.notifications.some(m => /Recovery step 1 — Over 4 at 1.16 USD to clear 1 USD/.test(m))).toBe(true);
-        expect(market.state.notifications.some(m => /Recovery step 2 — Over 4 at 2.51 USD to clear 2.16 USD/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /Recovery step 1 — Over 4 sized at 1.16 USD to clear 1 USD.*waiting/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /Recovery step 2 — Over 4 sized at 2.51 USD to clear 2.16 USD.*waiting/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /RECOVERY READY/.test(m))).toBe(true);
         expect(market.state.notifications.some(m => /Recovery complete — debt cleared/.test(m))).toBe(true);
+    });
+
+    it('waits for a qualified recovery moment instead of firing the ladder blindly', () => {
+        loadFixture('turbo-r100-over2-over4');
+        const code = buildRunner(workspace);
+        const market = fakeMarket({
+            results: ['L', 'W'],
+            recoveryReady: state => state.recoveryAnalyses >= 15,
+        });
+
+        expect(runStrategy(code, market)).toBe('exhausted');
+        expect(market.state.trades).toHaveLength(2);
+        expect(market.state.trades[0]).toMatchObject({ prediction: 2, won: false });
+        expect(market.state.trades[1]).toMatchObject({ prediction: 4, won: true });
+        expect(market.state.recoveryAnalyses).toBe(15);
+        expect(market.state.notifications.some(m => /RECOVERY WAIT/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /RECOVERY READY/.test(m))).toBe(true);
+    });
+
+    it('does not force a recovery purchase when its analysis remains cold', () => {
+        loadFixture('turbo-r100-over2-over4');
+        const code = buildRunner(workspace);
+        const market = fakeMarket({ results: ['L', 'W'], recoveryReady: () => false });
+
+        expect(runStrategy(code, market)).toBe('waiting');
+        expect(market.state.trades).toHaveLength(1);
+        expect(market.state.trades[0]).toMatchObject({ prediction: 2, won: false });
+        expect(market.state.recoveryAnalyses).toBeGreaterThan(100);
+        expect(market.state.notifications.some(m => /RECOVERY WAIT/.test(m))).toBe(true);
     });
 
     it('stops at stop-loss on a losing ladder and never trades past it', () => {

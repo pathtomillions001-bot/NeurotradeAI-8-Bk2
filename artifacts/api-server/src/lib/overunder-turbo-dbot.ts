@@ -7,8 +7,8 @@
  *   (market, normal barrier, recovery barrier) triple. Normally the user deploys
  *   it into NeuroTrade's own executor. "Create DBot" instead turns that exact
  *   triple — plus the session's stake / take-profit / stop-loss and the shared
- *   bot recovery rules — into a stock Deriv Bot (Blockly) strategy. The user
- *   opens it in the unmodified Deriv bot builder, verifies the blocks, and
+ *   bot recovery rules — into a NeuroTrade Deriv Bot (Blockly) strategy. The user
+ *   opens it in NeuroTrade's embedded Deriv bot builder, verifies the blocks, and
  *   presses Deriv's own Run: from then on Deriv Bot executes the trades, not
  *   the Turbo engine.
  *
@@ -18,7 +18,10 @@
  *   · ARM ONCE: before the first purchase it waits until the normal contract's
  *     hit-rate over the last 40 digits is ≥ its break-even (1 / payout), or
  *     the arming window elapses (`armTimeoutTicks`) — then it never re-arms.
- *   · Normal contract while there is no debt; recovery contract while there is.
+ *   · Normal entries retain Turbo's continuous cadence after arming.
+ *   · Recovery entries are NOT blind: before every attempt the running DBot
+ *     requires a Bayesian conditional 90% lower bound above live break-even,
+ *     stable tape, low loss clustering and positive balance-aware log utility.
  *   · Recovery stake = debt × (1 + markup %) / (payout − 1), floored at $0.35,
  *     capped at the account's max trade stake and at the live balance, rounded
  *     UP to cents — the same `getBotRecoveryStake` maths as every specialist bot.
@@ -31,13 +34,12 @@
  *   The one thing a DBot cannot do is Turbo's SWITCHING mode (Deriv Bot fixes
  *   the market in its trade definition), so the generated bot is a LOCKED bot.
  *
- * WHY EVERY BLOCK IS STOCK
- * ────────────────────────
- *   Only block types that ship with the vendored Deriv bot builder are used
- *   (`TURBO_DBOT_BLOCK_TYPES`), so the workspace loads through the builder's
- *   normal `load()` path with zero patches to Deriv's code. The generated XML is
- *   plain Blockly XML with `is_dbot="true"`, identical in shape to the Quick
- *   Strategy templates in `artifacts/dbot-builder/src/xml/`.
+ * BUILDER COMPATIBILITY
+ * ─────────────────────
+ *   The strategy is plain Blockly XML and loads through the builder's normal
+ *   `load()` path. Recovery timing uses two NeuroTrade blocks registered by the
+ *   vendored builder; all execution and analysis remain local in that running
+ *   DBot, but the strategy must be run in NeuroTrade's embedded builder.
  */
 
 import {
@@ -74,6 +76,8 @@ export interface TurboDbotInput {
   armWindow?: number;
   /** Purchase-condition evaluations (≈ ticks) before arming is forced. */
   armTimeoutTicks?: number;
+  /** Digits used by the in-bot recovery timing model (default 120). */
+  recoveryWindow?: number;
 }
 
 export interface TurboDbotStrategy {
@@ -100,11 +104,12 @@ export interface TurboDbotStrategy {
     breakerDepth: number;
     armWindow: number;
     armTimeoutTicks: number;
+    recoveryWindow: number;
     currency: string;
   };
 }
 
-/** Every block type the generated strategy may contain — all stock Deriv Bot blocks. */
+/** Every block type the generated strategy may contain, including the two vendored recovery-analysis blocks. */
 export const TURBO_DBOT_BLOCK_TYPES = Object.freeze([
   "trade_definition",
   "trade_definition_market",
@@ -123,6 +128,8 @@ export const TURBO_DBOT_BLOCK_TYPES = Object.freeze([
   "total_profit",
   "balance",
   "lastDigitList",
+  "nt_analyse_turbo_recovery",
+  "nt_turbo_recovery_decision",
   "lists_getSublist",
   "lists_length",
   "controls_forEach",
@@ -132,6 +139,7 @@ export const TURBO_DBOT_BLOCK_TYPES = Object.freeze([
   "logic_boolean",
   "math_number",
   "math_arithmetic",
+  "math_modulo",
   "math_round",
   "math_constrain",
   "variables_set",
@@ -185,6 +193,7 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
 
   const armWindow = Math.max(12, Math.round(input.armWindow ?? 40));
   const armTimeoutTicks = Math.max(1, Math.round(input.armTimeoutTicks ?? 30));
+  const recoveryWindow = Math.max(40, Math.min(300, Math.round(input.recoveryWindow ?? 120)));
   const breakerDepth = Math.max(3, Math.round(input.breakerDepth));
   const maxRecoverySteps = Math.max(1, Math.min(10, Math.round(input.maxRecoverySteps)));
   const markupPercent = Math.max(0, input.markupPercent);
@@ -213,6 +222,11 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     hits: "Hits",
     digits: "Digits",
     digit: "Digit",
+    recoveryReady: "Recovery Ready",
+    recoveryChecks: "Recovery Checks",
+    recoveryReason: "Recovery Analysis",
+    recoveryProbability: "Recovery Probability",
+    recoveryLowerBound: "Recovery Lower Bound",
     profit: "Profit",
     lastStake: "Last Stake",
     lastReturn: "Last Return",
@@ -239,12 +253,18 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     x.set(V.recPayout, x.num(Math.round(input.recoveryPayout * 1000) / 1000)),
     x.set(V.armed, x.bool(false)),
     x.set(V.armTicks, x.num(0)),
+    x.set(V.recoveryReady, x.bool(false)),
+    x.set(V.recoveryChecks, x.num(0)),
+    x.set(V.recoveryReason, x.text("recovery analysis warming up")),
+    x.set(V.recoveryProbability, x.num(0)),
+    x.set(V.recoveryLowerBound, x.num(0)),
     x.notify(
       "info",
       x.text(
         `NeuroTrade Turbo · ${input.displayName} · ${normalLabel} normal → ${recoveryLabel} recovery · ` +
           `stake ${money(input.stake)} · TP ${money(input.takeProfit)} · SL ${money(input.stopLoss)} · ` +
-          `recovery markup ${markupPercent}% · circuit breaker ${breakerDepth} losses`,
+          `recovery: Bayesian 90% timing over ${recoveryWindow} digits · markup ${markupPercent}% · ` +
+          `circuit breaker ${breakerDepth} losses`,
       ),
     ),
   ];
@@ -319,21 +339,71 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     ]),
   ];
 
+  const purchaseCurrentContract = () =>
+    x.ifElse(
+      [{ cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")), then: [x.purchase("DIGITOVER")] }],
+      [x.purchase("DIGITUNDER")],
+    );
+
+  const recoveryWaitReport: Stmt[] = [
+    x.joinInto(V.message, [x.text("RECOVERY WAIT ·"), x.get(V.recoveryReason)]),
+    x.notify("info", x.get(V.message)),
+  ];
+  const recoveryReadyReport: Stmt[] = [
+    x.joinInto(V.message, [
+      x.text("RECOVERY READY · step"),
+      x.get(V.step),
+      x.text("·"),
+      x.get(V.recoveryReason),
+    ]),
+    x.notify("success", x.get(V.message)),
+  ];
+  const recoveryGate: Stmt[] = [
+    x.set(V.recoveryChecks, x.arith("ADD", x.get(V.recoveryChecks), x.num(1))),
+    x.set(V.recoveryReady, x.bool(false)),
+    x.ntAnalyseTurboRecovery(
+      input.recovery.side,
+      input.recovery.barrier,
+      x.get(V.recPayout),
+      recoveryWindow,
+      x.get(V.stake),
+    ),
+    x.set(V.recoveryReady, x.ntTurboRecoveryDecision("eligible")),
+    x.set(V.recoveryReason, x.ntTurboRecoveryDecision("reason")),
+    x.set(V.recoveryProbability, x.ntTurboRecoveryDecision("probability")),
+    x.set(V.recoveryLowerBound, x.ntTurboRecoveryDecision("lowerBound")),
+    x.ifElse([
+      {
+        cond: x.compare("EQ", x.get(V.recoveryReady), x.bool(true)),
+        then: [...recoveryReadyReport, purchaseCurrentContract()],
+      },
+      {
+        cond: x.compare("EQ", x.mod(x.get(V.recoveryChecks), x.num(10)), x.num(0)),
+        then: recoveryWaitReport,
+      },
+    ]),
+  ];
+
   const beforePurchase = x.topLevel(
     "before_purchase",
     `<statement name="BEFOREPURCHASE_STACK">${x.chain([
-      x.ifElse([{ cond: x.compare("EQ", x.get(V.armed), x.bool(false)), then: arming }]),
-      x.ifElse([
-        {
-          cond: x.compare("EQ", x.get(V.armed), x.bool(true)),
-          then: [
-            x.ifElse(
-              [{ cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")), then: [x.purchase("DIGITOVER")] }],
-              [x.purchase("DIGITUNDER")],
-            ),
-          ],
-        },
-      ]),
+      x.ifElse(
+        [
+          {
+            cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+            then: recoveryGate,
+          },
+        ],
+        [
+          x.ifElse([{ cond: x.compare("EQ", x.get(V.armed), x.bool(false)), then: arming }]),
+          x.ifElse([
+            {
+              cond: x.compare("EQ", x.get(V.armed), x.bool(true)),
+              then: [purchaseCurrentContract()],
+            },
+          ]),
+        ],
+      ),
     ])}</statement>`,
     0,
     900,
@@ -387,12 +457,20 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
   );
 
   // ── 5. Restart trading conditions — the shared recovery ledger ─────────────
+  // A factory is required: each insertion must receive fresh Blockly value
+  // block IDs or the real builder rejects the workspace as ambiguous.
+  const resetRecoveryGate = (): Stmt[] => [
+    x.set(V.recoveryReady, x.bool(false)),
+    x.set(V.recoveryChecks, x.num(0)),
+    x.set(V.recoveryReason, x.text("recovery analysis warming up")),
+  ];
   const enterRecovery: Stmt[] = [
     x.set(V.inRecovery, x.bool(true)),
     x.set(V.step, x.num(1)),
     x.set(V.debt, x.get(V.lastStake)),
     x.set(V.contract, x.text(input.recovery.side)),
     x.set(V.barrier, x.num(input.recovery.barrier)),
+    ...resetRecoveryGate(),
   ];
   const deepenRecovery: Stmt[] = [
     x.ifElse([
@@ -402,6 +480,7 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
       },
     ]),
     x.set(V.debt, x.arith("ADD", x.get(V.debt), x.get(V.lastStake))),
+    ...resetRecoveryGate(),
   ];
   const exitRecovery: Stmt[] = [
     x.set(V.debt, x.num(0)),
@@ -410,9 +489,11 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     x.set(V.contract, x.text(input.normal.side)),
     x.set(V.barrier, x.num(input.normal.barrier)),
     x.set(V.stake, x.get(V.baseStake)),
+    ...resetRecoveryGate(),
     x.notify("success", x.text(`Recovery complete — debt cleared, back to ${normalLabel} at base stake`)),
   ];
   const onRecoveryWinPartial: Stmt[] = [
+    ...resetRecoveryGate(),
     x.call(RECOVERY_PROC),
     // Deriv's text_join glues its parts with a single space.
     x.joinInto(V.message, [
@@ -431,11 +512,11 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     x.joinInto(V.message, [
       x.text("Recovery step"),
       x.get(V.step),
-      x.text(`— ${recoveryLabel} at`),
+      x.text(`— ${recoveryLabel} sized at`),
       x.get(V.stake),
       x.text(`${currency} to clear`),
       x.get(V.debt),
-      x.text(currency),
+      x.text(`${currency} · waiting for a qualified recovery entry`),
     ]),
     x.notify("warn", x.get(V.message)),
   ];
@@ -540,6 +621,7 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
       breakerDepth,
       armWindow,
       armTimeoutTicks,
+      recoveryWindow,
       currency,
     },
   };

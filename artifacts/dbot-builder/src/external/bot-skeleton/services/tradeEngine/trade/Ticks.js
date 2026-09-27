@@ -8,6 +8,7 @@ import { api_base } from '../../api/api-base';
 import { getDirection, getLastDigit } from '../utils/helpers';
 import { expectPositiveInteger } from '../utils/sanitize';
 import * as constants from './state/constants';
+import { analyseTurboRecovery } from './turbo-recovery-analysis';
 
 let tickListenerKey;
 
@@ -180,9 +181,77 @@ export default Engine =>
             return best.eligible;
         }
 
-        ntDigitDecision(field) {
+        async ntDigitDecision(field) {
             const value = this.nt_digit_decision?.[field];
             return value === undefined ? (field === 'reason' ? 'analysis warming up' : 0) : value;
+        }
+
+        /**
+         * Time a generated Turbo DBot's FIXED recovery contract. The pre-deploy
+         * scan still owns market/barrier selection; this read only answers
+         * whether the next tick is a defensible moment to place that recovery.
+         */
+        async ntAnalyseTurboRecovery(
+            contract = 'DIGITOVER',
+            barrier = 4,
+            fallbackPayout = 1.95,
+            requestedWindow = 120,
+            requestedStake = 0
+        ) {
+            try {
+                const windowSize = Math.max(40, Math.min(300, Number(requestedWindow) || 120));
+                const ticks = await this.$scope.ticksService.request({ symbol: this.symbol });
+                const pip = this.$scope.ticksService.pipSizes?.[this.symbol] ?? this.getPipSize() ?? 2;
+                const digits = ticks
+                    .slice(-windowSize)
+                    .map(tick => getLastDigit(Number(tick.quote).toFixed(pip)));
+
+                // Prefer the proposal currently prepared by Trade Definition.
+                // Its payout/ask ratio is the true live total-return multiplier;
+                // the API-quoted seed remains a conservative availability fallback.
+                const proposal = [...(this.data?.proposals ?? [])]
+                    .reverse()
+                    .find(row => {
+                        const sameContract = row?.contract_type === contract;
+                        const sameBarrier = row?.barrier === undefined || Number(row.barrier) === Number(barrier);
+                        return sameContract && sameBarrier;
+                    });
+                const ask = Number(proposal?.ask_price);
+                const totalReturn = Number(proposal?.payout);
+                const livePayout = ask > 0 && totalReturn > ask ? totalReturn / ask : Number.NaN;
+                const payout = Number.isFinite(livePayout) ? livePayout : Number(fallbackPayout);
+                const stake = Number(requestedStake) || Number(this.tradeOptions?.amount) || 0;
+                const balance = Number(this.getBalance?.('NUM')) || 0;
+
+                this.nt_turbo_recovery_decision = analyseTurboRecovery({
+                    digits,
+                    contract,
+                    barrier,
+                    payout,
+                    stake,
+                    balance,
+                });
+                return this.nt_turbo_recovery_decision.eligible;
+            } catch (_) {
+                this.nt_turbo_recovery_decision = {
+                    eligible: false,
+                    probability: 0,
+                    lowerBound: 0,
+                    breakEven: 1,
+                    clusterRatio: 99,
+                    instability: 1,
+                    expectedUtility: -999,
+                    samples: 0,
+                    contextSamples: 0,
+                    reason: 'HOLD · recovery feed unavailable; retrying safely',
+                };
+                return false;
+            }
+        }
+
+        async ntTurboRecoveryDecision(field) {
+            const value = this.nt_turbo_recovery_decision?.[field];
+            return value === undefined ? (field === 'reason' ? 'HOLD · recovery analysis warming up' : 0) : value;
         }
 
         /** Safe between-contract retarget: remove the old listener, clear stale

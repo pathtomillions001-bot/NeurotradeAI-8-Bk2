@@ -2,10 +2,10 @@
  * Over/Under Turbo → Deriv DBot strategy generator.
  *
  * Pins the contract the "Create DBot" button relies on: the generated workspace
- * is stock Deriv-Bot Blockly XML that (a) trades exactly the scanned market and
+ * is vendored Deriv-Bot Blockly XML that (a) trades exactly the scanned market and
  * barriers, (b) carries the session's stake / TP / SL, (c) implements the shared
- * bot recovery maths, and (d) uses only block types the vendored builder ships,
- * so it loads through the builder's unmodified `load()` path.
+ * bot recovery maths, and (d) uses only block types the vendored builder registers,
+ * including the in-runtime recovery timer, so it loads through the normal `load()` path.
  */
 
 import assert from "node:assert/strict";
@@ -46,7 +46,7 @@ function attr(xml: string, name: string): string[] {
 }
 
 describe("buildTurboDbotStrategy", () => {
-  it("emits a Deriv-Bot workspace whose every block is a stock builder block", () => {
+  it("emits a DBot workspace whose every block is registered by the vendored builder", () => {
     const { xml } = buildTurboDbotStrategy(baseInput());
     assert.ok(xml.startsWith("<xml "), "root must be <xml>");
     assert.match(xml, /is_dbot="true"/);
@@ -146,6 +146,23 @@ describe("buildTurboDbotStrategy", () => {
     assert.match(xml, />Recovery Payout<\/field><value name="VALUE"><block type="math_number" id="[^"]+"><field name="NUM">1.95<\/field>/);
     assert.equal(summary.armWindow, 40);
     assert.equal(summary.armTimeoutTicks, 30);
+    assert.equal(summary.recoveryWindow, 120);
+  });
+
+  it("gates every recovery attempt behind the in-bot Bayesian timing decision", () => {
+    const { xml, summary } = buildTurboDbotStrategy(baseInput({ recoveryWindow: 160 }));
+    assert.match(xml, /<block type="nt_analyse_turbo_recovery"/);
+    assert.match(xml, /<field name="CONTRACT">DIGITOVER<\/field>/);
+    assert.match(xml, /<field name="BARRIER">4<\/field>/);
+    assert.match(xml, /<field name="WINDOW">160<\/field>/);
+    assert.match(xml, /<block type="nt_turbo_recovery_decision"[^>]*><field name="FIELD">eligible<\/field>/);
+    assert.match(xml, /<field name="FIELD">reason<\/field>/);
+    assert.match(xml, /<field name="FIELD">probability<\/field>/);
+    assert.match(xml, /<field name="FIELD">lowerBound<\/field>/);
+    assert.match(xml, /RECOVERY WAIT ·/);
+    assert.match(xml, /RECOVERY READY · step/);
+    assert.match(xml, /waiting for a qualified recovery entry/);
+    assert.equal(summary.recoveryWindow, 160);
   });
 
   it("defines the recovery-stake procedure before its callers", () => {

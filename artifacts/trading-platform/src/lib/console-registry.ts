@@ -66,6 +66,12 @@ export function implementedConsoleIds(): string[] {
  */
 export const SCANNER_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
   "overunder-turbo@2",
+  // Barrier Bastion scans, deploys in-app, and can hand its measured band lock
+  // to the Deriv bot builder.
+  "bastion@1",
+  // Vector Surge scans momentum/recovery quality and can forge the adaptive
+  // Rise/Fall DBot from the scanned card.
+  "surge@1",
   // Dual-Lock Range Sentinel scans the markets AND can take the trades — either
   // in NeuroTrade's executor (Lock & Deploy) or by handing the scanned lock to
   // the Deriv bot builder (Create DBot).

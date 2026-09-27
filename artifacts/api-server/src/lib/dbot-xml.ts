@@ -76,10 +76,18 @@ export class XmlBuilder {
   get(name: string): string {
     return `<block type="variables_get" id="${this.id()}"><field name="VAR" id="${this.variable(name)}">${esc(name)}</field></block>`;
   }
-  arith(op: "ADD" | "MINUS" | "MULTIPLY" | "DIVIDE", a: string, b: string): string {
+  arith(
+    op: "ADD" | "MINUS" | "MULTIPLY" | "DIVIDE",
+    a: string,
+    b: string,
+  ): string {
     return `<block type="math_arithmetic" id="${this.id()}"><field name="OP">${op}</field><value name="A">${a}</value><value name="B">${b}</value></block>`;
   }
-  compare(op: "EQ" | "NEQ" | "LT" | "LTE" | "GT" | "GTE", a: string, b: string): string {
+  compare(
+    op: "EQ" | "NEQ" | "LT" | "LTE" | "GT" | "GTE",
+    a: string,
+    b: string,
+  ): string {
     return `<block type="logic_compare" id="${this.id()}"><field name="OP">${op}</field><value name="A">${a}</value><value name="B">${b}</value></block>`;
   }
   logic(op: "AND" | "OR", a: string, b: string): string {
@@ -111,14 +119,23 @@ export class XmlBuilder {
     return `<block type="nt_digit_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
   }
   /** Run the adaptive multi-market/barrier ranker inside the bot runtime. */
-  ntAnalyse(mode: "NORMAL" | "RECOVERY", markets: string[], window: number): Stmt {
+  ntAnalyse(
+    mode: "NORMAL" | "RECOVERY",
+    markets: string[],
+    window: number,
+  ): Stmt {
     return {
       type: "nt_analyse_digit_markets",
       inner: `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field><field name="WINDOW">${esc(window)}</field>`,
     };
   }
   /** Omni Forge: run the user-defined contract-set ranker inside the bot runtime. */
-  ntAnalyseContracts(mode: "NORMAL" | "RECOVERY", markets: string[], contractsCsv: string, window: number): Stmt {
+  ntAnalyseContracts(
+    mode: "NORMAL" | "RECOVERY",
+    markets: string[],
+    contractsCsv: string,
+    window: number,
+  ): Stmt {
     return {
       type: "nt_analyse_contracts",
       inner:
@@ -206,9 +223,34 @@ export class XmlBuilder {
   ntDualLockEntryDecision(field: string): string {
     return `<block type="nt_dual_lock_entry_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
   }
+  /** Barrier Bastion: same bounded first-entry timing, with Bastion-labelled blocks. */
+  ntAnalyseBastionEntry(
+    contract: "DIGITOVER" | "DIGITUNDER",
+    barrier: number,
+    window: number,
+    patience: number,
+    waited: string,
+  ): Stmt {
+    return {
+      type: "nt_analyse_bastion_entry",
+      inner:
+        `<field name="CONTRACT">${contract}</field>` +
+        `<field name="BARRIER">${esc(barrier)}</field>` +
+        `<field name="WINDOW">${esc(window)}</field>` +
+        `<field name="PATIENCE">${esc(patience)}</field>` +
+        `<value name="WAITED">${waited}</value>`,
+    };
+  }
+  /** Read a field from the latest Barrier Bastion first-entry timing decision. */
+  ntBastionEntryDecision(field: string): string {
+    return `<block type="nt_bastion_entry_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
   /** Safely retarget the vendored trade engine between contracts. */
   ntSwitchMarket(symbol: string): Stmt {
-    return { type: "nt_switch_market", inner: `<value name="SYMBOL">${symbol}</value>` };
+    return {
+      type: "nt_switch_market",
+      inner: `<value name="SYMBOL">${symbol}</value>`,
+    };
   }
   lastN(list: string, n: number): string {
     return (
@@ -244,7 +286,9 @@ export class XmlBuilder {
           `<value name="IF${i}">${b.cond}</value><statement name="DO${i}">${this.chain(b.then)}</statement>`,
       )
       .join("");
-    const els = otherwise ? `<statement name="ELSE">${this.chain(otherwise)}</statement>` : "";
+    const els = otherwise
+      ? `<statement name="ELSE">${this.chain(otherwise)}</statement>`
+      : "";
     return { type: "controls_if", inner: `${mutation}${body}${els}` };
   }
   forEach(itemVar: string, list: string, body: Stmt[]): Stmt {
@@ -267,20 +311,30 @@ export class XmlBuilder {
       inner: `<field name="VARIABLE" id="${this.variable(target)}">${esc(target)}</field><statement name="STACK">${stack}</statement>`,
     };
   }
-  notify(kind: "success" | "info" | "warn" | "error", message: string, sound = "silent"): Stmt {
+  notify(
+    kind: "success" | "info" | "warn" | "error",
+    message: string,
+    sound = "silent",
+  ): Stmt {
     return {
       type: "notify",
       inner: `<field name="NOTIFICATION_TYPE">${kind}</field><field name="NOTIFICATION_SOUND">${sound}</field><value name="MESSAGE">${message}</value>`,
     };
   }
   purchase(contract: "DIGITOVER" | "DIGITUNDER" | "CALL" | "PUT"): Stmt {
-    return { type: "purchase", inner: `<field name="PURCHASE_LIST">${contract}</field>` };
+    return {
+      type: "purchase",
+      inner: `<field name="PURCHASE_LIST">${contract}</field>`,
+    };
   }
   tradeAgain(): Stmt {
     return { type: "trade_again", inner: "" };
   }
   call(procName: string): Stmt {
-    return { type: "procedures_callnoreturn", inner: `<mutation name="${esc(procName)}"></mutation>` };
+    return {
+      type: "procedures_callnoreturn",
+      inner: `<mutation name="${esc(procName)}"></mutation>`,
+    };
   }
 
   /** Nest statements with `<next>` the way Blockly serialises a stack. */
@@ -292,7 +346,13 @@ export class XmlBuilder {
   }
 
   /** Top-level (x/y positioned) block. */
-  topLevel(type: string, inner: string, x: number, y: number, attrs = ""): string {
+  topLevel(
+    type: string,
+    inner: string,
+    x: number,
+    y: number,
+    attrs = "",
+  ): string {
     return `<block type="${type}" id="${this.id()}" x="${x}" y="${y}"${attrs}>${inner}</block>`;
   }
 
@@ -302,13 +362,25 @@ export class XmlBuilder {
   // and a streak length inside the running bot (docs/digit-forge-market-switching.md §4.3).
 
   /** `math_single` — ROOT / ABS / NEG / LN / LOG10 / EXP / POW10. */
-  single(op: "ROOT" | "ABS" | "NEG" | "LN" | "LOG10" | "EXP" | "POW10", v: string): string {
+  single(
+    op: "ROOT" | "ABS" | "NEG" | "LN" | "LOG10" | "EXP" | "POW10",
+    v: string,
+  ): string {
     return `<block type="math_single" id="${this.id()}"><field name="OP">${op}</field><value name="NUM">${v}</value></block>`;
   }
 
   /** `math_on_list` — SUM / MIN / MAX / AVERAGE / MEDIAN / MODE / ANTIMODE / STD_DEV / RANDOM. */
   onList(
-    op: "SUM" | "MIN" | "MAX" | "AVERAGE" | "MEDIAN" | "MODE" | "ANTIMODE" | "STD_DEV" | "RANDOM",
+    op:
+      | "SUM"
+      | "MIN"
+      | "MAX"
+      | "AVERAGE"
+      | "MEDIAN"
+      | "MODE"
+      | "ANTIMODE"
+      | "STD_DEV"
+      | "RANDOM",
     list: string,
   ): string {
     // NOTE: the vendored `math_on_list` defines no domToMutation (unlike upstream
@@ -330,7 +402,9 @@ export class XmlBuilder {
   /** Fold a list of conditions into a left-nested AND/OR chain (Blockly's op is binary). */
   all(op: "AND" | "OR", conds: string[]): string {
     if (conds.length === 0) return this.bool(op === "AND");
-    return conds.reduce((acc, cond) => (acc === "" ? cond : this.logic(op, acc, cond)));
+    return conds.reduce((acc, cond) =>
+      acc === "" ? cond : this.logic(op, acc, cond),
+    );
   }
 
   /** A value-returning procedure call. */
@@ -339,7 +413,13 @@ export class XmlBuilder {
   }
 
   /** `procedures_defreturn` — statements then a RETURN value. */
-  defReturn(procName: string, body: Stmt[], returnValue: string, x: number, y: number): string {
+  defReturn(
+    procName: string,
+    body: Stmt[],
+    returnValue: string,
+    x: number,
+    y: number,
+  ): string {
     return (
       `<block type="procedures_defreturn" id="${this.id()}" x="${x}" y="${y}">` +
       `<field name="NAME">${esc(procName)}</field>` +

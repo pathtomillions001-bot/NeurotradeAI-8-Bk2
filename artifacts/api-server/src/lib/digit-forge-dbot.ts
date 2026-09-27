@@ -13,7 +13,7 @@
  *   · Trades 1-tick Over/Under digit contracts on the chosen market.
  *   · NORMAL mode (no debt): fires only when its own live measurement of the
  *     tape clears a statistical gate (§ "The gate" below).
- *   · RECOVERY mode (debt outstanding): re-ranks the recovery barriers, then
+ *   · RECOVERY mode (debt outstanding): re-ranks the two recovery barriers (Over 5 / Under 4), then
  *     waits for a stable, loss-conditioned edge confirmed on two distinct
  *     ticks. Multi-horizon agreement, clustering and adverse-run vetoes keep a
  *     growing stake out of a hostile regime. The stake is the shared recovery
@@ -55,23 +55,52 @@
  *   runs in NeuroTrade's builder, not the unmodified app.deriv.com builder.
  */
 
-import {
-  contractLabel,
-  isNormalContract,
-  isRecoveryContract,
-  type TurboContract,
-} from "./overunder-turbo-analysis";
+import { contractLabel, type TurboContract } from "./overunder-turbo-analysis";
 import { XmlBuilder, esc, money, type Stmt } from "./dbot-xml";
 import { marketPathForSymbol } from "./overunder-turbo-dbot";
 
 // ── Public types ──────────────────────────────────────────────────────────────
+
+/** The ONLY contracts Digit Forge may rank for normal (non-recovery) trades. */
+export const DIGIT_FORGE_NORMAL_CONTRACTS: readonly TurboContract[] =
+  Object.freeze([
+    { side: "DIGITOVER", barrier: 1 },
+    { side: "DIGITOVER", barrier: 2 },
+    { side: "DIGITUNDER", barrier: 7 },
+    { side: "DIGITUNDER", barrier: 8 },
+  ]);
+
+/** The ONLY contracts Digit Forge may rank for recovery trades. */
+export const DIGIT_FORGE_RECOVERY_CONTRACTS: readonly TurboContract[] =
+  Object.freeze([
+    { side: "DIGITOVER", barrier: 5 },
+    { side: "DIGITUNDER", barrier: 4 },
+  ]);
+
+export function isDigitForgeNormalContract(
+  side: unknown,
+  barrier: unknown,
+): boolean {
+  return DIGIT_FORGE_NORMAL_CONTRACTS.some(
+    (c) => c.side === side && c.barrier === barrier,
+  );
+}
+
+export function isDigitForgeRecoveryContract(
+  side: unknown,
+  barrier: unknown,
+): boolean {
+  return DIGIT_FORGE_RECOVERY_CONTRACTS.some(
+    (c) => c.side === side && c.barrier === barrier,
+  );
+}
 
 export interface DigitForgeInput {
   symbol: string;
   displayName: string;
   /** Over 1 / Over 2 / Under 7 / Under 8. */
   normal: TurboContract;
-  /** Over 4 / Over 5 / Under 4 / Under 5. */
+  /** Over 5 / Under 4 only. */
   recovery: TurboContract;
   /** Base stake in account currency (≥ 0.35). */
   stake: number;
@@ -82,7 +111,7 @@ export interface DigitForgeInput {
   markupPercent: number;
   /** Hard cap for any single stake (settings.maxTradeStake). */
   maxStake: number;
-  /** Total-return payout multipliers (stake included), e.g. Over 4 ≈ 1.95. */
+  /** Total-return payout multipliers (stake included), e.g. Over 5 ≈ 2.43. */
   normalPayout: number;
   recoveryPayout: number;
   /** Consecutive losses that halt the bot. */
@@ -219,7 +248,11 @@ export function ladderRisk(
   markupPercent: number,
   depth: number,
   winRate: number,
-): { debtGrowthPerStep: number; capitalAtRisk: number; failureProbability: number } {
+): {
+  debtGrowthPerStep: number;
+  capitalAtRisk: number;
+  failureProbability: number;
+} {
   const rate = (1 + markupPercent / 100) / (payout - 1);
   const growth = 1 + rate;
   let capital = 0;
@@ -227,7 +260,8 @@ export function ladderRisk(
   return {
     debtGrowthPerStep: Math.round(growth * 1000) / 1000,
     capitalAtRisk: Math.round(capital * 100) / 100,
-    failureProbability: Math.round(Math.pow(1 - winRate, depth) * 10000) / 10000,
+    failureProbability:
+      Math.round(Math.pow(1 - winRate, depth) * 10000) / 10000,
   };
 }
 
@@ -237,45 +271,70 @@ function ensure(cond: boolean, message: string): void {
   if (!cond) throw new Error(message);
 }
 
-export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrategy {
+export function buildDigitForgeStrategy(
+  input: DigitForgeInput,
+): DigitForgeStrategy {
   ensure(
-    isNormalContract(input.normal.side, input.normal.barrier),
+    isDigitForgeNormalContract(input.normal.side, input.normal.barrier),
     "normal must be one of Over 1, Over 2, Under 7, Under 8",
   );
   ensure(
-    isRecoveryContract(input.recovery.side, input.recovery.barrier),
-    "recovery must be one of Over 4, Over 5, Under 4, Under 5",
+    isDigitForgeRecoveryContract(input.recovery.side, input.recovery.barrier),
+    "recovery must be one of Over 5 or Under 4",
   );
-  ensure(Number.isFinite(input.stake) && input.stake >= 0.35, "stake must be ≥ 0.35");
+  ensure(
+    Number.isFinite(input.stake) && input.stake >= 0.35,
+    "stake must be ≥ 0.35",
+  );
   ensure(input.takeProfit > 0, "takeProfit must be > 0");
   ensure(input.stopLoss > 0, "stopLoss must be > 0");
-  ensure(input.normalPayout > 1, "normalPayout must be a total-return multiplier > 1");
-  ensure(input.recoveryPayout > 1, "recoveryPayout must be a total-return multiplier > 1");
-  ensure(/^[A-Za-z0-9_]+$/.test(input.symbol), "symbol must be a Deriv symbol code");
+  ensure(
+    input.normalPayout > 1,
+    "normalPayout must be a total-return multiplier > 1",
+  );
+  ensure(
+    input.recoveryPayout > 1,
+    "recoveryPayout must be a total-return multiplier > 1",
+  );
+  ensure(
+    /^[A-Za-z0-9_]+$/.test(input.symbol),
+    "symbol must be a Deriv symbol code",
+  );
 
   // Window is capped because `before_purchase` runs on EVERY tick and the
   // JS-Interpreter is step-limited: an O(W) rescan of 300 digits per tick is
   // the most the sandbox absorbs without visibly stalling the bot.
-  const windowSize = Math.max(20, Math.min(300, Math.round(input.window ?? 120)));
-  const minSamples = Math.max(10, Math.min(windowSize, Math.round(input.minSamples ?? 30)));
+  const windowSize = Math.max(
+    20,
+    Math.min(300, Math.round(input.window ?? 120)),
+  );
+  const minSamples = Math.max(
+    10,
+    Math.min(windowSize, Math.round(input.minSamples ?? 30)),
+  );
   const z = Math.max(0, Math.min(3, input.confidenceZ ?? 1.645));
   const forceEntryAfter = Math.max(0, Math.round(input.forceEntryAfter ?? 0));
   const useMarkov = input.useMarkov !== false;
   const useStreakCooldown = input.useStreakCooldown !== false;
   const breakerDepth = Math.max(3, Math.round(input.breakerDepth));
-  const maxRecoverySteps = Math.max(1, Math.min(10, Math.round(input.maxRecoverySteps)));
+  const maxRecoverySteps = Math.max(
+    1,
+    Math.min(10, Math.round(input.maxRecoverySteps)),
+  );
   const markupPercent = Math.max(0, input.markupPercent);
   const maxStake = input.maxStake > 0 ? input.maxStake : 500;
   const { market, submarket } = marketPathForSymbol(input.symbol);
   const normalLabel = contractLabel(input.normal);
   const recoveryLabel = contractLabel(input.recovery);
-  const currency = /^[A-Za-z]{3,5}$/.test(input.currency) ? input.currency.toUpperCase() : "USD";
+  const currency = /^[A-Za-z]{3,5}$/.test(input.currency)
+    ? input.currency.toUpperCase()
+    : "USD";
   const watchMarkets = [input.symbol, ...(input.watchMarkets ?? [])]
     .filter((s, i, all) => /^[A-Za-z0-9_]+$/.test(s) && all.indexOf(s) === i)
     .slice(0, 8);
 
   const zSquared = Math.round(z * z * 1e6) / 1e6;
-  const halfZSquared = Math.round((z * z) / 2 * 1e6) / 1e6;
+  const halfZSquared = Math.round(((z * z) / 2) * 1e6) / 1e6;
   const runLimit = expectedMaxRun(windowSize, 1 - fairWinRate(input.normal));
   const breakEven = Math.round((1 / input.normalPayout) * 10000) / 10000;
 
@@ -415,12 +474,20 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     // -1 marks "no previous digit yet", so the first digit starts no pair.
     x.set(V.prev, x.num(-1)),
     x.forEach(V.digit, x.get(V.digits), [
-      x.ifElse([{ cond: normalWins(x.get(V.digit)), then: [x.set(V.cur, x.num(1))] }], [x.set(V.cur, x.num(0))]),
+      x.ifElse(
+        [{ cond: normalWins(x.get(V.digit)), then: [x.set(V.cur, x.num(1))] }],
+        [x.set(V.cur, x.num(0))],
+      ),
       x.set(V.hits, x.arith("ADD", x.get(V.hits), x.get(V.cur))),
       // Trailing adverse run: resets on every win, so after the loop it holds
       // the length of the losing streak the tape is sitting in right now.
       x.ifElse(
-        [{ cond: x.compare("EQ", x.get(V.cur), x.num(0)), then: [x.set(V.runNow, x.arith("ADD", x.get(V.runNow), x.num(1)))] }],
+        [
+          {
+            cond: x.compare("EQ", x.get(V.cur), x.num(0)),
+            then: [x.set(V.runNow, x.arith("ADD", x.get(V.runNow), x.num(1)))],
+          },
+        ],
         [x.set(V.runNow, x.num(0))],
       ),
       x.ifElse([
@@ -428,7 +495,12 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
           cond: x.compare("EQ", x.get(V.prev), x.num(0)),
           then: [
             x.ifElse(
-              [{ cond: x.compare("EQ", x.get(V.cur), x.num(0)), then: [x.set(V.n00, x.arith("ADD", x.get(V.n00), x.num(1)))] }],
+              [
+                {
+                  cond: x.compare("EQ", x.get(V.cur), x.num(0)),
+                  then: [x.set(V.n00, x.arith("ADD", x.get(V.n00), x.num(1)))],
+                },
+              ],
               [x.set(V.n01, x.arith("ADD", x.get(V.n01), x.num(1)))],
             ),
           ],
@@ -437,7 +509,12 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
           cond: x.compare("EQ", x.get(V.prev), x.num(1)),
           then: [
             x.ifElse(
-              [{ cond: x.compare("EQ", x.get(V.cur), x.num(0)), then: [x.set(V.n10, x.arith("ADD", x.get(V.n10), x.num(1)))] }],
+              [
+                {
+                  cond: x.compare("EQ", x.get(V.cur), x.num(0)),
+                  then: [x.set(V.n10, x.arith("ADD", x.get(V.n10), x.num(1)))],
+                },
+              ],
               [x.set(V.n11, x.arith("ADD", x.get(V.n11), x.num(1)))],
             ),
           ],
@@ -448,7 +525,14 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
 
     // Agresti–Coull one-sided lower bound.
     x.set(V.nTilde, x.arith("ADD", x.get(V.windowN), x.num(zSquared))),
-    x.set(V.pTilde, x.arith("DIVIDE", x.arith("ADD", x.get(V.hits), x.num(halfZSquared)), x.get(V.nTilde))),
+    x.set(
+      V.pTilde,
+      x.arith(
+        "DIVIDE",
+        x.arith("ADD", x.get(V.hits), x.num(halfZSquared)),
+        x.get(V.nTilde),
+      ),
+    ),
     x.set(
       V.pLo,
       x.arith(
@@ -461,7 +545,11 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
             "ROOT",
             x.arith(
               "DIVIDE",
-              x.arith("MULTIPLY", x.get(V.pTilde), x.arith("MINUS", x.num(1), x.get(V.pTilde))),
+              x.arith(
+                "MULTIPLY",
+                x.get(V.pTilde),
+                x.arith("MINUS", x.num(1), x.get(V.pTilde)),
+              ),
               x.get(V.nTilde),
             ),
           ),
@@ -538,7 +626,11 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
             then: [
               x.set(
                 V.pCond,
-                x.arith("DIVIDE", x.arith("ADD", x.get(V.n11), x.num(1)), x.arith("ADD", x.get(V.row1), x.num(2))),
+                x.arith(
+                  "DIVIDE",
+                  x.arith("ADD", x.get(V.n11), x.num(1)),
+                  x.arith("ADD", x.get(V.row1), x.num(2)),
+                ),
               ),
             ],
           },
@@ -546,7 +638,11 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
         [
           x.set(
             V.pCond,
-            x.arith("DIVIDE", x.arith("ADD", x.get(V.n01), x.num(1)), x.arith("ADD", x.get(V.row0), x.num(2))),
+            x.arith(
+              "DIVIDE",
+              x.arith("ADD", x.get(V.n01), x.num(1)),
+              x.arith("ADD", x.get(V.row0), x.num(2)),
+            ),
           ),
         ],
       ),
@@ -558,7 +654,8 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     x.compare("GTE", x.get(V.windowN), x.num(minSamples)),
     x.compare("GT", x.get(V.pLo), x.get(V.breakEven)),
   ];
-  if (useStreakCooldown) gateClauses.push(x.compare("LT", x.get(V.runNow), x.num(runLimit)));
+  if (useStreakCooldown)
+    gateClauses.push(x.compare("LT", x.get(V.runNow), x.num(runLimit)));
   if (useMarkov) {
     // χ²(1) at 5 %: below 3.84 the chain is indistinguishable from i.i.d., so
     // it must not veto — above it, the conditional rate has to clear break-even.
@@ -572,7 +669,9 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
   }
   measure.push(
     x.set(V.gate, x.bool(false)),
-    x.ifElse([{ cond: x.all("AND", gateClauses), then: [x.set(V.gate, x.bool(true))] }]),
+    x.ifElse([
+      { cond: x.all("AND", gateClauses), then: [x.set(V.gate, x.bool(true))] },
+    ]),
   );
 
   const measureProc = x.topLevel(
@@ -590,7 +689,8 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
   // Omni Forge's journal, so both generated bots read identically.
   const waitingReport: Stmt[] = [
     x.joinInto(V.message, [
-      x.text("ANALYSING"), x.get(V.activeSymbol),
+      x.text("ANALYSING"),
+      x.get(V.activeSymbol),
       x.text("· no qualified setup yet — holding"),
     ]),
     x.notify("info", x.get(V.message)),
@@ -599,8 +699,12 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
   // A factory, not a shared array: every emission needs its own block ids.
   const entryReport = (): Stmt[] => [
     x.joinInto(V.message, [
-      x.text("ENTRY ·"), x.get(V.activeSymbol), x.text("·"), x.get(V.contract),
-      x.get(V.barrier), x.text("· setup qualified"),
+      x.text("ENTRY ·"),
+      x.get(V.activeSymbol),
+      x.text("·"),
+      x.get(V.contract),
+      x.get(V.barrier),
+      x.text("· setup qualified"),
     ]),
     x.notify("success", x.get(V.message)),
   ];
@@ -613,10 +717,12 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     x.set(V.decisionReason, x.ntDecision("reason")),
     x.set(V.gate, x.ntDecision("eligible")),
     x.ifElse(
-      [{
-        cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
-        then: [x.set(V.recPayout, x.ntDecision("payout"))],
-      }],
+      [
+        {
+          cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+          then: [x.set(V.recPayout, x.ntDecision("payout"))],
+        },
+      ],
       [x.set(V.normPayout, x.ntDecision("payout"))],
     ),
   ];
@@ -624,35 +730,57 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
   const adaptiveEntry: Stmt[] = [
     x.set(V.evalTicks, x.arith("ADD", x.get(V.evalTicks), x.num(1))),
     x.ifElse(
-      [{ cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)), then: [x.ntAnalyse("RECOVERY", watchMarkets, windowSize)] }],
+      [
+        {
+          cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+          then: [x.ntAnalyse("RECOVERY", watchMarkets, windowSize)],
+        },
+      ],
       [x.ntAnalyse("NORMAL", watchMarkets, windowSize)],
     ),
     ...readAdaptiveDecision,
-    x.ifElse(
-      [{
+    x.ifElse([
+      {
         cond: x.compare("EQ", x.ntDecision("changedMarket"), x.bool(true)),
         then: [
           x.ntSwitchMarket(x.get(V.activeSymbol)),
-          x.joinInto(V.message, [x.text("SWITCHED MARKET · now analysing"), x.get(V.activeSymbol)]),
+          x.joinInto(V.message, [
+            x.text("SWITCHED MARKET · now analysing"),
+            x.get(V.activeSymbol),
+          ]),
           x.notify("info", x.get(V.message)),
         ],
-      }, {
+      },
+      {
         cond: x.compare("EQ", x.get(V.gate), x.bool(true)),
         then: [...entryReport(), x.set(V.fire, x.bool(true))],
       },
-      ...(forceEntryAfter > 0 ? [{
-        cond: x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
-        then: [
-          x.notify("warn", x.text(`Patience limit ${forceEntryAfter}: entering on the best available setup`)),
-          ...entryReport(),
-          x.set(V.fire, x.bool(true)),
-        ],
-      }] : []),
+      ...(forceEntryAfter > 0
+        ? [
+            {
+              cond: x.compare(
+                "GTE",
+                x.get(V.evalTicks),
+                x.num(forceEntryAfter),
+              ),
+              then: [
+                x.notify(
+                  "warn",
+                  x.text(
+                    `Patience limit ${forceEntryAfter}: entering on the best available setup`,
+                  ),
+                ),
+                ...entryReport(),
+                x.set(V.fire, x.bool(true)),
+              ],
+            },
+          ]
+        : []),
       {
         cond: x.compare("EQ", x.mod(x.get(V.evalTicks), x.num(5)), x.num(0)),
         then: waitingReport,
-      }],
-    ),
+      },
+    ]),
   ];
 
   const beforePurchase = x.topLevel(
@@ -660,9 +788,22 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     `<statement name="BEFOREPURCHASE_STACK">${x.chain([
       x.set(V.fire, x.bool(false)),
       ...adaptiveEntry,
-      x.ifElse([{ cond: x.compare("EQ", x.get(V.fire), x.bool(true)), then: [
-        x.ifElse([{ cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")), then: [x.purchase("DIGITOVER")] }], [x.purchase("DIGITUNDER")]),
-      ] }]),
+      x.ifElse([
+        {
+          cond: x.compare("EQ", x.get(V.fire), x.bool(true)),
+          then: [
+            x.ifElse(
+              [
+                {
+                  cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")),
+                  then: [x.purchase("DIGITOVER")],
+                },
+              ],
+              [x.purchase("DIGITUNDER")],
+            ),
+          ],
+        },
+      ]),
     ])}</statement>`,
     0,
     900,
@@ -685,7 +826,14 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
       V.stake,
       x.arith(
         "DIVIDE",
-        x.round("ROUNDUP", x.arith("MULTIPLY", x.arith("MINUS", x.get(V.stake), x.num(0.000000001)), x.num(100))),
+        x.round(
+          "ROUNDUP",
+          x.arith(
+            "MULTIPLY",
+            x.arith("MINUS", x.get(V.stake), x.num(0.000000001)),
+            x.num(100),
+          ),
+        ),
         x.num(100),
       ),
     ),
@@ -695,12 +843,24 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
         then: [
           x.set(
             V.stake,
-            x.arith("DIVIDE", x.round("ROUNDDOWN", x.arith("MULTIPLY", x.balance(), x.num(100))), x.num(100)),
+            x.arith(
+              "DIVIDE",
+              x.round(
+                "ROUNDDOWN",
+                x.arith("MULTIPLY", x.balance(), x.num(100)),
+              ),
+              x.num(100),
+            ),
           ),
         ],
       },
     ]),
-    x.ifElse([{ cond: x.compare("LT", x.get(V.stake), x.num(0.35)), then: [x.set(V.stake, x.num(0.35))] }]),
+    x.ifElse([
+      {
+        cond: x.compare("LT", x.get(V.stake), x.num(0.35)),
+        then: [x.set(V.stake, x.num(0.35))],
+      },
+    ]),
   ];
 
   const recoveryProc = x.topLevel(
@@ -737,7 +897,12 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     // Back to normal means back behind the gate: the next entry must re-qualify.
     x.set(V.gate, x.bool(false)),
     x.set(V.evalTicks, x.num(0)),
-    x.notify("success", x.text(`Recovery complete — debt cleared, back to ${normalLabel} at base stake behind the gate`)),
+    x.notify(
+      "success",
+      x.text(
+        `Recovery complete — debt cleared, back to ${normalLabel} at base stake behind the gate`,
+      ),
+    ),
   ];
   const onRecoveryWinPartial: Stmt[] = [
     x.call(RECOVERY_PROC),
@@ -752,7 +917,15 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
   ];
   const onLoss: Stmt[] = [
     x.set(V.lossRun, x.arith("ADD", x.get(V.lossRun), x.num(1))),
-    x.ifElse([{ cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)), then: deepenRecovery }], enterRecovery),
+    x.ifElse(
+      [
+        {
+          cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+          then: deepenRecovery,
+        },
+      ],
+      enterRecovery,
+    ),
     x.call(RECOVERY_PROC),
     x.joinInto(V.message, [
       x.text("Recovery step"),
@@ -777,10 +950,20 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
             [
               {
                 cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
-                then: [x.set(V.recPayout, x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)))],
+                then: [
+                  x.set(
+                    V.recPayout,
+                    x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)),
+                  ),
+                ],
               },
             ],
-            [x.set(V.normPayout, x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)))],
+            [
+              x.set(
+                V.normPayout,
+                x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)),
+              ),
+            ],
           ),
         ],
       },
@@ -790,7 +973,15 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
         cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
         then: [
           x.set(V.debt, x.arith("MINUS", x.get(V.debt), x.get(V.profit))),
-          x.ifElse([{ cond: x.compare("LTE", x.get(V.debt), x.num(0.005)), then: exitRecovery }], onRecoveryWinPartial),
+          x.ifElse(
+            [
+              {
+                cond: x.compare("LTE", x.get(V.debt), x.num(0.005)),
+                then: exitRecovery,
+              },
+            ],
+            onRecoveryWinPartial,
+          ),
         ],
       },
     ]),
@@ -800,11 +991,27 @@ export function buildDigitForgeStrategy(input: DigitForgeInput): DigitForgeStrat
     [
       {
         cond: x.compare("GTE", x.totalProfit(), x.num(input.takeProfit)),
-        then: [x.notify("success", x.text(`Take profit ${money(input.takeProfit)} ${currency} reached — session complete`), "job-done")],
+        then: [
+          x.notify(
+            "success",
+            x.text(
+              `Take profit ${money(input.takeProfit)} ${currency} reached — session complete`,
+            ),
+            "job-done",
+          ),
+        ],
       },
       {
         cond: x.compare("LTE", x.totalProfit(), x.num(-input.stopLoss)),
-        then: [x.notify("error", x.text(`Stop loss ${money(input.stopLoss)} ${currency} hit — session stopped`), "error")],
+        then: [
+          x.notify(
+            "error",
+            x.text(
+              `Stop loss ${money(input.stopLoss)} ${currency} hit — session stopped`,
+            ),
+            "error",
+          ),
+        ],
       },
       {
         cond: x.compare("GTE", x.get(V.lossRun), x.num(breakerDepth)),

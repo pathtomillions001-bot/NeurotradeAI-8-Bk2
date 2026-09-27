@@ -15,18 +15,21 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildDigitForgeStrategy, type DigitForgeInput } from "./digit-forge-dbot";
+import {
+  buildDigitForgeStrategy,
+  type DigitForgeInput,
+} from "./digit-forge-dbot";
 
 export const DIGIT_FORGE_FIXTURES: Record<string, DigitForgeInput> = {
   /**
    * The default forge: full gate (Agresti–Coull + Markov + streak cooldown),
    * session-sized boundaries so the stop-loss is what ends a losing run.
    */
-  "forge-r50-over2-over4": {
+  "forge-r50-over2-over5": {
     symbol: "R_50",
     displayName: "Volatility 50 Index",
     normal: { side: "DIGITOVER", barrier: 2 },
-    recovery: { side: "DIGITOVER", barrier: 4 },
+    recovery: { side: "DIGITOVER", barrier: 5 },
     stake: 1,
     takeProfit: 10,
     stopLoss: 5,
@@ -34,7 +37,7 @@ export const DIGIT_FORGE_FIXTURES: Record<string, DigitForgeInput> = {
     markupPercent: 10,
     maxStake: 500,
     normalPayout: 1.4,
-    recoveryPayout: 1.95,
+    recoveryPayout: 2.43,
     breakerDepth: 6,
     currency: "USD",
     window: 120,
@@ -51,11 +54,11 @@ export const DIGIT_FORGE_FIXTURES: Record<string, DigitForgeInput> = {
    * deterministically and see the circuit breaker fire. This is also the shape
    * that proves the conditional gate clauses are genuinely optional.
    */
-  "forge-1hz100v-under7-under5-open": {
+  "forge-1hz100v-under7-under4-open": {
     symbol: "1HZ100V",
     displayName: "Volatility 100 (1s) Index",
     normal: { side: "DIGITUNDER", barrier: 7 },
-    recovery: { side: "DIGITUNDER", barrier: 5 },
+    recovery: { side: "DIGITUNDER", barrier: 4 },
     stake: 0.5,
     takeProfit: 1000,
     stopLoss: 1000,
@@ -63,7 +66,7 @@ export const DIGIT_FORGE_FIXTURES: Record<string, DigitForgeInput> = {
     markupPercent: 10,
     maxStake: 500,
     normalPayout: 1.4,
-    recoveryPayout: 1.95,
+    recoveryPayout: 2.43,
     breakerDepth: 5,
     currency: "USD",
     window: 20,
@@ -103,7 +106,10 @@ export const DIGIT_FORGE_FIXTURES: Record<string, DigitForgeInput> = {
 
 export function fixturesDir(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  return path.resolve(here, "../../../dbot-builder/src/preview/__tests__/fixtures");
+  return path.resolve(
+    here,
+    "../../../dbot-builder/src/preview/__tests__/fixtures",
+  );
 }
 
 export function renderFixture(name: string): string {

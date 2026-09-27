@@ -18,9 +18,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
+import { useLocation } from "wouter";
 import {
   Loader2, StopCircle, ScanSearch, RefreshCw, ChevronLeft, X, Lock,
-  Shuffle, ShieldCheck, LockKeyhole, TrendingUp, Activity, ArrowUp, ArrowDown, Waves,
+  Shuffle, ShieldCheck, LockKeyhole, TrendingUp, Activity, ArrowUp, ArrowDown, Waves, Hammer,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -28,6 +29,7 @@ import { useGetSettings } from "@workspace/api-client-react";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
+import { loadStrategyIntoBotBuilder } from "@/lib/bot-builder-frame";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
 type Verdict = "prime" | "viable" | "thin";
@@ -201,8 +203,10 @@ export function SurgeConsole({ bot, open, onOpenChange, session, onSession }: {
   session: BotSessionStatus | null;
   onSession: (status: BotSessionStatus | null) => void;
 }) {
+  const [, navigate] = useLocation();
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
+  const [buildingDbot, setBuildingDbot] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({ scanning: null, scanned: 0, total: 19 });
   const { data: settings } = useGetSettings();
@@ -276,6 +280,49 @@ export function SurgeConsole({ bot, open, onOpenChange, session, onSession }: {
       onSession(data.status); setMarketMode(mode); setStep("running");
       toast.success(mode === "locked" ? `🔒 Locked on ${c.displayName} — recovery holds this market` : `🔁 Deployed on ${c.displayName} — recovery hunts all markets`);
     } catch { toast.error("Could not start the bot"); } finally { setLoading(false); }
+  };
+
+  const handleCreateDbot = async (candidate: Candidate) => {
+    setBuildingDbot(true);
+    try {
+      const watchMarkets = [candidate.symbol, ...(scanResult?.allScored ?? []).map(row => row.symbol)]
+        .filter((symbol, index, all) => all.indexOf(symbol) === index)
+        .slice(0, 8);
+      const res = await fetch("/api/bots/surge/dbot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...config,
+          symbol: candidate.symbol,
+          params: candidate.params,
+          analysis: candidate,
+          watchMarkets,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.xml) {
+        toast.error(data?.error ?? "Could not create the Vector Surge DBot");
+        return;
+      }
+      const loaded = loadStrategyIntoBotBuilder({ name: data.name, xml: data.xml, symbol: candidate.symbol });
+      toast.info(`Forging adaptive Rise/Fall DBot from ${candidate.displayName}…`);
+      onOpenChange(false);
+      navigate("/bot-builder");
+      const ok = await loaded;
+      if (ok) {
+        toast.success(
+          `Vector Surge DBot ready · starts on ${candidate.displayName} · scans ${data.summary?.watchMarkets?.length ?? watchMarkets.length} markets · ` +
+          `trades the best confirmed Rise or Fall in both normal and recovery. Verify the blocks, then press Run.`,
+          { duration: 14_000 },
+        );
+      } else {
+        toast.error("The Bot Builder did not confirm the strategy loaded — return to Vector Surge and try again.");
+      }
+    } catch {
+      toast.error("Could not reach the Vector Surge DBot forge");
+    } finally {
+      setBuildingDbot(false);
+    }
   };
 
   const handleStop = async () => {
@@ -427,6 +474,13 @@ export function SurgeConsole({ bot, open, onOpenChange, session, onSession }: {
                     <div className="space-y-2">
                       <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "locked")} disabled={loading} className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}><Lock className="w-4 h-4 mr-2" /> Trade Locked on {(scanResult.best ?? scanResult.bestAvailable)!.displayName}</Button>
                       <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "switching")} disabled={loading} variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}><Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching</Button>
+                      <Button onClick={() => handleCreateDbot((scanResult.best ?? scanResult.bestAvailable)!)} disabled={loading || buildingDbot} variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
+                        {buildingDbot ? <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> : <Hammer className="w-3.5 h-3.5 mr-2" />}
+                        Create adaptive DBot
+                      </Button>
+                      <p className="text-[9px] text-muted-foreground/60 leading-snug text-center">
+                        The DBot trades both Rise and Fall in normal and recovery, and switches among the eight strongest scanned markets.
+                      </p>
                     </div>
                   </>
                 ) : (

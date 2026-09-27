@@ -10,6 +10,10 @@
 import { Router } from "express";
 import { logger } from "../lib/logger";
 import { AUTOMATED_DERIV_MARKETS, isAutomatedMarket } from "../lib/deriv";
+import { db, accountsTable, settingsTable } from "@workspace/db";
+import { and, eq } from "drizzle-orm";
+import { resolveRecoveryPayout } from "../lib/recovery-payout";
+import { buildSurgeDbotStrategy } from "../lib/surge-dbot";
 import type { SurgeParams, SurgeSideMode } from "../lib/surge-analysis";
 import {
   SURGE_BOT_ID,
@@ -141,6 +145,80 @@ router.post("/start", async (req, res): Promise<void> => {
   logger.info({ botId: SURGE_BOT_ID, symbol: market.symbol, sideMode, marketMode }, "Vector Surge deployed");
   const status = getStatus();
   res.json({ ok: true, status });
+});
+
+router.post("/dbot", async (req, res): Promise<void> => {
+  const body = req.body ?? {};
+  const symbol = typeof body.symbol === "string" ? body.symbol : "";
+  const market = symbol && isAutomatedMarket(symbol)
+    ? AUTOMATED_DERIV_MARKETS.find(item => item.symbol === symbol)
+    : undefined;
+  if (!market) {
+    res.status(400).json({ error: "Run the scan first — a measured Rise/Fall market is required" });
+    return;
+  }
+  if (typeof body.stake !== "number" || body.stake < 0.35) {
+    res.status(400).json({ error: "stake must be ≥ 0.35" });
+    return;
+  }
+  const params = parseParams(body.params ?? body.analysis?.params);
+  if (!params) {
+    res.status(400).json({ error: "Run the scan first — its fitted Vector Surge parameter card is required" });
+    return;
+  }
+
+  try {
+    let markupPercent = 10;
+    let maxStake = 500;
+    let currency = "USD";
+    try {
+      const settings = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
+      if (settings[0]) {
+        const markup = Number((settings[0] as any).botRecoveryMarkup);
+        const cap = Number((settings[0] as any).maxTradeStake);
+        if (Number.isFinite(markup)) markupPercent = Math.max(0, markup);
+        if (Number.isFinite(cap) && cap > 0) maxStake = cap;
+      }
+      let accounts = await db.select().from(accountsTable)
+        .where(and(eq(accountsTable.sessionId, req.sessionId), eq(accountsTable.isActive, true))).limit(1);
+      if (accounts.length === 0) accounts = await db.select().from(accountsTable).where(eq(accountsTable.sessionId, req.sessionId)).limit(1);
+      if (accounts[0]?.currency) currency = accounts[0].currency;
+    } catch { /* safe account defaults */ }
+
+    const requestedMarkets = Array.isArray(body.watchMarkets) ? body.watchMarkets : [];
+    const watchMarkets = [market.symbol, ...requestedMarkets]
+      .filter((candidate, index, all) => typeof candidate === "string" && isAutomatedMarket(candidate) && all.indexOf(candidate) === index)
+      .slice(0, 8) as string[];
+    const quotes = await Promise.all(watchMarkets.flatMap(watchedSymbol => [
+      resolveRecoveryPayout({ symbol: watchedSymbol, contractType: "CALL", duration: 1, durationUnit: "t", currency }),
+      resolveRecoveryPayout({ symbol: watchedSymbol, contractType: "PUT", duration: 1, durationUnit: "t", currency }),
+    ]));
+    // Use the worst quoted return across every watched market and both sides.
+    // This prevents a switch from undersizing debt recovery; realised returns
+    // refresh the active mode after wins inside the generated DBot.
+    const payout = Math.min(...quotes.map(quote => quote.payoutMultiplier));
+    const strategy = buildSurgeDbotStrategy({
+      symbol: market.symbol,
+      displayName: market.displayName,
+      watchMarkets,
+      stake: body.stake,
+      takeProfit: Number(body.takeProfit) > 0 ? Number(body.takeProfit) : 10,
+      stopLoss: Number(body.stopLoss) > 0 ? Number(body.stopLoss) : 5,
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+      markupPercent,
+      maxStake,
+      payout,
+      breakerDepth: Math.max(4, Math.min(12, Number(body.breakerDepth) || (Number(body.maxRecoverySteps) || 3) + 2)),
+      currency,
+      window: Math.max(100, Math.min(500, Number(body.window) || 240)),
+      weights: params.weights,
+      tau: params.tau,
+    });
+    res.json(strategy);
+  } catch (err) {
+    logger.error({ err }, "Vector Surge DBot generation failed");
+    res.status(400).json({ error: err instanceof Error ? err.message : "Could not create Vector Surge DBot" });
+  }
 });
 
 router.post("/stop", (req, res) => {

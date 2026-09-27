@@ -11,6 +11,7 @@ import * as constants from './state/constants';
 import { analyseDualLockEntry, DUAL_LOCK_ENTRY_DEFAULTS } from './dual-lock-entry';
 import { analyseTurboRecovery } from './turbo-recovery-analysis';
 import { analyseDigitForgeCandidate, DIGIT_FORGE_ANALYSIS_LIMITS } from './digit-forge-analysis';
+import { analyseSurgeMarket, SURGE_FORGE_LIMITS } from './surge-forge-analysis';
 
 let tickListenerKey;
 // The symbol `tickListenerKey` belongs to. Without it, `watchTicks` asked the
@@ -216,6 +217,86 @@ export default Engine =>
         async ntDigitDecision(field) {
             const value = this.nt_digit_decision?.[field];
             return value === undefined ? (field === 'reason' ? 'analysis warming up' : 0) : value;
+        }
+
+        /**
+         * Vector Surge DBot: rank Rise and Fall on every watched market using
+         * recency-Bayes, order-1/2 Markov, empirical run hazard, robust drift,
+         * multi-horizon agreement and explicit loss-pair risk. Both normal and
+         * recovery require the same candidate on two distinct ticks; this
+         * prevents one transient quote or repeated interpreter pass from firing.
+         */
+        async ntAnalyseSurgeMarkets(mode = 'NORMAL', csv = '', requestedWindow = 240, weightsCsv = '', tau = 1, payout = 1.92) {
+            const markets = [...new Set(String(csv).split(',').map(s => s.trim()).filter(Boolean))].slice(0, 8);
+            if (!markets.includes(this.symbol)) markets.unshift(this.symbol);
+            const windowSize = Math.max(100, Math.min(500, Number(requestedWindow) || 240));
+            const weights = String(weightsCsv).split(':').map(Number);
+            const normalizedMode = String(mode).toUpperCase() === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
+            const rows = [];
+            const scanOne = async symbol => {
+                try {
+                    const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: 3 });
+                    const tail = ticks.slice(-windowSize);
+                    const prices = tail.map(tick => Number(tick.quote));
+                    const analysis = analyseSurgeMarket({ prices, payout, mode: normalizedMode, weights, tau });
+                    rows.push({
+                        symbol,
+                        ...analysis,
+                        tickEpoch: Number(tail[tail.length - 1]?.epoch) || 0,
+                    });
+                } catch (_) { /* one unavailable market never stops the DBot */ }
+            };
+            for (let index = 0; index < markets.length; index += 3) {
+                await Promise.all(markets.slice(index, index + 3).map(scanOne));
+            }
+            rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+            const best = rows[0];
+            if (!best) {
+                this.nt_surge_confirmation = undefined;
+                this.nt_surge_decision = {
+                    symbol: this.symbol,
+                    contract: 'CALL',
+                    payout: Number(payout) > 1 ? Number(payout) : 1.92,
+                    eligible: false,
+                    confirmations: 0,
+                    score: -999,
+                    reason: 'HOLD · price feeds unavailable; retrying safely',
+                    changedMarket: false,
+                };
+                return false;
+            }
+
+            let confirmations = 0;
+            let eligible = false;
+            if (best.eligible) {
+                const key = `${normalizedMode}:${best.symbol}:${best.contract}`;
+                const previous = this.nt_surge_confirmation;
+                if (previous?.key === key && previous.epoch !== best.tickEpoch) confirmations = previous.count + 1;
+                else if (previous?.key === key && previous.epoch === best.tickEpoch) confirmations = previous.count;
+                else confirmations = 1;
+                this.nt_surge_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
+                eligible = confirmations >= SURGE_FORGE_LIMITS.confirmations;
+            } else {
+                this.nt_surge_confirmation = undefined;
+            }
+            this.nt_surge_decision = {
+                ...best,
+                eligible,
+                confirmations,
+                // Never churn markets for an ineligible score. Switch only
+                // when the destination already clears every raw risk gate;
+                // fresh-tick confirmation completes after the safe retarget.
+                changedMarket: best.eligible && best.symbol !== this.symbol,
+                reason: best.eligible && !eligible
+                    ? `HOLD · confirming ${best.contract === 'CALL' ? 'Rise' : 'Fall'} on fresh tick ${confirmations}/${SURGE_FORGE_LIMITS.confirmations}`
+                    : best.reason,
+            };
+            return eligible;
+        }
+
+        async ntSurgeDecision(field) {
+            const value = this.nt_surge_decision?.[field];
+            return value === undefined ? (field === 'reason' ? 'surge analysis warming up' : 0) : value;
         }
 
         /**

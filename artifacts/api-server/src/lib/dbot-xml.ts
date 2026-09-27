@@ -130,6 +130,27 @@ export class XmlBuilder {
   ntForgeDecision(field: string): string {
     return `<block type="nt_contract_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
   }
+  /** Vector Surge: rank Rise/Fall across the watched market set. */
+  ntAnalyseSurge(
+    mode: "NORMAL" | "RECOVERY",
+    markets: string[],
+    window: number,
+    weights: number[],
+    tau: number,
+    payout: string,
+  ): Stmt {
+    return {
+      type: "nt_analyse_surge_markets",
+      inner:
+        `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field>` +
+        `<field name="WINDOW">${esc(window)}</field><field name="WEIGHTS">${esc(weights.join(":"))}</field>` +
+        `<field name="TAU">${esc(tau)}</field><value name="PAYOUT">${payout}</value>`,
+    };
+  }
+  /** Read a field from the latest Vector Surge market/side decision. */
+  ntSurgeDecision(field: string): string {
+    return `<block type="nt_surge_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
   /** Omni Forge: buy any digit contract type with a just-in-time prediction. */
   ntPurchaseContract(contract: string, barrier: string): Stmt {
     return {
@@ -252,7 +273,7 @@ export class XmlBuilder {
       inner: `<field name="NOTIFICATION_TYPE">${kind}</field><field name="NOTIFICATION_SOUND">${sound}</field><value name="MESSAGE">${message}</value>`,
     };
   }
-  purchase(contract: "DIGITOVER" | "DIGITUNDER"): Stmt {
+  purchase(contract: "DIGITOVER" | "DIGITUNDER" | "CALL" | "PUT"): Stmt {
     return { type: "purchase", inner: `<field name="PURCHASE_LIST">${contract}</field>` };
   }
   tradeAgain(): Stmt {

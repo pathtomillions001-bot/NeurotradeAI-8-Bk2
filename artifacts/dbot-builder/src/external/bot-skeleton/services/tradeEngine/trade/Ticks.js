@@ -90,6 +90,126 @@ export default Engine =>
         getLastDigitList() {
             return new Promise(resolve => this.getTicks().then(ticks => resolve(this.getLastDigitsFromList(ticks))));
         }
+
+        /**
+         * Rank all legal Digit Forge choices on all watched markets.  This is a
+         * runtime primitive intentionally exposed through Blockly: no server or
+         * hidden AI decides a trade after the strategy has been forged.
+         *
+         * Score = conservative EV + conditional Markov edge - instability -
+         * loss-clustering risk.  A Beta(20*p0,20*(1-p0)) prior shrinks short
+         * tapes toward the uniform-digit model; Wilson's one-sided 90% bound is
+         * the hard edge test.  Recovery uses the same evidence but gives extra
+         * weight to P(win|previous loss), because that is its actual entry state.
+         */
+        async ntAnalyseDigitMarkets(mode = 'NORMAL', csv = '', requestedWindow = 120) {
+            const normal = [
+                { contract: 'DIGITOVER', barrier: 1, payout: 1.23 },
+                { contract: 'DIGITOVER', barrier: 2, payout: 1.4 },
+                { contract: 'DIGITUNDER', barrier: 7, payout: 1.4 },
+                { contract: 'DIGITUNDER', barrier: 8, payout: 1.23 },
+            ];
+            const recovery = [
+                { contract: 'DIGITOVER', barrier: 4, payout: 1.95 },
+                { contract: 'DIGITOVER', barrier: 5, payout: 2.43 },
+                { contract: 'DIGITUNDER', barrier: 5, payout: 1.95 },
+                { contract: 'DIGITUNDER', barrier: 4, payout: 2.43 },
+            ];
+            const candidates = mode === 'RECOVERY' ? recovery : normal;
+            const markets = [...new Set(String(csv).split(',').map(s => s.trim()).filter(Boolean))].slice(0, 8);
+            if (!markets.includes(this.symbol)) markets.unshift(this.symbol);
+            const windowSize = Math.max(20, Math.min(300, Number(requestedWindow) || 120));
+            const z = 1.282; // one-sided 90%; strict enough to reject noise without 30-minute silence
+            const rows = [];
+            await Promise.all(markets.map(async symbol => {
+                try {
+                    const ticks = await this.$scope.ticksService.request({ symbol });
+                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
+                    const digits = ticks.slice(-windowSize).map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    if (digits.length < 20) return;
+                    for (const c of candidates) {
+                        const wins = digits.map(d => c.contract === 'DIGITOVER' ? d > c.barrier : d < c.barrier);
+                        const n = wins.length;
+                        const p0 = c.contract === 'DIGITOVER' ? (9 - c.barrier) / 10 : c.barrier / 10;
+                        const hits = wins.filter(Boolean).length;
+                        const probability = (hits + 20 * p0) / (n + 20);
+                        const denom = 1 + z * z / n;
+                        const centre = probability + z * z / (2 * n);
+                        const spread = z * Math.sqrt((probability * (1 - probability) + z * z / (4 * n)) / n);
+                        const lowerBound = (centre - spread) / denom;
+                        const breakEven = 1 / c.payout;
+                        const ev = probability * c.payout - 1;
+                        let ll = 0, lw = 0, wl = 0, ww = 0;
+                        for (let i = 1; i < n; i++) {
+                            if (!wins[i - 1] && !wins[i]) ll++; else if (!wins[i - 1]) lw++;
+                            else if (!wins[i]) wl++; else ww++;
+                        }
+                        const afterLoss = (lw + 1) / (ll + lw + 2);
+                        const afterWin = (ww + 1) / (wl + ww + 2);
+                        const markov = wins[n - 1] ? afterWin : afterLoss;
+                        const lossRate = 1 - probability;
+                        const clustering = ((ll + 1) / (ll + lw + 2)) / Math.max(0.01, lossRate);
+                        const half = Math.max(10, Math.floor(n / 2));
+                        const recent = wins.slice(-half).filter(Boolean).length / half;
+                        const prior = wins.slice(0, half).filter(Boolean).length / half;
+                        const instability = Math.abs(recent - prior);
+                        const conditionalEdge = (mode === 'RECOVERY' ? afterLoss : markov) - breakEven;
+                        const score = 100 * ((lowerBound - breakEven) * 0.55 + conditionalEdge * 0.25 + ev * 0.2 - instability * 0.2 - Math.max(0, clustering - 1) * 0.08);
+                        const eligible = n >= 30 && ev > 0 && lowerBound > breakEven - 0.025 && instability < 0.16 && clustering < 1.45;
+                        rows.push({ symbol, ...c, samples: n, probability, lowerBound, breakEven, ev, markov, clustering, instability, score, eligible });
+                    }
+                } catch (_) { /* one unavailable market must not stop the bot */ }
+            }));
+            rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+            const best = rows[0];
+            if (!best) {
+                this.nt_digit_decision = { symbol: this.symbol, contract: 'DIGITOVER', barrier: mode === 'RECOVERY' ? 4 : 2, eligible: false, score: -999, samples: 0, reason: 'feed unavailable; retrying', changedMarket: false };
+                return false;
+            }
+            const blockers = [];
+            if (best.samples < 30) blockers.push(`samples ${best.samples}/30`);
+            if (best.ev <= 0) blockers.push(`EV ${(best.ev * 100).toFixed(2)}%`);
+            if (best.lowerBound <= best.breakEven - 0.025) blockers.push(`lower bound ${(best.lowerBound * 100).toFixed(1)}% vs BE ${(best.breakEven * 100).toFixed(1)}%`);
+            if (best.instability >= 0.16) blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
+            if (best.clustering >= 1.45) blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
+            this.nt_digit_decision = {
+                ...best,
+                changedMarket: best.symbol !== this.symbol,
+                reason: best.eligible ? `READY score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%` : `HOLD: ${blockers.join(', ') || 'no qualified edge'}`,
+            };
+            return best.eligible;
+        }
+
+        ntDigitDecision(field) {
+            const value = this.nt_digit_decision?.[field];
+            return value === undefined ? (field === 'reason' ? 'analysis warming up' : 0) : value;
+        }
+
+        /** Safe between-contract retarget: remove the old listener, clear stale
+         * proposals and make the next Trade Definition cycle quote the new symbol. */
+        async ntSwitchMarket(nextSymbol) {
+            const next = String(nextSymbol || '');
+            if (!next || next === this.symbol) return false;
+            if (this.data?.contract?.status === 'open') {
+                globalObserver.emit('ui.log.warn', `Market switch refused while a contract is open (${this.symbol} → ${next})`);
+                return false;
+            }
+            const old = this.symbol;
+            if (tickListenerKey) await this.$scope.ticksService.stopMonitor({ symbol: old, key: tickListenerKey });
+            this.symbol = undefined;
+            await this.watchTicks(next);
+            this.options.symbol = next;
+            if (this.tradeOptions) this.tradeOptions.symbol = next;
+            this.data.proposals = [];
+            // Force makeProposals() to regenerate its purchase reference and
+            // templates on the next Trade Definition cycle. Keeping the old
+            // cache here can purchase a stale quote from the previous market.
+            this.trade_option = null;
+            this.proposal_templates = [];
+            globalObserver.emit('ui.log.info', `Digit Forge switched ${old} → ${next}; stale proposals cleared`);
+            return true;
+        }
+
         getLastDigitsFromList(ticks) {
             const digits = ticks.map(tick => {
                 return getLastDigit(tick.toFixed(this.getPipSize()));

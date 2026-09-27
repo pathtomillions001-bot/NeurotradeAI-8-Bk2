@@ -196,17 +196,16 @@ describe("buildDigitForgeStrategy", () => {
     assert.equal(buildDigitForgeStrategy(baseInput()).summary.forceEntryAfter, 0);
 
     const forced = buildDigitForgeStrategy(baseInput({ forceEntryAfter: 90 }));
-    assert.match(forced.xml, /Patience limit of 90 evaluations/);
+    assert.match(forced.xml, /Patience limit 90/);
     assert.equal(forced.summary.forceEntryAfter, 90);
   });
 
-  it("fires recovery immediately — the gate only guards normal entries", () => {
+  it("independently ranks recovery candidates instead of reusing the normal decision", () => {
     const { xml } = buildDigitForgeStrategy(baseInput());
     const before = xml.slice(xml.indexOf('<block type="before_purchase"'), xml.indexOf('<block type="after_purchase"'));
-    const inRecoveryAt = before.indexOf("In Recovery");
-    const measureAt = before.indexOf("Measure the tape");
-    assert.ok(inRecoveryAt >= 0 && measureAt >= 0);
-    assert.ok(inRecoveryAt < measureAt, "recovery must short-circuit before the gate is measured");
+    assert.match(before, /<field name="MODE">NORMAL<\/field>/);
+    assert.match(before, /<field name="MODE">RECOVERY<\/field>/);
+    assert.match(before, /nt_digit_decision/);
   });
 
   it("implements the shared recovery ladder: debt × (1+markup) / (payout−1), floored, capped, rounded up", () => {
@@ -258,12 +257,14 @@ describe("buildDigitForgeStrategy", () => {
     assert.equal(buildDigitForgeStrategy(baseInput({ window: 40, minSamples: 900 })).summary.minSamples, 40);
   });
 
-  it("records the rotator watch list without emitting non-stock blocks (phase 4 contract)", () => {
+  it("emits the validated rotator watch list and safe market-switch block", () => {
     const { xml, summary } = buildDigitForgeStrategy(
       baseInput({ watchMarkets: ["R_10", "R_25", "bad symbol", "R_75"] }),
     );
-    assert.deepEqual(summary.watchMarkets, ["R_10", "R_25", "R_75"]);
-    assert.doesNotMatch(xml, /nt_watch_markets|nt_switch_market|nt_digit_list/);
+    assert.deepEqual(summary.watchMarkets, ["R_50", "R_10", "R_25", "R_75"]);
+    assert.match(xml, /nt_analyse_digit_markets/);
+    assert.match(xml, /nt_switch_market/);
+    assert.match(xml, /R_50,R_10,R_25,R_75/);
   });
 });
 

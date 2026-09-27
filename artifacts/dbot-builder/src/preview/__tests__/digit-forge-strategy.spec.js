@@ -138,6 +138,22 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000 }) {
         getTotalProfit: () => state.totalProfit,
         getBalance: () => state.balance,
         getLastDigitList: () => { state.digitReads += 1; return digits(state); },
+        ntAnalyseDigitMarkets: mode => {
+            state.digitReads += 1;
+            const tape = digits(state);
+            const under = state.init?.symbol === '1HZ100V';
+            const over1 = state.init?.symbol === 'R_10';
+            const contractType = under ? 'DIGITUNDER' : 'DIGITOVER';
+            const barrier = mode === 'RECOVERY' ? (over1 ? 5 : under ? 5 : 4) : (over1 ? 1 : under ? 7 : 2);
+            const hits = tape.filter(d => contractType === 'DIGITOVER' ? d > barrier : d < barrier).length;
+            const probability = hits / tape.length;
+            const payout = PAYOUT[`${contractType}:${barrier}`];
+            const eligible = mode === 'RECOVERY' || probability * payout > 1;
+            state.decision = { symbol: state.init.symbol, contract: contractType, barrier, payout, probability, lowerBound: probability - 0.01, breakEven: 1 / payout, ev: probability * payout - 1, markov: probability, clustering: 1, samples: tape.length, score: eligible ? 5 : -5, eligible, reason: eligible ? 'READY' : 'HOLD: EV negative', changedMarket: false };
+            return eligible;
+        },
+        ntDigitDecision: field => state.decision?.[field] ?? 0,
+        ntSwitchMarket: symbol => { state.init.symbol = symbol; return true; },
         notify: n => state.notifications.push(n.message),
         isTradeAgain: () => {},
         getLastTick: () => ({ epoch: Date.now() }),
@@ -224,7 +240,7 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         const defs = workspace.getBlocksByType('procedures_defnoreturn', false).map(b => b.getFieldValue('NAME')).sort();
         expect(defs).toEqual(['Measure the tape', 'Size recovery stake']);
         const calls = workspace.getBlocksByType('procedures_callnoreturn', false);
-        expect(calls.length).toBeGreaterThanOrEqual(3);
+        expect(calls.length).toBeGreaterThanOrEqual(2);
         for (const call of calls) {
             expect(defs).toContain(call.getProcedureCall());
         }
@@ -266,7 +282,7 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         expect(runStrategy(code, market)).toBe('never-fired');
         expect(market.state.trades).toHaveLength(0);
         expect(market.state.beforeEvaluations).toBeGreaterThan(100);
-        expect(market.state.notifications.some(m => /Holding fire/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /ANALYSING/.test(m))).toBe(true);
     });
 
     it('runs the shared recovery ladder exactly like every other NeuroTrade bot', () => {
@@ -301,7 +317,7 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         expect(runStrategy(code, market)).toBe('never-fired');
         expect(market.state.trades.map(t => t.prediction)).toEqual([7, 5]);
         expect(market.state.notifications.some(m => /Recovery complete — debt cleared/.test(m))).toBe(true);
-        expect(market.state.notifications.some(m => /Holding fire/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /ANALYSING/.test(m))).toBe(true);
     });
 
     it('trips the circuit breaker on a clustered losing run', () => {
@@ -339,7 +355,7 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         // forceEntryAfter = 3 → refuses three times, then takes the entry.
         expect(market.state.beforeEvaluations).toBeLessThanOrEqual(6);
         expect(market.state.trades).toHaveLength(1);
-        expect(market.state.notifications.some(m => /Patience limit of 3 evaluations/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /Patience limit 3/.test(m))).toBe(true);
     });
 
     it('never buys a contract type or barrier the trade definition did not declare', () => {

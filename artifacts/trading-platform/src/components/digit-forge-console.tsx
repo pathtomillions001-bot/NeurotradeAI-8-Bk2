@@ -196,7 +196,17 @@ export function DigitForgeConsole({
       const res = await fetch("/api/bots/digit-forge/dbot", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ symbol, normal, recovery, ...config, ...gate }),
+        body: JSON.stringify({
+          symbol,
+          // The starting choices remain as a portable fallback. The adaptive
+          // NeuroTrade DBot enables and ranks every legal normal/recovery
+          // barrier and may rotate across this live watchlist.
+          normal,
+          recovery,
+          watchMarkets: markets.map(m => m.symbol).slice(0, 8),
+          ...config,
+          ...gate,
+        }),
       });
       const data = await res.json();
       if (!res.ok || !data?.xml) {
@@ -273,11 +283,11 @@ export function DigitForgeConsole({
                   <Hammer className="w-3 h-3" /> This console builds, it does not trade
                 </p>
                 <p className="text-[10px] text-muted-foreground leading-relaxed">
-                  There is no scan. Set the barriers and boundaries, press{" "}
-                  <span className="text-white/80 font-semibold">Create DBot</span>, and NeuroTrade forges a
-                  Deriv Bot that carries the analysis <span className="text-white/80">inside itself</span> —
-                  it re-measures the tape every tick on your own Deriv connection and only fires a normal
-                  entry when its own numbers agree. You press Run in the Bot Builder.
+                  Choose a starting market and boundaries, then press{" "}
+                  <span className="text-white/80 font-semibold">Create DBot</span>. The generated bot enables
+                  all four normal barriers and all four recovery barriers, ranks them across up to eight markets,
+                  and safely switches market between contracts when another tape is stronger. Bayesian probability,
+                  live EV, Markov transitions, stability and loss clustering all run inside your Bot Builder.
                 </p>
               </div>
 
@@ -297,7 +307,7 @@ export function DigitForgeConsole({
               {/* Barriers */}
               <div className="space-y-2">
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                  Normal barrier <span className="text-muted-foreground/50 normal-case">— traded behind the gate</span>
+                  Normal barriers <span className="text-emerald-400/70 normal-case">— all enabled · highlighted choice is fallback</span>
                 </p>
                 <div className="grid grid-cols-4 gap-1.5">
                   {normalOpts.map(o => (
@@ -317,7 +327,7 @@ export function DigitForgeConsole({
                 </div>
 
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold pt-1">
-                  Recovery barrier <span className="text-muted-foreground/50 normal-case">— fires on debt, ungated</span>
+                  Recovery barriers <span className="text-amber-300/70 normal-case">— all enabled · independently ranked on debt</span>
                 </p>
                 <div className="grid grid-cols-4 gap-1.5">
                   {recoveryOpts.map(o => (

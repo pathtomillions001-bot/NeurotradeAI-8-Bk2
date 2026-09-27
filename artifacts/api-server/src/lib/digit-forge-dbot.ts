@@ -13,9 +13,11 @@
  *   · Trades 1-tick Over/Under digit contracts on the chosen market.
  *   · NORMAL mode (no debt): fires only when its own live measurement of the
  *     tape clears a statistical gate (§ "The gate" below).
- *   · RECOVERY mode (debt outstanding): fires immediately on the recovery
- *     barrier — recovery is about repayment speed, not selectivity. The stake
- *     is the shared `getBotRecoveryStake` ladder, identical to every other bot.
+ *   · RECOVERY mode (debt outstanding): re-ranks the recovery barriers, then
+ *     waits for a stable, loss-conditioned edge confirmed on two distinct
+ *     ticks. Multi-horizon agreement, clustering and adverse-run vetoes keep a
+ *     growing stake out of a hostile regime. The stake is the shared recovery
+ *     ladder, identical to every other bot.
  *   · Circuit breaker on consecutive losses; take-profit / stop-loss on Deriv's
  *     own total-profit counter end the run.
  *

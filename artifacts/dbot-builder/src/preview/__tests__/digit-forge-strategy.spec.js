@@ -98,7 +98,7 @@ function buildRunner(workspace) {
 }
 
 /** Scripted Deriv: `results` are the outcomes of successive purchases. */
-function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000 }) {
+function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recoveryHoldEvaluations = 0 }) {
     const state = {
         trades: [],
         notifications: [],
@@ -109,6 +109,7 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000 }) {
         init: null,
         beforeEvaluations: 0,
         digitReads: 0,
+        recoveryAnalyses: 0,
         exhausted: false,
     };
     const contract = { buy_price: 0, sell_price: 0, profit: 0, result: 'win' };
@@ -148,7 +149,10 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000 }) {
             const hits = tape.filter(d => contractType === 'DIGITOVER' ? d > barrier : d < barrier).length;
             const probability = hits / tape.length;
             const payout = PAYOUT[`${contractType}:${barrier}`];
-            const eligible = mode === 'RECOVERY' || probability * payout > 1;
+            if (mode === 'RECOVERY') state.recoveryAnalyses += 1;
+            const eligible = mode === 'RECOVERY'
+                ? state.recoveryAnalyses > recoveryHoldEvaluations
+                : probability * payout > 1;
             state.decision = { symbol: state.init.symbol, contract: contractType, barrier, payout, probability, lowerBound: probability - 0.01, breakEven: 1 / payout, ev: probability * payout - 1, markov: probability, clustering: 1, samples: tape.length, score: eligible ? 5 : -5, eligible, reason: eligible ? 'READY' : 'HOLD: EV negative', changedMarket: false };
             return eligible;
         },
@@ -313,19 +317,19 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         expect(market.state.notifications.some(m => /Recovery complete — debt cleared/.test(m))).toBe(true);
     });
 
-    it('fires recovery without consulting the gate (debt is cleared at the 50 % barrier, not waited out)', () => {
+    it('keeps recovery debt pending safely until the recovery ranker confirms an entry', () => {
         loadFixture('forge-1hz100v-under7-under5-open');
         const code = buildRunner(workspace);
-        // Tape goes dead immediately after the first (winning-gate) entry: the
-        // normal leg would be refused, but the recovery leg must still fire.
+        // After the normal loss, the runtime ranker refuses three evaluations.
+        // The workspace must hold the sized debt without throwing or buying,
+        // then execute exactly once when the ranker confirms the setup.
         const market = fakeMarket({
             results: ['L', 'W', 'W'],
             digits: state => (state.trades.length === 0 ? UNDER7_HOT : UNDER7_DEAD),
+            recoveryHoldEvaluations: 3,
         });
-        // The recovery leg fires on the dead tape (debt does not wait), the
-        // debt clears, and then the bot goes straight back to refusing — the
-        // third scripted result is never used.
         expect(runStrategy(code, market)).toBe('never-fired');
+        expect(market.state.recoveryAnalyses).toBeGreaterThan(3);
         expect(market.state.trades.map(t => t.prediction)).toEqual([7, 5]);
         expect(market.state.notifications.some(m => /Recovery complete — debt cleared/.test(m))).toBe(true);
         expect(market.state.notifications.some(m => /ANALYSING/.test(m))).toBe(true);

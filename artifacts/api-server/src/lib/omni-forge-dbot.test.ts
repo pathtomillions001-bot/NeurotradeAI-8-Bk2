@@ -158,6 +158,14 @@ describe("omni-forge strategy shape", () => {
     const md = buildOmniForgeStrategy({ ...BASE, normal: [{ type: "DIGITMATCH", digit: 5 }] });
     assert.match(md.xml, /<field name="TRADETYPE_LIST">matchesdiffers<\/field>/);
     assert.ok(md.xml.includes('<value name="PREDICTION">'));
+
+    const autoDiff = buildOmniForgeStrategy({ ...BASE, normal: [{ type: "DIGITDIFF", digit: -1 }] });
+    // -1 remains in the analyser CSV as the intentional "auto" sentinel, but
+    // live Trade Definition is seeded with legal digit 0 until analysis picks
+    // the coldest concrete digit. Deriv must never receive barrier -1.
+    assert.equal(autoDiff.summary.normalCsv, "DIGITDIFF:-1:1.09");
+    assert.match(autoDiff.xml, /id="ofprd"><field name="NUM">0<\/field>/);
+    assert.doesNotMatch(autoDiff.xml, /id="ofprd"><field name="NUM">-1<\/field>/);
   });
 
   it("keeps the starting market first in the watchlist and caps it at eight", () => {

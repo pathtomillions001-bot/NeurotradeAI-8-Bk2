@@ -22,11 +22,24 @@ export default Engine =>
         ntPurchaseContract(contract_type, barrier) {
             const type = String(contract_type || '').toUpperCase();
             const digit = Math.trunc(Number(barrier));
+            const isParity = type === 'DIGITEVEN' || type === 'DIGITODD';
+            const needsDigit = ['DIGITOVER', 'DIGITUNDER', 'DIGITMATCH', 'DIGITDIFF'].includes(type);
             if (this.tradeOptions) {
-                if (type === 'DIGITEVEN' || type === 'DIGITODD' || !Number.isFinite(digit) || digit < 0) {
+                if (isParity) {
                     delete this.tradeOptions.prediction;
+                } else if (needsDigit) {
+                    // Matches/Differs "auto" is encoded as -1 in the analyser
+                    // CSV, but the ranker must resolve it before purchase. Never
+                    // send -1 (or no prediction) to Deriv: retain a valid seeded
+                    // prediction as a safe fallback, otherwise use digit 0.
+                    const seeded = Math.trunc(Number(this.tradeOptions.prediction));
+                    this.tradeOptions.prediction = Number.isFinite(digit) && digit >= 0 && digit <= 9
+                        ? digit
+                        : Number.isFinite(seeded) && seeded >= 0 && seeded <= 9
+                          ? seeded
+                          : 0;
                 } else {
-                    this.tradeOptions.prediction = digit;
+                    delete this.tradeOptions.prediction;
                 }
             }
             return this.purchase(type);

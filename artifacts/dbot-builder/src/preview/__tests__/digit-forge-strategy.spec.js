@@ -270,6 +270,13 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         expect(market.state.digitReads).toBeGreaterThan(0);
         expect(market.state.trades[0]).toMatchObject({ type: 'DIGITOVER', prediction: 2, stake: 1 });
         expect(market.state.notifications[0]).toMatch(/NeuroTrade Digit Forge · Volatility 50 Index · Over 2 normal → Over 4 recovery/);
+
+        // Journal transparency, deliberately minimal: the user sees the state
+        // and the subject of each decision, never the model behind it.
+        expect(market.state.notifications.some(m => /^ENTRY · R_50 · DIGITOVER 2 · setup qualified$/.test(m))).toBe(true);
+        for (const message of market.state.notifications.slice(1)) {
+            expect(message).not.toMatch(/score|EV |lower bound|LCB|Markov|clustering/i);
+        }
     });
 
     it('refuses to trade a tape that has not earned it, and never throws while waiting', () => {
@@ -282,7 +289,11 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         expect(runStrategy(code, market)).toBe('never-fired');
         expect(market.state.trades).toHaveLength(0);
         expect(market.state.beforeEvaluations).toBeGreaterThan(100);
-        expect(market.state.notifications.some(m => /ANALYSING/.test(m))).toBe(true);
+        expect(
+            market.state.notifications.some(m => /^ANALYSING R_50 · no qualified setup yet — holding$/.test(m))
+        ).toBe(true);
+        // Holding is reported without leaking the statistics behind it.
+        expect(market.state.notifications.some(m => /score|lower bound|clustering/i.test(m))).toBe(false);
     });
 
     it('runs the shared recovery ladder exactly like every other NeuroTrade bot', () => {

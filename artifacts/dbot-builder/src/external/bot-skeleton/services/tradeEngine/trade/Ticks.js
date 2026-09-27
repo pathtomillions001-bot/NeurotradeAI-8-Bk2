@@ -8,32 +8,45 @@ import { api_base } from '../../api/api-base';
 import { getDirection, getLastDigit } from '../utils/helpers';
 import { expectPositiveInteger } from '../utils/sanitize';
 import * as constants from './state/constants';
+import { analyseDualLockEntry, DUAL_LOCK_ENTRY_DEFAULTS } from './dual-lock-entry';
 import { analyseTurboRecovery } from './turbo-recovery-analysis';
 
 let tickListenerKey;
+// The symbol `tickListenerKey` belongs to. Without it, `watchTicks` asked the
+// ticks service to stop the NEW symbol's monitor using the OLD symbol's key —
+// a no-op that silently left the previous monitor registered.
+let tickListenerSymbol;
 
 export default Engine =>
     class Ticks extends Engine {
         async watchTicks(symbol) {
             if (symbol && this.symbol !== symbol) {
+                const previous = tickListenerSymbol ?? this.symbol;
                 this.symbol = symbol;
                 const { ticksService } = this.$scope;
 
-                await ticksService.stopMonitor({
-                    symbol,
-                    key: tickListenerKey,
-                });
+                if (tickListenerKey && previous) {
+                    await ticksService.stopMonitor({
+                        symbol: previous,
+                        key: tickListenerKey,
+                    });
+                }
                 const callback = ticks => {
                     if (this.is_proposal_subscription_required) {
                         this.checkProposalReady();
                     }
-                    const lastTick = ticks.slice(-1)[0];
-                    const { epoch } = lastTick;
-                    this.store.dispatch({ type: constants.NEW_TICK, payload: epoch });
+                    const lastTick = Array.isArray(ticks) ? ticks[ticks.length - 1] : undefined;
+                    // A tape can be momentarily empty (a stream that was just
+                    // re-subscribed). Destructuring `undefined` here threw
+                    // inside the tick callback, which killed the listener and
+                    // left the bot waiting for a tick that never came.
+                    if (!lastTick || lastTick.epoch === undefined) return;
+                    this.store.dispatch({ type: constants.NEW_TICK, payload: lastTick.epoch });
                 };
 
                 const key = await ticksService.monitor({ symbol, callback });
                 tickListenerKey = key;
+                tickListenerSymbol = symbol;
             }
         }
 
@@ -410,6 +423,77 @@ export default Engine =>
             return value === undefined ? (field === 'reason' ? 'HOLD · recovery analysis warming up' : 0) : value;
         }
 
+        /**
+         * Time the FIRST entry of a generated Dual-Lock Range Sentinel bot.
+         *
+         * The scan owns the market, side and barrier; this read only answers
+         * whether the next tick is a defensible moment to START. The generated
+         * strategy calls it once per tick until it returns true, then never
+         * again for the rest of the run — every later trade (normal and
+         * recovery) fires with no analysis at all, exactly as before.
+         *
+         * The wait is bounded by `patience` evaluations: at the deadline the
+         * gate opens unconditionally, including when the tick feed is
+         * unavailable, so a generated bot can never sit idle.
+         */
+        async ntAnalyseDualLockEntry(
+            contract = 'DIGITOVER',
+            barrier = 1,
+            requestedWindow = DUAL_LOCK_ENTRY_DEFAULTS.window,
+            patience = DUAL_LOCK_ENTRY_DEFAULTS.patience,
+            waited = 0
+        ) {
+            const patienceTicks = Math.max(
+                3,
+                Math.min(40, Math.trunc(Number(patience)) || DUAL_LOCK_ENTRY_DEFAULTS.patience)
+            );
+            const waitedTicks = Math.max(0, Math.trunc(Number(waited)) || 0);
+            try {
+                const windowSize = Math.max(
+                    40,
+                    Math.min(300, Number(requestedWindow) || DUAL_LOCK_ENTRY_DEFAULTS.window)
+                );
+                const ticks = await this.$scope.ticksService.request({ symbol: this.symbol });
+                const pip = this.$scope.ticksService.pipSizes?.[this.symbol] ?? this.getPipSize() ?? 2;
+                const digits = ticks.slice(-windowSize).map(tick => getLastDigit(Number(tick.quote).toFixed(pip)));
+
+                this.nt_dual_lock_entry_decision = analyseDualLockEntry({
+                    digits,
+                    contract,
+                    barrier,
+                    waited: waitedTicks,
+                    patience: patienceTicks,
+                });
+            } catch (_) {
+                // A missing tape must never strand the bot: honour the deadline.
+                const forced = waitedTicks >= patienceTicks;
+                this.nt_dual_lock_entry_decision = {
+                    ready: forced,
+                    forced,
+                    contract: contract === 'DIGITUNDER' ? 'DIGITUNDER' : 'DIGITOVER',
+                    barrier: Number(barrier) || 0,
+                    samples: 0,
+                    baseline: 0,
+                    confidence: 0,
+                    threshold: 0,
+                    quietTicks: 0,
+                    burst: 0,
+                    waited: waitedTicks,
+                    patience: patienceTicks,
+                    state: 'UNKNOWN',
+                    reason: forced
+                        ? `TIMED ENTRY · ${patienceTicks}-tick patience budget reached — starting the scanned lock`
+                        : `TIMING ${waitedTicks}/${patienceTicks} · tick feed unavailable; retrying`,
+                };
+            }
+            return this.nt_dual_lock_entry_decision.ready;
+        }
+
+        async ntDualLockEntryDecision(field) {
+            const value = this.nt_dual_lock_entry_decision?.[field];
+            return value === undefined ? (field === 'reason' ? 'entry timing warming up' : 0) : value;
+        }
+
         /** Safe between-contract retarget: remove the old listener, clear stale
          * proposals and make the next Trade Definition cycle quote the new symbol. */
         async ntSwitchMarket(nextSymbol) {
@@ -420,9 +504,26 @@ export default Engine =>
                 return false;
             }
             const old = this.symbol;
-            if (tickListenerKey) await this.$scope.ticksService.stopMonitor({ symbol: old, key: tickListenerKey });
-            this.symbol = undefined;
-            await this.watchTicks(next);
+            try {
+                if (tickListenerKey && tickListenerSymbol) {
+                    await this.$scope.ticksService.stopMonitor({ symbol: tickListenerSymbol, key: tickListenerKey });
+                }
+                this.symbol = undefined;
+                await this.watchTicks(next);
+            } catch (error) {
+                // Roll back. Leaving `this.symbol` undefined (the old failure
+                // mode) broke every later tape read, and the bot stopped
+                // trading with no explanation. Staying on the previous market
+                // costs nothing: the ranker simply proposes the switch again.
+                this.symbol = undefined;
+                try {
+                    await this.watchTicks(old);
+                } catch (_) {
+                    this.symbol = old;
+                }
+                globalObserver.emit('ui.log.warn', `Market switch to ${next} failed — staying on ${old}`);
+                return false;
+            }
             this.options.symbol = next;
             if (this.tradeOptions) this.tradeOptions.symbol = next;
             this.data.proposals = [];

@@ -159,6 +159,32 @@ export class XmlBuilder {
   ntTurboRecoveryDecision(field: string): string {
     return `<block type="nt_turbo_recovery_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
   }
+  /**
+   * Dual-Lock: time the FIRST entry of the run (and only the first). The scan
+   * still owns market/side/barrier; this gate only delays the start, and its
+   * wait is bounded by `patience` evaluations.
+   */
+  ntAnalyseDualLockEntry(
+    contract: "DIGITOVER" | "DIGITUNDER",
+    barrier: number,
+    window: number,
+    patience: number,
+    waited: string,
+  ): Stmt {
+    return {
+      type: "nt_analyse_dual_lock_entry",
+      inner:
+        `<field name="CONTRACT">${contract}</field>` +
+        `<field name="BARRIER">${esc(barrier)}</field>` +
+        `<field name="WINDOW">${esc(window)}</field>` +
+        `<field name="PATIENCE">${esc(patience)}</field>` +
+        `<value name="WAITED">${waited}</value>`,
+    };
+  }
+  /** Read a field from the latest Dual-Lock first-entry timing decision. */
+  ntDualLockEntryDecision(field: string): string {
+    return `<block type="nt_dual_lock_entry_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
   /** Safely retarget the vendored trade engine between contracts. */
   ntSwitchMarket(symbol: string): Stmt {
     return { type: "nt_switch_market", inner: `<value name="SYMBOL">${symbol}</value>` };

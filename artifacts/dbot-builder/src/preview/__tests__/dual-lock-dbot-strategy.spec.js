@@ -9,11 +9,13 @@
  * JavaScript exactly the way `dbot.generateCode()` does, and EXECUTE it against a
  * scripted market with a fake `Bot` interface.
  *
- * The one intentional difference from the Turbo DBot: this bot carries NO in-bot
- * analysis. It fires the locked normal contract every tick and, on a loss, fires
- * the locked recovery contract every tick at the shared recovery-ladder stake
- * (debt × 1.1 / (payout − 1), rounded up to cents, back to base on cleared debt,
- * circuit breaker / TP / SL halts) — no arming, no recovery-timing gate.
+ * The difference from the Turbo DBot: this bot carries no in-bot analysis EXCEPT
+ * the first-entry timing gate, which runs once per run (and is bounded by its
+ * patience budget). After that first purchase it fires the locked normal
+ * contract every tick and, on a loss, the locked recovery contract every tick at
+ * the shared recovery-ladder stake (debt × 1.1 / (payout − 1), rounded up to
+ * cents, back to base on cleared debt, circuit breaker / TP / SL halts) — no
+ * arming, no recovery-timing gate.
  */
 import fs from 'fs';
 import path from 'path';
@@ -21,6 +23,7 @@ import { localize } from '@deriv-com/translations';
 import { loadBlockly } from '../../external/bot-skeleton/scratch/blockly';
 import DBotStore from '../../external/bot-skeleton/scratch/dbot-store';
 import { isAllRequiredBlocksEnabled } from '../../external/bot-skeleton/scratch/utils';
+import { analyseDualLockEntry } from '../../external/bot-skeleton/services/tradeEngine/trade/dual-lock-entry';
 
 localize.mockImplementation((text, args) =>
     typeof text === 'string' ? text.replace(/{{\s*(\w+)\s*}}/g, (match, key) => (args && key in args ? args[key] : match)) : text
@@ -74,8 +77,22 @@ function buildRunner(workspace) {
     `;
 }
 
-/** Scripted Deriv: `results` are the outcomes of successive purchases. */
-function fakeMarket({ results, balance = 1000 }) {
+/** A tape where every digit satisfies the locked contract (gate opens at once). */
+const cleanTape = (contract, barrier, length = 80) =>
+    Array.from({ length }, () => (contract === 'DIGITUNDER' ? Math.max(0, barrier - 1) : Math.min(9, barrier + 1)));
+
+/** A tape where every digit violates it (gate holds until its deadline). */
+const hostileTape = (contract, barrier, length = 80) =>
+    Array.from({ length }, () => (contract === 'DIGITUNDER' ? Math.min(9, barrier + 1) : Math.max(0, barrier - 1)));
+
+/**
+ * Scripted Deriv: `results` are the outcomes of successive purchases.
+ *
+ * `entryTape` feeds the REAL first-entry model (`analyseDualLockEntry`) so these
+ * tests exercise the generated wiring against the production maths, not a stub.
+ * It may be an array or a function of the evaluation count.
+ */
+function fakeMarket({ results, balance = 1000, entryTape = null }) {
     const state = {
         trades: [],
         notifications: [],
@@ -85,8 +102,10 @@ function fakeMarket({ results, balance = 1000 }) {
         tradeOptions: null,
         init: null,
         beforeEvaluations: 0,
+        entryCalls: [],
         exhausted: false,
     };
+    let entryDecision = null;
     const contract = { buy_price: 0, sell_price: 0, profit: 0, result: 'win' };
     const Bot = {
         init: (account, options) => { state.init = { account, ...options }; },
@@ -116,6 +135,20 @@ function fakeMarket({ results, balance = 1000 }) {
         notify: n => state.notifications.push(n.message),
         isTradeAgain: () => {},
         getLastTick: () => ({ epoch: Date.now() }),
+        ntAnalyseDualLockEntry: (contract, barrier, windowSize, patience, waited) => {
+            state.entryCalls.push({ contract, barrier, windowSize, patience, waited });
+            const tape = typeof entryTape === 'function' ? entryTape(waited) : entryTape;
+            entryDecision = analyseDualLockEntry({
+                digits: tape ?? cleanTape(contract, barrier),
+                contract,
+                barrier,
+                waited,
+                patience,
+            });
+            return entryDecision.ready;
+        },
+        ntDualLockEntryDecision: field =>
+            entryDecision ? entryDecision[field] : field === 'reason' ? 'entry timing warming up' : 0,
     };
     const watch = scope => {
         if (scope !== 'before') return false;
@@ -194,16 +227,17 @@ describe('Dual-Lock Range Sentinel → Deriv DBot strategy', () => {
         expect(workspace.getBlocksByType('procedures_callnoreturn', false).length).toBeGreaterThanOrEqual(2);
     });
 
-    it('passes the run-button gate with a stock purchase block and NO in-bot analysis blocks', () => {
+    it('passes the run-button gate with a stock purchase block and only the first-entry gate', () => {
         // This is the exact gate that raises "The Purchase block is mandatory…".
-        // The Dual-Lock DBot uses the stock `purchase` block (no nt_* analysis
-        // blocks at all), so the gate must accept it out of the box.
+        // The Dual-Lock DBot still buys through the stock `purchase` block (the
+        // first-entry gate only decides WHEN), so the gate accepts it as before.
         for (const fixture of ['duallock-r100-over2-over4', 'duallock-1hz100v-under7-under5-wide']) {
             workspace.dispose();
             workspace = new window.Blockly.Workspace();
             loadFixture(fixture);
             window.Blockly.derivWorkspace = workspace;
             expect(workspace.getBlocksByType('purchase', false).length).toBeGreaterThanOrEqual(1);
+            expect(workspace.getBlocksByType('nt_analyse_dual_lock_entry', false)).toHaveLength(1);
             expect(workspace.getBlocksByType('nt_analyse_turbo_recovery', false)).toHaveLength(0);
             expect(workspace.getBlocksByType('nt_turbo_recovery_decision', false)).toHaveLength(0);
             expect(workspace.getBlocksByType('nt_purchase_contract', false)).toHaveLength(0);
@@ -211,12 +245,13 @@ describe('Dual-Lock Range Sentinel → Deriv DBot strategy', () => {
         }
     });
 
-    it('fires the lock every tick with no analysis, and recovers with the shared ladder', () => {
+    it('fires the lock every tick after the timed start, and recovers with the shared ladder', () => {
         loadFixture('duallock-r100-over2-over4');
         const code = buildRunner(workspace);
         expect(code).toContain("symbol              : 'R_100'");
         expect(code).toContain('Bot.purchase');
-        // No analysis calls: this bot never consults the tape while running.
+        // The only analysis call is the first-entry gate.
+        expect(code).toContain('Bot.ntAnalyseDualLockEntry');
         expect(code).not.toContain('Bot.ntAnalyseTurboRecovery');
         expect(code).not.toContain('Bot.getLastDigitList');
 
@@ -235,9 +270,73 @@ describe('Dual-Lock Range Sentinel → Deriv DBot strategy', () => {
             ['DIGITOVER', 4, 2.51, 'W'], // recovery: ceil₂(2.16 × 1.1 / 0.95) = 2.51 → +2.38 clears debt
             ['DIGITOVER', 2, 1, 'W'], // straight back to the normal leg at base stake
         ]);
-        expect(market.state.notifications.some(m => /no in-bot analysis/.test(m))).toBe(true);
+        // Timing ran once, for the locked contract only, and never again.
+        expect(market.state.entryCalls).toHaveLength(1);
+        expect(market.state.entryCalls[0]).toMatchObject({ contract: 'DIGITOVER', barrier: 2, patience: 12, waited: 1 });
+        expect(market.state.notifications.some(m => /first entry timed within 12 ticks/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /Over 2 on Volatility 100 Index — TIMED ENTRY/.test(m))).toBe(true);
         expect(market.state.notifications.some(m => /Recovery step 1 — Over 4 sized at 1.16 USD to clear 1 USD.*firing back-to-back/.test(m))).toBe(true);
         expect(market.state.notifications.some(m => /Recovery complete — debt cleared/.test(m))).toBe(true);
+    });
+
+    it('waits for a well-timed first entry instead of firing into a violation burst', () => {
+        loadFixture('duallock-r100-over2-over4');
+        const code = buildRunner(workspace);
+        // The tape is hostile for the first 4 evaluations, then the range holds.
+        const market = fakeMarket({
+            results: ['W'],
+            entryTape: waited => (waited <= 4 ? hostileTape('DIGITOVER', 2) : cleanTape('DIGITOVER', 2)),
+        });
+        expect(runStrategy(code, market)).toBe('exhausted');
+
+        // Five evaluations: four holds, then the entry — and nothing bought early.
+        expect(market.state.entryCalls.map(call => call.waited)).toEqual([1, 2, 3, 4, 5]);
+        expect(market.state.trades).toHaveLength(1);
+        expect(market.state.trades[0]).toMatchObject({ type: 'DIGITOVER', prediction: 2, stake: 1 });
+        expect(market.state.notifications.some(m => /Waiting for a clean start — TIMING 3\/12/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /TIMED ENTRY · \d+ clean ticks/.test(m))).toBe(true);
+        expect(market.state.notifications.some(m => /patience budget reached/.test(m))).toBe(false);
+    });
+
+    it('never stalls: a permanently hostile tape still starts at the patience deadline', () => {
+        loadFixture('duallock-r100-over2-over4');
+        const code = buildRunner(workspace);
+        const market = fakeMarket({ results: ['W'], entryTape: hostileTape('DIGITOVER', 2) });
+        expect(runStrategy(code, market)).toBe('exhausted');
+
+        // Bounded wait: exactly the 12-tick patience budget, then the locked buy.
+        expect(market.state.entryCalls).toHaveLength(12);
+        expect(market.state.trades).toHaveLength(1);
+        expect(market.state.trades[0]).toMatchObject({ type: 'DIGITOVER', prediction: 2, stake: 1 });
+        expect(market.state.notifications.some(m => /patience budget reached/.test(m))).toBe(true);
+    });
+
+    it('times only the FIRST entry — every later normal and recovery trade fires straight away', () => {
+        loadFixture('duallock-r100-over2-over4');
+        const code = buildRunner(workspace);
+        const market = fakeMarket({ results: ['L', 'L', 'W', 'W', 'W'] });
+        expect(runStrategy(code, market)).toBe('exhausted');
+
+        expect(market.state.trades).toHaveLength(5);
+        // One timing call for five trades: the gate latches open after the first.
+        expect(market.state.entryCalls).toHaveLength(1);
+        expect(market.state.trades.map(t => [t.type, t.prediction, t.stake])).toEqual([
+            ['DIGITOVER', 2, 1],
+            ['DIGITOVER', 4, 1.16],
+            ['DIGITOVER', 4, 2.51],
+            ['DIGITOVER', 2, 1],
+            ['DIGITOVER', 2, 1],
+        ]);
+    });
+
+    it('times the Under lock on its own terms (same gate, no per-market tuning)', () => {
+        loadFixture('duallock-1hz100v-under7-under5-wide');
+        const code = buildRunner(workspace);
+        const market = fakeMarket({ results: ['W'] });
+        expect(runStrategy(code, market)).toBe('exhausted');
+
+        expect(market.state.entryCalls[0]).toMatchObject({ contract: 'DIGITUNDER', barrier: 7 });
+        expect(market.state.trades[0]).toMatchObject({ type: 'DIGITUNDER', prediction: 7 });
     });
 
     it('stops at stop-loss on a losing ladder and never trades past it', () => {

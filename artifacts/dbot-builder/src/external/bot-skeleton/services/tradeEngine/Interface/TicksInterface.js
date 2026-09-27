@@ -16,6 +16,8 @@ const getTicksInterface = tradeEngine => {
         ntContractDecision: (...args) => tradeEngine.ntContractDecision(...args),
         ntAnalyseTurboRecovery: (...args) => tradeEngine.ntAnalyseTurboRecovery(...args),
         ntTurboRecoveryDecision: (...args) => tradeEngine.ntTurboRecoveryDecision(...args),
+        ntAnalyseDualLockEntry: (...args) => tradeEngine.ntAnalyseDualLockEntry(...args),
+        ntDualLockEntryDecision: (...args) => tradeEngine.ntDualLockEntryDecision(...args),
         ntSwitchMarket: (...args) => tradeEngine.ntSwitchMarket(...args),
     };
 };

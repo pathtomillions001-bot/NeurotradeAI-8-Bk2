@@ -4,10 +4,10 @@
  * Pins the contract the Dual-Lock "Create DBot" button relies on: the generated
  * workspace is vendored Deriv-Bot Blockly XML that (a) trades exactly the
  * scanned market and barriers, (b) carries the session's stake / TP / SL, (c)
- * implements the shared bot recovery maths, and (d) — the one intentional
- * difference from the Turbo DBot — carries NO in-bot analysis: it uses only
- * stock blocks (including the real `purchase` block) and no `nt_*` analysis
- * blocks, so it fires the locked contracts non-stop until TP/SL/breaker.
+ * implements the shared bot recovery maths, and (d) times ONLY the first entry
+ * of the run (`nt_analyse_dual_lock_entry`, deadline-bounded) and then fires
+ * the locked contracts non-stop — no analysis on any later normal or recovery
+ * trade — until TP/SL/breaker.
  */
 
 import assert from "node:assert/strict";
@@ -62,17 +62,51 @@ describe("buildDualLockDbotStrategy", () => {
     }
   });
 
-  it("carries a real `purchase` block and NO nt_* analysis blocks (the run-button gate is satisfied)", () => {
+  it("carries a real `purchase` block and no analysis beyond the first-entry gate", () => {
     const { xml } = buildDualLockDbotStrategy(baseInput());
     // A stock purchase block is what the builder's mandatory-block gate checks.
     assert.ok(blockTypes(xml).includes("purchase"), "must contain a stock purchase block");
-    // The whole point: Dual-Lock's DBot does no analysis while it runs.
-    assert.doesNotMatch(xml, /nt_analyse/);
+    // The ONLY analysis block is the first-entry timing gate, used exactly once.
+    assert.equal(blockTypes(xml).filter((t) => t === "nt_analyse_dual_lock_entry").length, 1);
+    assert.doesNotMatch(xml, /nt_analyse_digit_markets|nt_analyse_contracts|nt_analyse_turbo_recovery/);
     assert.doesNotMatch(xml, /nt_turbo_recovery_decision/);
     assert.doesNotMatch(xml, /nt_purchase_contract/);
+    assert.doesNotMatch(xml, /nt_switch_market/);
     assert.doesNotMatch(xml, /lastDigitList/);
     assert.doesNotMatch(xml, /lists_getSublist/);
     assert.doesNotMatch(xml, /controls_forEach/);
+  });
+
+  it("times ONLY the first entry, on the locked contract, with a bounded deadline", () => {
+    const { xml, summary } = buildDualLockDbotStrategy(
+      baseInput({ normal: { side: "DIGITUNDER", barrier: 7 }, entryPatience: 9, entryWindow: 150 }),
+    );
+    // The gate analyses the LOCKED normal contract — never a different one.
+    assert.match(
+      xml,
+      /<block type="nt_analyse_dual_lock_entry"[^>]*><field name="CONTRACT">DIGITUNDER<\/field><field name="BARRIER">7<\/field><field name="WINDOW">150<\/field><field name="PATIENCE">9<\/field>/,
+    );
+    // The waited counter feeds the gate so its deadline can expire.
+    assert.match(xml, />Entry Ticks Waited<\/field><\/block><\/value>/);
+    // A latch variable means the gate is consulted only until the first buy.
+    assert.match(xml, />First Entry Timed<\/field><value name="VALUE"><block type="logic_boolean" id="[^"]+"><field name="BOOL">FALSE<\/field>/);
+    assert.match(xml, />First Entry Timed<\/field><value name="VALUE"><block type="logic_boolean" id="[^"]+"><field name="BOOL">TRUE<\/field>/);
+    // Both branches buy through the stock purchase block (gate open / latched).
+    assert.ok(blockTypes(xml).filter((t) => t === "purchase").length >= 4);
+    assert.equal(summary.entryPatience, 9);
+    assert.equal(summary.entryWindow, 150);
+  });
+
+  it("clamps the timing knobs to safe, always-terminating values", () => {
+    const wild = buildDualLockDbotStrategy(baseInput({ entryPatience: 500, entryWindow: 5 })).summary;
+    assert.equal(wild.entryPatience, 40);
+    assert.equal(wild.entryWindow, 40);
+    const tiny = buildDualLockDbotStrategy(baseInput({ entryPatience: 0, entryWindow: 9999 })).summary;
+    assert.equal(tiny.entryPatience, 3);
+    assert.equal(tiny.entryWindow, 300);
+    const fallback = buildDualLockDbotStrategy(baseInput()).summary;
+    assert.equal(fallback.entryPatience, 12);
+    assert.equal(fallback.entryWindow, 120);
   });
 
   it("is well-formed: balanced tags and unique block ids", () => {
@@ -115,7 +149,7 @@ describe("buildDualLockDbotStrategy", () => {
     assert.match(prediction, />Barrier<\/field>/);
   });
 
-  it("purchases whichever side the current leg says, from the scanned barriers, every tick", () => {
+  it("purchases whichever side the current leg says, from the scanned barriers, every tick after the first", () => {
     const { xml } = buildDualLockDbotStrategy(
       baseInput({ normal: { side: "DIGITUNDER", barrier: 7 }, recovery: { side: "DIGITOVER", barrier: 5 } }),
     );

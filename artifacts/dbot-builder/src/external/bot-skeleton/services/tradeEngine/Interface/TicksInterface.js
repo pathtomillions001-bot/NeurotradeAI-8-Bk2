@@ -20,6 +20,8 @@ const getTicksInterface = tradeEngine => {
         ntTurboRecoveryDecision: (...args) => tradeEngine.ntTurboRecoveryDecision(...args),
         ntAnalyseDualLockEntry: (...args) => tradeEngine.ntAnalyseDualLockEntry(...args),
         ntDualLockEntryDecision: (...args) => tradeEngine.ntDualLockEntryDecision(...args),
+        ntAnalyseBastionEntry: (...args) => tradeEngine.ntAnalyseBastionEntry(...args),
+        ntBastionEntryDecision: (...args) => tradeEngine.ntBastionEntryDecision(...args),
         ntSwitchMarket: (...args) => tradeEngine.ntSwitchMarket(...args),
     };
 };

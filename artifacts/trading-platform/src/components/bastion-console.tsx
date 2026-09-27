@@ -18,9 +18,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
+import { useLocation } from "wouter";
 import {
   Loader2, StopCircle, ScanSearch, RefreshCw, ChevronLeft, X, Lock,
-  Shuffle, ShieldCheck, LockKeyhole,
+  Shuffle, ShieldCheck, LockKeyhole, Workflow,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -28,6 +29,7 @@ import { useGetSettings } from "@workspace/api-client-react";
 import type { BotCardData, BotSessionStatus, AccentKey } from "@/lib/bots";
 import { ACCENTS, BOT_ICON } from "@/lib/bots";
 import { withTabSession } from "@/lib/tab-session";
+import { loadStrategyIntoBotBuilder } from "@/lib/bot-builder-frame";
 
 type Step = "config" | "scanning" | "scan-result" | "running";
 type Verdict = "prime" | "viable" | "thin";
@@ -171,8 +173,10 @@ export function BastionConsole({ bot, open, onOpenChange, session, onSession }: 
   session: BotSessionStatus | null;
   onSession: (status: BotSessionStatus | null) => void;
 }) {
+  const [, navigate] = useLocation();
   const [step, setStep] = useState<Step>("config");
   const [loading, setLoading] = useState(false);
+  const [buildingDbot, setBuildingDbot] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
   const [progress, setProgress] = useState<{ scanning: string | null; scanned: number; total: number }>({
     scanning: null, scanned: 0, total: 19,
@@ -301,6 +305,46 @@ export function BastionConsole({ bot, open, onOpenChange, session, onSession }: 
     } catch {
       toast.error("Could not start the bot");
     } finally { setLoading(false); }
+  };
+
+  const handleCreateDbot = async (candidate: Candidate) => {
+    setBuildingDbot(true);
+    try {
+      const res = await fetch("/api/bots/bastion/dbot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...buildBody(),
+          symbol: candidate.symbol,
+          params: candidate.params,
+          analysis: candidate,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data?.xml) {
+        toast.error(data?.error ?? "Could not create the Barrier Bastion DBot");
+        return;
+      }
+      const loaded = loadStrategyIntoBotBuilder({ name: data.name, xml: data.xml, symbol: candidate.symbol });
+      toast.info(`Building Barrier Bastion DBot for ${candidate.displayName}…`);
+      onOpenChange(false);
+      navigate("/bot-builder");
+      const ok = await loaded;
+      if (ok) {
+        toast.success(
+          `Barrier Bastion DBot ready · ${candidate.displayName} · ${data.summary?.normal ?? "Bastion normal"} normal → ` +
+          `${data.summary?.recovery ?? "Bastion recovery"} recovery · first entry timed, then the scanned lock runs non-stop. ` +
+          `Verify the blocks, then press Run.`,
+          { duration: 12_000 },
+        );
+      } else {
+        toast.error("The Bot Builder did not confirm the strategy loaded — return to Barrier Bastion and try again.");
+      }
+    } catch {
+      toast.error("Could not reach the Barrier Bastion DBot forge");
+    } finally {
+      setBuildingDbot(false);
+    }
   };
 
   const handleStop = async () => {
@@ -488,6 +532,18 @@ export function BastionConsole({ bot, open, onOpenChange, session, onSession }: 
                               variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
                         <Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching
                       </Button>
+                      <Button onClick={() => handleCreateDbot((scanResult.best ?? scanResult.bestAvailable)!)} disabled={loading || buildingDbot}
+                              data-testid="bastion-create-dbot"
+                              className="w-full h-10 bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white font-bold text-xs">
+                        {buildingDbot
+                          ? <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                          : <Workflow className="w-4 h-4 mr-2" />}
+                        {buildingDbot ? "Building DBot…" : "Create DBot"}
+                      </Button>
+                      <p className="text-[9px] text-muted-foreground/60 leading-relaxed text-center">
+                        Builds a standalone Deriv Bot from this scan: one Bastion market, a timed first entry,
+                        then fixed normal/recovery bands with the shared recovery ladder.
+                      </p>
                     </div>
                   </>
                 ) : (

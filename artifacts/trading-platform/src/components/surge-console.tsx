@@ -21,7 +21,7 @@ import { toast } from "sonner";
 import { useLocation } from "wouter";
 import {
   Loader2, StopCircle, ScanSearch, RefreshCw, ChevronLeft, X, Lock,
-  Shuffle, ShieldCheck, LockKeyhole, TrendingUp, Activity, ArrowUp, ArrowDown, Waves, Hammer,
+  Shuffle, ShieldCheck, LockKeyhole, TrendingUp, Activity, ArrowUp, ArrowDown, Waves, Workflow,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
@@ -474,9 +474,9 @@ export function SurgeConsole({ bot, open, onOpenChange, session, onSession }: {
                     <div className="space-y-2">
                       <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "locked")} disabled={loading} className={`w-full h-10 ${a.solidBtn} text-white font-bold text-xs`}><Lock className="w-4 h-4 mr-2" /> Trade Locked on {(scanResult.best ?? scanResult.bestAvailable)!.displayName}</Button>
                       <Button onClick={() => handleStart((scanResult.best ?? scanResult.bestAvailable)!, "switching")} disabled={loading} variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}><Shuffle className="w-3.5 h-3.5 mr-2" /> Smart Switching</Button>
-                      <Button onClick={() => handleCreateDbot((scanResult.best ?? scanResult.bestAvailable)!)} disabled={loading || buildingDbot} variant="outline" className={`w-full h-9 ${a.outlineBtn} text-xs font-semibold`}>
-                        {buildingDbot ? <Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> : <Hammer className="w-3.5 h-3.5 mr-2" />}
-                        Create adaptive DBot
+                      <Button onClick={() => handleCreateDbot((scanResult.best ?? scanResult.bestAvailable)!)} disabled={loading || buildingDbot} data-testid="surge-create-dbot" className="w-full h-10 bg-gradient-to-r from-fuchsia-600 to-violet-600 hover:from-fuchsia-500 hover:to-violet-500 text-white font-bold text-xs">
+                        {buildingDbot ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Workflow className="w-4 h-4 mr-2" />}
+                        {buildingDbot ? "Building DBot…" : "Create DBot"}
                       </Button>
                       <p className="text-[9px] text-muted-foreground/60 leading-snug text-center">
                         The DBot trades both Rise and Fall in normal and recovery, and switches among the eight strongest scanned markets.

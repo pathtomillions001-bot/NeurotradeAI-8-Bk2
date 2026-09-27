@@ -62,7 +62,7 @@ interface ForgeSummary {
 // Internal startup defaults keep the generated XML portable. The running
 // DBot ranks every enabled normal and recovery barrier before it trades.
 const FALLBACK_NORMAL: Contract = { side: "DIGITOVER", barrier: 2 };
-const FALLBACK_RECOVERY: Contract = { side: "DIGITOVER", barrier: 4 };
+const FALLBACK_RECOVERY: Contract = { side: "DIGITOVER", barrier: 5 };
 
 function NumInput({ label: lbl, value, onChange, min, max, step = 1, suffix, accent, hint }: {
   label: string; value: number; onChange: (v: number) => void;
@@ -199,7 +199,7 @@ export function DigitForgeConsole({
       if (ok) {
         const s: ForgeSummary | undefined = data.summary;
         toast.success(
-          `DBot forged: ${marketName} · adaptive normal and recovery barriers · ` +
+          `DBot forged: ${marketName} · adaptive normal and focused recovery barriers · ` +
             `stake $${config.stake} · TP $${config.takeProfit} · SL $${config.stopLoss}. ` +
             `It measures its own tape (${s?.window ?? gate.window}-tick window) before every normal entry. ` +
             `Verify the blocks, then press Run.`,
@@ -262,7 +262,7 @@ export function DigitForgeConsole({
                 <p className="text-[10px] text-muted-foreground leading-relaxed">
                   Choose a starting market and session boundaries, then press{" "}
                   <span className="text-white/80 font-semibold">Create DBot</span>. The generated bot enables
-                  all four normal barriers and all four recovery barriers, ranks them across up to eight markets,
+                  all four normal barriers and the two recovery barriers (Over 5 / Under 4), ranks them across up to eight markets,
                   and safely switches market between contracts when another tape is stronger. Bayesian probability,
                   live EV, Markov transitions, stability and loss clustering all run inside your Bot Builder.
                 </p>

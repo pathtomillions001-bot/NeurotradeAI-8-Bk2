@@ -22,16 +22,14 @@ import {
   buildDigitForgeStrategy,
   fairWinRate,
   ladderRisk,
+  DIGIT_FORGE_NORMAL_CONTRACTS,
+  DIGIT_FORGE_RECOVERY_CONTRACTS,
+  isDigitForgeNormalContract,
+  isDigitForgeRecoveryContract,
   type DigitForgeInput,
 } from "../lib/digit-forge-dbot";
 import {
-  TURBO_NORMAL_CONTRACTS,
-  TURBO_RECOVERY_CONTRACTS,
-} from "../lib/overunder-turbo-engine";
-import {
   contractLabel,
-  isNormalContract,
-  isRecoveryContract,
   type TurboContract,
   type TurboSide,
 } from "../lib/overunder-turbo-analysis";
@@ -41,7 +39,10 @@ const router = Router();
 /** Canonical total-return multiplier for a digit barrier. */
 function payoutFor(c: TurboContract): number {
   const table = c.side === "DIGITOVER" ? OVER_PAYOUTS : UNDER_PAYOUTS;
-  return table[c.barrier] ?? (c.side === "DIGITOVER" ? OVER_PAYOUTS[4]! : UNDER_PAYOUTS[5]!);
+  return (
+    table[c.barrier] ??
+    (c.side === "DIGITOVER" ? OVER_PAYOUTS[4]! : UNDER_PAYOUTS[5]!)
+  );
 }
 
 function parseContract(raw: any): TurboContract | null {
@@ -54,7 +55,9 @@ function parseContract(raw: any): TurboContract | null {
 }
 
 /** The user's risk settings — the same two the executors read. */
-async function riskSettings(sessionId: string): Promise<{ markupPercent: number; maxStake: number }> {
+async function riskSettings(
+  sessionId: string,
+): Promise<{ markupPercent: number; maxStake: number }> {
   let markupPercent = 10;
   let maxStake = 500;
   try {
@@ -81,10 +84,19 @@ async function accountCurrency(sessionId: string): Promise<string> {
     let accounts = await db
       .select()
       .from(accountsTable)
-      .where(and(eq(accountsTable.sessionId, sessionId), eq(accountsTable.isActive, true)))
+      .where(
+        and(
+          eq(accountsTable.sessionId, sessionId),
+          eq(accountsTable.isActive, true),
+        ),
+      )
       .limit(1);
     if (accounts.length === 0) {
-      accounts = await db.select().from(accountsTable).where(eq(accountsTable.sessionId, sessionId)).limit(1);
+      accounts = await db
+        .select()
+        .from(accountsTable)
+        .where(eq(accountsTable.sessionId, sessionId))
+        .limit(1);
     }
     if (accounts[0]?.currency) return accounts[0].currency;
   } catch {
@@ -99,14 +111,14 @@ async function accountCurrency(sessionId: string): Promise<string> {
  */
 router.get("/options", (_req, res) => {
   res.json({
-    normal: TURBO_NORMAL_CONTRACTS.map((c) => ({
+    normal: DIGIT_FORGE_NORMAL_CONTRACTS.map((c) => ({
       ...c,
       label: contractLabel(c),
       payout: payoutFor(c),
       fairWinRate: fairWinRate(c),
       breakEven: Math.round((1 / payoutFor(c)) * 10000) / 10000,
     })),
-    recovery: TURBO_RECOVERY_CONTRACTS.map((c) => ({
+    recovery: DIGIT_FORGE_RECOVERY_CONTRACTS.map((c) => ({
       ...c,
       label: contractLabel(c),
       payout: payoutFor(c),
@@ -129,12 +141,21 @@ router.post("/dbot", async (req, res): Promise<void> => {
 
   const normal = parseContract(body.normal);
   const recovery = parseContract(body.recovery);
-  if (!normal || !isNormalContract(normal.side, normal.barrier)) {
-    res.status(400).json({ error: "normal must be one of Over 1, Over 2, Under 7, Under 8" });
+  if (!normal || !isDigitForgeNormalContract(normal.side, normal.barrier)) {
+    res
+      .status(400)
+      .json({
+        error: "normal must be one of Over 1, Over 2, Under 7, Under 8",
+      });
     return;
   }
-  if (!recovery || !isRecoveryContract(recovery.side, recovery.barrier)) {
-    res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 4, Under 5" });
+  if (
+    !recovery ||
+    !isDigitForgeRecoveryContract(recovery.side, recovery.barrier)
+  ) {
+    res
+      .status(400)
+      .json({ error: "recovery must be one of Over 5 or Under 4" });
     return;
   }
 
@@ -156,15 +177,20 @@ router.post("/dbot", async (req, res): Promise<void> => {
   // Rotator candidates are validated here so the phase-4 switch can never be
   // handed a market the app does not trade.
   const requestedWatchMarkets = Array.isArray(body.watchMarkets)
-    ? (body.watchMarkets as unknown[]).filter((s): s is string => typeof s === "string" && isAutomatedMarket(s))
+    ? (body.watchMarkets as unknown[]).filter(
+        (s): s is string => typeof s === "string" && isAutomatedMarket(s),
+      )
     : [];
   // Adaptive mode is the default: if the client does not provide a watchlist,
   // seed it from every digit-enabled market (the generator caps subscriptions
   // at eight and always keeps the selected starting market first).
-  const watchMarkets = (requestedWatchMarkets.length > 0
-    ? requestedWatchMarkets
-    : AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map((m) => m.symbol))
-    .slice(0, 8);
+  const watchMarkets = (
+    requestedWatchMarkets.length > 0
+      ? requestedWatchMarkets
+      : AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map(
+          (m) => m.symbol,
+        )
+  ).slice(0, 8);
 
   try {
     const [{ markupPercent, maxStake }, currency] = await Promise.all([
@@ -180,7 +206,10 @@ router.post("/dbot", async (req, res): Promise<void> => {
       stake,
       takeProfit: Number(body.takeProfit) > 0 ? Number(body.takeProfit) : 10,
       stopLoss: Number(body.stopLoss) > 0 ? Number(body.stopLoss) : 5,
-      maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
+      maxRecoverySteps: Math.max(
+        1,
+        Math.min(10, Number(body.maxRecoverySteps) || 3),
+      ),
       markupPercent,
       maxStake,
       normalPayout: payoutFor(normal),
@@ -188,9 +217,14 @@ router.post("/dbot", async (req, res): Promise<void> => {
       breakerDepth: Math.max(3, Math.min(20, Number(body.breakerDepth) || 6)),
       currency,
       window: Number(body.window) > 0 ? Number(body.window) : undefined,
-      minSamples: Number(body.minSamples) > 0 ? Number(body.minSamples) : undefined,
-      confidenceZ: Number.isFinite(Number(body.confidenceZ)) ? Number(body.confidenceZ) : undefined,
-      forceEntryAfter: Number.isFinite(Number(body.forceEntryAfter)) ? Number(body.forceEntryAfter) : undefined,
+      minSamples:
+        Number(body.minSamples) > 0 ? Number(body.minSamples) : undefined,
+      confidenceZ: Number.isFinite(Number(body.confidenceZ))
+        ? Number(body.confidenceZ)
+        : undefined,
+      forceEntryAfter: Number.isFinite(Number(body.forceEntryAfter))
+        ? Number(body.forceEntryAfter)
+        : undefined,
       useMarkov: body.useMarkov !== false,
       useStreakCooldown: body.useStreakCooldown !== false,
       watchMarkets,
@@ -199,7 +233,8 @@ router.post("/dbot", async (req, res): Promise<void> => {
     const strategy = buildDigitForgeStrategy(input);
     res.json({ ok: true, ...strategy });
   } catch (err) {
-    const message = err instanceof Error ? err.message : "Could not build the strategy";
+    const message =
+      err instanceof Error ? err.message : "Could not build the strategy";
     logger.warn({ err }, "digit-forge dbot build failed");
     res.status(400).json({ error: message });
   }
@@ -211,15 +246,28 @@ router.post("/dbot", async (req, res): Promise<void> => {
  */
 router.post("/risk", async (req, res): Promise<void> => {
   const recovery = parseContract(req.body?.recovery);
-  if (!recovery || !isRecoveryContract(recovery.side, recovery.barrier)) {
-    res.status(400).json({ error: "recovery must be one of Over 4, Over 5, Under 4, Under 5" });
+  if (
+    !recovery ||
+    !isDigitForgeRecoveryContract(recovery.side, recovery.barrier)
+  ) {
+    res
+      .status(400)
+      .json({ error: "recovery must be one of Over 5 or Under 4" });
     return;
   }
-  const depth = Math.max(1, Math.min(10, Number(req.body?.maxRecoverySteps) || 3));
+  const depth = Math.max(
+    1,
+    Math.min(10, Number(req.body?.maxRecoverySteps) || 3),
+  );
   const stake = Number(req.body?.stake) > 0 ? Number(req.body.stake) : 1;
   const { markupPercent } = await riskSettings(req.sessionId);
   const payout = payoutFor(recovery);
-  const ladder = ladderRisk(payout, markupPercent, depth, fairWinRate(recovery));
+  const ladder = ladderRisk(
+    payout,
+    markupPercent,
+    depth,
+    fairWinRate(recovery),
+  );
   res.json({
     ...ladder,
     payout,

@@ -33,6 +33,9 @@ const shouldStopOnError = (bot, errorName = '') => {
 
 const timeMachineEnabled = bot => botInitialized(bot) && bot.tradeEngine.options.timeMachineEnabled;
 
+/** Normalise native interface methods for the async interpreter API. */
+export const invokeInterfaceFunction = (func, args) => Promise.resolve().then(() => func(...args));
+
 // TODO chek beforState & duringState & startState
 const Interpreter = () => {
     let $scope = createScope();
@@ -75,7 +78,13 @@ const Interpreter = () => {
             const function_args = first_defined_arg_idx < 0 ? [] : reversed_args.slice(first_defined_arg_idx).reverse();
             // End of workaround
 
-            func(...function_args.map(arg => js_interpreter.pseudoToNative(arg)))
+            // Most tick helpers return promises, but cached reads such as
+            // Digit Forge's ntDigitDecision return scalars. Normalise both so a
+            // scalar cannot crash the production bundle with `.then is not a function`.
+            invokeInterfaceFunction(
+                func,
+                function_args.map(arg => js_interpreter.pseudoToNative(arg))
+            )
                 .then(rv => {
                     callback(js_interpreter.nativeToPseudo(rv));
                     loop();

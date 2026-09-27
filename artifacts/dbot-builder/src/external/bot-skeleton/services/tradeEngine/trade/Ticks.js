@@ -180,7 +180,7 @@ export default Engine =>
             return best.eligible;
         }
 
-        ntDigitDecision(field) {
+        async ntDigitDecision(field) {
             const value = this.nt_digit_decision?.[field];
             return value === undefined ? (field === 'reason' ? 'analysis warming up' : 0) : value;
         }

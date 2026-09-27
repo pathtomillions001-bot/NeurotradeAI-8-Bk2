@@ -12,12 +12,12 @@
  * generated workspace, on the user's own Deriv connection, every tick.
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
 import {
-  Loader2, X, Workflow, Hammer, Sigma, ShieldCheck, AlertTriangle,
+  Loader2, X, Workflow, Hammer, ShieldCheck, AlertTriangle,
   ChevronDown, ChevronRight, Activity,
 } from "lucide-react";
 import { Button } from "./ui/button";
@@ -28,16 +28,7 @@ import { loadStrategyIntoBotBuilder } from "@/lib/bot-builder-frame";
 
 interface Contract { side: "DIGITOVER" | "DIGITUNDER"; barrier: number }
 
-interface ContractOption extends Contract {
-  label: string;
-  payout: number;
-  fairWinRate: number;
-  breakEven: number;
-}
-
 interface ForgeOptions {
-  normal: ContractOption[];
-  recovery: ContractOption[];
   markets: { symbol: string; displayName: string }[];
 }
 
@@ -68,9 +59,10 @@ interface ForgeSummary {
   ladder: { debtGrowthPerStep: number; capitalAtRisk: number; failureProbability: number };
 }
 
-function sameContract(a: Contract, b: Contract) {
-  return a.side === b.side && a.barrier === b.barrier;
-}
+// Internal startup defaults keep the generated XML portable. The running
+// DBot ranks every enabled normal and recovery barrier before it trades.
+const FALLBACK_NORMAL: Contract = { side: "DIGITOVER", barrier: 2 };
+const FALLBACK_RECOVERY: Contract = { side: "DIGITOVER", barrier: 4 };
 
 function NumInput({ label: lbl, value, onChange, min, max, step = 1, suffix, accent, hint }: {
   label: string; value: number; onChange: (v: number) => void;
@@ -144,8 +136,6 @@ export function DigitForgeConsole({
   const [lastBuild, setLastBuild] = useState<ForgeSummary | null>(null);
 
   const [symbol, setSymbol] = useState("R_50");
-  const [normal, setNormal] = useState<Contract>({ side: "DIGITOVER", barrier: 2 });
-  const [recovery, setRecovery] = useState<Contract>({ side: "DIGITOVER", barrier: 4 });
   const [config, setConfig] = useState({
     stake: 1, takeProfit: 10, stopLoss: 5, maxRecoverySteps: 3, breakerDepth: 6,
   });
@@ -161,24 +151,12 @@ export function DigitForgeConsole({
     let cancelled = false;
     fetch("/api/bots/digit-forge/options")
       .then(r => r.json())
-      .then(d => { if (!cancelled && d?.normal) setOptions(d); })
-      .catch(() => { /* fall back to the static lists below */ });
+      .then(d => { if (!cancelled && d?.markets) setOptions(d); })
+      .catch(() => { /* fall back to the static market list below */ });
     return () => { cancelled = true; };
   }, [open, options]);
 
-  const normalOpts = options?.normal ?? [];
-  const recoveryOpts = options?.recovery ?? [];
   const markets = options?.markets ?? SCAN_MARKETS.map(m => ({ symbol: m.symbol, displayName: m.name }));
-
-  const normalMeta = normalOpts.find(o => sameContract(o, normal));
-  const recoveryMeta = recoveryOpts.find(o => sameContract(o, recovery));
-
-  /** The honest headline: a barrier only pays if it clears its own break-even. */
-  const edge = useMemo(() => {
-    if (!normalMeta) return null;
-    const gap = normalMeta.fairWinRate - normalMeta.breakEven;
-    return { gap, ok: gap > 0 };
-  }, [normalMeta]);
 
   if (!bot) return null;
   const a = ACCENTS[bot.accent];
@@ -198,11 +176,10 @@ export function DigitForgeConsole({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           symbol,
-          // The starting choices remain as a portable fallback. The adaptive
-          // NeuroTrade DBot enables and ranks every legal normal/recovery
-          // barrier and may rotate across this live watchlist.
-          normal,
-          recovery,
+          // Internal startup values keep the XML portable. The running DBot
+          // enables and ranks every legal normal/recovery barrier itself.
+          normal: FALLBACK_NORMAL,
+          recovery: FALLBACK_RECOVERY,
           watchMarkets: markets.map(m => m.symbol).slice(0, 8),
           ...config,
           ...gate,
@@ -222,7 +199,7 @@ export function DigitForgeConsole({
       if (ok) {
         const s: ForgeSummary | undefined = data.summary;
         toast.success(
-          `DBot forged: ${marketName} · ${s?.normal ?? ""} normal → ${s?.recovery ?? ""} recovery · ` +
+          `DBot forged: ${marketName} · adaptive normal and recovery barriers · ` +
             `stake $${config.stake} · TP $${config.takeProfit} · SL $${config.stopLoss}. ` +
             `It measures its own tape (${s?.window ?? gate.window}-tick window) before every normal entry. ` +
             `Verify the blocks, then press Run.`,
@@ -283,7 +260,7 @@ export function DigitForgeConsole({
                   <Hammer className="w-3 h-3" /> This console builds, it does not trade
                 </p>
                 <p className="text-[10px] text-muted-foreground leading-relaxed">
-                  Choose a starting market and boundaries, then press{" "}
+                  Choose a starting market and session boundaries, then press{" "}
                   <span className="text-white/80 font-semibold">Create DBot</span>. The generated bot enables
                   all four normal barriers and all four recovery barriers, ranks them across up to eight markets,
                   and safely switches market between contracts when another tape is stronger. Bayesian probability,
@@ -303,70 +280,6 @@ export function DigitForgeConsole({
                   {markets.map(m => <option key={m.symbol} value={m.symbol}>{m.displayName}</option>)}
                 </select>
               </div>
-
-              {/* Barriers */}
-              <div className="space-y-2">
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold">
-                  Normal barriers <span className="text-emerald-400/70 normal-case">— all enabled · highlighted choice is fallback</span>
-                </p>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {normalOpts.map(o => (
-                    <button
-                      key={o.label}
-                      onClick={() => setNormal({ side: o.side, barrier: o.barrier })}
-                      className={`rounded-lg border px-1 py-1.5 text-[10px] font-bold transition-colors ${
-                        sameContract(o, normal)
-                          ? `${a.panelBorder} ${a.activeBg} ${a.text}`
-                          : "border-white/10 bg-black/20 text-muted-foreground hover:text-white"
-                      }`}
-                    >
-                      {o.label}
-                      <span className="block text-[8px] font-mono font-normal opacity-60">×{o.payout.toFixed(2)}</span>
-                    </button>
-                  ))}
-                </div>
-
-                <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-semibold pt-1">
-                  Recovery barriers <span className="text-amber-300/70 normal-case">— all enabled · independently ranked on debt</span>
-                </p>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {recoveryOpts.map(o => (
-                    <button
-                      key={o.label}
-                      onClick={() => setRecovery({ side: o.side, barrier: o.barrier })}
-                      className={`rounded-lg border px-1 py-1.5 text-[10px] font-bold transition-colors ${
-                        sameContract(o, recovery)
-                          ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
-                          : "border-white/10 bg-black/20 text-muted-foreground hover:text-white"
-                      }`}
-                    >
-                      {o.label}
-                      <span className="block text-[8px] font-mono font-normal opacity-60">×{o.payout.toFixed(2)}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* The maths the user is buying into */}
-              {normalMeta && recoveryMeta && (
-                <div className="rounded-xl border border-white/10 bg-black/20 p-2.5 space-y-2">
-                  <p className="text-[10px] uppercase tracking-widest font-semibold text-muted-foreground flex items-center gap-1.5">
-                    <Sigma className="w-3 h-3" /> What the numbers say
-                  </p>
-                  <div className="grid grid-cols-2 gap-1.5">
-                    <Stat label="Fair win rate" value={`${(normalMeta.fairWinRate * 100).toFixed(0)}%`} />
-                    <Stat label="Break-even" value={`${(normalMeta.breakEven * 100).toFixed(1)}%`}
-                          tone={edge?.ok ? "text-green-400" : "text-red-400"} />
-                    <Stat label="Recovery repays" value={`${(1 / (recoveryMeta.payout - 1)).toFixed(2)} losses`} tone="text-amber-300" />
-                    <Stat label="Ladder depth" value={`${config.maxRecoverySteps} steps`} />
-                  </div>
-                  <p className="text-[9px] text-muted-foreground/60 leading-snug">
-                    {edge?.ok
-                      ? `A fair tape clears break-even by ${((edge.gap) * 100).toFixed(1)} points — the gate's job is to only trade when the LIVE tape agrees, because Deriv prices every digit contract below its fair odds.`
-                      : "This barrier's payout does not cover its own fair win rate, so the gate will refuse most entries by design."}
-                  </p>
-                </div>
-              )}
 
               {/* Boundaries */}
               <div className="space-y-2">

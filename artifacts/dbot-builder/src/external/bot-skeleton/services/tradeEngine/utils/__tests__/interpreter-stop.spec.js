@@ -3,7 +3,7 @@
 // looks permanently frozen (the "click Stop, then nothing works" report).
 import { api_base } from '../../../api/api-base';
 import { observer as globalObserver } from '../../../../utils/observer';
-import Interpreter from '../interpreter';
+import Interpreter, { invokeInterfaceFunction } from '../interpreter';
 
 jest.mock('@/components/shared', () => ({
     isMultiplierContract: jest.fn(() => false),
@@ -45,6 +45,18 @@ jest.mock('../../../api/api-base', () => ({
 }));
 
 jest.mock('@deriv/js-interpreter', () => function JSInterpreter() {});
+
+describe('async interpreter interface', () => {
+    it('accepts cached scalar results as well as promises', async () => {
+        await expect(invokeInterfaceFunction(() => 'READY', [])).resolves.toBe('READY');
+        await expect(invokeInterfaceFunction(() => Promise.resolve(42), [])).resolves.toBe(42);
+    });
+
+    it('turns synchronous interface errors into promise rejections', async () => {
+        const failure = new Error('decision unavailable');
+        await expect(invokeInterfaceFunction(() => { throw failure; }, [])).rejects.toBe(failure);
+    });
+});
 
 describe('interpreter.stop()', () => {
     beforeEach(() => {

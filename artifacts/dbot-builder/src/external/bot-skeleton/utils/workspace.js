@@ -1,8 +1,10 @@
 import { config } from '../constants/config';
+import { acceptedTypesFor } from './mandatory-block-aliases';
 
-// NeuroTrade: `nt_purchase_contract` is Omni Forge's purchase mechanism and
-// stands in for the stock `purchase` block (see scratch/utils/index.js).
-const MANDATORY_BLOCK_ALIASES = { purchase: ['purchase', 'nt_purchase_contract'] };
+// NeuroTrade: `nt_purchase_contract` (Omni Forge) and `nt_purchase_digit_trade`
+// (Digit Forge) stand in for the stock `purchase` block. The alias map is shared
+// with scratch/utils/index.js via utils/mandatory-block-aliases.js so the Run
+// button and this check cannot drift apart.
 
 export const hasAllRequiredBlocks = () => {
     const blocks_in_workspace = window.Blockly.derivWorkspace.getAllBlocks();
@@ -10,7 +12,7 @@ export const hasAllRequiredBlocks = () => {
     const required_block_types = ['trade_definition_tradeoptions', ...mandatoryMainBlocks];
     const all_block_types = blocks_in_workspace.map(block => block.type);
     const has_all_required_blocks = required_block_types.every(required_block_type => {
-        const accepted = MANDATORY_BLOCK_ALIASES[required_block_type] ?? [required_block_type];
+        const accepted = acceptedTypesFor(required_block_type);
         return accepted.some(type => all_block_types.includes(type));
     });
 

@@ -79,12 +79,16 @@ const SURGE_DURATION = 1;
 const SURGE_DURATION_UNIT = "t";
 
 /** Prices re-read from the feed every scan/refit pass. */
-const SCAN_PRICES = 4500;
+// Keep the live decision window bounded: the policy only uses recent structure,
+// while the offline scan still measures a larger unseen sample.  Pulling 4,500
+// ticks on every refit made DBots spend seconds analysing data that could not
+// affect a one-tick contract.
+const SCAN_PRICES = 2200;
 /** Warm prices for a cross-market recovery hunt (fast + sufficient). */
-const HUNT_PRICES = 2500;
+const HUNT_PRICES = 1200;
 /** Re-measure cadence — live never trusts a stale fit for long. */
-const REFIT_LOCKED_MS = 25_000;
-const REFIT_SWITCHING_MS = 45_000;
+const REFIT_LOCKED_MS = 30_000;
+const REFIT_SWITCHING_MS = 60_000;
 /** Switching migrates only for a MEANINGFULLY better edge (anti-flip). */
 const SWITCH_MARGIN = 0.015;
 /** In recovery (switching mode) hunt a better market this often. */
@@ -585,7 +589,7 @@ async function runLoop(config: SurgeConfig) {
       const age = tickManager.getTickAgeSeconds(activeSymbol);
       if (!Number.isFinite(age) || age > medianGap * 6) {
         session.watch.phase = "watching"; session.watch.reason = "tick feed lagging — holding fire until it catches up";
-        session.message = `⏳ Holding on ${activeName} — tick feed lagging`; broadcast(); await sleep(900); continue;
+        session.message = `⏳ Holding on ${activeName} — tick feed lagging`; broadcast(); await sleep(180); continue;
       }
 
       const live = policy as SurgePolicy | null;
@@ -608,7 +612,7 @@ async function runLoop(config: SurgeConfig) {
       const entry = lastEntry;
       if (!live || !entry) {
         session.watch.phase = "watching"; session.watch.reason = "waiting for the first live tick";
-        session.message = `👁 ${activeName} — waiting for the first live tick`; broadcast(); await sleep(900); continue;
+        session.message = `👁 ${activeName} — waiting for the first live tick`; broadcast(); await sleep(180); continue;
       }
 
       session.watch.phase = "armed"; applyDecisionToWatch(entry, lastRadar);
@@ -626,7 +630,7 @@ async function runLoop(config: SurgeConfig) {
         }
         session.watch.phase = "watching"; session.watch.reason = entry.reason;
         session.message = inRecovery ? `🛡 Recovery armed — ${entry.reason}` : `👁 ${entry.side?.label ?? "Rise/Fall"} on ${activeName} — ${entry.reason}`;
-        broadcast(); await sleep(900); continue;
+        broadcast(); await sleep(180); continue;
       }
 
       const fireContract: SurgeContract = entry.side!;
@@ -721,7 +725,7 @@ async function runLoop(config: SurgeConfig) {
       if (session.totalProfit >= config.takeProfit) { session.running = false; session.message = `✅ Take profit $${config.takeProfit.toFixed(2)} reached in ${session.tradeCount} shots.`; broadcast(); return; }
       if (session.totalProfit <= -config.stopLoss) { session.running = false; session.message = `🛑 Stop loss $${config.stopLoss.toFixed(2)} hit after ${session.tradeCount} shots. Session stopped safely.`; broadcast(); return; }
 
-      await sleep(won ? (inRecovery ? 400 : 2500) : 1500);
+      await sleep(won ? (inRecovery ? 180 : 300) : 220);
       consecutiveErrors = 0;
     } catch (err) {
       consecutiveErrors++; logger.error({ err, consecutiveErrors }, "Vector Surge stability catch — keeping the session alive");

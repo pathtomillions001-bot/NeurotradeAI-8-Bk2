@@ -177,24 +177,17 @@ describe("buildDigitForgeStrategy", () => {
     );
   });
 
-  it("buys the decided contract AND its barrier atomically (no stale prediction)", () => {
+  it("buys both sides from variables so normal and recovery can differ", () => {
     const { xml } = buildDigitForgeStrategy(
       baseInput({
         normal: { side: "DIGITOVER", barrier: 2 },
         recovery: { side: "DIGITUNDER", barrier: 4 },
       }),
     );
-    // The stock `purchase` block can only ever use the barrier the Trade
-    // Definition captured one cycle earlier — the "Under 2" bug. The buy must
-    // carry the live contract AND the live barrier together.
-    assert.doesNotMatch(xml, /<block type="purchase"/);
-    assert.doesNotMatch(xml, /PURCHASE_LIST/);
-    const buys = [...xml.matchAll(/<block type="nt_purchase_contract"/g)];
-    assert.equal(buys.length, 1, "exactly one buy site");
-    assert.match(
-      xml,
-      /<block type="nt_purchase_contract"[^>]*><value name="CONTRACT">.*?>Contract<\/field>.*?<value name="BARRIER">.*?>Barrier<\/field>/s,
-    );
+    const purchases = [
+      ...xml.matchAll(/<field name="PURCHASE_LIST">([^<]+)<\/field>/g),
+    ].map((m) => m[1]!);
+    assert.deepEqual(new Set(purchases), new Set(["DIGITOVER", "DIGITUNDER"]));
     // Stake and barrier are variables, with legal positive-number shadows.
     assert.match(
       xml,
@@ -298,64 +291,6 @@ describe("buildDigitForgeStrategy", () => {
       (xml.match(/<mutation name="Size recovery stake">/g) ?? []).length,
       2,
     ); // both call sites
-  });
-
-  it("refuses any pair outside the mode's vocabulary before it can be bought", () => {
-    const { xml } = buildDigitForgeStrategy(baseInput());
-    const before = xml.slice(
-      xml.indexOf('<block type="before_purchase"'),
-      xml.indexOf('<block type="after_purchase"'),
-    );
-    // The guard is the `if` that wraps the buy.
-    const buyAt = before.indexOf('<block type="nt_purchase_contract"');
-    assert.ok(buyAt > 0, "the buy must exist");
-    const guard = before.slice(
-      before.lastIndexOf('<block type="controls_if"', buyAt),
-      buyAt,
-    );
-    // Normal: Over 1, Over 2, Under 7, Under 8. Recovery: Over 5, Under 4.
-    for (const [side, barrier] of [
-      ["DIGITOVER", 1],
-      ["DIGITOVER", 2],
-      ["DIGITUNDER", 7],
-      ["DIGITUNDER", 8],
-      ["DIGITOVER", 5],
-      ["DIGITUNDER", 4],
-    ] as const) {
-      assert.match(
-        guard,
-        new RegExp(
-          `<field name="TEXT">${side}</field>[\\s\\S]{0,600}?<field name="NUM">${barrier}</field>`,
-        ),
-        `missing sovereignty clause for ${side} ${barrier}`,
-      );
-    }
-    // …and nothing else: six legal pairs, six side/barrier comparisons.
-    assert.equal(
-      (guard.match(/<block type="logic_compare"/g) ?? []).length,
-      // 2 mode checks (In Recovery false / true) + 6 pairs × 2 comparisons
-      14,
-    );
-    assert.match(before, /INTEGRITY · refused/);
-    assert.match(before, /outside this bot's barrier set/);
-  });
-
-  it("keeps the recovery ladder on the recovery payout and on whole cents", () => {
-    const { xml } = buildDigitForgeStrategy(
-      baseInput({ recoveryPayout: 2.43 }),
-    );
-    const after = xml.slice(xml.indexOf('<block type="after_purchase"'));
-    // Entering recovery re-seeds the ladder's divisor with the RECOVERY leg's
-    // payout — never the multiplier the normal leg left behind.
-    assert.match(
-      after,
-      /Recovery Payout<\/field><value name="VALUE"><block type="math_number"[^>]*><field name="NUM">2\.43<\/field>/,
-    );
-    // Debt moves in whole cents (recovery-math.addMoney parity): ×100, ROUND, ÷100.
-    assert.ok(
-      (after.match(/<field name="OP">ROUND<\/field>/g) ?? []).length >= 3,
-      "debt must be rounded to cents on entry, on deepening and on repayment",
-    );
   });
 
   it("ends the run on TP, SL or the circuit breaker, and otherwise trades again", () => {

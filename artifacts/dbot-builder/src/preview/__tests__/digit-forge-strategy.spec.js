@@ -18,6 +18,7 @@ import path from 'path';
 import { localize } from '@deriv-com/translations';
 import { loadBlockly } from '../../external/bot-skeleton/scratch/blockly';
 import DBotStore from '../../external/bot-skeleton/scratch/dbot-store';
+import { isAllRequiredBlocksEnabled } from '../../external/bot-skeleton/scratch/utils';
 import { isDigitForgeContract } from '../../external/bot-skeleton/services/tradeEngine/trade/digit-forge-contracts';
 // The actual app policy is the oracle, not a second handwritten stake formula.
 import {
@@ -367,6 +368,24 @@ describe('Digit Forge → Deriv DBot strategy', () => {
                 'Worst Case Rate',
             ])
         );
+    });
+
+    it('passes the run-button gate — nt_purchase_digit_trade satisfies the mandatory Purchase block', () => {
+        // Reproduces the "The Purchase block is mandatory and cannot be
+        // deleted/disabled." failure: Digit Forge buys through
+        // `nt_purchase_digit_trade` (no stock `purchase` block), so the gate must
+        // accept it — otherwise Deriv's Run button refuses to start the bot.
+        // Same contract Omni Forge established for `nt_purchase_contract`.
+        for (const fixture of ['forge-r50-over2-over5', 'forge-r10-over1-over5-forced', 'forge-1hz100v-under7-under4-open']) {
+            workspace.dispose();
+            workspace = new window.Blockly.Workspace();
+            loadFixture(fixture);
+            // getDisabledBlocks reads the active workspace off this global.
+            window.Blockly.derivWorkspace = workspace;
+            expect(workspace.getBlocksByType('purchase', false)).toHaveLength(0);
+            expect(workspace.getBlocksByType('nt_purchase_digit_trade', false)).toHaveLength(1);
+            expect(isAllRequiredBlocksEnabled(workspace)).toBe(true);
+        }
     });
 
     it('compiles to runnable code and reads the tape itself before every normal entry', () => {

@@ -5,6 +5,7 @@ import { localize } from '@deriv-com/translations';
 import { config } from '../../constants/config';
 import { LogTypes } from '../../constants/messages';
 import { error_message_map } from '../../utils/error-config';
+import { acceptedTypesFor } from '../../utils/mandatory-block-aliases';
 import { saveWorkspaceToRecent } from '../../utils/local-storage';
 import { observer as globalObserver } from '../../utils/observer';
 import { removeLimitedBlocks } from '../../utils/workspace';
@@ -410,17 +411,17 @@ const getAllRequiredBlocks = (workspace, required_block_types) => {
  *
  * Omni Forge (and any strategy that needs to buy an arbitrary contract type with
  * a just-in-time digit) purchases through the `nt_purchase_contract` block
- * instead of the stock `purchase` block. That block IS the strategy's purchase
- * mechanism, so it satisfies the mandatory "purchase" requirement exactly the
+ * instead of the stock `purchase` block. Digit Forge purchases through
+ * `nt_purchase_digit_trade`. Those blocks ARE the strategy's purchase
+ * mechanism, so they satisfy the mandatory "purchase" requirement exactly the
  * way `purchase` does. Without this the run-button gate rejects a perfectly
- * valid Omni Forge workspace with "The Purchase block is mandatory…".
+ * valid workspace with "The Purchase block is mandatory…".
+ *
+ * The map lives in utils/mandatory-block-aliases.js so the Run button
+ * (isAllRequiredBlocksEnabled) and utils/workspace.js (hasAllRequiredBlocks)
+ * cannot drift apart again — the drift is what let Digit Forge's
+ * `nt_purchase_digit_trade` through unfixed after Omni Forge's alias landed.
  */
-const MANDATORY_BLOCK_ALIASES = Object.freeze({
-    purchase: ['purchase', 'nt_purchase_contract'],
-});
-
-/** The block types that can satisfy a given required block type. */
-const acceptedTypesFor = required_block_type => MANDATORY_BLOCK_ALIASES[required_block_type] ?? [required_block_type];
 
 /** True when the workspace holds at least one block that satisfies `required_block_type`. */
 const workspaceHasRequiredBlock = (workspace, required_block_type) => {

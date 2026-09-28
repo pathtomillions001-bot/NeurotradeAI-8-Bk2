@@ -18,7 +18,7 @@ window.Blockly.Blocks.nt_analyse_surge_markets = {
         this.setPreviousStatement(true);
         this.setNextStatement(true);
         this.setColour(window.Blockly.Colours.Base.colour);
-        this.setTooltip(localize('Ranks Rise and Fall across watched markets: regime gate (persistence/runs z), adaptive-memory Bayes, Markov conditional, recency run-hazard, robust drift — fired by a conditional G-test evidence boundary.'));
+        this.setTooltip(localize('Ranks Rise and Fall across watched markets using Bayesian, Markov, run-hazard, robust-drift and multi-horizon statistics.'));
     },
     customContextMenu(menu) { modifyContextMenu(menu); },
 };
@@ -40,8 +40,6 @@ window.Blockly.Blocks.nt_surge_decision = {
             ['payout', 'payout'], ['probability', 'probability'], ['lower bound', 'lowerBound'],
             ['break-even', 'breakEven'], ['utility', 'utility'], ['loss continuation', 'qLL'],
             ['pair risk', 'pairRisk'], ['instability', 'instability'], ['confirmations', 'confirmations'],
-            ['regime', 'regime'], ['edge probability', 'edgeProb'], ['evidence', 'evidence'],
-            ['persistence z', 'zPersist'], ['runs z', 'runsZ'], ['memory', 'memory'],
             ['reason', 'reason'], ['changed market', 'changedMarket'],
         ]), 'FIELD');
         this.setOutput(true, null);

@@ -222,22 +222,11 @@ export default Engine =>
         }
 
         /**
-         * Vector Surge DBot (PULSE v2): rank Rise and Fall on every watched
-         * market. The analysis itself (surge-forge-analysis) answers three
-         * questions — is the tape structured at all (regime gate), which side
-         * and with what probability (four-lens logit fusion), and is there
-         * enough statistical evidence to fire NOW (conditional G-test +
-         * posterior tail + beta-quantile bound).
-         *
-         * Speed engineering around that pure core:
-         *  · all market tapes are fetched in ONE parallel round;
-         *  · results are cached by (symbol, mode, window, payout, tick epoch),
-         *    so repeated interpreter passes over the same tick reuse the
-         *    analysis instead of re-fetching and re-computing it;
-         *  · NORMAL fires on a single evidence-strong tick (the GLR boundary
-         *    already demands persistent evidence); RECOVERY keeps the
-         *    two-distinct-tick persistence rule because those stakes are
-         *    debt-sized.
+         * Vector Surge DBot: rank Rise and Fall on every watched market using
+         * recency-Bayes, order-1/2 Markov, empirical run hazard, robust drift,
+         * multi-horizon agreement and explicit loss-pair risk. Both normal and
+         * recovery require the same candidate on two distinct ticks; this
+         * prevents one transient quote or repeated interpreter pass from firing.
          */
         async ntAnalyseSurgeMarkets(
             mode = 'NORMAL',
@@ -259,34 +248,25 @@ export default Engine =>
             const windowSize = Math.max(100, Math.min(500, Number(requestedWindow) || 240));
             const weights = String(weightsCsv).split(':').map(Number);
             const normalizedMode = String(mode).toUpperCase() === 'RECOVERY' ? 'RECOVERY' : 'NORMAL';
-            if (!this.nt_surge_tape_cache) this.nt_surge_tape_cache = new Map();
-            const cache = this.nt_surge_tape_cache;
             const rows = [];
             const scanOne = async symbol => {
                 try {
                     const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: 3 });
                     const tail = ticks.slice(-windowSize);
-                    const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
-                    const cacheKey = `${normalizedMode}:${symbol}:${windowSize}:${Number(payout)}:${tail.length}:${tickEpoch}`;
-                    const ownerKey = `${normalizedMode}:${symbol}`;
-                    let row = cache.get(cacheKey);
-                    if (!row) {
-                        const prices = tail.map(tick => Number(tick.quote));
-                        const analysis = analyseSurgeMarket({ prices, payout, mode: normalizedMode, weights, tau });
-                        row = { symbol, ...analysis, tickEpoch };
-                        // One cached row per (mode, symbol): drop the stale epoch.
-                        const stale = cache.get(ownerKey);
-                        if (stale && stale !== cacheKey) cache.delete(stale);
-                        cache.set(cacheKey, row);
-                        cache.set(ownerKey, cacheKey);
-                        if (cache.size > 128) cache.clear();
-                    }
-                    rows.push(row);
+                    const prices = tail.map(tick => Number(tick.quote));
+                    const analysis = analyseSurgeMarket({ prices, payout, mode: normalizedMode, weights, tau });
+                    rows.push({
+                        symbol,
+                        ...analysis,
+                        tickEpoch: Number(tail[tail.length - 1]?.epoch) || 0,
+                    });
                 } catch (_) {
                     /* one unavailable market never stops the DBot */
                 }
             };
-            await Promise.all(markets.map(scanOne));
+            for (let index = 0; index < markets.length; index += 3) {
+                await Promise.all(markets.slice(index, index + 3).map(scanOne));
+            }
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
             if (!best) {
@@ -304,10 +284,6 @@ export default Engine =>
                 return false;
             }
 
-            const requiredConfirmations =
-                normalizedMode === 'RECOVERY'
-                    ? SURGE_FORGE_LIMITS.recoveryConfirmations
-                    : SURGE_FORGE_LIMITS.normalConfirmations;
             let confirmations = 0;
             let eligible = false;
             if (best.eligible) {
@@ -317,7 +293,7 @@ export default Engine =>
                 else if (previous?.key === key && previous.epoch === best.tickEpoch) confirmations = previous.count;
                 else confirmations = 1;
                 this.nt_surge_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
-                eligible = confirmations >= requiredConfirmations;
+                eligible = confirmations >= SURGE_FORGE_LIMITS.confirmations;
             } else {
                 this.nt_surge_confirmation = undefined;
             }
@@ -331,7 +307,7 @@ export default Engine =>
                 changedMarket: best.eligible && best.symbol !== this.symbol,
                 reason:
                     best.eligible && !eligible
-                        ? `HOLD · confirming ${best.contract === 'CALL' ? 'Rise' : 'Fall'} on fresh tick ${confirmations}/${requiredConfirmations}`
+                        ? `HOLD · confirming ${best.contract === 'CALL' ? 'Rise' : 'Fall'} on fresh tick ${confirmations}/${SURGE_FORGE_LIMITS.confirmations}`
                         : best.reason,
             };
             return eligible;

@@ -93,6 +93,9 @@ const REFIT_SWITCHING_MS = 60_000;
 const SWITCH_MARGIN = 0.015;
 /** In recovery (switching mode) hunt a better market this often. */
 const RECOVERY_HUNT_MS = 3_000;
+/** In switching mode, look for equally-qualified normal shots across the pool.
+ * This is an opportunity search, not a relaxed quality gate. */
+const NORMAL_HUNT_MS = 3_000;
 /** Minimum prices before the live policy is allowed to exist. */
 const MIN_LIVE_PRICES = 150;
 
@@ -506,6 +509,7 @@ async function runLoop(config: SurgeConfig) {
   let lastRadar: SurgeWatch["recoveryRadar"] = [];
   let lastReanalyzeAt = 0;
   let lastHuntAt = 0;
+  let lastNormalHuntAt = 0;
   let consecutiveErrors = 0;
 
   async function refitActive(): Promise<SurgeCandidate | null> {
@@ -540,20 +544,26 @@ async function runLoop(config: SurgeConfig) {
     await refitActive(); return { migrated: false };
   }
 
-  async function huntRecoveryShot(): Promise<{ symbol: string; name: string; dec: SurgeDecision } | null> {
-    const markets = AUTOMATED_DERIV_MARKETS;
-    let best: { symbol: string; name: string; dec: SurgeDecision } | null = null;
-    for (const m of markets) {
+  async function huntShot(mode: "normal" | "recovery"): Promise<{ symbol: string; name: string; dec: SurgeDecision } | null> {
+    // Read markets concurrently. The old sequential hunt could spend several
+    // seconds per pass, making a good opportunity stale before it was evaluated.
+    const markets = await Promise.all(AUTOMATED_DERIV_MARKETS.map(async m => {
       const prices = await readPrices(m.symbol, HUNT_PRICES);
-      if (prices.length < MIN_LIVE_PRICES) continue;
+      if (prices.length < MIN_LIVE_PRICES) return null;
       let scan: SurgePolicy;
       if (policy && m.symbol === activeSymbol) scan = policy;
       else { scan = new SurgePolicy(config.params); for (let i = 0; i < prices.length; i++) scan.update(prices, i); }
-      const dec = scan.decideRecovery(prices, prices.length - 1);
-      if (dec.ready && dec.side && dec.read && (!best || (dec.read.utility > best.dec.read!.utility))) best = { symbol: m.symbol, name: m.displayName, dec };
-    }
-    return best;
+      const dec = mode === "recovery"
+        ? scan.decideRecovery(prices, prices.length - 1)
+        : scan.decideNormal(prices, prices.length - 1, SPEC.sideMode);
+      return dec.ready && dec.side && dec.read ? { symbol: m.symbol, name: m.displayName, dec } : null;
+    }));
+    return markets.filter((x): x is { symbol: string; name: string; dec: SurgeDecision } => x !== null)
+      .sort((a, b) => (b.dec.read?.utility ?? -Infinity) - (a.dec.read?.utility ?? -Infinity))[0] ?? null;
   }
+
+  // Kept as a named wrapper for recovery telemetry and future callers.
+  async function huntRecoveryShot() { return huntShot("recovery"); }
 
   while (session.running && !session.stopRequested) {
     try {
@@ -618,6 +628,17 @@ async function runLoop(config: SurgeConfig) {
       session.watch.phase = "armed"; applyDecisionToWatch(entry, lastRadar);
 
       if (!entry.ready) {
+        if (!inRecovery && !LOCKED && Date.now() - lastNormalHuntAt >= NORMAL_HUNT_MS) {
+          lastNormalHuntAt = Date.now();
+          session.watch.phase = "hunting"; session.watch.reason = "scanning all markets for the same quality bar…";
+          session.message = `🔎 Opportunity scan — checking all markets without lowering the Vector Surge bar`; broadcast();
+          const hunt = await huntShot("normal");
+          if (hunt && hunt.symbol !== activeSymbol) {
+            activeSymbol = hunt.symbol; activeName = hunt.name; session.watch.switched = true;
+            await refitActive(); session.message = `🔁 Same-quality opportunity found on ${activeName} — firing ${hunt.dec.side!.label}`; broadcast(); await sleep(120); continue;
+          }
+          if (hunt) { lastEntry = hunt.dec; continue; }
+        }
         if (inRecovery && !LOCKED && Date.now() - lastHuntAt >= RECOVERY_HUNT_MS) {
           lastHuntAt = Date.now(); session.watch.phase = "hunting"; session.watch.reason = "hunting all markets for a bar-clearing recovery shot…";
           session.message = `🔎 Recovery hunt — scanning all markets for a clean Rise/Fall shot`; broadcast();

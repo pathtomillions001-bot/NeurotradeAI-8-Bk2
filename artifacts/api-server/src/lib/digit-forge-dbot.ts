@@ -48,11 +48,12 @@
  *
  * NEUROTRADE ADAPTIVE BLOCKS
  * ──────────────────────────
- *   The generated strategy uses three blocks registered by our vendored builder:
- *   `nt_analyse_digit_markets`, `nt_digit_decision`, and `nt_switch_market`.
- *   They rank every legal normal/recovery barrier across the watchlist and
- *   safely retarget the engine between contracts. This adaptive XML therefore
- *   runs in NeuroTrade's builder, not the unmodified app.deriv.com builder.
+ *   The vendored builder ranks legal pairs with `nt_analyse_digit_markets`,
+ *   reads the decision with `nt_digit_decision`, and retargets with
+ *   `nt_switch_market`. `nt_prepare_digit_trade` quotes that exact tuple before
+ *   sizing; `nt_purchase_digit_trade` validates it again and buys a fresh quote
+ *   at the calculated stake. This XML requires NeuroTrade's builder, not the
+ *   unmodified app.deriv.com builder.
  */
 
 import { contractLabel, type TurboContract } from "./overunder-turbo-analysis";
@@ -129,7 +130,7 @@ export interface DigitForgeInput {
   useMarkov?: boolean;
   /** Include the streak cooldown clause (default true). */
   useStreakCooldown?: boolean;
-  /** Rotator candidates — recorded now, wired in phase 4. */
+  /** Markets ranked inside the running DBot (starting market first, at most eight). */
   watchMarkets?: string[];
 }
 
@@ -172,7 +173,7 @@ export interface DigitForgeStrategy {
   };
 }
 
-/** Every block type the generated strategy may contain — all stock Deriv Bot blocks. */
+/** Every block type the generated strategy may contain, including our builder extensions. */
 export const DIGIT_FORGE_BLOCK_TYPES = Object.freeze([
   "trade_definition",
   "trade_definition_market",
@@ -184,7 +185,8 @@ export const DIGIT_FORGE_BLOCK_TYPES = Object.freeze([
   "trade_definition_tradeoptions",
   "before_purchase",
   "after_purchase",
-  "purchase",
+  "nt_prepare_digit_trade",
+  "nt_purchase_digit_trade",
   "trade_again",
   "contract_check_result",
   "read_details",
@@ -339,6 +341,10 @@ export function buildDigitForgeStrategy(
   const breakEven = Math.round((1 / input.normalPayout) * 10000) / 10000;
 
   const x = new XmlBuilder();
+  // Deriv's math_number validator rejects scientific notation; a literal 1e-9
+  // silently loads as 0. Build the shared money-rounding epsilon arithmetically
+  // so an exact-cent result such as 0.55 never rounds up to 0.56.
+  const moneyEpsilon = (): string => x.arith("DIVIDE", x.num(1), x.num(1_000_000_000));
 
   const V = {
     baseStake: "Base Stake",
@@ -376,6 +382,9 @@ export function buildDigitForgeStrategy(
     pCond: "Conditional Rate",
     gate: "Gate Pass",
     fire: "Fire",
+    forced: "Forced Normal Entry",
+    livePayout: "Live Payout",
+    stakeLimit: "Stake Limit",
     evalTicks: "Evaluations",
     activeSymbol: "Active Market",
     decisionReason: "Analysis Reason",
@@ -449,7 +458,9 @@ export function buildDigitForgeStrategy(
       `<next><block type="trade_definition_restartbuysell" id="dfrb" deletable="false" movable="false">` +
       `<field name="TIME_MACHINE_ENABLED">FALSE</field>` +
       `<next><block type="trade_definition_restartonerror" id="dfre" deletable="false" movable="false">` +
-      `<field name="RESTARTONERROR">TRUE</field>` +
+      // Quotes retry safely by holding for a new scan. A BUY error may mean
+      // the contract exists: stop for reconciliation, never auto-replay it.
+      `<field name="RESTARTONERROR">FALSE</field>` +
       `</block></next></block></next></block></next></block></next></block></next></block>` +
       `</statement>` +
       `<statement name="INITIALIZATION">${x.chain(init)}</statement>` +
@@ -704,7 +715,9 @@ export function buildDigitForgeStrategy(
       x.text("·"),
       x.get(V.contract),
       x.get(V.barrier),
-      x.text("· setup qualified"),
+      x.text("· stake"),
+      x.get(V.stake),
+      x.text(currency),
     ]),
     x.notify("success", x.get(V.message)),
   ];
@@ -745,7 +758,7 @@ export function buildDigitForgeStrategy(
         then: [
           x.ntSwitchMarket(x.get(V.activeSymbol)),
           x.joinInto(V.message, [
-            x.text("SWITCHED MARKET · now analysing"),
+            x.text("MARKET SWITCH REQUEST ·"),
             x.get(V.activeSymbol),
           ]),
           x.notify("info", x.get(V.message)),
@@ -753,16 +766,17 @@ export function buildDigitForgeStrategy(
       },
       {
         cond: x.compare("EQ", x.get(V.gate), x.bool(true)),
-        then: [...entryReport(), x.set(V.fire, x.bool(true))],
+        then: [x.set(V.fire, x.bool(true))],
       },
       ...(forceEntryAfter > 0
         ? [
             {
-              cond: x.compare(
-                "GTE",
-                x.get(V.evalTicks),
-                x.num(forceEntryAfter),
-              ),
+              // Patience may relax a NORMAL statistical gate, never the
+              // recovery confirmation/regime gate or the execution allowlist.
+              cond: x.all("AND", [
+                x.compare("EQ", x.get(V.inRecovery), x.bool(false)),
+                x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
+              ]),
               then: [
                 x.notify(
                   "warn",
@@ -770,7 +784,7 @@ export function buildDigitForgeStrategy(
                     `Patience limit ${forceEntryAfter}: entering on the best available setup`,
                   ),
                 ),
-                ...entryReport(),
+                x.set(V.forced, x.bool(true)),
                 x.set(V.fire, x.bool(true)),
               ],
             },
@@ -787,20 +801,47 @@ export function buildDigitForgeStrategy(
     "before_purchase",
     `<statement name="BEFOREPURCHASE_STACK">${x.chain([
       x.set(V.fire, x.bool(false)),
+      x.set(V.forced, x.bool(false)),
       ...adaptiveEntry,
       x.ifElse([
         {
           cond: x.compare("EQ", x.get(V.fire), x.bool(true)),
           then: [
-            x.ifElse(
-              [
-                {
-                  cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")),
-                  then: [x.purchase("DIGITOVER")],
-                },
-              ],
-              [x.purchase("DIGITUNDER")],
-            ),
+            // Trade Definition ran BEFORE the adaptive scan. Its cached
+            // prediction/stake must never be used to buy the newly chosen side.
+            // Quote the complete tuple, then size recovery at THAT live payout.
+            x.set(V.livePayout, x.ntPrepareDigitTrade(
+              x.get(V.inRecovery), x.get(V.activeSymbol), x.get(V.contract),
+              x.get(V.barrier), x.get(V.forced),
+            )),
+            x.set(V.fire, x.bool(false)),
+            x.ifElse([
+              {
+                cond: x.compare("GT", x.get(V.livePayout), x.num(1)),
+                then: [
+                  x.ifElse([
+                    {
+                      cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+                      then: [
+                        x.set(V.recPayout, x.get(V.livePayout)),
+                        x.call(RECOVERY_PROC),
+                      ],
+                    },
+                  ], [
+                    x.set(V.normPayout, x.get(V.livePayout)),
+                    x.set(V.stake, x.get(V.baseStake)),
+                  ]),
+                  x.set(V.fire, x.ntPurchaseDigitTrade(
+                    x.get(V.inRecovery), x.get(V.activeSymbol), x.get(V.contract),
+                    x.get(V.barrier), x.get(V.stake), x.num(maxStake),
+                  )),
+                  x.ifElse([{
+                    cond: x.compare("EQ", x.get(V.fire), x.bool(true)),
+                    then: entryReport(),
+                  }]),
+                ],
+              },
+            ]),
           ],
         },
       ]),
@@ -830,37 +871,25 @@ export function buildDigitForgeStrategy(
           "ROUNDUP",
           x.arith(
             "MULTIPLY",
-            x.arith("MINUS", x.get(V.stake), x.num(0.000000001)),
+            x.arith("MINUS", x.get(V.stake), moneyEpsilon()),
             x.num(100),
           ),
         ),
         x.num(100),
       ),
     ),
-    x.ifElse([
-      {
-        cond: x.compare("GT", x.get(V.stake), x.balance()),
-        then: [
-          x.set(
-            V.stake,
-            x.arith(
-              "DIVIDE",
-              x.round(
-                "ROUNDDOWN",
-                x.arith("MULTIPLY", x.balance(), x.num(100)),
-              ),
-              x.num(100),
-            ),
-          ),
-        ],
-      },
-    ]),
-    x.ifElse([
-      {
-        cond: x.compare("LT", x.get(V.stake), x.num(0.35)),
-        then: [x.set(V.stake, x.num(0.35))],
-      },
-    ]),
+    // Round the hard cap DOWN after rounding the request UP. The old
+    // clamp-then-ceil could cross a fractional max stake, and its final 0.35
+    // floor could buy with a balance below Deriv's minimum.
+    x.set(V.stakeLimit, x.num(maxStake)),
+    x.ifElse([{
+      cond: x.compare("LT", x.balance(), x.get(V.stakeLimit)),
+      then: [x.set(V.stakeLimit, x.balance())],
+    }]),
+    x.set(V.stakeLimit, x.arith("DIVIDE", x.round("ROUNDDOWN", x.arith(
+      "MULTIPLY", x.arith("ADD", x.get(V.stakeLimit), moneyEpsilon()), x.num(100),
+    )), x.num(100))),
+    x.set(V.stake, x.constrain(x.get(V.stake), x.num(0), x.get(V.stakeLimit))),
   ];
 
   const recoveryProc = x.topLevel(
@@ -871,10 +900,16 @@ export function buildDigitForgeStrategy(
   );
 
   // ── 6. Settlement — the shared recovery ledger ─────────────────────────────
+  // Match addMoney/settleRecoveryWin in recovery-math.ts: loss debt is held at
+  // integer-cent precision and only REAL net profit reduces it. Reaching the
+  // step counter cap never discards debt or returns to normal prematurely.
+  const cents = (value: string): string => x.round("ROUND", x.arith("MULTIPLY", value, x.num(100)));
+  const addMoney = (a: string, b: string): string =>
+    x.arith("DIVIDE", x.arith("ADD", cents(a), cents(b)), x.num(100));
   const enterRecovery: Stmt[] = [
     x.set(V.inRecovery, x.bool(true)),
     x.set(V.step, x.num(1)),
-    x.set(V.debt, x.get(V.lastStake)),
+    x.set(V.debt, addMoney(x.get(V.lastStake), x.num(0))),
     x.set(V.contract, x.text(input.recovery.side)),
     x.set(V.barrier, x.num(input.recovery.barrier)),
   ];
@@ -885,7 +920,7 @@ export function buildDigitForgeStrategy(
         then: [x.set(V.step, x.arith("ADD", x.get(V.step), x.num(1)))],
       },
     ]),
-    x.set(V.debt, x.arith("ADD", x.get(V.debt), x.get(V.lastStake))),
+    x.set(V.debt, addMoney(x.get(V.debt), x.get(V.lastStake))),
   ];
   const exitRecovery: Stmt[] = [
     x.set(V.debt, x.num(0)),
@@ -900,18 +935,15 @@ export function buildDigitForgeStrategy(
     x.notify(
       "success",
       x.text(
-        `Recovery complete — debt cleared, back to ${normalLabel} at base stake behind the gate`,
+        "Recovery complete — debt cleared, back to normal barriers at base stake behind the gate",
       ),
     ),
   ];
   const onRecoveryWinPartial: Stmt[] = [
-    x.call(RECOVERY_PROC),
     x.joinInto(V.message, [
       x.text("Partial recovery —"),
       x.get(V.debt),
-      x.text(`${currency} debt remains, next ${recoveryLabel} stake`),
-      x.get(V.stake),
-      x.text(currency),
+      x.text(`${currency} debt remains; scanning Over 5 / Under 4`),
     ]),
     x.notify("warn", x.get(V.message)),
   ];
@@ -926,15 +958,12 @@ export function buildDigitForgeStrategy(
       ],
       enterRecovery,
     ),
-    x.call(RECOVERY_PROC),
     x.joinInto(V.message, [
       x.text("Recovery step"),
       x.get(V.step),
-      x.text(`— ${recoveryLabel} at`),
-      x.get(V.stake),
-      x.text(`${currency} to clear`),
+      x.text("— debt"),
       x.get(V.debt),
-      x.text(currency),
+      x.text(`${currency}; scanning Over 5 / Under 4`),
     ]),
     x.notify("warn", x.get(V.message)),
   ];
@@ -972,11 +1001,13 @@ export function buildDigitForgeStrategy(
       {
         cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
         then: [
-          x.set(V.debt, x.arith("MINUS", x.get(V.debt), x.get(V.profit))),
+          x.set(V.debt, x.arith("DIVIDE", x.arith(
+            "MINUS", cents(x.get(V.debt)), cents(x.get(V.profit)),
+          ), x.num(100))),
           x.ifElse(
             [
               {
-                cond: x.compare("LTE", x.get(V.debt), x.num(0.005)),
+                cond: x.compare("LTE", x.get(V.debt), x.num(0)),
                 then: exitRecovery,
               },
             ],
@@ -1037,9 +1068,8 @@ export function buildDigitForgeStrategy(
       x.set(V.lastReturn, x.readDetails(3)),
       x.set(V.evalTicks, x.num(0)),
       x.ifElse([{ cond: x.checkResult("win"), then: onWin }], onLoss),
-      // PHASE 4 (rotator): the in-XML market switch belongs HERE and nowhere
-      // else — after settlement, before trade_again, with no contract open.
-      // See docs/digit-forge-market-switching.md §2.3.
+      // Only settlement writes the ledger. The next before_purchase pass
+      // re-ranks in the new mode and binds a freshly quoted decision.
       boundaries,
     ])}</statement>`,
     1000,

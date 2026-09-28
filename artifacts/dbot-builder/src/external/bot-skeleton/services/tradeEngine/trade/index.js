@@ -13,6 +13,7 @@ import Balance from './Balance';
 import OpenContract from './OpenContract';
 import Proposal from './Proposal';
 import Purchase from './Purchase';
+import DigitForge from './DigitForge';
 import Sell from './Sell';
 import Ticks from './Ticks';
 import Total from './Total';
@@ -62,7 +63,7 @@ const watchScope = ({ store, stopScope, passScope, passFlag }) => {
     });
 };
 
-export default class TradeEngine extends Balance(Purchase(Sell(OpenContract(Proposal(Ticks(Total(class {}))))))) {
+export default class TradeEngine extends Balance(DigitForge(Purchase(Sell(OpenContract(Proposal(Ticks(Total(class {})))))))) {
     constructor($scope) {
         super();
         this.observer = $scope.observer;
@@ -81,6 +82,10 @@ export default class TradeEngine extends Balance(Purchase(Sell(OpenContract(Prop
         const [token, options] = expectInitArg(args);
         const { symbol } = options;
 
+        this.nt_digit_decision = undefined;
+        this.nt_digit_prepared = null;
+        this.nt_digit_recovery_confirmation = undefined;
+        this.nt_digit_live_payouts = new Map();
         this.initArgs = args;
         this.options = options;
         this.startPromise = this.loginAndGetBalance(token);

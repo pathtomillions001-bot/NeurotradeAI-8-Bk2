@@ -262,7 +262,7 @@ export function DigitForgeConsole({
                 <p className="text-[10px] text-muted-foreground leading-relaxed">
                   Choose a starting market and session boundaries, then press{" "}
                   <span className="text-white/80 font-semibold">Create DBot</span>. The generated bot enables
-                  all four normal barriers and the two recovery barriers (Over 5 / Under 4), ranks them across up to eight markets,
+                  only Over 1 / Over 2 / Under 7 / Under 8 normally and Over 5 / Under 4 in recovery, ranks them across up to eight markets,
                   and safely switches market between contracts when another tape is stronger. Bayesian probability,
                   live EV, Markov transitions, stability and loss clustering all run inside your Bot Builder.
                 </p>
@@ -288,7 +288,7 @@ export function DigitForgeConsole({
                 <NumInput label="Take profit" value={config.takeProfit} onChange={v => setConfig(c => ({ ...c, takeProfit: v }))} min={1} step={1} suffix="USD" accent={bot.accent} />
                 <NumInput label="Stop loss" value={config.stopLoss} onChange={v => setConfig(c => ({ ...c, stopLoss: v }))} min={1} step={1} suffix="USD" accent={bot.accent} />
                 <NumInput label="Max recovery steps" value={config.maxRecoverySteps} onChange={v => setConfig(c => ({ ...c, maxRecoverySteps: v }))} min={1} max={10} step={1} accent={bot.accent}
-                          hint="How deep the debt ladder may go before the bot gives the debt up and returns to base stake." />
+                          hint="Caps the recovery step counter, not the debt. Unpaid losses stay in recovery until repaid; stop-loss and the circuit breaker stop the run." />
                 <NumInput label="Circuit breaker" value={config.breakerDepth} onChange={v => setConfig(c => ({ ...c, breakerDepth: v }))} min={3} max={20} step={1} accent={bot.accent}
                           hint="Consecutive losses that stop the run outright — the clustered-loss tail, not the average." />
               </div>
@@ -312,7 +312,7 @@ export function DigitForgeConsole({
                     <NumInput label="Confidence z" value={gate.confidenceZ} onChange={v => setGate(g => ({ ...g, confidenceZ: v }))} min={0} max={3} step={0.005} accent={bot.accent}
                               hint="Agresti–Coull lower bound. 1.645 = 95% one-sided; 0 = trade the raw rate." />
                     <NumInput label="Force entry after" value={gate.forceEntryAfter} onChange={v => setGate(g => ({ ...g, forceEntryAfter: v }))} min={0} max={5000} step={10} accent={bot.accent}
-                              hint="0 = infinite patience. Otherwise the bot takes one gated-off entry after this many refusals." />
+                              hint="Normal mode only: 0 = infinite patience; otherwise allows an entry after this many refusals. Recovery always waits for a confirmed setup." />
                     <Toggle label="Markov dependence test" accent={bot.accent}
                             description="Two-state chain + G² likelihood-ratio test; the conditional rate only votes when G² > 3.84 (χ²₁, 5%)."
                             value={gate.useMarkov} onChange={v => setGate(g => ({ ...g, useMarkov: v }))} />
@@ -329,9 +329,10 @@ export function DigitForgeConsole({
                   <ShieldCheck className="w-3 h-3" /> Recovery uses the app's own ladder
                 </p>
                 <p className="text-[9px] text-muted-foreground leading-snug">
-                  debt × (1 + markup) ÷ (payout − 1), floored at 0.35, capped by your max trade stake and live
-                  balance, rounded up to the cent — the same formula every NeuroTrade bot uses, compiled into
-                  the blocks so it runs without this app.
+                  debt × (1 + markup) ÷ (live payout − 1), using the selected Over 5 or Under 4 quote before
+                  sizing — the same recovery formula as the app's AI bots. Stakes round up without exceeding
+                  your max trade stake or live balance. Partial wins reduce debt; normal trading resumes only
+                  when that debt is repaid. No affordable minimum stake means no trade.
                 </p>
               </div>
 

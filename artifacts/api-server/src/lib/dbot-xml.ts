@@ -118,6 +118,24 @@ export class XmlBuilder {
   ntDecision(field: string): string {
     return `<block type="nt_digit_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
   }
+  /** Quote the complete Digit Forge decision before computing its stake. */
+  ntPrepareDigitTrade(
+    inRecovery: string, symbol: string, contract: string, barrier: string, forced: string,
+  ): string {
+    return `<block type="nt_prepare_digit_trade" id="${this.id()}">` +
+      `<value name="IN_RECOVERY">${inRecovery}</value><value name="SYMBOL">${symbol}</value>` +
+      `<value name="CONTRACT">${contract}</value><value name="BARRIER">${barrier}</value>` +
+      `<value name="FORCED">${forced}</value></block>`;
+  }
+  /** Buy exactly the prepared tuple with the just-calculated, capped stake. */
+  ntPurchaseDigitTrade(
+    inRecovery: string, symbol: string, contract: string, barrier: string, amount: string, maxStake: string,
+  ): string {
+    return `<block type="nt_purchase_digit_trade" id="${this.id()}">` +
+      `<value name="IN_RECOVERY">${inRecovery}</value><value name="SYMBOL">${symbol}</value>` +
+      `<value name="CONTRACT">${contract}</value><value name="BARRIER">${barrier}</value>` +
+      `<value name="AMOUNT">${amount}</value><value name="MAX_STAKE">${maxStake}</value></block>`;
+  }
   /** Run the adaptive multi-market/barrier ranker inside the bot runtime. */
   ntAnalyse(
     mode: "NORMAL" | "RECOVERY",

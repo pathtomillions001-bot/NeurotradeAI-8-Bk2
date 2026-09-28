@@ -45,10 +45,11 @@ export default Engine =>
             return this.purchase(type);
         }
 
-        purchase(contract_type) {
+        purchase(contract_type, quotedPurchase) {
             // Prevent calling purchase twice or while an existing purchase request is in-flight
-            if (this.is_purchasing || this.store.getState().scope !== BEFORE_PURCHASE) {
-                return Promise.resolve();
+            if (this.is_purchasing || ((this.nt_digit_preparing || this.nt_digit_purchase_pending) && !quotedPurchase) ||
+                this.store.getState().scope !== BEFORE_PURCHASE) {
+                return Promise.resolve(false);
             }
             this.is_purchasing = true;
 
@@ -70,7 +71,7 @@ export default Engine =>
                 this.contractId = buy.contract_id;
                 this.store.dispatch(purchaseSuccessful());
 
-                if (this.is_proposal_subscription_required) {
+                if (this.is_proposal_subscription_required && !quotedPurchase) {
                     this.renewProposalsOnPurchase();
                 }
 
@@ -83,10 +84,11 @@ export default Engine =>
                     contract_type,
                     buy_price: buy.buy_price,
                 });
+                return true;
             };
 
-            if (this.is_proposal_subscription_required) {
-                const { id, askPrice } = this.selectProposal(contract_type);
+            if (quotedPurchase || this.is_proposal_subscription_required) {
+                const { id, askPrice } = quotedPurchase ?? this.selectProposal(contract_type);
 
                 const action = () => api_base.api.send({ buy: id, price: askPrice });
 
@@ -97,8 +99,10 @@ export default Engine =>
                     data: askPrice,
                 });
 
-                if (!this.options.timeMachineEnabled) {
-                    return doUntilDone(action).then(onSuccess).catch(err => {
+                if (quotedPurchase || !this.options.timeMachineEnabled) {
+                    // A Digit Forge quote is single-use. On failure let the
+                    // interpreter re-scan/re-quote; never retry a stale buy id.
+                    return (quotedPurchase ? action() : doUntilDone(action)).then(onSuccess).catch(err => {
                         resetPurchasing();
                         throw err;
                     });

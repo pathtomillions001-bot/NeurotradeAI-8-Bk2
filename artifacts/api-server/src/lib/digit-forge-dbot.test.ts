@@ -13,12 +13,18 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   DIGIT_FORGE_BLOCK_TYPES,
+  DIGIT_FORGE_NORMAL_CONTRACTS,
+  DIGIT_FORGE_RECOVERY_CONTRACTS,
   buildDigitForgeStrategy,
   expectedMaxRun,
   fairWinRate,
   ladderRisk,
   type DigitForgeInput,
 } from "./digit-forge-dbot.ts";
+
+// The standalone builder is a CommonJS package; tsx exposes its JS module as default.
+import digitForgeRuntimePolicy from "../../../dbot-builder/src/external/bot-skeleton/services/tradeEngine/trade/digit-forge-contracts.js";
+const { DIGIT_FORGE_CONTRACTS, isDigitForgeContract } = digitForgeRuntimePolicy;
 
 function baseInput(overrides: Partial<DigitForgeInput> = {}): DigitForgeInput {
   return {
@@ -66,6 +72,31 @@ function fieldsOf(xml: string, type: string): Record<string, string> {
     ]),
   );
 }
+
+describe("Digit Forge contract policy parity", () => {
+  it("has exactly the same strict normal/recovery pairs in the API and the runtime purchase guard", () => {
+    for (const [mode, contracts] of [
+      ["NORMAL", DIGIT_FORGE_NORMAL_CONTRACTS],
+      ["RECOVERY", DIGIT_FORGE_RECOVERY_CONTRACTS],
+    ] as const) {
+      assert.deepEqual(
+        DIGIT_FORGE_CONTRACTS[mode].map((c: { contract: string; barrier: number }) => ({ side: c.contract, barrier: c.barrier })),
+        contracts,
+      );
+      for (const side of ["DIGITOVER", "DIGITUNDER"]) {
+        for (let barrier = 0; barrier <= 9; barrier++) {
+          const allowed = contracts.some(c => c.side === side && c.barrier === barrier);
+          assert.equal(isDigitForgeContract(mode, side, barrier), allowed);
+          const input = baseInput(mode === "NORMAL"
+            ? { normal: { side: side as "DIGITOVER" | "DIGITUNDER", barrier } }
+            : { recovery: { side: side as "DIGITOVER" | "DIGITUNDER", barrier } });
+          if (allowed) assert.doesNotThrow(() => buildDigitForgeStrategy(input));
+          else assert.throws(() => buildDigitForgeStrategy(input), /must be one of/);
+        }
+      }
+    }
+  });
+});
 
 describe("buildDigitForgeStrategy", () => {
   it("emits a workspace whose every block and shadow is a stock builder block", () => {
@@ -156,6 +187,8 @@ describe("buildDigitForgeStrategy", () => {
       fieldsOf(xml, "trade_definition_contracttype").TYPE_LIST,
       "both",
     );
+    assert.equal(fieldsOf(xml, "trade_definition_restartonerror").RESTARTONERROR, "FALSE",
+      "an ambiguous buy error must not automatically restart/replay the trade");
     // The six children may not be dragged out or deleted by the user.
     assert.equal(
       (xml.match(/deletable="false" movable="false"/g) ?? []).length,
@@ -177,17 +210,22 @@ describe("buildDigitForgeStrategy", () => {
     );
   });
 
-  it("buys both sides from variables so normal and recovery can differ", () => {
+  it("binds the whole decision and current stake instead of issuing a side-only stock purchase", () => {
     const { xml } = buildDigitForgeStrategy(
       baseInput({
         normal: { side: "DIGITOVER", barrier: 2 },
         recovery: { side: "DIGITUNDER", barrier: 4 },
       }),
     );
-    const purchases = [
-      ...xml.matchAll(/<field name="PURCHASE_LIST">([^<]+)<\/field>/g),
-    ].map((m) => m[1]!);
-    assert.deepEqual(new Set(purchases), new Set(["DIGITOVER", "DIGITUNDER"]));
+    assert.doesNotMatch(xml, /<block type="purchase"/);
+    const before = xml.slice(xml.indexOf('<block type="before_purchase"'), xml.indexOf('<block type="after_purchase"'));
+    const quote = before.indexOf('<block type="nt_prepare_digit_trade"');
+    const size = before.indexOf('<mutation name="Size recovery stake">');
+    const buy = before.indexOf('<block type="nt_purchase_digit_trade"');
+    assert.ok(quote >= 0 && size > quote && buy > size, "quote the selected tuple BEFORE sizing and buying");
+    for (const value of ["IN_RECOVERY", "SYMBOL", "CONTRACT", "BARRIER", "AMOUNT", "MAX_STAKE"]) {
+      assert.ok(before.slice(buy).includes(`<value name="${value}">`), `missing execution input ${value}`);
+    }
     // Stake and barrier are variables, with legal positive-number shadows.
     assert.match(
       xml,
@@ -282,15 +320,14 @@ describe("buildDigitForgeStrategy", () => {
     assert.match(xml, /<field name="OP">ROUNDUP<\/field>/);
     assert.match(xml, /<field name="NUM">0\.35<\/field>/); // Deriv's minimum
     assert.match(xml, /<field name="NUM">250<\/field>/); // max stake cap
-    assert.match(
-      xml,
-      /<field name="NUM">1e-9<\/field>|<field name="NUM">0\.000000001<\/field>/,
-    );
+    // Literal 1e-9 is rejected by the real builder's number validator.
+    assert.match(xml, /<field name="NUM">1000000000<\/field>/);
+    assert.doesNotMatch(xml, /<field name="NUM">1e-9<\/field>/);
     assert.match(xml, /<block type="balance"/); // never stake more than the balance
     assert.equal(
       (xml.match(/<mutation name="Size recovery stake">/g) ?? []).length,
-      2,
-    ); // both call sites
+      1,
+    ); // only after the selected contract's live payout is available
   });
 
   it("ends the run on TP, SL or the circuit breaker, and otherwise trades again", () => {
@@ -306,7 +343,7 @@ describe("buildDigitForgeStrategy", () => {
 
   it("re-arms the gate after recovery completes", () => {
     const { xml } = buildDigitForgeStrategy(baseInput());
-    assert.match(xml, /back to Over 2 at base stake behind the gate/);
+    assert.match(xml, /back to normal barriers at base stake behind the gate/);
   });
 
   it("escapes text so a market name can never break the XML", () => {

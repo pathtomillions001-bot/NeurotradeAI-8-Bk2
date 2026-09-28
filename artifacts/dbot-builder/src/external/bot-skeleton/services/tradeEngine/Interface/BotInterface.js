@@ -13,6 +13,8 @@ const getBotInterface = tradeEngine => {
         // same fire-and-forget semantics as `purchase` (the trade loop's
         // watch() scopes own completion, exactly like the stock block).
         ntPurchaseContract: (contract_type, barrier) => tradeEngine.ntPurchaseContract(contract_type, barrier),
+        ntPrepareDigitTrade: (...args) => tradeEngine.ntPrepareDigitTrade(...args),
+        ntPurchaseDigitTrade: (...args) => tradeEngine.ntPurchaseDigitTrade(...args),
         getAskPrice: contract_type => Number(getProposal(contract_type, tradeEngine).ask_price),
         getPayout: contract_type => Number(getProposal(contract_type, tradeEngine).payout),
         getPurchaseReference: () => tradeEngine.getPurchaseReference(),

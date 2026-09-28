@@ -11,6 +11,7 @@ import * as constants from './state/constants';
 import { analyseDualLockEntry, DUAL_LOCK_ENTRY_DEFAULTS } from './dual-lock-entry';
 import { analyseTurboRecovery } from './turbo-recovery-analysis';
 import { analyseDigitForgeCandidate, DIGIT_FORGE_ANALYSIS_LIMITS } from './digit-forge-analysis';
+import { DIGIT_FORGE_CONTRACTS } from './digit-forge-contracts';
 import { analyseSurgeMarket, SURGE_FORGE_LIMITS } from './surge-forge-analysis';
 
 let tickListenerKey;
@@ -120,17 +121,9 @@ export default Engine =>
          */
         async ntAnalyseDigitMarkets(mode = 'NORMAL', csv = '', requestedWindow = 120) {
             const recoveryMode = String(mode).toUpperCase() === 'RECOVERY';
-            const normal = [
-                { contract: 'DIGITOVER', barrier: 1, payout: 1.23 },
-                { contract: 'DIGITOVER', barrier: 2, payout: 1.4 },
-                { contract: 'DIGITUNDER', barrier: 7, payout: 1.4 },
-                { contract: 'DIGITUNDER', barrier: 8, payout: 1.23 },
-            ];
-            const recovery = [
-                { contract: 'DIGITOVER', barrier: 5, payout: 2.43 },
-                { contract: 'DIGITUNDER', barrier: 4, payout: 2.43 },
-            ];
-            const candidates = recoveryMode ? recovery : normal;
+            const normalizedMode = recoveryMode ? 'RECOVERY' : 'NORMAL';
+            const candidates = DIGIT_FORGE_CONTRACTS[normalizedMode];
+            this.nt_digit_prepared = null;
             const markets = [
                 ...new Set(
                     String(csv)
@@ -153,12 +146,12 @@ export default Engine =>
                     if (digits.length < 20) return;
                     const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
                     for (const candidate of candidates) {
+                        const live = this.nt_digit_live_payouts?.get(`${symbol}:${candidate.contract}:${candidate.barrier}`);
+                        const payout = live && Date.now() - live.at < 60000 ? live.payout : candidate.payout;
                         const analysis = analyseDigitForgeCandidate({
-                            digits,
-                            ...candidate,
-                            mode: recoveryMode ? 'RECOVERY' : 'NORMAL',
+                            digits, ...candidate, payout, mode: normalizedMode,
                         });
-                        rows.push({ symbol, ...candidate, ...analysis, tickEpoch });
+                        rows.push({ symbol, ...candidate, payout, ...analysis, tickEpoch, digits });
                     }
                 } catch (_) {
                     /* one unavailable market must not stop the bot */
@@ -172,6 +165,7 @@ export default Engine =>
             if (!best) {
                 this.nt_digit_recovery_confirmation = undefined;
                 this.nt_digit_decision = {
+                    mode: normalizedMode,
                     symbol: this.symbol,
                     contract: 'DIGITOVER',
                     barrier: recoveryMode ? 5 : 2,
@@ -209,6 +203,7 @@ export default Engine =>
 
             this.nt_digit_decision = {
                 ...best,
+                mode: normalizedMode,
                 eligible,
                 confirmations,
                 changedMarket: best.symbol !== this.symbol,
@@ -692,10 +687,11 @@ export default Engine =>
         async ntSwitchMarket(nextSymbol) {
             const next = String(nextSymbol || '');
             if (!next || next === this.symbol) return false;
-            if (this.data?.contract?.status === 'open') {
+            if (this.is_purchasing || this.nt_digit_preparing || this.nt_digit_purchase_pending ||
+                this.data?.contract?.status === 'open') {
                 globalObserver.emit(
                     'ui.log.warn',
-                    `Market switch refused while a contract is open (${this.symbol} → ${next})`
+                    `Market switch refused while a trade is being prepared or is open (${this.symbol} → ${next})`
                 );
                 return false;
             }

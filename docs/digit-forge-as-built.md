@@ -1,168 +1,164 @@
-# Digit Forge · Part III — as built (phases 1–3)
+# Digit Forge — current runtime and recovery contract
 
-Parts I and II are the design. This is the **record of what actually shipped**,
-what it does at runtime, and how each promise is held down by a test. Where the
-build deviates from the design, the deviation is stated here and this document
-wins.
+Parts I and II describe the original design. This document records what the
+adaptive generator and vendored builder actually execute. It supersedes the
+older fixed-barrier, four-recovery-barrier and ungated-recovery descriptions.
 
-Status: **phases 1–4 complete.** Digit Forge now emits a NeuroTrade-adaptive
-XML that ranks all four normal barriers and all four recovery barriers across a
-validated eight-market watchlist. The vendored builder safely retargets the
-trade engine between contracts, removes the old tick listener, clears proposal
-state and forces a fresh quote before another purchase.
+## Allowed trades
 
----
+The DBot scans its validated watchlist (up to eight markets, including the
+starting market). A contract is a **market + side + barrier** tuple, never an
+independently chosen side and prediction.
 
-## 1. What a user does
-
-1. Bot Arena → **Digit Forge** card (fuchsia, `BOT-DF-FORGE`, tagged **FORGE**).
-2. The panel asks for: market, normal barrier (Over 1/2 · Under 7/8), recovery
-   barrier (Over 4/5 · Under 4/5), stake, TP, SL, max recovery steps, circuit
-   breaker, and — under *In-bot analysis* — tick window, minimum samples,
-   confidence z, patience limit, Markov test on/off, streak cooldown on/off.
-3. **Create DBot** (the panel's only primary action — there is no scan).
-4. The app POSTs the settings, receives Blockly XML, pushes it into the warm
-   bot-builder iframe and routes to **/bot-builder**.
-5. The user sees the blocks, presses Deriv's own **Run**. NeuroTrade is out of
-   the loop from that moment.
-
-The panel never starts a session, never polls status and has no stop button,
-because there is nothing running on this side.
-
----
-
-## 2. Where the analysis lives
-
-Inside the generated workspace. The bot re-derives its own opinion from
-`Bot.getLastDigitList()` before **every** normal entry:
-
-| Step | Block-level implementation |
+| Mode | The complete allowed set |
 | --- | --- |
-| Window | `lists_getSublist` of the last `Window Size` digits (default 120, clamped 20–300) |
-| Classify | `controls_forEach` sets `Is Win` per digit against the normal barrier (`math_modulo` + `logic_compare`) |
-| Point estimate | wins / n |
-| Uncertainty | Agresti–Coull: `ñ = n + z²`, `p̃ = (wins + z²/2)/ñ`, `Worst Case Rate = p̃ − z·√(p̃(1−p̃)/ñ)` (`math_single ROOT`) |
-| Break-even | `1 / payout`, refreshed from the realised payout after every win (`read_details`) |
-| Sequence structure | 2-state Markov counters (`Loss to Loss`, `Loss to Win`, `Win to Loss`, `Win to Win`) → `Dependence G2 = 2Σ O·ln(O/E)` (`math_single LN`) |
-| Dependence gate | conditional rate only votes when `G2 > 3.84` (χ²₁, 5 %) |
-| Streak cooldown | stand down while `Adverse Run > ⌈ln(W(1−q))/ln(1/q) + 2σ⌉` (`Run Limit`, a forge-time literal) |
-| Decision | `Gate Pass` → `Fire` → exactly one `purchase` of the declared contract type |
+| Normal, no outstanding loss debt | **Over 1, Over 2, Under 7, Under 8** |
+| Recovery, outstanding loss debt | **Over 5, Under 4** |
 
-`Evaluations` counts refusals; every 25th emits a *Holding fire* notification so
-the user can see the bot is alive and why it is not trading. With
-`forceEntryAfter > 0` the bot takes one entry anyway once that many refusals
-accumulate (*Patience limit of N evaluations*); the default `0` means infinite
-patience.
+The console's initial normal/recovery pair seeds Trade Definition; it does not
+lock the scanner to that pair. The runtime re-ranks the legal set before each
+entry, preferring qualified candidates across all watched markets. Its Beta
+posterior, confidence bounds, expected value, loss-conditioned transitions,
+window stability and clustering tests run in the browser's bot runtime, not
+on the NeuroTrade API. Recovery also requires the same candidate to qualify on
+two **distinct ticks**. A successful buy resets that confirmation.
 
-**Recovery is deliberately ungated.** `before_purchase` checks `In Recovery`
-first and fires immediately — debt is cleared at the 50 %/40 % barrier where one
-win repays ≈1.1 losses, instead of waiting out a gate that was designed for the
-80 %/70 % barrier.
+The optional patience limit applies **only to normal mode**. It never overrides
+the recovery gate, the contract allowlist, quote validation or balance limits.
+No usable tape/quote means hold, not a fallback purchase.
 
----
+## Reported incident: why Under 2 could be bought
 
-## 3. Recovery — the app's own ladder, compiled into blocks
+The scanner's allowlist was already correct. The handoff to the stock purchase
+block was not:
 
-`Size recovery stake` reproduces `getBotRecoveryStake`
-(`artifacts/api-server/src/lib/agents/recovery-engine.ts`) exactly:
+1. Trade Definition called `Bot.start()` with the initial prediction **2**.
+2. In `before_purchase`, the scanner selected **Under 7** and updated Blockly's
+   `Contract` and `Barrier` variables.
+3. The stock block called only `Bot.purchase('DIGITUNDER')`. It did **not** pass
+   the new barrier or refresh `tradeOptions.prediction`.
+4. The engine therefore bought **Under 2**. Similarly, a seeded recovery
+   **Over 5** could become **Under 5** when the ranker selected **Under 4**.
 
+The wrong recovery pair also changed the realised payout, causing unexpected
+partial recovery and another recovery trade instead of returning to normal.
+Earlier acceptance tests always picked the seeded side/barrier; they never
+exercised this mismatch.
+
+There were additional recovery discrepancies:
+
+- Stake sizing ran at settlement, before the next selected contract's payout
+  was known. Updating the payout during the next scan did not re-size the stake.
+- The builder's numeric-field validator rejected a literal `1e-9`, silently
+  replacing the rounding epsilon with zero. For example, binary floating-point
+  arithmetic could turn an exact **0.55** stake into **0.56** after `ceil`.
+- Rounding up after clamping could exceed a fractional maximum stake; applying
+  the 0.35 floor after a balance cap could exceed an insufficient balance.
+- The patience escape hatch also bypassed recovery confirmation.
+
+## Corrected execution handoff
+
+Generated XML now uses two additional NeuroTrade builder blocks:
+
+1. **`nt_prepare_digit_trade`** validates the decision's mode, market, side,
+   barrier and engine scope. It requests a fresh **$1 proposal for that exact
+   tuple**, rechecks the gate at the live payout, and returns the total-return
+   multiplier. Failed/malformed/timed-out quotes return zero to hold. Fresh
+   payouts feed back into ranking for that candidate for up to 60 seconds.
+2. The workspace calculates its recovery stake **after** receiving that payout.
+3. **`nt_purchase_digit_trade`** consumes the preparation once, verifies the
+   same tuple and current limits again, requests a proposal at the calculated
+   stake, and buys **that proposal id**. It never selects a cached startup
+   proposal, even if stock payout/proposal blocks are present.
+
+Preparation expires after ten seconds. A new analysis, market/mode change,
+trade cycle or stop invalidates it. Quote/preparation and purchase locks prevent
+concurrent buys or retargeting. Quote failures hold and re-scan; buy errors are
+not swallowed or automatically replayed. Generated workspaces disable
+restart-on-error, so an ambiguous buy error stops for account reconciliation
+rather than risking a duplicate trade or resetting the ledger. No real account
+trades are needed to run the regression tests.
+
+A failed market switch cannot buy the selected side on the old market. The XML
+logs a switch **request**; the engine logs whether it succeeded. Entry messages
+report the executed market, side, digit and stake, rather than the seed pair.
+
+## Recovery parity with the app's AI bots
+
+The policy is the existing **bot-specific debt markup** policy, not the main
+engine's separate Auto/Manual or Split/Instant target-profit settings:
+
+```text
+raw stake = outstanding debt × (1 + botRecoveryMarkup / 100)
+            / (selected live total-return payout − 1)
+
+stake = ceil-to-cents(max(0.35, raw stake))
+stake = min(stake, floor-to-cents(maxTradeStake), floor-to-cents(balance))
+if stake < 0.35, or a hard limit is unavailable: do not buy
 ```
-stake = ceil₂( debt × (1 + markup/100) / (payout − 1) )
-stake = max(0.35, min(stake, maxTradeStake, balance))
+
+Markup and max stake are copied from the user's saved settings at forge time.
+This reproduces `calculateBotRecoveryStake` + `applyRecoveryStakeLimits` /
+`getBotRecoveryStake` for executable stakes. The final execution guard additionally
+refuses insufficient/invalid balances instead of forcing the minimum through a
+hard limit. The rounding epsilon is emitted as **1 / 1,000,000,000**, so it survives
+loading into real Deriv Blockly.
+
+Settlement alone updates the workspace ledger, at integer-cent precision:
+
+- A normal loss enters recovery at step 1 and records the actual lost stake.
+- Further losses add the actual lost stakes to debt.
+- Recovery wins subtract **actual net profit**, not total payout or the stake.
+- Partial wins keep recovery active for the remaining debt.
+- Recovery ends as soon as all loss debt is repaid. The next scan is normal,
+  at the base stake, behind the normal gate.
+- `maxRecoverySteps` caps the step **counter**, just as in the app. It does not
+  discard unpaid debt. TP, SL and the consecutive-loss circuit breaker stop
+  the run independently.
+
+At the canonical 2.43× recovery payout, base stake 0.50 and 10% markup:
+
+```text
+0.50 normal loss → debt 0.50
+recovery stake ceil(0.50 × 1.10 / 1.43) = 0.39
+0.39 loss → debt 0.89
+recovery stake ceil(0.89 × 1.10 / 1.43) = 0.69
+0.69 win → actual net profit 0.99 → debt cleared
+next normal trade = 0.50
 ```
 
-`markup` and `maxTradeStake` are read from the user's saved settings at forge
-time, so the generated bot agrees with every other NeuroTrade bot. The ladder
-ends on `maxRecoverySteps` (debt abandoned, back to base stake behind the gate),
-on the circuit breaker (`breakerDepth` consecutive losses), or on TP/SL.
+## Regression coverage
 
-Verified numerically in the builder suite: stake 0.50 → L → `ceil₂(0.55/0.95)` =
-**0.58** → L → `ceil₂(1.188/0.95)` = **1.26** → W clears the debt → back to the
-normal leg at 0.50.
-
----
-
-## 4. Files
-
-| Path | Role |
-| --- | --- |
-| `artifacts/api-server/src/lib/dbot-xml.ts` | Shared Blockly-XML emitter (extracted from the Turbo generator, byte-identical — its fixtures prove it). Adds `single`, `onList`, `mod`, `not`, `all`, `callReturn`, `defReturn`, `change`. |
-| `artifacts/api-server/src/lib/digit-forge-dbot.ts` | The generator: `DIGIT_FORGE_BLOCK_TYPES`, `fairWinRate`, `expectedMaxRun`, `ladderRisk`, `buildDigitForgeStrategy`. |
-| `artifacts/api-server/src/lib/digit-forge-dbot.test.ts` | 22 tests: allowlist, root scopes, XML well-formedness, variable declaration completeness, trade-definition order, unconditional trade options, gate maths constants, input rejection, clamping. |
-| `artifacts/api-server/src/lib/digit-forge-dbot.fixtures.ts` | The three committed fixtures; `--write` regenerates them. |
-| `artifacts/api-server/src/routes/digit-forge.ts` | `GET /options`, `POST /dbot`, `POST /risk`. No engine, no session state. |
-| `artifacts/api-server/src/lib/bot-catalog.ts` | `digit-forge` entry, `forge` flag, console id `digit-forge@1`. |
-| `artifacts/trading-platform/src/components/digit-forge-console.tsx` | The settings panel whose primary button is **Create DBot**. |
-| `artifacts/trading-platform/src/lib/console-registry.ts` | Registers the console; `FORGE_CONSOLE_IDS` / `consoleIsForge` drive the new FORGE badge (kept distinct from SCANNER, which promises scan-and-trade). |
-| `artifacts/dbot-builder/src/preview/__tests__/digit-forge-strategy.spec.js` | **The acceptance test** — real Blockly, real code generation, real execution. |
-
----
-
-## 5. "It must not error when it runs" — how that is held down
-
-The builder suite loads each committed fixture into the **real** Deriv Blockly
-with every vendored block definition, applies the same pre-load validation
-`load()` applies, compiles it exactly the way `dbot.generateCode()` does, and
-executes the result against a scripted market with a fake `Bot` interface.
-
-Nine specs, all passing alongside the six Turbo ones:
-
-| Spec | What it would catch |
-| --- | --- |
-| loads with every root block and both procedures intact | an unknown block type (rejects the whole workspace), or a `procedures_callnoreturn` whose mutation name does not match a definition — Blockly silently roots an empty duplicate and the call becomes a no-op |
-| compiles and reads the tape before every normal entry | a gate that never calls `Bot.getLastDigitList()` (i.e. analysis that is not actually running in-bot) |
-| refuses a dead tape without throwing | division by zero in the Agresti–Coull/G² arithmetic on degenerate windows; an infinite loop that throws rather than waits |
-| runs the shared recovery ladder | any drift from `getBotRecoveryStake` — the stakes are asserted to the cent |
-| fires recovery without consulting the gate | a gate that also blocks recovery (debt would never be cleared) |
-| trips the circuit breaker | an off-by-one in the consecutive-loss counter |
-| stops at TP and at SL | boundaries that never halt the run |
-| honours the patience limit | the forced-entry escape hatch failing to compile or to fire |
-| never buys an undeclared contract type/barrier | `purchase` naming a type absent from `trade_definition_contracttype` — the classic runtime error for generated DBots |
-
-Structural guards that sit in the API-side suite instead: the block allowlist,
-`trade_definition` child order, trade options never being emitted inside a
-conditional (`BinaryBotPrivateHasCalledTradeOptions` would stay false and the
-interpreter would spin), every `VAR` reference being declared in `<variables>`,
-and XML escaping of user-supplied market names.
-
-Run them:
+- `api-server/src/lib/digit-forge-dbot.test.ts`: generator/runtime allowlist
+  parity for all side/digit pairs; live quote → sizing → purchase order;
+  unconditional Trade Definition; XML structure, variables and saved fixtures.
+- `dbot-builder/src/preview/__tests__/digit-forge-strategy.spec.js`: real Blockly
+  load/compile/execute, including the originally failing Under 2/Under 5 cases,
+  all six legal pairs across changing markets, changing live payouts, exact-cent
+  rounding, partial wins, fractional caps, depleted balance, step-cap debt
+  retention, failed switches and recovery patience. Every scripted buy checks
+  mode and stake against the **actual app recovery-math functions**.
+- `dbot-builder/src/external/bot-skeleton/services/tradeEngine/trade/__tests__/digit-forge-execution.spec.js`:
+  real scanner/purchase mixins against a mocked Deriv transport; exact proposal
+  requests and purchased ids, exhaustive rejection of forbidden pairs, stale
+  proposal protection, quote errors/timeouts, mode/market changes, concurrent
+  calls, stops and live-payout gates.
 
 ```bash
-# generator + fixtures (429 tests incl. the rest of the API suite)
 corepack pnpm --filter @workspace/api-server test
-# real-Blockly load + compile + execute
-cd artifacts/dbot-builder && npm install && npx jest src/preview/__tests__/
+cd artifacts/dbot-builder
+npm ci --no-audit --no-fund
+npx jest src/preview/__tests__/ src/external/bot-skeleton/services/tradeEngine/trade/__tests__/ --runInBand --coverage=false
 ```
 
----
+## Deployment and existing XML
 
-## 6. Deviations from Parts I and II
+Deploy the **API and rebuilt web/builder bundle together**. Saved/exported XML
+contains the old execution blocks and is not rewritten automatically: stop the
+old DBot and use **Create DBot** again after deployment, then verify it on a
+Deriv demo account before using real funds. The new adaptive XML requires the
+updated NeuroTrade builder, not the unmodified app.deriv.com builder.
 
-- **No `State` variable.** `Prev State` already carries the last digit's
-  membership after the classification loop.
-- **`Run Limit` is a forge-time literal**, not a runtime variable — the window
-  size is fixed at forge time, so the expected-max-run bound is too.
-- **Waiting report every 25 evaluations**, not 30.
-- **`forceEntryAfter` defaults to 0** (infinite patience) rather than a
-  non-zero default; an impatient default would undo the gate.
-- **`exitRecovery` also resets `Gate Pass` and `Evaluations`**, so the first
-  normal entry after a recovery must re-qualify from scratch.
-- **Adaptive XML is NeuroTrade-builder-only.** `nt_analyse_digit_markets`,
-  `nt_digit_decision` and `nt_switch_market` are registered by the vendored
-  builder. The ranker combines Beta shrinkage, Wilson lower bounds, expected
-  value, a two-state Markov conditional rate, window stability and loss
-  clustering. Stock app.deriv.com does not know these blocks.
-- **The journal is diagnostic.** Every ten refused evaluations it reports the
-  active market, score and exact blocker; market changes are announced and
-  explicitly confirm that stale proposals were cleared.
-
----
-
-## 7. Still honest about the edge
-
-Nothing here makes a digit contract positive-expectation. Deriv prices every
-barrier in this vocabulary below its fair odds, the synthetics are i.i.d., and a
-120-tick window cannot prove a small edge. What the generated bot does is refuse
-to trade a tape that has not cleared its own break-even with statistical room to
-spare, cap the damage when it is wrong, and clear debt at the barrier where
-clearing is cheapest. The panel says exactly this, in the panel.
+These changes enforce execution and recovery correctness, not profitability.
+Digit contracts remain risky and a recovery ladder can exhaust the configured
+limits; statistical gates cannot guarantee an edge or recovery of losses.

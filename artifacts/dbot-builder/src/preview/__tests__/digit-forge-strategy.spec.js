@@ -18,6 +18,11 @@ import path from 'path';
 import { localize } from '@deriv-com/translations';
 import { loadBlockly } from '../../external/bot-skeleton/scratch/blockly';
 import DBotStore from '../../external/bot-skeleton/scratch/dbot-store';
+import { isDigitForgeContract } from '../../external/bot-skeleton/services/tradeEngine/trade/digit-forge-contracts';
+// The actual app policy is the oracle, not a second handwritten stake formula.
+import {
+    addMoney, applyRecoveryStakeLimits, calculateBotRecoveryStake, settleRecoveryWin,
+} from '../../../../api-server/src/lib/recovery-math';
 
 localize.mockImplementation((text, args) =>
     typeof text === 'string'
@@ -34,6 +39,7 @@ const PAYOUT = {
     'DIGITOVER:1': 1.23,
     'DIGITOVER:5': 2.43,
     'DIGITUNDER:7': 1.4,
+    'DIGITUNDER:8': 1.23,
     'DIGITUNDER:5': 1.95,
     'DIGITUNDER:4': 2.43,
 };
@@ -106,7 +112,7 @@ function buildRunner(workspace) {
 }
 
 /** Scripted Deriv: `results` are the outcomes of successive purchases. */
-function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recoveryHoldEvaluations = 0 }) {
+function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recoveryHoldEvaluations = 0, decisionFor, payoutFor, switchFails = false }) {
     const state = {
         trades: [],
         notifications: [],
@@ -119,6 +125,9 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
         digitReads: 0,
         recoveryAnalyses: 0,
         exhausted: false,
+        debt: 0,
+        preparations: [],
+        purchases: [],
     };
     const contract = { buy_price: 0, sell_price: 0, profit: 0, result: 'win' };
     const Bot = {
@@ -127,6 +136,7 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
         },
         start: options => {
             state.tradeOptions = options;
+            state.baseStake ??= options.amount;
             state.purchased = false;
         },
         highlightBlock: () => {},
@@ -138,7 +148,7 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
             const won = results[state.trades.length] === 'W';
             const stake = state.tradeOptions.amount;
             const prediction = state.tradeOptions.prediction;
-            const multiplier = PAYOUT[`${type}:${prediction}`];
+            const multiplier = state.prepared?.payout ?? PAYOUT[`${type}:${prediction}`];
             if (!multiplier) throw new Error(`unexpected contract ${type} barrier ${prediction}`);
             const sell = won ? Math.round(stake * multiplier * 100) / 100 : 0;
             contract.buy_price = stake;
@@ -147,7 +157,10 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
             contract.result = won ? 'win' : 'loss';
             state.totalProfit = Math.round((state.totalProfit + contract.profit) * 100) / 100;
             state.balance = Math.round((state.balance + contract.profit) * 100) / 100;
-            state.trades.push({ type, prediction, stake, won, profit: contract.profit });
+            state.trades.push({ type, prediction, stake, won, profit: contract.profit, symbol: state.init.symbol });
+            state.debt = won
+                ? settleRecoveryWin({ unrecoveredAmount: state.debt, remainingTargetProfit: 0, actualNetProfit: contract.profit }).remainingDebt
+                : addMoney(state.debt, stake);
             state.purchased = true;
         },
         isResult: r => contract.result === r,
@@ -172,6 +185,8 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
             const eligible =
                 mode === 'RECOVERY' ? state.recoveryAnalyses > recoveryHoldEvaluations : probability * payout > 1;
             state.decision = {
+                mode,
+                digits: tape,
                 symbol: state.init.symbol,
                 contract: contractType,
                 barrier,
@@ -188,10 +203,44 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
                 reason: eligible ? 'READY' : 'HOLD: EV negative',
                 changedMarket: false,
             };
-            return eligible;
+            if (decisionFor) {
+                Object.assign(state.decision, decisionFor(state, mode));
+                state.decision.changedMarket = state.decision.symbol !== state.init.symbol;
+            }
+            return state.decision.eligible;
         },
         ntDigitDecision: field => state.decision?.[field] ?? 0,
+        ntPrepareDigitTrade: (inRecovery, symbol, type, barrier, forced) => {
+            state.prepared = null;
+            const mode = inRecovery ? 'RECOVERY' : 'NORMAL';
+            if (!isDigitForgeContract(mode, type, barrier) || symbol !== state.init.symbol ||
+                state.decision.mode !== mode || state.decision.contract !== type || state.decision.barrier !== barrier ||
+                (!state.decision.eligible && !(forced && !inRecovery)) || state.decision.samples < 20) return 0;
+            const payout = payoutFor?.(state, mode) ?? PAYOUT[`${type}:${barrier}`];
+            if (!(payout > 1)) return 0;
+            state.prepared = { inRecovery, symbol, type, barrier, payout };
+            state.preparations.push(state.prepared);
+            return payout;
+        },
+        ntPurchaseDigitTrade: (inRecovery, symbol, type, barrier, amount, maxStake) => {
+            const prepared = state.prepared;
+            if (!prepared || prepared.inRecovery !== inRecovery || prepared.symbol !== symbol ||
+                prepared.type !== type || prepared.barrier !== barrier ||
+                amount < 0.35 || amount > maxStake || amount > state.balance) return false;
+            // Every trade's mode/stake must agree with the real application's
+            // debt-only ledger and configurable-markup bot recovery policy.
+            expect(inRecovery).toBe(state.debt > 0);
+            const expected = inRecovery
+                ? applyRecoveryStakeLimits(calculateBotRecoveryStake(state.debt, prepared.payout, 10), maxStake, state.balance)
+                : state.baseStake;
+            expect(amount).toBe(expected);
+            state.purchases.push({ inRecovery, symbol, type, barrier, amount, debt: state.debt });
+            state.tradeOptions = { ...state.tradeOptions, symbol, prediction: barrier, amount };
+            Bot.purchase(type);
+            return true;
+        },
         ntSwitchMarket: symbol => {
+            if (switchFails) return false;
             state.init.symbol = symbol;
             return true;
         },
@@ -299,7 +348,7 @@ describe('Digit Forge → Deriv DBot strategy', () => {
             .sort();
         expect(defs).toEqual(['Measure the tape', 'Size recovery stake']);
         const calls = workspace.getBlocksByType('procedures_callnoreturn', false);
-        expect(calls.length).toBeGreaterThanOrEqual(2);
+        expect(calls.length).toBeGreaterThanOrEqual(1);
         for (const call of calls) {
             expect(defs).toContain(call.getProcedureCall());
         }
@@ -342,7 +391,7 @@ describe('Digit Forge → Deriv DBot strategy', () => {
 
         // Journal transparency, deliberately minimal: the user sees the state
         // and the subject of each decision, never the model behind it.
-        expect(market.state.notifications.some(m => /^ENTRY · R_50 · DIGITOVER 2 · setup qualified$/.test(m))).toBe(
+        expect(market.state.notifications.some(m => /^ENTRY · R_50 · DIGITOVER 2 · stake 1 USD$/.test(m))).toBe(
             true
         );
         for (const message of market.state.notifications.slice(1)) {
@@ -381,9 +430,143 @@ describe('Digit Forge → Deriv DBot strategy', () => {
             ['DIGITUNDER', 7, 0.5, 'W'], // debt cleared → back to the gated normal leg
         ]);
         expect(
-            market.state.notifications.some(m => /Recovery step 1 — Under 4 at 0.39 USD to clear 0.5 USD/.test(m))
+            market.state.notifications.some(m => /Recovery step 1 — debt 0.5 USD; scanning Over 5 \/ Under 4/.test(m))
         ).toBe(true);
         expect(market.state.notifications.some(m => /Recovery complete — debt cleared/.test(m))).toBe(true);
+    });
+
+    it('binds the selected Under 7 barrier at purchase instead of the startup Over 2 barrier', () => {
+        loadFixture('forge-r50-over2-over5');
+        const market = fakeMarket({
+            results: ['W'],
+            decisionFor: () => ({ contract: 'DIGITUNDER', barrier: 7, payout: 1.4, eligible: true }),
+        });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('exhausted');
+        expect(market.state.trades[0]).toMatchObject({ type: 'DIGITUNDER', prediction: 7, stake: 1 });
+    });
+
+    it('keeps the selected side and barrier paired when recovery switches from Over 5 to Under 4', () => {
+        loadFixture('forge-r50-over2-over5');
+        const market = fakeMarket({
+            results: ['L', 'W', 'W'],
+            decisionFor: (_state, mode) => mode === 'RECOVERY'
+                ? { contract: 'DIGITUNDER', barrier: 4, payout: 2.43, eligible: true }
+                : { contract: 'DIGITOVER', barrier: 2, payout: 1.4, eligible: true },
+        });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('exhausted');
+        expect(market.state.trades.map(t => [t.type, t.prediction, t.stake])).toEqual([
+            ['DIGITOVER', 2, 1],
+            ['DIGITUNDER', 4, 0.77],
+            ['DIGITOVER', 2, 1],
+        ]);
+    });
+
+    it('follows every legal normal/recovery pair across market changes without mixing any tuple fields', () => {
+        loadFixture('forge-r50-over2-over5');
+        const choices = [
+            ['R_50', 'DIGITOVER', 1],
+            ['R_75', 'DIGITUNDER', 8],
+            ['R_50', 'DIGITOVER', 2],
+            ['R_75', 'DIGITUNDER', 7],
+            ['R_50', 'DIGITOVER', 5],
+            ['R_75', 'DIGITUNDER', 4],
+            ['R_75', 'DIGITUNDER', 8],
+        ];
+        const market = fakeMarket({
+            results: ['W', 'W', 'W', 'L', 'L', 'W', 'W'],
+            decisionFor: state => {
+                const [symbol, contract, barrier] = choices[Math.min(state.trades.length, choices.length - 1)];
+                return { symbol, contract, barrier, payout: PAYOUT[`${contract}:${barrier}`], eligible: true };
+            },
+        });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('exhausted');
+        expect(market.state.trades.map(t => [t.symbol, t.type, t.prediction])).toEqual(choices);
+        expect(market.state.trades.map(t => t.stake)).toEqual([1, 1, 1, 1, 0.77, 1.37, 1]);
+    });
+
+    it('recomputes each recovery stake AFTER the selected live payout is known', () => {
+        loadFixture('forge-1hz100v-under7-under4-open');
+        const market = fakeMarket({
+            results: ['L', 'L', 'W', 'W'],
+            digits: () => UNDER7_HOT,
+            // Both recovery trades are Under 4, but Deriv's quote changed.
+            payoutFor: (state, mode) => mode === 'RECOVERY' ? (state.trades.length === 1 ? 2 : 3) : 1.4,
+        });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('exhausted');
+        // App oracle is checked on EVERY purchase by the harness as well.
+        expect(market.state.trades.map(t => t.stake)).toEqual([0.5, 0.55, 0.58, 0.5]);
+        expect(market.state.trades.map(t => t.prediction)).toEqual([7, 4, 4, 7]);
+    });
+
+    it('retains partial recovery debt, respects a fractional hard cap, then returns to base stake only when repaid', () => {
+        loadFixture('forge-1hz100v-under7-under4-open');
+        // Edit the generated max-stake setting exactly as a workspace user can.
+        for (const block of workspace.getBlocksByType('math_number', false)) {
+            if (Number(block.getFieldValue('NUM')) === 500) block.setFieldValue('0.609', 'NUM');
+        }
+        const market = fakeMarket({ results: ['L', 'L', 'W', 'W', 'W'], digits: () => UNDER7_HOT });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('exhausted');
+        expect(market.state.trades.map(t => [t.prediction, t.stake])).toEqual([
+            [7, 0.5], [4, 0.39], [4, 0.6], [4, 0.35], [7, 0.5],
+        ]);
+        expect(market.state.notifications.some(m => /Partial recovery — 0.03 USD debt remains/.test(m))).toBe(true);
+        expect(market.state.debt).toBe(0);
+    });
+
+    it('never abandons outstanding debt when the recovery-step counter reaches its cap', () => {
+        loadFixture('forge-1hz100v-under7-under4-open');
+        const market = fakeMarket({ results: ['L', 'L', 'L', 'L', 'W', 'W'], digits: () => UNDER7_HOT });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('exhausted');
+        expect(market.state.trades.map(t => t.prediction)).toEqual([7, 4, 4, 4, 4, 7]);
+        expect(market.state.notifications.filter(m => /Recovery step 3/.test(m))).toHaveLength(2);
+    });
+
+    it('does not push the 0.35 minimum above the remaining account balance', () => {
+        loadFixture('forge-1hz100v-under7-under4-open');
+        const market = fakeMarket({ results: ['L', 'L', 'W'], digits: () => UNDER7_HOT, balance: 1.1 });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('never-fired');
+        expect(market.state.trades.map(t => t.stake)).toEqual([0.5, 0.39]);
+        expect(market.state.balance).toBe(0.21);
+        expect(market.state.debt).toBe(0.89);
+    });
+
+    it('normal patience never forces a recovery buy through its confirmation gate', () => {
+        loadFixture('forge-r10-over1-over5-forced');
+        const market = fakeMarket({ results: ['L', 'W'], digits: () => OVER1_DEAD, recoveryHoldEvaluations: 1000 });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('never-fired');
+        expect(market.state.trades.map(t => [t.type, t.prediction])).toEqual([['DIGITOVER', 1]]);
+        expect(market.state.debt).toBe(1);
+        expect(market.state.notifications.filter(m => /Patience limit/.test(m))).toHaveLength(1);
+    });
+
+    it.each([['NORMAL', 'DIGITUNDER', 2], ['RECOVERY', 'DIGITOVER', 4], ['RECOVERY', 'DIGITUNDER', 5]])
+    ('holds instead of buying a forbidden %s %s %s decision', (mode, contract, barrier) => {
+        loadFixture('forge-r50-over2-over5');
+        const market = fakeMarket({
+            results: ['L', 'W'],
+            decisionFor: (_state, currentMode) => currentMode === mode ? { contract, barrier, eligible: true } : {},
+        });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('never-fired');
+        expect(market.state.trades).toHaveLength(mode === 'NORMAL' ? 0 : 1);
+    });
+
+    it('retains recovery debt while its live payout is unavailable', () => {
+        loadFixture('forge-r50-over2-over5');
+        const market = fakeMarket({ results: ['L', 'W'], payoutFor: (_state, mode) => mode === 'RECOVERY' ? 0 : 1.4 });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('never-fired');
+        expect(market.state.trades).toHaveLength(1);
+        expect(market.state.debt).toBe(1);
+    });
+
+    it('never purchases on the old market when the selected market switch fails', () => {
+        loadFixture('forge-r50-over2-over5');
+        const market = fakeMarket({
+            results: ['W'], switchFails: true,
+            decisionFor: () => ({ symbol: 'R_75', contract: 'DIGITUNDER', barrier: 7, eligible: true }),
+        });
+        expect(runStrategy(buildRunner(workspace), market)).toBe('never-fired');
+        expect(market.state.trades).toHaveLength(0);
+        expect(market.state.init.symbol).toBe('R_50');
     });
 
     it('keeps recovery debt pending safely until the recovery ranker confirms an entry', () => {

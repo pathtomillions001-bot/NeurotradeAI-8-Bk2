@@ -111,7 +111,7 @@ export function buildSurgeDbotStrategy(input: SurgeDbotInput) {
   );
 
   const entryReport = (): Stmt[] => [
-    x.joinInto(V.message, [x.text("ENTRY ·"), x.get(V.activeSymbol), x.text("·"), x.get(V.contract), x.text("· evidence-confirmed setup")]),
+    x.joinInto(V.message, [x.text("ENTRY ·"), x.get(V.activeSymbol), x.text("·"), x.get(V.contract), x.text("· two-tick setup confirmed")]),
     x.notify("success", x.get(V.message)),
   ];
   const waitingReport: Stmt[] = [

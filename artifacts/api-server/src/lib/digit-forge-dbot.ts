@@ -20,6 +20,11 @@
  *     ladder, identical to every other bot.
  *   · Circuit breaker on consecutive losses; take-profit / stop-loss on Deriv's
  *     own total-profit counter end the run.
+ *   · Contract sovereignty: the (side, barrier) pair is re-checked against the
+ *     vocabulary of the CURRENT mode immediately before every buy — normal may
+ *     only ever be Over 1/2 or Under 7/8, recovery only Over 5 or Under 4 —
+ *     and the buy carries that barrier with it (`nt_purchase_contract`), so a
+ *     side and a barrier from two different decisions can never be combined.
  *
  * THE GATE (all of this is computed INSIDE the workspace, every tick)
  * ──────────────────────────────────────────────────────────────────
@@ -184,7 +189,12 @@ export const DIGIT_FORGE_BLOCK_TYPES = Object.freeze([
   "trade_definition_tradeoptions",
   "before_purchase",
   "after_purchase",
-  "purchase",
+  // Digit Forge buys through `nt_purchase_contract`, NOT the stock `purchase`
+  // block. The stock block can only carry the barrier that the Trade Definition
+  // captured in `BinaryBotPrivateStart` — i.e. one full cycle BEFORE the ranker
+  // chose the contract — which is how a live run ended up buying "Under 2".
+  // See the comment above `purchaseDecided` in this file.
+  "nt_purchase_contract",
   "trade_again",
   "contract_check_result",
   "read_details",
@@ -783,6 +793,79 @@ export function buildDigitForgeStrategy(
     ]),
   ];
 
+  // ── Contract sovereignty — checked on EVERY fire, both legs ───────────────
+  // The mirror of `dual-lock-engine.ts`'s per-fire leg check: the pair about to
+  // be bought must belong to the vocabulary of the mode the ledger is in.
+  // Normal → Over 1 / Over 2 / Under 7 / Under 8. Recovery → Over 5 / Under 4.
+  // Both sets are derived from the frozen constants at the top of this file, so
+  // the XML can never drift from the server's definition of "legal".
+  const pairIs = (c: TurboContract) =>
+    x.all("AND", [
+      x.compare("EQ", x.get(V.contract), x.text(c.side)),
+      x.compare("EQ", x.get(V.barrier), x.num(c.barrier)),
+    ]);
+  const legalForMode = x.logic(
+    "OR",
+    x.all("AND", [
+      x.compare("EQ", x.get(V.inRecovery), x.bool(false)),
+      x.all("OR", DIGIT_FORGE_NORMAL_CONTRACTS.map(pairIs)),
+    ]),
+    x.all("AND", [
+      x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+      x.all("OR", DIGIT_FORGE_RECOVERY_CONTRACTS.map(pairIs)),
+    ]),
+  );
+
+  const rejectIllegalPair: Stmt[] = [
+    x.joinInto(V.message, [
+      x.text("INTEGRITY · refused"),
+      x.get(V.contract),
+      x.get(V.barrier),
+      x.text("· outside this bot's barrier set — no trade taken"),
+    ]),
+    x.notify("error", x.get(V.message)),
+    // Fall back to the configured leg for the current mode so the run can
+    // continue from a legal state on the next evaluation.
+    x.ifElse(
+      [
+        {
+          cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+          then: [
+            x.set(V.contract, x.text(input.recovery.side)),
+            x.set(V.barrier, x.num(input.recovery.barrier)),
+          ],
+        },
+      ],
+      [
+        x.set(V.contract, x.text(input.normal.side)),
+        x.set(V.barrier, x.num(input.normal.barrier)),
+      ],
+    ),
+    x.set(V.gate, x.bool(false)),
+  ];
+
+  // ── The buy ───────────────────────────────────────────────────────────────
+  // `nt_purchase_contract` applies the prediction JUST IN TIME, immediately
+  // before the buy. The stock `purchase` block cannot: `Bot.start(tradeOptions)`
+  // (the Trade Definition's SUBMARKET stack) runs in `BinaryBotPrivateStart`,
+  // one whole cycle BEFORE `before_purchase`, so the PREDICTION it captured is
+  // the barrier from the PREVIOUS settlement while the contract SIDE came from
+  // the ranker a moment ago. That mismatch is what produced illegal pairs such
+  // as "Under 2" in normal mode and "Under 5" in recovery — a recovery leg
+  // priced 1.95 while the ladder had been sized for 2.43, so wins under-repaid
+  // the debt. Contract and barrier now travel together, atomically.
+  const purchaseDecided: Stmt[] = [
+    x.ifElse(
+      [
+        {
+          cond: legalForMode,
+          then: [x.ntPurchaseContract(x.get(V.contract), x.get(V.barrier))],
+        },
+      ],
+      rejectIllegalPair,
+    ),
+  ];
+
   const beforePurchase = x.topLevel(
     "before_purchase",
     `<statement name="BEFOREPURCHASE_STACK">${x.chain([
@@ -791,17 +874,7 @@ export function buildDigitForgeStrategy(
       x.ifElse([
         {
           cond: x.compare("EQ", x.get(V.fire), x.bool(true)),
-          then: [
-            x.ifElse(
-              [
-                {
-                  cond: x.compare("EQ", x.get(V.contract), x.text("DIGITOVER")),
-                  then: [x.purchase("DIGITOVER")],
-                },
-              ],
-              [x.purchase("DIGITUNDER")],
-            ),
-          ],
+          then: purchaseDecided,
         },
       ]),
     ])}</statement>`,
@@ -871,12 +944,27 @@ export function buildDigitForgeStrategy(
   );
 
   // ── 6. Settlement — the shared recovery ledger ─────────────────────────────
+  // Every debt movement is rounded to the account's minor unit, exactly like
+  // `addMoney()` / `toCents()` in `recovery-math.ts`. Without it IEEE-754 dust
+  // (0.8899999999999999) survives the "is the debt cleared?" test and keeps a
+  // ladder alive for one extra, unnecessary, debt-sized trade.
+  const cents = (value: string) =>
+    x.arith(
+      "DIVIDE",
+      x.round("ROUND", x.arith("MULTIPLY", value, x.num(100))),
+      x.num(100),
+    );
+
   const enterRecovery: Stmt[] = [
     x.set(V.inRecovery, x.bool(true)),
     x.set(V.step, x.num(1)),
-    x.set(V.debt, x.get(V.lastStake)),
+    x.set(V.debt, cents(x.get(V.lastStake))),
     x.set(V.contract, x.text(input.recovery.side)),
     x.set(V.barrier, x.num(input.recovery.barrier)),
+    // The ladder must divide by the RECOVERY leg's payout, never by whatever
+    // multiplier the normal leg happened to leave behind (recovery-engine.ts →
+    // getBotRecoveryStake is always quoted for the contract about to be bought).
+    x.set(V.recPayout, x.num(Math.round(input.recoveryPayout * 1000) / 1000)),
   ];
   const deepenRecovery: Stmt[] = [
     x.ifElse([
@@ -885,7 +973,7 @@ export function buildDigitForgeStrategy(
         then: [x.set(V.step, x.arith("ADD", x.get(V.step), x.num(1)))],
       },
     ]),
-    x.set(V.debt, x.arith("ADD", x.get(V.debt), x.get(V.lastStake))),
+    x.set(V.debt, cents(x.arith("ADD", x.get(V.debt), x.get(V.lastStake)))),
   ];
   const exitRecovery: Stmt[] = [
     x.set(V.debt, x.num(0)),
@@ -972,7 +1060,10 @@ export function buildDigitForgeStrategy(
       {
         cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
         then: [
-          x.set(V.debt, x.arith("MINUS", x.get(V.debt), x.get(V.profit))),
+          x.set(
+            V.debt,
+            cents(x.arith("MINUS", x.get(V.debt), x.get(V.profit))),
+          ),
           x.ifElse(
             [
               {

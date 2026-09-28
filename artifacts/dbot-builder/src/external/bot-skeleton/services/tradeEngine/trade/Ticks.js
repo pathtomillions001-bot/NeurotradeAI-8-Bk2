@@ -120,6 +120,10 @@ export default Engine =>
          */
         async ntAnalyseDigitMarkets(mode = 'NORMAL', csv = '', requestedWindow = 120) {
             const recoveryMode = String(mode).toUpperCase() === 'RECOVERY';
+            // Mirrors DIGIT_FORGE_NORMAL_CONTRACTS / DIGIT_FORGE_RECOVERY_CONTRACTS in
+            // artifacts/api-server/src/lib/digit-forge-dbot.ts. Nothing outside these two
+            // sets may ever be published as a decision: the generated XML re-checks the
+            // pair before it buys, and this is the other half of that contract.
             const normal = [
                 { contract: 'DIGITOVER', barrier: 1, payout: 1.23 },
                 { contract: 'DIGITOVER', barrier: 2, payout: 1.4 },
@@ -131,6 +135,8 @@ export default Engine =>
                 { contract: 'DIGITUNDER', barrier: 4, payout: 2.43 },
             ];
             const candidates = recoveryMode ? recovery : normal;
+            const isLegalPair = (contract, barrier) =>
+                candidates.some(c => c.contract === contract && c.barrier === Number(barrier));
             const markets = [
                 ...new Set(
                     String(csv)
@@ -158,6 +164,9 @@ export default Engine =>
                             ...candidate,
                             mode: recoveryMode ? 'RECOVERY' : 'NORMAL',
                         });
+                        // `analyseDigitForgeCandidate` echoes the pair back; publish a row
+                        // only when what comes out is still the legal pair that went in.
+                        if (!isLegalPair(analysis.contract, analysis.barrier)) continue;
                         rows.push({ symbol, ...candidate, ...analysis, tickEpoch });
                     }
                 } catch (_) {
@@ -169,7 +178,9 @@ export default Engine =>
             }
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
-            if (!best) {
+            // The fallback decision is itself a legal pair for the mode, so a dead feed
+            // can never leave the workspace holding a barrier it is not allowed to buy.
+            if (!best || !isLegalPair(best.contract, best.barrier)) {
                 this.nt_digit_recovery_confirmation = undefined;
                 this.nt_digit_decision = {
                     symbol: this.symbol,
@@ -179,7 +190,7 @@ export default Engine =>
                     eligible: false,
                     score: -999,
                     samples: 0,
-                    reason: 'feed unavailable; retrying',
+                    reason: best ? 'contract integrity check failed; holding' : 'feed unavailable; retrying',
                     changedMarket: false,
                 };
                 return false;

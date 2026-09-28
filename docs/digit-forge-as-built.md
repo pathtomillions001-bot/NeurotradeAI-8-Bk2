@@ -46,15 +46,7 @@ Inside the generated workspace. The bot re-derives its own opinion from
 | Sequence structure | 2-state Markov counters (`Loss to Loss`, `Loss to Win`, `Win to Loss`, `Win to Win`) → `Dependence G2 = 2Σ O·ln(O/E)` (`math_single LN`) |
 | Dependence gate | conditional rate only votes when `G2 > 3.84` (χ²₁, 5 %) |
 | Streak cooldown | stand down while `Adverse Run > ⌈ln(W(1−q))/ln(1/q) + 2σ⌉` (`Run Limit`, a forge-time literal) |
-| Decision | `Gate Pass` → `Fire` → sovereignty check → exactly one `nt_purchase_contract` carrying the decided contract AND its barrier |
-
-> **Fix — see `docs/digit-forge-stale-barrier-fix.md`.** The buy used to be the
-> stock `purchase` block, which can only use the barrier `Bot.start()` captured
-> one cycle earlier; combined with a side chosen by the ranker a moment ago that
-> produced illegal pairs such as **Under 2** (normal) and **Under 5**
-> (recovery — priced 1.95× against a ladder sized for 2.43×). The buy now
-> carries its own barrier and the pair is re-checked against the mode's
-> vocabulary on every fire.
+| Decision | `Gate Pass` → `Fire` → exactly one `purchase` of the declared contract type |
 
 `Evaluations` counts refusals; every 25th emits a *Holding fire* notification so
 the user can see the bot is alive and why it is not trading. With
@@ -78,11 +70,6 @@ win repays ≈1.1 losses, instead of waiting out a gate that was designed for th
 stake = ceil₂( debt × (1 + markup/100) / (payout − 1) )
 stake = max(0.35, min(stake, maxTradeStake, balance))
 ```
-
-Entering recovery re-seeds the ladder's divisor with the RECOVERY leg's payout
-(never the multiplier the normal leg left behind), and every debt movement is
-rounded to whole cents — the block-level equivalent of `addMoney()` / `toCents()`
-in `recovery-math.ts`.
 
 `markup` and `maxTradeStake` are read from the user's saved settings at forge
 time, so the generated bot agrees with every other NeuroTrade bot. The ladder

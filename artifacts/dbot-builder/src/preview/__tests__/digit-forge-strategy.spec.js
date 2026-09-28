@@ -106,7 +106,7 @@ function buildRunner(workspace) {
 }
 
 /** Scripted Deriv: `results` are the outcomes of successive purchases. */
-function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recoveryHoldEvaluations = 0 }) {
+function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recoveryHoldEvaluations = 0, decide }) {
     const state = {
         trades: [],
         notifications: [],
@@ -121,6 +121,26 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
         exhausted: false,
     };
     const contract = { buy_price: 0, sell_price: 0, profit: 0, result: 'win' };
+    const purchase = type => {
+        if (state.trades.length >= results.length) {
+            state.exhausted = true;
+            throw new Error('SCRIPT_EXHAUSTED');
+        }
+        const won = results[state.trades.length] === 'W';
+        const stake = state.tradeOptions.amount;
+        const prediction = state.tradeOptions.prediction;
+        const multiplier = PAYOUT[`${type}:${prediction}`];
+        if (!multiplier) throw new Error(`unexpected contract ${type} barrier ${prediction}`);
+        const sell = won ? Math.round(stake * multiplier * 100) / 100 : 0;
+        contract.buy_price = stake;
+        contract.sell_price = sell;
+        contract.profit = Math.round((sell - stake) * 100) / 100;
+        contract.result = won ? 'win' : 'loss';
+        state.totalProfit = Math.round((state.totalProfit + contract.profit) * 100) / 100;
+        state.balance = Math.round((state.balance + contract.profit) * 100) / 100;
+        state.trades.push({ type, prediction, stake, won, profit: contract.profit });
+        state.purchased = true;
+    };
     const Bot = {
         init: (account, options) => {
             state.init = { account, ...options };
@@ -130,25 +150,16 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
             state.purchased = false;
         },
         highlightBlock: () => {},
-        purchase: type => {
-            if (state.trades.length >= results.length) {
-                state.exhausted = true;
-                throw new Error('SCRIPT_EXHAUSTED');
+        purchase,
+        // Mirrors Purchase.js → ntPurchaseContract: the prediction of the contract
+        // ACTUALLY being bought is applied just in time, overriding whatever the
+        // Trade Definition captured in BinaryBotPrivateStart one cycle earlier.
+        ntPurchaseContract: (type, barrier) => {
+            const digit = Math.trunc(Number(barrier));
+            if (state.tradeOptions && Number.isFinite(digit) && digit >= 0 && digit <= 9) {
+                state.tradeOptions.prediction = digit;
             }
-            const won = results[state.trades.length] === 'W';
-            const stake = state.tradeOptions.amount;
-            const prediction = state.tradeOptions.prediction;
-            const multiplier = PAYOUT[`${type}:${prediction}`];
-            if (!multiplier) throw new Error(`unexpected contract ${type} barrier ${prediction}`);
-            const sell = won ? Math.round(stake * multiplier * 100) / 100 : 0;
-            contract.buy_price = stake;
-            contract.sell_price = sell;
-            contract.profit = Math.round((sell - stake) * 100) / 100;
-            contract.result = won ? 'win' : 'loss';
-            state.totalProfit = Math.round((state.totalProfit + contract.profit) * 100) / 100;
-            state.balance = Math.round((state.balance + contract.profit) * 100) / 100;
-            state.trades.push({ type, prediction, stake, won, profit: contract.profit });
-            state.purchased = true;
+            return purchase(String(type || '').toUpperCase());
         },
         isResult: r => contract.result === r,
         readDetails: i => [null, null, contract.buy_price, contract.sell_price, contract.profit][i],
@@ -163,14 +174,34 @@ function fakeMarket({ results, digits = () => OVER2_HOT, balance = 1000, recover
             const tape = digits(state);
             const under = state.init?.symbol === '1HZ100V';
             const over1 = state.init?.symbol === 'R_10';
-            const contractType = under ? 'DIGITUNDER' : 'DIGITOVER';
-            const barrier = mode === 'RECOVERY' ? (under ? 4 : 5) : over1 ? 1 : under ? 7 : 2;
+            // The real ranker re-picks the pair on EVERY evaluation, so a test may
+            // supply its own `decide` to prove the buy follows the latest decision
+            // rather than the barrier the Trade Definition captured last cycle.
+            const chosen = decide ? decide(mode, state) : null;
+            const contractType = chosen ? chosen.contract : under ? 'DIGITUNDER' : 'DIGITOVER';
+            const barrier = chosen
+                ? chosen.barrier
+                : mode === 'RECOVERY'
+                  ? under
+                      ? 4
+                      : 5
+                  : over1
+                    ? 1
+                    : under
+                      ? 7
+                      : 2;
             const hits = tape.filter(d => (contractType === 'DIGITOVER' ? d > barrier : d < barrier)).length;
             const probability = hits / tape.length;
-            const payout = PAYOUT[`${contractType}:${barrier}`];
+            // An illegal pair has no price here; a ranker that publishes one is the
+            // very thing the workspace's sovereignty check exists to refuse.
+            const payout = PAYOUT[`${contractType}:${barrier}`] ?? 1.4;
             if (mode === 'RECOVERY') state.recoveryAnalyses += 1;
             const eligible =
-                mode === 'RECOVERY' ? state.recoveryAnalyses > recoveryHoldEvaluations : probability * payout > 1;
+                chosen && chosen.eligible !== undefined
+                    ? chosen.eligible
+                    : mode === 'RECOVERY'
+                      ? state.recoveryAnalyses > recoveryHoldEvaluations
+                      : probability * payout > 1;
             state.decision = {
                 symbol: state.init.symbol,
                 contract: contractType,
@@ -440,6 +471,86 @@ describe('Digit Forge → Deriv DBot strategy', () => {
         expect(market.state.beforeEvaluations).toBeLessThanOrEqual(6);
         expect(market.state.trades).toHaveLength(1);
         expect(market.state.notifications.some(m => /Patience limit 3/.test(m))).toBe(true);
+    });
+
+    /**
+     * REGRESSION — "it trades Under 2".
+     *
+     * `Bot.start(tradeOptions)` (the Trade Definition's SUBMARKET stack) runs in
+     * BinaryBotPrivateStart, one full cycle BEFORE before_purchase. A stock
+     * `purchase` block therefore buys the SIDE the ranker chose a moment ago with
+     * the PREDICTION the last settlement left behind — Over 2's barrier welded to
+     * a DIGITUNDER decision is exactly "Under 2". The buy must carry its own
+     * barrier.
+     */
+    it('buys the barrier the ranker just chose, never the one captured a cycle earlier', () => {
+        loadFixture('forge-r50-over2-over5');
+        const code = buildRunner(workspace);
+        // The ranker rotates across the legal normal vocabulary, as the real one does.
+        const plan = [
+            { contract: 'DIGITUNDER', barrier: 7 },
+            { contract: 'DIGITOVER', barrier: 1 },
+            { contract: 'DIGITUNDER', barrier: 7 },
+        ];
+        let picks = 0;
+        const market = fakeMarket({
+            results: ['W', 'W', 'W'],
+            digits: () => OVER2_HOT,
+            decide: mode =>
+                mode === 'RECOVERY'
+                    ? { contract: 'DIGITOVER', barrier: 5 }
+                    : { ...plan[Math.min(picks++, plan.length - 1)], eligible: true },
+        });
+        expect(runStrategy(code, market)).toBe('exhausted');
+
+        const pairs = market.state.trades.map(t => `${t.type}:${t.prediction}`);
+        expect(pairs.length).toBeGreaterThan(0);
+        // Every buy is one of the four legal normal pairs — no Under 2, no Over 7.
+        for (const pair of pairs) {
+            expect(['DIGITOVER:1', 'DIGITOVER:2', 'DIGITUNDER:7', 'DIGITUNDER:8']).toContain(pair);
+        }
+        // …and the first buy followed the FIRST decision, not the fixture's Over 2.
+        expect(pairs[0]).toBe('DIGITUNDER:7');
+    });
+
+    it('keeps recovery strictly on Over 5 / Under 4 and clears the debt there', () => {
+        // The fixture is configured with Over 5 recovery; the ranker prefers Under 4.
+        // Before the fix this bought "Under 5" (1.95×) with a ladder sized for 2.43×,
+        // so a winning recovery trade could not repay the debt it was sized against.
+        loadFixture('forge-r50-over2-over5');
+        const code = buildRunner(workspace);
+        const market = fakeMarket({
+            results: ['L', 'W', 'W'],
+            digits: () => OVER2_HOT,
+            decide: mode =>
+                mode === 'RECOVERY'
+                    ? { contract: 'DIGITUNDER', barrier: 4, eligible: true }
+                    : { contract: 'DIGITOVER', barrier: 2, eligible: true },
+        });
+        expect(runStrategy(code, market)).toBe('exhausted');
+
+        const trades = market.state.trades.map(t => [t.type, t.prediction, t.stake, t.won ? 'W' : 'L']);
+        expect(trades[0]).toEqual(['DIGITOVER', 2, 1, 'L']); // normal leg → debt 1.00
+        // ceil₂(1.00 × 1.1 / 1.43) = 0.77 on the 2.43× recovery leg the ranker chose.
+        expect(trades[1]).toEqual(['DIGITUNDER', 4, 0.77, 'W']);
+        expect(market.state.notifications.some(m => /Recovery complete — debt cleared/.test(m))).toBe(true);
+        // Back to the gated normal leg afterwards.
+        expect(trades[2][0]).toBe('DIGITOVER');
+        expect(trades[2][1]).toBe(2);
+    });
+
+    it('refuses a pair outside its vocabulary instead of buying it', () => {
+        loadFixture('forge-r50-over2-over5');
+        const code = buildRunner(workspace);
+        // A ranker (or a future change to it) offering Under 2 must never be obeyed.
+        const market = fakeMarket({
+            results: ['W'],
+            digits: () => OVER2_HOT,
+            decide: () => ({ contract: 'DIGITUNDER', barrier: 2, eligible: true }),
+        });
+        expect(runStrategy(code, market)).toBe('never-fired');
+        expect(market.state.trades).toHaveLength(0);
+        expect(market.state.notifications.some(m => /INTEGRITY · refused DIGITUNDER 2/.test(m))).toBe(true);
     });
 
     it('never buys a contract type or barrier the trade definition did not declare', () => {

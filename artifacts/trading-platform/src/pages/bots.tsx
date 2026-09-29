@@ -135,6 +135,82 @@ function ReleaseSkewPanel({ skew, apiRelease }: {
   );
 }
 
+// ── Bot Builder bundle parity ─────────────────────────────────────────────────
+//
+// The embedded Deriv Bot Builder (/bot/preview) is a PREBUILT bundle under
+// artifacts/dbot-builder/out — gitignored, built once per machine, and served
+// as-is by `vite dev`. Nothing rebuilds it when the bot runtime changes, so a
+// stale bundle happily runs OLD generated-code preambles and block generators
+// against strategies forged by the CURRENT app — and only fails when the user
+// presses Run, with an interpreter error that never mentions staleness (the
+// ".epoch is not a function" incident). The dev server exposes a parity
+// verdict at /bot/preview/__parity (stamped content hash vs live sources);
+// production always ships a freshly built bundle so the endpoint simply
+// doesn't exist there and this stays quiet.
+
+interface BuilderParity {
+  stamped: boolean;
+  stale: boolean;
+  reason: "no-bundle" | "unstamped" | "hash-mismatch" | "ok" | "sources-unavailable";
+  stampBuiltAt?: string | null;
+  currentSkeletonHash?: string | null;
+  stampSkeletonHash?: string | null;
+  rebuildCommand: string;
+}
+
+function useBuilderParity() {
+  return useQuery({
+    queryKey: ["bot-builder-parity"],
+    queryFn: async () => {
+      try {
+        const res = await fetch("/bot/preview/__parity", { cache: "no-store" });
+        if (!res.ok) return null;
+        const contentType = res.headers.get("content-type") ?? "";
+        if (!contentType.includes("application/json")) return null; // SPA fallback → prod
+        return (await res.json()) as BuilderParity;
+      } catch {
+        return null;
+      }
+    },
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+    retry: false,
+  });
+}
+
+function BuilderParityPanel({ parity }: { parity: BuilderParity }) {
+  const built = parity.stampBuiltAt
+    ? new Date(parity.stampBuiltAt).toLocaleString()
+    : "before build stamping existed";
+  return (
+    <Card className="border-amber-500/40 bg-amber-500/[0.06]">
+      <CardContent className="p-4 space-y-2">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="w-5 h-5 text-amber-300 flex-shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <p className="text-sm font-semibold text-amber-200">
+              The Bot Builder needs a rebuild before you run a forged strategy
+            </p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              The embedded Deriv Bot Builder serving <span className="font-mono">/bot/preview</span>{" "}
+              {parity.reason === "unstamped"
+                ? "was built before bundle stamping existed and cannot be verified against the current sources"
+                : "was built from different sources than this app"}
+              . Pressing Run inside it can fail with errors that never mention the real cause. Rebuild it once:
+            </p>
+            <p className="text-[10px] font-mono text-amber-200/80 break-all">
+              {parity.rebuildCommand} <br />
+              bundle built {built}
+              {parity.stampSkeletonHash ? ` · skeleton ${parity.stampSkeletonHash}` : ""}
+              {parity.currentSkeletonHash ? ` · sources ${parity.currentSkeletonHash}` : ""}
+            </p>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 /** Opened when the API asks for a console this bundle cannot render. */
 function UnsupportedConsolePanel({ bot, consoleId }: { bot: BotCardData; consoleId: string }) {
   return (
@@ -421,6 +497,10 @@ export default function Bots() {
   const skew = consoleSkew(bots, data?.consoles);
   const openResolution = openBot ? resolveConsole(openBot) : null;
 
+  // Same idea for the PREBUILT embedded Bot Builder bundle: a stale bundle
+  // runs old bot-runtime code and only breaks when the user presses Run.
+  const builderParity = useBuilderParity().data ?? null;
+
   return (
     <div className="p-4 md:p-6 max-w-7xl mx-auto space-y-5">
 
@@ -440,6 +520,9 @@ export default function Bots() {
 
       {/* ── Release skew (stale web bundle vs current API) ─────────────── */}
       {skew.skewed && <ReleaseSkewPanel skew={skew} apiRelease={data?.release} />}
+
+      {/* ── Stale embedded Bot Builder bundle ──────────────────────────── */}
+      {builderParity?.stale && <BuilderParityPanel parity={builderParity} />}
 
       {/* ── Bot grid ───────────────────────────────────────────────────── */}
       {isLoading && (

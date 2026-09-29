@@ -4,6 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import fs from "fs";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
+import { BUILDER_STAMP_FILE, hashBuilderSources, readBuilderStamp } from "./scripts/bot-skeleton-hash.mjs";
 import { WEB_CONSOLE_IDS } from "./src/lib/console-contract";
 
 // Default to 5000 — Replit's standard webview port, required for autoStart preview.
@@ -53,15 +54,106 @@ function botPreviewDevServe(): Plugin {
   const stripPrefix = "/bot/preview/";
   const indexFile = path.join(builderOut, "index.html");
 
+  // ── Builder bundle parity ────────────────────────────────────────────────────
+  // The bundle in out/preview is a PREBUILT, gitignored artifact. Before the
+  // stamp existed, `vite dev` happily served a bundle that was days (or
+  // working-tree-states) behind src/external/bot-skeleton — and the only
+  // symptom surfaced when the user pressed Run in the Bot Builder and the
+  // stale runtime choked on a strategy the current sources generate (the
+  // ".epoch is not a function" incident). Compare the stamped content hash
+  // with the live sources at boot and expose the verdict so the Bot Arena can
+  // show an actionable panel instead of a cryptic interpreter error.
+  let parity: {
+    stamped: boolean;
+    stale: boolean;
+    reason: "no-bundle" | "unstamped" | "hash-mismatch" | "ok" | "sources-unavailable";
+    stampSha?: string;
+    stampSkeletonHash?: string;
+    stampBuiltAt?: string | null;
+    currentSkeletonHash?: string | null;
+    rebuildCommand: string;
+  };
+
+  function computeParity(): typeof parity {
+    const rebuildCommand = "pnpm --filter @workspace/trading-platform exec node scripts/build-dbot-builder.mjs";
+    if (!fs.existsSync(indexFile)) {
+      return {
+        stamped: false,
+        stale: false,
+        reason: "no-bundle" as const,
+        rebuildCommand,
+      };
+    }
+    const stamp = readBuilderStamp(builderOut);
+    const current = hashBuilderSources();
+    if (!stamp) {
+      return {
+        stamped: false,
+        stale: true,
+        reason: "unstamped" as const,
+        stampBuiltAt: null,
+        currentSkeletonHash: current?.hash ?? null,
+        rebuildCommand,
+      };
+    }
+    if (!current) {
+      return {
+        stamped: true,
+        stale: false,
+        reason: "sources-unavailable" as const,
+        stampSha: stamp.sha,
+        stampSkeletonHash: stamp.skeletonHash,
+        stampBuiltAt: stamp.builtAt ?? null,
+        currentSkeletonHash: null,
+        rebuildCommand,
+      };
+    }
+    const stale = stamp.skeletonHash !== current.hash;
+    return {
+      stamped: true,
+      stale,
+      reason: stale ? ("hash-mismatch" as const) : ("ok" as const),
+      stampSha: stamp.sha,
+      stampSkeletonHash: stamp.skeletonHash,
+      stampBuiltAt: stamp.builtAt ?? null,
+      currentSkeletonHash: current.hash,
+      rebuildCommand,
+    };
+  }
+
   return {
     name: "neurotrade-bot-preview-dev-serve",
     configureServer(server) {
-      const outputReady = fs.existsSync(indexFile);
-      if (!outputReady) {
+      const outputReadyAtBoot = fs.existsSync(indexFile);
+      if (!outputReadyAtBoot) {
         server.config.logger.info(
           "[bot-preview] Builder output not found — falling back to the /bot/preview " +
             "proxy (rsbuild dev on :4003). For a zero-process dev preview, run " +
             "`node scripts/build-dbot-builder.mjs` once, then restart `vite dev`.",
+        );
+      }
+
+      parity = computeParity();
+      if (parity.reason === "unstamped") {
+        server.config.logger.warn(
+          "[bot-preview] ⚠️  The Bot Builder bundle in artifacts/dbot-builder/out was built BEFORE build " +
+            "stamping existed, so it CANNOT be verified against the current sources. It very likely runs " +
+            "outdated bot-runtime code. Rebuild it once:\n" +
+            `    ${parity.rebuildCommand}\n` +
+            "then restart `vite dev`.",
+        );
+      } else if (parity.reason === "hash-mismatch") {
+        server.config.logger.warn(
+          `[bot-preview] ⚠️  STALE Bot Builder bundle: built ${parity.stampBuiltAt ?? "unknown date"} ` +
+            `(skeleton ${parity.stampSkeletonHash}) but the sources are now ${parity.currentSkeletonHash}. ` +
+            "The embedded builder will run OLD bot-runtime code against NEW forge strategies — Run in the " +
+            "Bot Builder can fail with errors that never mention staleness. Rebuild it:\n" +
+            `    ${parity.rebuildCommand}\n` +
+            "then restart `vite dev`.",
+        );
+      } else if (parity.reason === "ok") {
+        server.config.logger.info(
+          `[bot-preview] Builder bundle verified current (skeleton ${parity.currentSkeletonHash}, built ${parity.stampBuiltAt ?? "unknown"}).`,
         );
       }
 
@@ -72,9 +164,31 @@ function botPreviewDevServe(): Plugin {
           return next();
         }
 
+        // Machine-readable parity verdict for the Bot Arena's stale-bundle
+        // panel. Computed per request so a rebuild is picked up without a
+        // vite restart (the file middleware below serves the new bundle).
+        if (pathname === "/bot/preview/__parity" || pathname === `${stripPrefix}__parity`) {
+          parity = computeParity();
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.setHeader("cache-control", "no-store");
+          res.end(JSON.stringify(parity));
+          return undefined;
+        }
+
+        // The stamp itself is served like any other static file below, but
+        // never let a MISSING stamp fall through to the SPA (index.html).
+        if (pathname === `/bot/preview/${BUILDER_STAMP_FILE}` && !readBuilderStamp(builderOut)) {
+          res.statusCode = 404;
+          res.setHeader("content-type", "application/json; charset=utf-8");
+          res.end(JSON.stringify({ error: "Builder bundle predates build stamping — rebuild it." }));
+          return undefined;
+        }
+
         // When the builder bundle isn't available, defer to the legacy /bot/preview
         // proxy so incremental builder work (rsbuild dev on :4003) still functions.
-        if (!outputReady) return next();
+        // Checked per request (not captured at boot) so a bundle built AFTER the
+        // dev server started is served immediately — no restart needed.
+        if (!fs.existsSync(indexFile)) return next();
 
         const relative = decodeURIComponent(
           pathname.replace(/^\/bot\/preview\/?/, ""),

@@ -124,8 +124,8 @@ function botPreviewDevServe(): Plugin {
   return {
     name: "neurotrade-bot-preview-dev-serve",
     configureServer(server) {
-      const outputReady = fs.existsSync(indexFile);
-      if (!outputReady) {
+      const outputReadyAtBoot = fs.existsSync(indexFile);
+      if (!outputReadyAtBoot) {
         server.config.logger.info(
           "[bot-preview] Builder output not found — falling back to the /bot/preview " +
             "proxy (rsbuild dev on :4003). For a zero-process dev preview, run " +
@@ -186,7 +186,9 @@ function botPreviewDevServe(): Plugin {
 
         // When the builder bundle isn't available, defer to the legacy /bot/preview
         // proxy so incremental builder work (rsbuild dev on :4003) still functions.
-        if (!outputReady) return next();
+        // Checked per request (not captured at boot) so a bundle built AFTER the
+        // dev server started is served immediately — no restart needed.
+        if (!fs.existsSync(indexFile)) return next();
 
         const relative = decodeURIComponent(
           pathname.replace(/^\/bot\/preview\/?/, ""),

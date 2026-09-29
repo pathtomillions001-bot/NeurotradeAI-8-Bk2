@@ -75,6 +75,7 @@ describe("bot console contract", () => {
     assert.deepEqual(botConsoleIds(), [
       "apex@1",
       "bastion@1",
+      "combo-forge@1",
       "digit-forge@1",
       "dual-lock@1",
       "killshot-family@1",

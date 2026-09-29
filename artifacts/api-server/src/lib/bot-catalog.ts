@@ -112,6 +112,13 @@ export interface BotDefinition {
    * plus the shared recovery ladder. Execution belongs to Deriv's Run button.
    */
   omniForge?: boolean;
+  /**
+   * Combo Forge: Omni Forge's evidence-gated successor. Digits AND Rise/Fall;
+   * a prequential e-process ranker (Strict by default) picks the market and
+   * contract inside the generated workspace, and recovery uses the shared
+   * ladder sized from the payout of the contract actually picked.
+   */
+  comboForge?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -264,6 +271,32 @@ export const BOT_CATALOG: BotDefinition[] = [
     hasDigitLock: false,
     sides: [],
     nominalWinRate: "gated by measurement",
+    nominalPayout: "contract quote",
+  },
+  {
+    id: "combo-forge",
+    name: "Combo Forge",
+    code: "BOT-CF-FORGE",
+    family: "multi",
+    comboForge: true,
+    contractLabel: "Your contracts: digits · Rise/Fall",
+    tagline: "Your contracts, your markets. It trades only when the evidence says so.",
+    description:
+      "The evidence-gated successor to Omni Forge. Combo Forge never analyses anything here and never places a trade — you choose ANY mix of digit contracts and Rise/Fall for normal trades and an INDEPENDENT mix for recovery, across up to eight markets, press Create DBot, and it renders a Deriv Bot strategy that carries the analysis INSIDE itself. Every tick the running bot scores every market × contract candidate with a prequential evidence process — a mixture of fair-prior, slow and fast rates and one- and two-step context models, tested against each contract's own break-even — and in Strict mode (the default) fires only when the evidence clears a threshold corrected for everything it scanned. Expect it to stay silent on a fair tape: Deriv's synthetic digits are close to random and every contract is priced below fair odds, so no bot can promise a win rate. An optional Always mode trades the best-timed, cheapest candidate without demanding proof. Recovery uses the same shared debt ladder as every NeuroTrade bot, sized from the payout of the contract it actually picks. You verify the blocks in the Bot Builder and press Deriv's own Run.",
+    edge: [
+      "Digits AND Rise/Fall in one workspace — any subset of Over/Under, Even/Odd, Matches/Differs and Rise/Fall for normal, a different set for recovery",
+      "Strict by default: a mixture e-process against each contract's own break-even, with a Bonferroni threshold sized for every market × contract it scans — a fair tape rarely trips it",
+      "Honest about power: the console shows how many ticks a real edge needs to be proven and how often a simulated fair tape trips the gate, before you build",
+      "Recovery timed by state, not blind: it avoids legs whose current win rate is below fair, ranks the rest by expected log-growth of the exact ladder stake, and has a patience limit so a debt can never stall the session",
+      "Switch hysteresis between markets, so two near-equal tapes cannot make the bot flip-flop",
+      "Same shared recovery ladder as every other bot — debt × (1 + markup) / (payout − 1), floored at 0.35, capped by your max stake and live balance, rounded up to the cent, using the payout of the contract actually picked",
+    ],
+    accent: "teal",
+    icon: "target",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "gated by evidence",
     nominalPayout: "contract quote",
   },
   {
@@ -710,6 +743,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
+  if (bot.comboForge) return "combo-forge@1";
   if (bot.omniForge) return "omni-forge@1";
   if (bot.forge) return "digit-forge@1";
   if (bot.preLocked) return "dual-lock@1";

@@ -18,6 +18,7 @@ import { OverUnderNavigatorConsole } from "@/components/overunder-navigator-cons
 import { OverUnderTurboConsole } from "@/components/overunder-turbo-console";
 import { DigitForgeConsole } from "@/components/digit-forge-console";
 import { OmniForgeConsole } from "@/components/omni-forge-console";
+import { ComboForgeConsole } from "@/components/combo-forge-console";
 import { ParityForgeConsole } from "@/components/parity-forge-console";
 import { SurgeConsole } from "@/components/surge-console";
 import { BotConsole } from "@/components/bot-console";
@@ -44,6 +45,7 @@ export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProp
   "overunder-turbo@2": OverUnderTurboConsole,
   "digit-forge@1": DigitForgeConsole,
   "omni-forge@1": OmniForgeConsole,
+  "combo-forge@1": ComboForgeConsole,
   "parity-forge@1": ParityForgeConsole,
   "surge@1": SurgeConsole,
   "specialist@1": BotConsole,
@@ -109,6 +111,7 @@ export function consoleIsForge(bot: Pick<BotCardData, "console">): boolean {
  */
 export const CUSTOM_FORGE_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
   "omni-forge@1",
+  "combo-forge@1",
 ]);
 
 /** True when the bot's console forges a DBot from user-composed contract sets. */

@@ -41,6 +41,7 @@ import navigatorRouter from "./overunder-navigator";
 import turboRouter from "./overunder-turbo";
 import digitForgeRouter from "./digit-forge";
 import omniForgeRouter from "./omni-forge";
+import comboForgeRouter from "./combo-forge";
 import * as omni from "../lib/omni-engine";
 import omniRouter from "./omni";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
@@ -68,6 +69,7 @@ router.use("/overunder-navigator", navigatorRouter);
 router.use("/overunder-turbo", turboRouter);
 router.use("/digit-forge", digitForgeRouter);
 router.use("/omni-forge", omniForgeRouter);
+router.use("/combo-forge", comboForgeRouter);
 router.use("/omni", omniRouter);
 
 interface ParsedBotBody {

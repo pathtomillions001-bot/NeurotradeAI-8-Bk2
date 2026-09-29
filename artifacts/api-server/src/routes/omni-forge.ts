@@ -21,7 +21,7 @@ import {
   forgePayout,
   forgeFairRate,
   forgeLabel,
-  DIGIT_FORGE_CONTRACT_TYPES,
+  FORGE_CONTRACT_TYPES,
   type ForgeContractSpec,
   type ForgeContractType,
   type OmniForgeInput,
@@ -34,24 +34,18 @@ function parseSpecs(raw: unknown): ForgeContractSpec[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((entry: any): ForgeContractSpec | null => {
-      const type = (DIGIT_FORGE_CONTRACT_TYPES as readonly string[]).includes(
-        entry?.type,
-      )
+      const type = (FORGE_CONTRACT_TYPES as readonly string[]).includes(entry?.type)
         ? (entry.type as ForgeContractType)
         : null;
       if (!type) return null;
-      const digit = Number.isFinite(Number(entry?.digit))
-        ? Math.trunc(Number(entry.digit))
-        : -1;
+      const digit = Number.isFinite(Number(entry?.digit)) ? Math.trunc(Number(entry.digit)) : -1;
       return { type, digit };
     })
     .filter((s): s is ForgeContractSpec => s !== null);
 }
 
 /** The user's risk settings — the same two the executors read. */
-async function riskSettings(
-  sessionId: string,
-): Promise<{ markupPercent: number; maxStake: number }> {
+async function riskSettings(sessionId: string): Promise<{ markupPercent: number; maxStake: number }> {
   let markupPercent = 10;
   let maxStake = 500;
   try {
@@ -78,19 +72,10 @@ async function accountCurrency(sessionId: string): Promise<string> {
     let accounts = await db
       .select()
       .from(accountsTable)
-      .where(
-        and(
-          eq(accountsTable.sessionId, sessionId),
-          eq(accountsTable.isActive, true),
-        ),
-      )
+      .where(and(eq(accountsTable.sessionId, sessionId), eq(accountsTable.isActive, true)))
       .limit(1);
     if (accounts.length === 0) {
-      accounts = await db
-        .select()
-        .from(accountsTable)
-        .where(eq(accountsTable.sessionId, sessionId))
-        .limit(1);
+      accounts = await db.select().from(accountsTable).where(eq(accountsTable.sessionId, sessionId)).limit(1);
     }
     if (accounts[0]?.currency) return accounts[0].currency;
   } catch {
@@ -105,89 +90,31 @@ async function accountCurrency(sessionId: string): Promise<string> {
  * combination the generator rejects.
  */
 router.get("/options", (_req, res) => {
-  const describe = (type: (typeof DIGIT_FORGE_CONTRACT_TYPES)[number]) => {
+  const describe = (type: ForgeContractType) => {
     switch (type) {
       case "DIGITOVER":
-        return {
-          label: "Digits Over",
-          digitLabel: "Barrier",
-          digitMin: 0,
-          digitMax: 8,
-          allowsAuto: false,
-          needsDigit: true,
-        };
+        return { label: "Digits Over", digitLabel: "Barrier", digitMin: 0, digitMax: 8, allowsAuto: false, needsDigit: true };
       case "DIGITUNDER":
-        return {
-          label: "Digits Under",
-          digitLabel: "Barrier",
-          digitMin: 1,
-          digitMax: 9,
-          allowsAuto: false,
-          needsDigit: true,
-        };
+        return { label: "Digits Under", digitLabel: "Barrier", digitMin: 1, digitMax: 9, allowsAuto: false, needsDigit: true };
       case "DIGITEVEN":
-        return {
-          label: "Even",
-          digitLabel: null,
-          digitMin: null,
-          digitMax: null,
-          allowsAuto: false,
-          needsDigit: false,
-        };
+        return { label: "Even", digitLabel: null, digitMin: null, digitMax: null, allowsAuto: false, needsDigit: false };
       case "DIGITODD":
-        return {
-          label: "Odd",
-          digitLabel: null,
-          digitMin: null,
-          digitMax: null,
-          allowsAuto: false,
-          needsDigit: false,
-        };
+        return { label: "Odd", digitLabel: null, digitMin: null, digitMax: null, allowsAuto: false, needsDigit: false };
       case "DIGITMATCH":
-        return {
-          label: "Matches",
-          digitLabel: "Digit",
-          digitMin: 0,
-          digitMax: 9,
-          allowsAuto: true,
-          needsDigit: false,
-        };
+        return { label: "Matches", digitLabel: "Digit", digitMin: 0, digitMax: 9, allowsAuto: true, needsDigit: false };
       case "DIGITDIFF":
-        return {
-          label: "Differs",
-          digitLabel: "Digit",
-          digitMin: 0,
-          digitMax: 9,
-          allowsAuto: true,
-          needsDigit: false,
-        };
+        return { label: "Differs", digitLabel: "Digit", digitMin: 0, digitMax: 9, allowsAuto: true, needsDigit: false };
     }
   };
   res.json({
-    contractTypes: DIGIT_FORGE_CONTRACT_TYPES.map((type) => ({
+    contractTypes: FORGE_CONTRACT_TYPES.map((type) => ({
       type,
       ...describe(type),
-      payout: forgePayout({
-        type,
-        digit: type === "DIGITOVER" ? 4 : type === "DIGITUNDER" ? 5 : -1,
-      }),
-      fairWinRate: forgeFairRate({
-        type,
-        digit: type === "DIGITOVER" ? 4 : type === "DIGITUNDER" ? 5 : -1,
-      }),
+      payout: forgePayout({ type, digit: type === "DIGITOVER" ? 4 : type === "DIGITUNDER" ? 5 : -1 }),
+      fairWinRate: forgeFairRate({ type, digit: type === "DIGITOVER" ? 4 : type === "DIGITUNDER" ? 5 : -1 }),
     })),
-    overPayouts: Object.fromEntries(
-      Array.from({ length: 9 }, (_, b) => [
-        b,
-        forgePayout({ type: "DIGITOVER", digit: b }),
-      ]),
-    ),
-    underPayouts: Object.fromEntries(
-      Array.from({ length: 9 }, (_, i) => [
-        i + 1,
-        forgePayout({ type: "DIGITUNDER", digit: i + 1 }),
-      ]),
-    ),
+    overPayouts: Object.fromEntries(Array.from({ length: 9 }, (_, b) => [b, forgePayout({ type: "DIGITOVER", digit: b })])),
+    underPayouts: Object.fromEntries(Array.from({ length: 9 }, (_, i) => [i + 1, forgePayout({ type: "DIGITUNDER", digit: i + 1 })])),
     markets: AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map((m) => ({
       symbol: m.symbol,
       displayName: m.displayName,
@@ -218,17 +145,12 @@ router.post("/dbot", async (req, res): Promise<void> => {
   }
 
   const requestedWatchMarkets = Array.isArray(body.watchMarkets)
-    ? (body.watchMarkets as unknown[]).filter(
-        (s): s is string => typeof s === "string" && isAutomatedMarket(s),
-      )
+    ? (body.watchMarkets as unknown[]).filter((s): s is string => typeof s === "string" && isAutomatedMarket(s))
     : [];
-  const watchMarkets = (
-    requestedWatchMarkets.length > 0
-      ? requestedWatchMarkets
-      : AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map(
-          (m) => m.symbol,
-        )
-  ).slice(0, 8);
+  const watchMarkets = (requestedWatchMarkets.length > 0
+    ? requestedWatchMarkets
+    : AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map((m) => m.symbol))
+    .slice(0, 8);
 
   try {
     const [{ markupPercent, maxStake }, currency] = await Promise.all([
@@ -244,26 +166,20 @@ router.post("/dbot", async (req, res): Promise<void> => {
       stake,
       takeProfit: Number(body.takeProfit) > 0 ? Number(body.takeProfit) : 10,
       stopLoss: Number(body.stopLoss) > 0 ? Number(body.stopLoss) : 5,
-      maxRecoverySteps: Math.max(
-        1,
-        Math.min(10, Number(body.maxRecoverySteps) || 3),
-      ),
+      maxRecoverySteps: Math.max(1, Math.min(10, Number(body.maxRecoverySteps) || 3)),
       markupPercent,
       maxStake,
       breakerDepth: Math.max(3, Math.min(20, Number(body.breakerDepth) || 6)),
       currency,
       window: Number(body.window) > 0 ? Number(body.window) : undefined,
-      forceEntryAfter: Number.isFinite(Number(body.forceEntryAfter))
-        ? Number(body.forceEntryAfter)
-        : undefined,
+      forceEntryAfter: Number.isFinite(Number(body.forceEntryAfter)) ? Number(body.forceEntryAfter) : undefined,
       watchMarkets,
     };
 
     const strategy = buildOmniForgeStrategy(input);
     res.json({ ok: true, ...strategy });
   } catch (err) {
-    const message =
-      err instanceof Error ? err.message : "Could not build the strategy";
+    const message = err instanceof Error ? err.message : "Could not build the strategy";
     logger.warn({ err }, "omni-forge dbot build failed");
     res.status(400).json({ error: message });
   }
@@ -278,15 +194,10 @@ router.post("/risk", async (req, res): Promise<void> => {
   try {
     recovery = normaliseForgeSet(parseSpecs(req.body?.recovery), "recovery");
   } catch (err) {
-    res.status(400).json({
-      error: err instanceof Error ? err.message : "invalid recovery set",
-    });
+    res.status(400).json({ error: err instanceof Error ? err.message : "invalid recovery set" });
     return;
   }
-  const depth = Math.max(
-    1,
-    Math.min(10, Number(req.body?.maxRecoverySteps) || 3),
-  );
+  const depth = Math.max(1, Math.min(10, Number(req.body?.maxRecoverySteps) || 3));
   const stake = Number(req.body?.stake) > 0 ? Number(req.body.stake) : 1;
   const { markupPercent } = await riskSettings(req.sessionId);
   const worstPayout = Math.min(...recovery.map(forgePayout));

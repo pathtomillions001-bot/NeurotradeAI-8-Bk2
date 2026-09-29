@@ -13,12 +13,12 @@ const nowMs = () => (typeof performance !== 'undefined' ? performance : Date).no
 export default Engine =>
     class Purchase extends Engine {
         /**
-         * Forge runtime: buy any selected contract type with a just-in-time
-         * prediction when the contract needs one. Stock XML bakes one trade type (e.g. overunder) into the
+         * Omni Forge: buy ANY digit contract type with a just-in-time
+         * prediction. Stock XML bakes one trade type (e.g. overunder) into the
          * workspace, so its static `prediction` is right for barrier contracts
          * only. This native adjusts `tradeOptions.prediction` for the contract
          * actually being bought — set for Over/Under/Matches/Differs, removed
-         * for Even/Odd/Rise/Fall (those buys must not carry a barrier) — then defers
+         * for Even/Odd (a parity buy must not carry a barrier) — then defers
          * to the standard purchase path (scope guard, retries, logging).
          */
         ntPurchaseContract(contract_type, barrier) {
@@ -35,12 +35,11 @@ export default Engine =>
                     // send -1 (or no prediction) to Deriv: retain a valid seeded
                     // prediction as a safe fallback, otherwise use digit 0.
                     const seeded = Math.trunc(Number(this.tradeOptions.prediction));
-                    this.tradeOptions.prediction =
-                        Number.isFinite(digit) && digit >= 0 && digit <= 9
-                            ? digit
-                            : Number.isFinite(seeded) && seeded >= 0 && seeded <= 9
-                              ? seeded
-                              : 0;
+                    this.tradeOptions.prediction = Number.isFinite(digit) && digit >= 0 && digit <= 9
+                        ? digit
+                        : Number.isFinite(seeded) && seeded >= 0 && seeded <= 9
+                          ? seeded
+                          : 0;
                 } else {
                     delete this.tradeOptions.prediction;
                 }
@@ -50,11 +49,8 @@ export default Engine =>
 
         purchase(contract_type, quotedPurchase) {
             // Prevent calling purchase twice or while an existing purchase request is in-flight
-            if (
-                this.is_purchasing ||
-                ((this.nt_digit_preparing || this.nt_digit_purchase_pending) && !quotedPurchase) ||
-                this.store.getState().scope !== BEFORE_PURCHASE
-            ) {
+            if (this.is_purchasing || ((this.nt_digit_preparing || this.nt_digit_purchase_pending) && !quotedPurchase) ||
+                this.store.getState().scope !== BEFORE_PURCHASE) {
                 return Promise.resolve(false);
             }
             this.is_purchasing = true;
@@ -139,12 +135,10 @@ export default Engine =>
                     },
                     ['PriceMoved', 'InvalidContractProposal'],
                     delayIndex++
-                )
-                    .then(onSuccess)
-                    .catch(err => {
-                        resetPurchasing();
-                        throw err;
-                    });
+                ).then(onSuccess).catch(err => {
+                    resetPurchasing();
+                    throw err;
+                });
             }
             const trade_option = tradeOptionToBuy(contract_type, this.tradeOptions);
             const action = () => api_base.api.send(trade_option);
@@ -157,12 +151,10 @@ export default Engine =>
             });
 
             if (!this.options.timeMachineEnabled) {
-                return doUntilDone(action)
-                    .then(onSuccess)
-                    .catch(err => {
-                        resetPurchasing();
-                        throw err;
-                    });
+                return doUntilDone(action).then(onSuccess).catch(err => {
+                    resetPurchasing();
+                    throw err;
+                });
             }
 
             return recoverFromError(
@@ -181,12 +173,10 @@ export default Engine =>
                 },
                 ['PriceMoved', 'InvalidContractProposal'],
                 delayIndex++
-            )
-                .then(onSuccess)
-                .catch(err => {
-                    resetPurchasing();
-                    throw err;
-                });
+            ).then(onSuccess).catch(err => {
+                resetPurchasing();
+                throw err;
+            });
         }
         getPurchaseReference = () => purchase_reference;
         regeneratePurchaseReference = () => {

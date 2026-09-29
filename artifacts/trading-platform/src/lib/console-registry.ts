@@ -18,7 +18,6 @@ import { OverUnderNavigatorConsole } from "@/components/overunder-navigator-cons
 import { OverUnderTurboConsole } from "@/components/overunder-turbo-console";
 import { DigitForgeConsole } from "@/components/digit-forge-console";
 import { OmniForgeConsole } from "@/components/omni-forge-console";
-import { UniversalForgeConsole } from "@/components/universal-forge-console";
 import { ParityForgeConsole } from "@/components/parity-forge-console";
 import { SurgeConsole } from "@/components/surge-console";
 import { BotConsole } from "@/components/bot-console";
@@ -37,10 +36,7 @@ export interface BotConsoleProps {
 }
 
 /** Every console this build can render, keyed by its contract id. */
-export const CONSOLE_REGISTRY: Record<
-  WebConsoleId,
-  ComponentType<BotConsoleProps>
-> = {
+export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProps>> = {
   "omni@2": OmniConsole,
   "apex@1": ApexConsole,
   "bastion@1": BastionConsole,
@@ -48,7 +44,6 @@ export const CONSOLE_REGISTRY: Record<
   "overunder-turbo@2": OverUnderTurboConsole,
   "digit-forge@1": DigitForgeConsole,
   "omni-forge@1": OmniForgeConsole,
-  "universal-forge@1": UniversalForgeConsole,
   "parity-forge@1": ParityForgeConsole,
   "surge@1": SurgeConsole,
   "specialist@1": BotConsole,
@@ -107,18 +102,17 @@ export function consoleIsForge(bot: Pick<BotCardData, "console">): boolean {
 }
 
 /**
- * Consoles that forge a DBot from contracts the USER composes — Omni/Universal Forge
- * share this defining trait. Kept separate from FORGE_CONSOLE_IDS so the Bot Arena can
+ * Consoles that forge a DBot from contracts the USER composes — Omni Forge's
+ * defining trait. Kept separate from FORGE_CONSOLE_IDS so the Bot Arena can
  * badge these cards CUSTOM FORGE: same "builds, never trades" promise as
  * FORGE, but the contract mix is the user's own, not a fixed menu.
  */
-export const CUSTOM_FORGE_CONSOLE_IDS: ReadonlySet<string> =
-  new Set<WebConsoleId>(["omni-forge@1", "universal-forge@1"]);
+export const CUSTOM_FORGE_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
+  "omni-forge@1",
+]);
 
 /** True when the bot's console forges a DBot from user-composed contract sets. */
-export function consoleIsCustomForge(
-  bot: Pick<BotCardData, "console">,
-): boolean {
+export function consoleIsCustomForge(bot: Pick<BotCardData, "console">): boolean {
   return CUSTOM_FORGE_CONSOLE_IDS.has(bot.console ?? "specialist@1");
 }
 
@@ -134,16 +128,9 @@ export type ConsoleResolution =
  * a subset of what this bundle can draw. The unsafe direction (the API asks for
  * a console this bundle has never heard of) is reported, never guessed.
  */
-export function resolveConsole(
-  bot: Pick<BotCardData, "console">,
-): ConsoleResolution {
+export function resolveConsole(bot: Pick<BotCardData, "console">): ConsoleResolution {
   const id = bot.console ?? "specialist@1";
-  const Console = (
-    CONSOLE_REGISTRY as Record<
-      string,
-      ComponentType<BotConsoleProps> | undefined
-    >
-  )[id];
+  const Console = (CONSOLE_REGISTRY as Record<string, ComponentType<BotConsoleProps> | undefined>)[id];
   return Console ? { ok: true, id, Console } : { ok: false, id };
 }
 
@@ -176,22 +163,14 @@ export function consoleSkew(
   const implemented = new Set(implementedIds);
 
   const missingBots = bots
-    .map((bot) => ({ bot, id: bot.console ?? "specialist@1" }))
-    .filter((entry) => !implemented.has(entry.id))
-    .map((entry) => ({
-      id: entry.bot.id,
-      name: entry.bot.name,
-      console: entry.id,
-    }));
+    .map(bot => ({ bot, id: bot.console ?? "specialist@1" }))
+    .filter(entry => !implemented.has(entry.id))
+    .map(entry => ({ id: entry.bot.id, name: entry.bot.name, console: entry.id }));
 
-  const missing = new Set(missingBots.map((entry) => entry.console));
+  const missing = new Set(missingBots.map(entry => entry.console));
   for (const id of consoleContract ?? []) {
     if (!implemented.has(id)) missing.add(id);
   }
 
-  return {
-    missing: [...missing].sort(),
-    bots: missingBots,
-    skewed: missing.size > 0,
-  };
+  return { missing: [...missing].sort(), bots: missingBots, skewed: missing.size > 0 };
 }

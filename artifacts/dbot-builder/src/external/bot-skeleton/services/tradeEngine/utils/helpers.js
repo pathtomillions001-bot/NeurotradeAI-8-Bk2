@@ -108,12 +108,11 @@ export const tradeOptionToBuy = (contract_type, trade_option) => {
 };
 
 export const getDirection = ticks => {
-    const list = Array.isArray(ticks) ? ticks : [];
-    const { length } = list;
-    const [tickOld, tickNew] = list.slice(-2);
+    const { length } = ticks;
+    const [tickOld, tickNew] = ticks.slice(-2);
 
     let direction = '';
-    if (length >= 2 && tickOld && tickNew) {
+    if (length >= 2) {
         direction = tickOld.quote < tickNew.quote ? 'rise' : direction;
         direction = tickOld.quote > tickNew.quote ? 'fall' : direction;
     }
@@ -123,12 +122,9 @@ export const getDirection = ticks => {
 
 export const getLastDigit = tick => {
     let number_string = tick;
-    if (number_string === undefined || number_string === null) return Number.NaN;
     if (typeof number_string === 'number') {
         number_string = String(number_string);
     }
-    number_string = String(number_string);
-    if (number_string.length === 0) return Number.NaN;
     return Number(number_string[number_string.length - 1]);
 };
 

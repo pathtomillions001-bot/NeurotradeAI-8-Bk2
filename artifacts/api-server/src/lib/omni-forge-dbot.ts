@@ -40,7 +40,16 @@
  *     times the recovery entry instead of firing blind.
  *   · Loss-clustering ratio ξ = P(loss|loss)/P(loss) and split-half
  *     instability as score penalties: clustered losses are what turn a
- *     depth-3 ladder into a depth-6 event.
+ *     depth-3 ladder into a depth-6 event. Below 10 observed losses the
+ *     clustering estimate is pure add-one smoothing noise divided by a
+ *     near-zero loss rate, so it is treated as unmeasurable (neutral) —
+ *     without that guard, ~1.09× legs (Over 0 / Under 9 / Differs) could
+ *     never pass normal mode at all; see analyseForgeGate below.
+ *
+ * Forge-time, `analyseForgeGate` replicates those exact thresholds to quote
+ * each chosen contract's qualification odds on a fair tape, so a silent bot
+ * is never a surprise: tight legs are flagged in `warnings` and in a
+ * start-of-run journal notice.
  *
  * NEUROTRADE ADAPTIVE BLOCKS
  * ──────────────────────────
@@ -117,6 +126,8 @@ export interface OmniForgeStrategy {
   name: string;
   /** Blockly workspace XML (`is_dbot="true"`). */
   xml: string;
+  /** Plain-English cautions about the chosen contract sets (never errors). */
+  warnings: string[];
   summary: {
     symbol: string;
     displayName: string;
@@ -142,6 +153,12 @@ export interface OmniForgeStrategy {
       debtGrowthPerStep: number;
       capitalAtRisk: number;
       failureProbability: number;
+    };
+    /** Forge-time replica of the runtime gate, per contract set (expectation setting). */
+    gate: {
+      window: number;
+      normal: ForgeGateReading[];
+      recovery: ForgeGateReading[];
     };
   };
 }
@@ -245,6 +262,166 @@ function ensure(cond: boolean, message: string): void {
   if (!cond) throw new Error(message);
 }
 
+// ── Forge-time gate diagnostics ───────────────────────────────────────────────
+// The generated bot gates every entry on statistics computed INSIDE the bot
+// runtime (omni-forge-analysis.js in the vendored builder). Exactly the same
+// thresholds are replicated here so the forge can tell the user — before they
+// burn a session — how often each chosen contract can hope to qualify on a
+// fair tape. KEEP IN PARITY with
+// artifacts/dbot-builder/src/external/bot-skeleton/services/tradeEngine/trade/omni-forge-analysis.js
+
+export const OMNI_GATE_LIMITS = {
+  priorStrength: 20,
+  confidenceZ: 1.282,
+  /**
+   * Losses needed before the add-one-smoothed P(loss|loss) carries more
+   * signal than smoothing noise. Below this the runtime reports clustering
+   * as neutral (1.0) — without the guard, Over 0 / Under 9 / Differs could
+   * never clear normal mode at all (their ~1.09× price only admits ≤ 8%-loss
+   * tapes, where the raw ratio read 4–35× against any layout).
+   */
+  minClusterLosses: 10,
+  normal: { minSamples: 30, minEv: 0, lowerBoundMargin: 0.025, maxInstability: 0.16, maxClustering: 1.45 },
+  recovery: { minSamples: 20, minEv: -0.01, lowerBoundMargin: 0.05, maxInstability: Infinity, maxClustering: 1.6 },
+} as const;
+
+/** Break-even may exceed the fair rate by at most this before a leg counts as priced-tight. */
+export const TIGHT_HEADROOM = 0.015;
+/** Fair-tape qualification odds below this count as "sparse". */
+export const SPARSE_QUALIFICATION = 0.05;
+/** The runtime never admits a normal entry below 30 samples — the smallest sane window. */
+export const MIN_GATE_WINDOW = OMNI_GATE_LIMITS.normal.minSamples;
+
+export interface ForgeGateReading {
+  key: string;
+  label: string;
+  payout: number;
+  fairRate: number;
+  /** The win rate the gate prices: 1 / payout. */
+  breakEven: number;
+  /** Lowest tape win rate that would qualify (most flattering loss layout); null if unreachable at this window. */
+  minQualifyingWinRate: number | null;
+  /** Exact binomial P(a fair tape of `window` digits qualifies). */
+  qualificationChance: number;
+  /** The price leaves < ~1.5pt of headroom over natural odds — inherently rare-entry. */
+  tight: boolean;
+  /** Qualifies on < 5% of fair tapes at this window. */
+  sparse: boolean;
+}
+
+/** Would a tape with `hits` wins in `n` pass the mode's gate? Mirrors analyseOmniForgeCandidate. */
+function gatePasses(opts: {
+  hits: number;
+  n: number;
+  p0: number;
+  payout: number;
+  mode: "NORMAL" | "RECOVERY";
+  ll: number;
+  lw: number;
+  instability: number;
+}): boolean {
+  const { hits, n, p0, payout, mode, ll, lw, instability } = opts;
+  const limits = mode === "RECOVERY" ? OMNI_GATE_LIMITS.recovery : OMNI_GATE_LIMITS.normal;
+  const z = OMNI_GATE_LIMITS.confidenceZ;
+  const strength = OMNI_GATE_LIMITS.priorStrength;
+  const losses = n - hits;
+  const probability = (hits + strength * p0) / (n + strength);
+  const denom = 1 + (z * z) / n;
+  const centre = probability + (z * z) / (2 * n);
+  const spread = z * Math.sqrt((probability * (1 - probability) + (z * z) / (4 * n)) / n);
+  const lowerBound = (centre - spread) / denom;
+  const breakEven = 1 / payout;
+  const ev = probability * payout - 1;
+  const lossRate = 1 - probability;
+  const clustering =
+    losses >= OMNI_GATE_LIMITS.minClusterLosses ? (ll + 1) / (ll + lw + 2) / Math.max(0.01, lossRate) : 1;
+  return (
+    n >= limits.minSamples &&
+    ev > limits.minEv &&
+    lowerBound > breakEven - limits.lowerBoundMargin &&
+    instability < limits.maxInstability &&
+    clustering < limits.maxClustering
+  );
+}
+
+/** P(X ≥ k) for X ~ Binomial(n, p) — exact, via PMF recurrence (n ≤ 300 here). */
+export function binomialTail(n: number, k: number, p: number): number {
+  if (k <= 0) return 1;
+  if (k > n || p <= 0) return 0;
+  if (p >= 1) return 1;
+  let mass = Math.exp(n * Math.log(1 - p)); // P(X = 0)
+  let tail = 0;
+  for (let i = 0; i <= n; i++) {
+    if (i >= k) tail += mass;
+    mass *= ((n - i) / (i + 1)) * (p / (1 - p));
+  }
+  return Math.min(1, tail);
+}
+
+/**
+ * Forge-time qualification odds for a chosen set. For each contract we find
+ * the LOWEST qualifying win rate at this window (most flattering loss layout:
+ * losses scattered, no split-half drift — i.e. an upper bound on how easy the
+ * leg is to qualify), then the exact binomial chance of seeing that on a fair
+ * tape. This is expectation setting, not a promise: auto Matches/Differs
+ * resolve their digit from the live tape, which only helps.
+ */
+export function analyseForgeGate(
+  specs: ForgeContractSpec[],
+  window: number,
+  mode: "NORMAL" | "RECOVERY",
+): ForgeGateReading[] {
+  const n = Math.max(1, Math.round(window));
+  return specs.map((spec) => {
+    const payout = forgePayout(spec);
+    const fairRate = forgeFairRate(spec);
+    const breakEven = 1 / payout;
+    // p0 for the Beta prior = the fair rate for every contract kind.
+    let hits: number | null = null;
+    for (let h = n; h >= 0; h--) {
+      const losses = n - h;
+      const passes = gatePasses({
+        hits: h,
+        n,
+        p0: fairRate,
+        payout,
+        mode,
+        ll: 0, // most flattering layout: losses scattered, never back-to-back
+        lw: Math.min(losses, Math.max(0, n - losses)),
+        instability: 0,
+      });
+      if (passes) hits = h;
+      else if (hits !== null) break; // wins only ever help — first failure after a pass is the boundary
+    }
+    const minQualifyingWinRate = hits === null ? null : hits / n;
+    const qualificationChance = hits === null ? 0 : binomialTail(n, hits, fairRate);
+    return {
+      key: `${spec.type}:${spec.digit ?? -1}`,
+      label: forgeLabel(spec),
+      payout,
+      fairRate,
+      breakEven,
+      minQualifyingWinRate,
+      qualificationChance,
+      tight: breakEven - fairRate > TIGHT_HEADROOM,
+      sparse: qualificationChance < SPARSE_QUALIFICATION,
+    };
+  });
+}
+
+/** One plain-English sentence per rare-entry leg (shared by warnings and the journal heads-up). */
+export function rareEntrySentence(reading: ForgeGateReading): string {
+  const chance =
+    reading.qualificationChance < 0.001
+      ? "fewer than 1 in 1000 fair-tape windows"
+      : `about ${Math.max(1, Math.round(reading.qualificationChance * 100))} in 100 fair-tape windows`;
+  return (
+    `${reading.label} pays ${reading.payout}× — break-even is a ${(reading.breakEven * 100).toFixed(1)}% win rate ` +
+    `against a ${(reading.fairRate * 100).toFixed(0)}% natural rate, so it qualifies in ${chance}. ` +
+    `It will trade when the tape runs hot; for steadier entries move it to the recovery set or set a Force entry after limit.`
+  );
+}
+
 /** Validate + canonicalise a user contract set. Throws on anything illegal. */
 export function normaliseForgeSet(raw: ForgeContractSpec[], which: "normal" | "recovery"): ForgeContractSpec[] {
   ensure(Array.isArray(raw) && raw.length >= 1, `${which} needs at least one contract`);
@@ -320,7 +497,17 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   ensure(input.stopLoss > 0, "stopLoss must be > 0");
   ensure(/^[A-Za-z0-9_]+$/.test(input.symbol), "symbol must be a Deriv symbol code");
 
-  const windowSize = Math.max(20, Math.min(300, Math.round(input.window ?? 120)));
+  // The runtime never admits a NORMAL entry below 30 digit samples, so a
+  // 20–29 digit window would hold every normal leg forever (a quiet failure
+  // of the same family as the Over 0 / Under 9 dead zone). Floor it loudly.
+  const warnings: string[] = [];
+  const requestedWindow = Math.max(1, Math.min(300, Math.round(input.window ?? 120)));
+  if (requestedWindow < MIN_GATE_WINDOW) {
+    warnings.push(
+      `Tick window ${requestedWindow} is below the ${MIN_GATE_WINDOW}-digit minimum the normal gate needs — raised to ${MIN_GATE_WINDOW}.`,
+    );
+  }
+  const windowSize = Math.max(MIN_GATE_WINDOW, requestedWindow);
   const forceEntryAfter = Math.max(0, Math.round(input.forceEntryAfter ?? 0));
   const breakerDepth = Math.max(3, Math.round(input.breakerDepth));
   const maxRecoverySteps = Math.max(1, Math.min(10, Math.round(input.maxRecoverySteps)));
@@ -339,6 +526,18 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   const { tradeType, hasPrediction } = tradeTypeFor(firstNormal);
   const normalLabels = normal.map(forgeLabel);
   const recoveryLabels = recovery.map(forgeLabel);
+
+  // Qualification diagnostics against the SAME thresholds the bot enforces.
+  // Tight legs (price leaves under ~1.5pt of headroom over natural odds —
+  // the classic Over 0 / Under 9 / Differs trap) earn a forge-time warning
+  // and a start-of-run journal notice, so "no trades being taken" is never
+  // a silent surprise again.
+  const gateNormal = analyseForgeGate(normal, windowSize, "NORMAL");
+  const gateRecovery = analyseForgeGate(recovery, windowSize, "RECOVERY");
+  const rareNormalLegs = gateNormal.filter((r) => r.tight || r.sparse);
+  for (const reading of rareNormalLegs) {
+    warnings.push(rareEntrySentence(reading));
+  }
 
   const x = new XmlBuilder();
 
@@ -393,6 +592,21 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
           `recovery markup ${markupPercent}% · circuit breaker ${breakerDepth} losses`,
       ),
     ),
+    // Rare-entry notice: names the user's own contract choice and its own
+    // price — a static property of the legs they chose, never the model's
+    // per-tick statistics (the journal stays minimal by design).
+    ...(rareNormalLegs.length > 0
+      ? [
+          x.notify(
+            "warn",
+            x.text(
+              `Rare-entry notice: ${rareNormalLegs.map((r) => r.label).join(", ")} ` +
+                `${rareNormalLegs.length === 1 ? "pays" : "pay"} tight enough that normal entries qualify only on ≥ ` +
+                `${(Math.max(...rareNormalLegs.map((r) => r.breakEven)) * 100).toFixed(1)}% tapes — they trade when the tape runs hot, and recovery entries are unaffected`,
+            ),
+          ),
+        ]
+      : []),
   ];
 
   // ── 2. Trade options ───────────────────────────────────────────────────────
@@ -714,6 +928,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   return {
     name,
     xml,
+    warnings,
     summary: {
       symbol: input.symbol,
       displayName: input.displayName,
@@ -735,6 +950,11 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
       forceEntryAfter,
       watchMarkets,
       ladder: ladderRisk(worstPayout, markupPercent, maxRecoverySteps, worstRate),
+      gate: {
+        window: windowSize,
+        normal: gateNormal,
+        recovery: gateRecovery,
+      },
     },
   };
 }

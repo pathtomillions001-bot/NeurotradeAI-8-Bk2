@@ -99,6 +99,30 @@ async function withVerifiedMarketPath(xml: string, symbol: string | null | undef
     }
 }
 
+/**
+ * Reject strategies whose blocks this builder bundle cannot implement.
+ *
+ * Blockly SILENTLY DROPS block types it does not know when loading XML (and
+ * silently roots an empty definition for a missing procedure). A stale
+ * embedded-builder bundle therefore loads a new forge's strategy with half
+ * its logic missing — the workspace looks fine, and the breakage only
+ * surfaces when the user presses Run, as an interpreter error that never
+ * mentions the real cause (the ".epoch is not a function" incident was the
+ * same class: a bundle out of sync with the strategy generator). Failing the
+ * LOAD with the missing blocks named turns that into an actionable message.
+ */
+function findUnknownBlockTypes(xml: string): string[] {
+    try {
+        const dom = new DOMParser().parseFromString(xml, 'application/xml');
+        if (dom.getElementsByTagName('parsererror').length) return [];
+        const types = Array.from(dom.querySelectorAll('block')).map(b => b.getAttribute('type') || '');
+        const known_types = new Set(Object.keys(window.Blockly?.Blocks ?? {}));
+        return [...new Set(types)].filter(type => type && !known_types.has(type)).sort();
+    } catch {
+        return [];
+    }
+}
+
 async function performLoad(message: HostStrategyMessage, store: RootStore | null) {
     const { name, xml, symbol } = message;
     if (!xml || typeof xml !== 'string') return { ok: false, error: 'No strategy XML was supplied' };
@@ -115,6 +139,17 @@ async function performLoad(message: HostStrategyMessage, store: RootStore | null
         store?.dashboard?.setActiveTab(DBOT_TABS.BOT_BUILDER);
     } catch {
         /* dashboard store not ready — the load itself still succeeds */
+    }
+
+    const unknown_blocks = findUnknownBlockTypes(xml);
+    if (unknown_blocks.length > 0) {
+        return {
+            ok: false,
+            error:
+                `This Bot Builder bundle does not implement the strategy's blocks: ${unknown_blocks.join(', ')}. ` +
+                'The embedded builder is out of date with the app that forged this strategy — rebuild it with ' +
+                '`node scripts/build-dbot-builder.mjs` (from artifacts/trading-platform) and reload the page.',
+        };
     }
 
     const block_string = await withVerifiedMarketPath(xml, symbol);

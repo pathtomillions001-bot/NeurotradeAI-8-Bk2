@@ -70,17 +70,25 @@ import {
   EVEN_ODD_PAYOUT,
   MATCH_PAYOUT,
   DIFF_PAYOUT,
+  RISE_FALL_PAYOUT,
 } from "./payouts";
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
-export const FORGE_CONTRACT_TYPES = [
+export const DIGIT_FORGE_CONTRACT_TYPES = [
   "DIGITOVER",
   "DIGITUNDER",
   "DIGITEVEN",
   "DIGITODD",
   "DIGITMATCH",
   "DIGITDIFF",
+] as const;
+
+export const DIRECTION_FORGE_CONTRACT_TYPES = ["CALL", "PUT"] as const;
+
+export const FORGE_CONTRACT_TYPES = [
+  ...DIGIT_FORGE_CONTRACT_TYPES,
+  ...DIRECTION_FORGE_CONTRACT_TYPES,
 ] as const;
 
 export type ForgeContractType = (typeof FORGE_CONTRACT_TYPES)[number];
@@ -90,7 +98,7 @@ export interface ForgeContractSpec {
   /**
    * The digit: barrier for Over/Under (Over 0–8, Under 1–9), target digit for
    * Matches/Differs (0–9, or −1 = let the running bot auto-pick the
-   * hottest/coldest digit of the live tape). Ignored for Even/Odd.
+   * hottest/coldest digit of the live tape). Ignored for Even/Odd and Rise/Fall.
    */
   digit?: number;
 }
@@ -120,6 +128,8 @@ export interface OmniForgeInput {
   forceEntryAfter?: number;
   /** Markets the in-bot ranker may switch to (≤ 8, always includes symbol). */
   watchMarkets?: string[];
+  /** Brand label written into the DBot name and journal. */
+  strategyName?: string;
 }
 
 export interface OmniForgeStrategy {
@@ -219,6 +229,9 @@ export function forgePayout(spec: ForgeContractSpec): number {
       return MATCH_PAYOUT;
     case "DIGITDIFF":
       return DIFF_PAYOUT;
+    case "CALL":
+    case "PUT":
+      return RISE_FALL_PAYOUT;
   }
 }
 
@@ -236,6 +249,9 @@ export function forgeFairRate(spec: ForgeContractSpec): number {
       return 0.1;
     case "DIGITDIFF":
       return 0.9;
+    case "CALL":
+    case "PUT":
+      return 0.5;
   }
 }
 
@@ -255,6 +271,10 @@ export function forgeLabel(spec: ForgeContractSpec): string {
       return digit >= 0 ? `Matches ${digit}` : "Matches auto";
     case "DIGITDIFF":
       return digit >= 0 ? `Differs ${digit}` : "Differs auto";
+    case "CALL":
+      return "Rise";
+    case "PUT":
+      return "Fall";
   }
 }
 
@@ -281,8 +301,20 @@ export const OMNI_GATE_LIMITS = {
    * tapes, where the raw ratio read 4–35× against any layout).
    */
   minClusterLosses: 10,
-  normal: { minSamples: 30, minEv: 0, lowerBoundMargin: 0.025, maxInstability: 0.16, maxClustering: 1.45 },
-  recovery: { minSamples: 20, minEv: -0.01, lowerBoundMargin: 0.05, maxInstability: Infinity, maxClustering: 1.6 },
+  normal: {
+    minSamples: 30,
+    minEv: 0,
+    lowerBoundMargin: 0.025,
+    maxInstability: 0.16,
+    maxClustering: 1.45,
+  },
+  recovery: {
+    minSamples: 20,
+    minEv: -0.01,
+    lowerBoundMargin: 0.05,
+    maxInstability: Infinity,
+    maxClustering: 1.6,
+  },
 } as const;
 
 /** Break-even may exceed the fair rate by at most this before a leg counts as priced-tight. */
@@ -321,20 +353,24 @@ function gatePasses(opts: {
   instability: number;
 }): boolean {
   const { hits, n, p0, payout, mode, ll, lw, instability } = opts;
-  const limits = mode === "RECOVERY" ? OMNI_GATE_LIMITS.recovery : OMNI_GATE_LIMITS.normal;
+  const limits =
+    mode === "RECOVERY" ? OMNI_GATE_LIMITS.recovery : OMNI_GATE_LIMITS.normal;
   const z = OMNI_GATE_LIMITS.confidenceZ;
   const strength = OMNI_GATE_LIMITS.priorStrength;
   const losses = n - hits;
   const probability = (hits + strength * p0) / (n + strength);
   const denom = 1 + (z * z) / n;
   const centre = probability + (z * z) / (2 * n);
-  const spread = z * Math.sqrt((probability * (1 - probability) + (z * z) / (4 * n)) / n);
+  const spread =
+    z * Math.sqrt((probability * (1 - probability) + (z * z) / (4 * n)) / n);
   const lowerBound = (centre - spread) / denom;
   const breakEven = 1 / payout;
   const ev = probability * payout - 1;
   const lossRate = 1 - probability;
   const clustering =
-    losses >= OMNI_GATE_LIMITS.minClusterLosses ? (ll + 1) / (ll + lw + 2) / Math.max(0.01, lossRate) : 1;
+    losses >= OMNI_GATE_LIMITS.minClusterLosses
+      ? (ll + 1) / (ll + lw + 2) / Math.max(0.01, lossRate)
+      : 1;
   return (
     n >= limits.minSamples &&
     ev > limits.minEv &&
@@ -394,7 +430,8 @@ export function analyseForgeGate(
       else if (hits !== null) break; // wins only ever help — first failure after a pass is the boundary
     }
     const minQualifyingWinRate = hits === null ? null : hits / n;
-    const qualificationChance = hits === null ? 0 : binomialTail(n, hits, fairRate);
+    const qualificationChance =
+      hits === null ? 0 : binomialTail(n, hits, fairRate);
     return {
       key: `${spec.type}:${spec.digit ?? -1}`,
       label: forgeLabel(spec),
@@ -423,8 +460,14 @@ export function rareEntrySentence(reading: ForgeGateReading): string {
 }
 
 /** Validate + canonicalise a user contract set. Throws on anything illegal. */
-export function normaliseForgeSet(raw: ForgeContractSpec[], which: "normal" | "recovery"): ForgeContractSpec[] {
-  ensure(Array.isArray(raw) && raw.length >= 1, `${which} needs at least one contract`);
+export function normaliseForgeSet(
+  raw: ForgeContractSpec[],
+  which: "normal" | "recovery",
+): ForgeContractSpec[] {
+  ensure(
+    Array.isArray(raw) && raw.length >= 1,
+    `${which} needs at least one contract`,
+  );
   ensure(raw.length <= 6, `${which} allows at most 6 contracts`);
   const seen = new Set<string>();
   const out: ForgeContractSpec[] = [];
@@ -433,7 +476,9 @@ export function normaliseForgeSet(raw: ForgeContractSpec[], which: "normal" | "r
       (FORGE_CONTRACT_TYPES as readonly string[]).includes(spec?.type),
       `${which}: unknown contract type ${String(spec?.type)}`,
     );
-    let digit = Number.isFinite(Number(spec.digit)) ? Math.trunc(Number(spec.digit)) : -1;
+    let digit = Number.isFinite(Number(spec.digit))
+      ? Math.trunc(Number(spec.digit))
+      : -1;
     switch (spec.type) {
       case "DIGITOVER":
         ensure(digit >= 0 && digit <= 8, `${which}: Over needs a barrier 0–8`);
@@ -443,10 +488,13 @@ export function normaliseForgeSet(raw: ForgeContractSpec[], which: "normal" | "r
         break;
       case "DIGITMATCH":
       case "DIGITDIFF":
-        ensure(digit === -1 || (digit >= 0 && digit <= 9), `${which}: Matches/Differs digit must be 0–9 or auto`);
+        ensure(
+          digit === -1 || (digit >= 0 && digit <= 9),
+          `${which}: Matches/Differs digit must be 0–9 or auto`,
+        );
         break;
       default:
-        digit = -1; // Even/Odd carry no digit.
+        digit = -1; // Even/Odd and Rise/Fall carry no digit.
     }
     const key = `${spec.type}:${digit}`;
     if (seen.has(key)) continue;
@@ -458,20 +506,45 @@ export function normaliseForgeSet(raw: ForgeContractSpec[], which: "normal" | "r
 
 /** Wire format the vendored `nt_analyse_contracts` block parses at runtime. */
 export function forgeCsv(specs: ForgeContractSpec[]): string {
-  return specs.map((s) => `${s.type}:${s.digit ?? -1}:${forgePayout(s)}`).join(",");
+  return specs
+    .map((s) => `${s.type}:${s.digit ?? -1}:${forgePayout(s)}`)
+    .join(",");
 }
 
 /** The trade type the workspace declares — from the FIRST normal contract. */
-function tradeTypeFor(spec: ForgeContractSpec): { tradeType: string; hasPrediction: boolean } {
+function tradeTypeFor(spec: ForgeContractSpec): {
+  tradeTypeCat: string;
+  tradeType: string;
+  hasPrediction: boolean;
+} {
   switch (spec.type) {
+    case "CALL":
+    case "PUT":
+      return {
+        tradeTypeCat: "callput",
+        tradeType: "callput",
+        hasPrediction: false,
+      };
     case "DIGITEVEN":
     case "DIGITODD":
-      return { tradeType: "evenodd", hasPrediction: false };
+      return {
+        tradeTypeCat: "digits",
+        tradeType: "evenodd",
+        hasPrediction: false,
+      };
     case "DIGITMATCH":
     case "DIGITDIFF":
-      return { tradeType: "matchesdiffers", hasPrediction: true };
+      return {
+        tradeTypeCat: "digits",
+        tradeType: "matchesdiffers",
+        hasPrediction: true,
+      };
     default:
-      return { tradeType: "overunder", hasPrediction: true };
+      return {
+        tradeTypeCat: "digits",
+        tradeType: "overunder",
+        hasPrediction: true,
+      };
   }
 }
 
@@ -482,26 +555,43 @@ function tradeTypeFor(spec: ForgeContractSpec): { tradeType: string; hasPredicti
  * This prevents an invalid `barrier: -1` quote from blocking BEFORE_PURCHASE.
  */
 function safeRuntimeDigit(spec: ForgeContractSpec): number {
-  if (spec.type === "DIGITEVEN" || spec.type === "DIGITODD") return -1;
+  if (
+    spec.type === "DIGITEVEN" ||
+    spec.type === "DIGITODD" ||
+    spec.type === "CALL" ||
+    spec.type === "PUT"
+  )
+    return -1;
   const digit = spec.digit ?? -1;
   return digit >= 0 && digit <= 9 ? digit : 0;
 }
 
 // ── Strategy generator ────────────────────────────────────────────────────────
 
-export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy {
+export function buildOmniForgeStrategy(
+  input: OmniForgeInput,
+): OmniForgeStrategy {
   const normal = normaliseForgeSet(input.normal, "normal");
   const recovery = normaliseForgeSet(input.recovery, "recovery");
-  ensure(Number.isFinite(input.stake) && input.stake >= 0.35, "stake must be ≥ 0.35");
+  ensure(
+    Number.isFinite(input.stake) && input.stake >= 0.35,
+    "stake must be ≥ 0.35",
+  );
   ensure(input.takeProfit > 0, "takeProfit must be > 0");
   ensure(input.stopLoss > 0, "stopLoss must be > 0");
-  ensure(/^[A-Za-z0-9_]+$/.test(input.symbol), "symbol must be a Deriv symbol code");
+  ensure(
+    /^[A-Za-z0-9_]+$/.test(input.symbol),
+    "symbol must be a Deriv symbol code",
+  );
 
   // The runtime never admits a NORMAL entry below 30 digit samples, so a
   // 20–29 digit window would hold every normal leg forever (a quiet failure
   // of the same family as the Over 0 / Under 9 dead zone). Floor it loudly.
   const warnings: string[] = [];
-  const requestedWindow = Math.max(1, Math.min(300, Math.round(input.window ?? 120)));
+  const requestedWindow = Math.max(
+    1,
+    Math.min(300, Math.round(input.window ?? 120)),
+  );
   if (requestedWindow < MIN_GATE_WINDOW) {
     warnings.push(
       `Tick window ${requestedWindow} is below the ${MIN_GATE_WINDOW}-digit minimum the normal gate needs — raised to ${MIN_GATE_WINDOW}.`,
@@ -510,11 +600,16 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   const windowSize = Math.max(MIN_GATE_WINDOW, requestedWindow);
   const forceEntryAfter = Math.max(0, Math.round(input.forceEntryAfter ?? 0));
   const breakerDepth = Math.max(3, Math.round(input.breakerDepth));
-  const maxRecoverySteps = Math.max(1, Math.min(10, Math.round(input.maxRecoverySteps)));
+  const maxRecoverySteps = Math.max(
+    1,
+    Math.min(10, Math.round(input.maxRecoverySteps)),
+  );
   const markupPercent = Math.max(0, input.markupPercent);
   const maxStake = input.maxStake > 0 ? input.maxStake : 500;
   const { market, submarket } = marketPathForSymbol(input.symbol);
-  const currency = /^[A-Za-z]{3,5}$/.test(input.currency) ? input.currency.toUpperCase() : "USD";
+  const currency = /^[A-Za-z]{3,5}$/.test(input.currency)
+    ? input.currency.toUpperCase()
+    : "USD";
   const watchMarkets = [input.symbol, ...(input.watchMarkets ?? [])]
     .filter((s, i, all) => /^[A-Za-z0-9_]+$/.test(s) && all.indexOf(s) === i)
     .slice(0, 8);
@@ -523,7 +618,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   const recoveryCsv = forgeCsv(recovery);
   const firstNormal = normal[0]!;
   const firstRecovery = recovery[0]!;
-  const { tradeType, hasPrediction } = tradeTypeFor(firstNormal);
+  const { tradeTypeCat, tradeType, hasPrediction } = tradeTypeFor(firstNormal);
   const normalLabels = normal.map(forgeLabel);
   const recoveryLabels = recovery.map(forgeLabel);
 
@@ -539,6 +634,8 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     warnings.push(rareEntrySentence(reading));
   }
 
+  const strategyName =
+    (input.strategyName ?? "Omni Forge").trim() || "Omni Forge";
   const x = new XmlBuilder();
 
   const V = {
@@ -586,7 +683,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     x.notify(
       "info",
       x.text(
-        `NeuroTrade Omni Forge · ${input.displayName} · normal [${normalLabels.join(", ")}] → recovery [${recoveryLabels.join(", ")}] · ` +
+        `NeuroTrade ${strategyName} · ${input.displayName} · normal [${normalLabels.join(", ")}] → recovery [${recoveryLabels.join(", ")}] · ` +
           `stake ${money(input.stake)} · TP ${money(input.takeProfit)} · SL ${money(input.stopLoss)} · ` +
           `${windowSize}-digit window ranked across ${watchMarkets.length} market${watchMarkets.length === 1 ? "" : "s"} · ` +
           `recovery markup ${markupPercent}% · circuit breaker ${breakerDepth} losses`,
@@ -632,7 +729,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
       `<block type="trade_definition_market" id="ofmkt" deletable="false" movable="false">` +
       `<field name="MARKET_LIST">${market}</field><field name="SUBMARKET_LIST">${submarket}</field><field name="SYMBOL_LIST">${esc(input.symbol)}</field>` +
       `<next><block type="trade_definition_tradetype" id="oftt" deletable="false" movable="false">` +
-      `<field name="TRADETYPECAT_LIST">digits</field><field name="TRADETYPE_LIST">${tradeType}</field>` +
+      `<field name="TRADETYPECAT_LIST">${tradeTypeCat}</field><field name="TRADETYPE_LIST">${tradeType}</field>` +
       `<next><block type="trade_definition_contracttype" id="ofct" deletable="false" movable="false">` +
       `<field name="TYPE_LIST">both</field>` +
       `<next><block type="trade_definition_candleinterval" id="ofci" deletable="false" movable="false">` +
@@ -659,7 +756,8 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   // Markov row or clustering ratio that make up the decision.
   const waitingReport: Stmt[] = [
     x.joinInto(V.message, [
-      x.text("ANALYSING"), x.get(V.activeSymbol),
+      x.text("ANALYSING"),
+      x.get(V.activeSymbol),
       x.text("· no qualified setup yet — holding"),
     ]),
     x.notify("info", x.get(V.message)),
@@ -668,7 +766,10 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   // A factory, not a shared array: every emission needs its own block ids.
   const entryReport = (): Stmt[] => [
     x.joinInto(V.message, [
-      x.text("ENTRY ·"), x.get(V.activeSymbol), x.text("·"), x.get(V.contract),
+      x.text("ENTRY ·"),
+      x.get(V.activeSymbol),
+      x.text("·"),
+      x.get(V.contract),
       x.text("· setup qualified"),
     ]),
     x.notify("success", x.get(V.message)),
@@ -682,10 +783,12 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     x.set(V.decisionReason, x.ntForgeDecision("reason")),
     x.set(V.gate, x.ntForgeDecision("eligible")),
     x.ifElse(
-      [{
-        cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
-        then: [x.set(V.recPayout, x.ntForgeDecision("payout"))],
-      }],
+      [
+        {
+          cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+          then: [x.set(V.recPayout, x.ntForgeDecision("payout"))],
+        },
+      ],
       [x.set(V.normPayout, x.ntForgeDecision("payout"))],
     ),
   ];
@@ -693,35 +796,64 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   const adaptiveEntry: Stmt[] = [
     x.set(V.evalTicks, x.arith("ADD", x.get(V.evalTicks), x.num(1))),
     x.ifElse(
-      [{ cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)), then: [x.ntAnalyseContracts("RECOVERY", watchMarkets, recoveryCsv, windowSize)] }],
+      [
+        {
+          cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+          then: [
+            x.ntAnalyseContracts(
+              "RECOVERY",
+              watchMarkets,
+              recoveryCsv,
+              windowSize,
+            ),
+          ],
+        },
+      ],
       [x.ntAnalyseContracts("NORMAL", watchMarkets, normalCsv, windowSize)],
     ),
     ...readDecision,
-    x.ifElse(
-      [{
+    x.ifElse([
+      {
         cond: x.compare("EQ", x.ntForgeDecision("changedMarket"), x.bool(true)),
         then: [
           x.ntSwitchMarket(x.get(V.activeSymbol)),
-          x.joinInto(V.message, [x.text("SWITCHED MARKET · now analysing"), x.get(V.activeSymbol)]),
+          x.joinInto(V.message, [
+            x.text("SWITCHED MARKET · now analysing"),
+            x.get(V.activeSymbol),
+          ]),
           x.notify("info", x.get(V.message)),
         ],
-      }, {
+      },
+      {
         cond: x.compare("EQ", x.get(V.gate), x.bool(true)),
         then: [...entryReport(), x.set(V.fire, x.bool(true))],
       },
-      ...(forceEntryAfter > 0 ? [{
-        cond: x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
-        then: [
-          x.notify("warn", x.text(`Patience limit ${forceEntryAfter}: entering on the best available setup`)),
-          ...entryReport(),
-          x.set(V.fire, x.bool(true)),
-        ],
-      }] : []),
+      ...(forceEntryAfter > 0
+        ? [
+            {
+              cond: x.compare(
+                "GTE",
+                x.get(V.evalTicks),
+                x.num(forceEntryAfter),
+              ),
+              then: [
+                x.notify(
+                  "warn",
+                  x.text(
+                    `Patience limit ${forceEntryAfter}: entering on the best available setup`,
+                  ),
+                ),
+                ...entryReport(),
+                x.set(V.fire, x.bool(true)),
+              ],
+            },
+          ]
+        : []),
       {
         cond: x.compare("EQ", x.mod(x.get(V.evalTicks), x.num(5)), x.num(0)),
         then: waitingReport,
-      }],
-    ),
+      },
+    ]),
   ];
 
   const beforePurchase = x.topLevel(
@@ -729,10 +861,12 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     `<statement name="BEFOREPURCHASE_STACK">${x.chain([
       x.set(V.fire, x.bool(false)),
       ...adaptiveEntry,
-      x.ifElse([{
-        cond: x.compare("EQ", x.get(V.fire), x.bool(true)),
-        then: [x.ntPurchaseContract(x.get(V.contract), x.get(V.barrier))],
-      }]),
+      x.ifElse([
+        {
+          cond: x.compare("EQ", x.get(V.fire), x.bool(true)),
+          then: [x.ntPurchaseContract(x.get(V.contract), x.get(V.barrier))],
+        },
+      ]),
     ])}</statement>`,
     0,
     900,
@@ -755,7 +889,14 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
       V.stake,
       x.arith(
         "DIVIDE",
-        x.round("ROUNDUP", x.arith("MULTIPLY", x.arith("MINUS", x.get(V.stake), x.num(0.000000001)), x.num(100))),
+        x.round(
+          "ROUNDUP",
+          x.arith(
+            "MULTIPLY",
+            x.arith("MINUS", x.get(V.stake), x.num(0.000000001)),
+            x.num(100),
+          ),
+        ),
         x.num(100),
       ),
     ),
@@ -765,12 +906,24 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
         then: [
           x.set(
             V.stake,
-            x.arith("DIVIDE", x.round("ROUNDDOWN", x.arith("MULTIPLY", x.balance(), x.num(100))), x.num(100)),
+            x.arith(
+              "DIVIDE",
+              x.round(
+                "ROUNDDOWN",
+                x.arith("MULTIPLY", x.balance(), x.num(100)),
+              ),
+              x.num(100),
+            ),
           ),
         ],
       },
     ]),
-    x.ifElse([{ cond: x.compare("LT", x.get(V.stake), x.num(0.35)), then: [x.set(V.stake, x.num(0.35))] }]),
+    x.ifElse([
+      {
+        cond: x.compare("LT", x.get(V.stake), x.num(0.35)),
+        then: [x.set(V.stake, x.num(0.35))],
+      },
+    ]),
   ];
 
   const recoveryProc = x.topLevel(
@@ -809,7 +962,12 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     // Back to normal means back behind the gate: the next entry must re-qualify.
     x.set(V.gate, x.bool(false)),
     x.set(V.evalTicks, x.num(0)),
-    x.notify("success", x.text(`Recovery complete — debt cleared, back to your normal set [${normalLabels.join(", ")}] at base stake behind the gate`)),
+    x.notify(
+      "success",
+      x.text(
+        `Recovery complete — debt cleared, back to your normal set [${normalLabels.join(", ")}] at base stake behind the gate`,
+      ),
+    ),
   ];
   const onRecoveryWinPartial: Stmt[] = [
     x.call(RECOVERY_PROC),
@@ -824,7 +982,15 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
   ];
   const onLoss: Stmt[] = [
     x.set(V.lossRun, x.arith("ADD", x.get(V.lossRun), x.num(1))),
-    x.ifElse([{ cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)), then: deepenRecovery }], enterRecovery),
+    x.ifElse(
+      [
+        {
+          cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
+          then: deepenRecovery,
+        },
+      ],
+      enterRecovery,
+    ),
     x.call(RECOVERY_PROC),
     x.joinInto(V.message, [
       x.text("Recovery step"),
@@ -849,10 +1015,20 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
             [
               {
                 cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
-                then: [x.set(V.recPayout, x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)))],
+                then: [
+                  x.set(
+                    V.recPayout,
+                    x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)),
+                  ),
+                ],
               },
             ],
-            [x.set(V.normPayout, x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)))],
+            [
+              x.set(
+                V.normPayout,
+                x.arith("DIVIDE", x.get(V.lastReturn), x.get(V.lastStake)),
+              ),
+            ],
           ),
         ],
       },
@@ -862,7 +1038,15 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
         cond: x.compare("EQ", x.get(V.inRecovery), x.bool(true)),
         then: [
           x.set(V.debt, x.arith("MINUS", x.get(V.debt), x.get(V.profit))),
-          x.ifElse([{ cond: x.compare("LTE", x.get(V.debt), x.num(0.005)), then: exitRecovery }], onRecoveryWinPartial),
+          x.ifElse(
+            [
+              {
+                cond: x.compare("LTE", x.get(V.debt), x.num(0.005)),
+                then: exitRecovery,
+              },
+            ],
+            onRecoveryWinPartial,
+          ),
         ],
       },
     ]),
@@ -872,11 +1056,27 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     [
       {
         cond: x.compare("GTE", x.totalProfit(), x.num(input.takeProfit)),
-        then: [x.notify("success", x.text(`Take profit ${money(input.takeProfit)} ${currency} reached — session complete`), "job-done")],
+        then: [
+          x.notify(
+            "success",
+            x.text(
+              `Take profit ${money(input.takeProfit)} ${currency} reached — session complete`,
+            ),
+            "job-done",
+          ),
+        ],
       },
       {
         cond: x.compare("LTE", x.totalProfit(), x.num(-input.stopLoss)),
-        then: [x.notify("error", x.text(`Stop loss ${money(input.stopLoss)} ${currency} hit — session stopped`), "error")],
+        then: [
+          x.notify(
+            "error",
+            x.text(
+              `Stop loss ${money(input.stopLoss)} ${currency} hit — session stopped`,
+            ),
+            "error",
+          ),
+        ],
       },
       {
         cond: x.compare("GTE", x.get(V.lossRun), x.num(breakerDepth)),
@@ -918,7 +1118,7 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
     afterPurchase +
     `</xml>`;
 
-  const name = `NeuroTrade Omni Forge ${input.symbol} ${normalLabels.join("+")} to ${recoveryLabels.join("+")}`;
+  const name = `NeuroTrade ${strategyName} ${input.symbol} ${normalLabels.join("+")} to ${recoveryLabels.join("+")}`;
 
   // Worst-case ladder disclosure: the lowest recovery payout grows debt the
   // fastest and the lowest fair rate fails the most often.
@@ -949,7 +1149,12 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
       window: windowSize,
       forceEntryAfter,
       watchMarkets,
-      ladder: ladderRisk(worstPayout, markupPercent, maxRecoverySteps, worstRate),
+      ladder: ladderRisk(
+        worstPayout,
+        markupPercent,
+        maxRecoverySteps,
+        worstRate,
+      ),
       gate: {
         window: windowSize,
         normal: gateNormal,

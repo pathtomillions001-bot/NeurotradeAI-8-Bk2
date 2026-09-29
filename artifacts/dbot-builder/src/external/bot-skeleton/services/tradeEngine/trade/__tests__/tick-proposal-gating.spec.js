@@ -111,3 +111,38 @@ describe('watchTicks per-tick callback', () => {
         expect(engine.store.dispatch).not.toHaveBeenCalled();
     });
 });
+
+describe('getLastTick feed gaps', () => {
+    const engineWithTape = tape => {
+        const service = {
+            request: jest.fn(() => Promise.resolve(tape)),
+            pipSizes: { R_75: 2 },
+        };
+        const engine = newEngine({ proposalsReady: false }, { ticksService: service });
+        engine.symbol = 'R_75';
+        return engine;
+    };
+
+    it('resolves undefined instead of throwing when the tick tape is empty', async () => {
+        const engine = engineWithTape([]);
+        await expect(engine.getLastTick(true)).resolves.toBeUndefined();
+        await expect(engine.getLastTick(false)).resolves.toBeUndefined();
+    });
+
+    it('skips malformed rows and returns the newest valid tick', async () => {
+        const engine = engineWithTape([undefined, { quote: 'bad', epoch: 10 }, { quote: '101.23', epoch: '20' }]);
+        await expect(engine.getLastTick(true)).resolves.toEqual({ quote: '101.23', epoch: '20' });
+        await expect(engine.getLastTick(false, true)).resolves.toBe('101.23');
+    });
+
+    it('resolves undefined instead of hanging or rejecting during a transient request failure', async () => {
+        const service = {
+            request: jest.fn(() => Promise.reject(new Error('socket reconnecting'))),
+            pipSizes: { R_75: 2 },
+        };
+        const engine = newEngine({ proposalsReady: false }, { ticksService: service });
+        engine.symbol = 'R_75';
+
+        await expect(engine.getLastTick(true)).resolves.toBeUndefined();
+    });
+});

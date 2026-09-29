@@ -112,6 +112,11 @@ export interface BotDefinition {
    * plus the shared recovery ladder. Execution belongs to Deriv's Run button.
    */
   omniForge?: boolean;
+  /**
+   * Universal Forge: DBot factory for user-composed digit + Rise/Fall contract
+   * sets, with independent normal/recovery mixes.
+   */
+  universalForge?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -264,6 +269,33 @@ export const BOT_CATALOG: BotDefinition[] = [
     hasDigitLock: false,
     sides: [],
     nominalWinRate: "gated by measurement",
+    nominalPayout: "contract quote",
+  },
+
+  {
+    id: "universal-forge",
+    name: "Universal Forge",
+    code: "BOT-UF-FORGE",
+    family: "multi",
+    universalForge: true,
+    contractLabel: "Your contracts: Rise/Fall · Over/Under · Even/Odd · Matches/Differs",
+    tagline: "Any selected market. Any normal/recovery mix. One forged DBot.",
+    description:
+      "A new universal DBot factory. You choose the starting market, then compose independent normal and recovery contract sets from Rise, Fall, Digit Over/Under, Even/Odd, Matches and Differs. Press Create DBot and the strategy loaded into the Bot Builder carries its own runtime brain: probability maps, conservative lower-bound EV, variable context timing, recovery hazard, loss-clustering checks, safe market switching and the shared debt-aware recovery ladder. It does not trade inside NeuroTrade; Deriv's Run button owns execution after the blocks are loaded. If the tape is weak, stale or statistically unsafe, the DBot waits instead of forcing entries.",
+    edge: [
+      "Contract freedom beyond the current forges: Rise/Fall can compete against digit contracts in both normal and recovery mode",
+      "One common scoring language for every chosen leg: conservative expected value = lower-confidence win rate × payout − 1",
+      "Digit legs use the full distribution map, auto hot/cold digit selection for Matches/Differs and loss-conditioned recovery timing",
+      "Rise/Fall legs use tick-to-tick direction outcomes with flat ticks treated as losses for both sides, so direction trades must prove real drift",
+      "Best market and best contract are re-ranked every evaluation across up to eight selected automated markets, with safe switching only between trades",
+      "Recovery is timed, not blind: stricter confidence, clustering refusal, debt-aware sizing, max-step breaker and no trade when no chosen recovery leg qualifies",
+    ],
+    accent: "orange",
+    icon: "workflow",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "confidence-gated",
     nominalPayout: "contract quote",
   },
   {
@@ -710,6 +742,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
+  if (bot.universalForge) return "universal-forge@1";
   if (bot.omniForge) return "omni-forge@1";
   if (bot.forge) return "digit-forge@1";
   if (bot.preLocked) return "dual-lock@1";

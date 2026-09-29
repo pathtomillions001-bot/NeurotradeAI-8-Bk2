@@ -40,4 +40,7 @@ export enum LogTypes {
     LOST = 'lost',
     WELCOME_BACK = 'welcome_back',
     WELCOME = 'welcome',
+    // Run-cadence telemetry (see tradeEngine/utils/run-metrics.js): a short
+    // "run pace" journal line emitted every few trades while a bot runs.
+    RUN_METRICS = 'run_metrics',
 }

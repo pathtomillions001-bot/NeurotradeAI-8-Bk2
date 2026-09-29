@@ -21,8 +21,24 @@ let tickListenerKey;
 // a no-op that silently left the previous monitor registered.
 let tickListenerSymbol;
 
+// Proposal ids expire server-side within seconds. Once proposals are ready we
+// no longer re-select them on EVERY tick (stock deriv-bot does, burning CPU on
+// redux dispatches and template scans), but we refresh on this cadence so a
+// bot that idles between entries never tries to buy a long-dead proposal id.
+const PROPOSAL_REFRESH_INTERVAL_MS = 4000;
+
 export default Engine =>
     class Ticks extends Engine {
+        /**
+         * Proposal hygiene gate for the per-tick callback: real work only while
+         * proposals are pending, plus a low-frequency keepalive after that.
+         */
+        shouldCheckProposalReadiness() {
+            if (!this.is_proposal_subscription_required) return false;
+            if (!this.store.getState().proposalsReady) return true;
+            return Date.now() - (this.nt_last_proposal_check || 0) >= PROPOSAL_REFRESH_INTERVAL_MS;
+        }
+
         async watchTicks(symbol) {
             if (symbol && this.symbol !== symbol) {
                 const previous = tickListenerSymbol ?? this.symbol;
@@ -36,7 +52,8 @@ export default Engine =>
                     });
                 }
                 const callback = ticks => {
-                    if (this.is_proposal_subscription_required) {
+                    if (this.shouldCheckProposalReadiness()) {
+                        this.nt_last_proposal_check = Date.now();
                         this.checkProposalReady();
                     }
                     const lastTick = Array.isArray(ticks) ? ticks[ticks.length - 1] : undefined;
@@ -45,6 +62,14 @@ export default Engine =>
                     // inside the tick callback, which killed the listener and
                     // left the bot waiting for a tick that never came.
                     if (!lastTick || lastTick.epoch === undefined) return;
+                    const { scope } = this.store.getState();
+                    this.run_metrics?.recordTick(
+                        scope === constants.BEFORE_PURCHASE
+                            ? 'armed'
+                            : scope === constants.DURING_PURCHASE
+                              ? 'busy'
+                              : 'idle'
+                    );
                     this.store.dispatch({ type: constants.NEW_TICK, payload: lastTick.epoch });
                 };
 

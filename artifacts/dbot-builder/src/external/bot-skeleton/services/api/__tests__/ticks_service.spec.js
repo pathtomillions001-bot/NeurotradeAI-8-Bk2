@@ -37,6 +37,21 @@ function fakeApi() {
         connection: { readyState: 1 },
         send: jest.fn(request => {
             api.requests.push(request);
+            if (request.ticks_history && request.style === 'candles') {
+                return Promise.resolve({
+                    candles: [
+                        {
+                            symbol: request.ticks_history,
+                            granularity: request.granularity,
+                            open_time: 1000,
+                            open: 100,
+                            high: 101,
+                            low: 99,
+                            close: 100.5,
+                        },
+                    ],
+                });
+            }
             if (request.ticks_history) return Promise.resolve(history(request.ticks_history));
             return Promise.resolve({});
         }),
@@ -45,7 +60,28 @@ function fakeApi() {
         onMessage: () => ({ subscribe: cb => listeners.push(cb) }),
     };
     api.pushTick = (symbol, epoch, quote = 123.45) =>
-        listeners.forEach(cb => cb({ data: { msg_type: 'tick', tick: { symbol, epoch, quote, id: `${symbol}-sub` } } }));
+        listeners.forEach(cb =>
+            cb({ data: { msg_type: 'tick', tick: { symbol, epoch, quote, id: `${symbol}-sub` } } })
+        );
+    api.pushOhlc = (symbol, granularity, open_time = 2000) =>
+        listeners.forEach(cb =>
+            cb({
+                data: {
+                    msg_type: 'ohlc',
+                    ohlc: {
+                        symbol,
+                        granularity,
+                        id: `${symbol}-${granularity}-sub`,
+                        open_time,
+                        open: 100,
+                        high: 101,
+                        low: 99,
+                        close: 100.5,
+                    },
+                },
+            })
+        );
+    api.pushMalformedTick = () => listeners.forEach(cb => cb({ data: { msg_type: 'tick', tick: undefined } }));
     api.historyRequests = symbol => api.requests.filter(r => r.ticks_history === symbol).length;
     return api;
 }
@@ -177,6 +213,27 @@ describe('TicksService — stream resilience for switching bots', () => {
         service.ticks = service.ticks.set('R_50', []);
         expect(() => api.pushTick('R_50', 4000)).not.toThrow();
         expect(service.ticks.get('R_50')).toHaveLength(1);
+    });
+
+    it('ignores malformed tick messages rather than throwing in the socket handler', async () => {
+        await service.request({ symbol: 'R_50' });
+        expect(() => api.pushMalformedTick()).not.toThrow();
+        expect(service.ticks.get('R_50')).toHaveLength(5);
+    });
+
+    it('survives an OHLC update after an empty candle tape is seeded', async () => {
+        await service.request({ symbol: 'R_50', granularity: 60 });
+        service.candles = service.candles.setIn(['R_50', 60], []);
+
+        expect(() => api.pushOhlc('R_50', 60, 3000)).not.toThrow();
+        expect(service.candles.getIn(['R_50', 60])).toHaveLength(1);
+        expect(service.candles.getIn(['R_50', 60, 0, 'epoch'])).toBe(3000);
+    });
+
+    it('turns malformed history into an empty tape instead of throwing', async () => {
+        api.send.mockResolvedValueOnce({ history: undefined });
+        await expect(service.request({ symbol: 'R_50' })).resolves.toEqual([]);
+        expect(service.ticks.get('R_50')).toEqual([]);
     });
 
     it('attaches to an existing subscription without retrying or journalling a false failure', async () => {

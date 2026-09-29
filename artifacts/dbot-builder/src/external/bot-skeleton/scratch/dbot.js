@@ -360,19 +360,31 @@ class DBot {
                 return false;
             }
             function BinaryBotPrivateTickAnalysis() {
-                var currentTickTime = Bot.getLastTick(true);
-                while (currentTickTime === 'MarketIsClosed') {
+                var currentTick = Bot.getLastTick(true);
+                while (currentTick === 'MarketIsClosed') {
                     sleep(5);
-                    currentTickTime = Bot.getLastTick(true);
+                    currentTick = Bot.getLastTick(true);
                 }
-                currentTickTime = currentTickTime.epoch;
+                // Tick history can be momentarily empty while the stream is
+                // reconnecting or re-subscribing. Do not read `.epoch` from
+                // that gap; wait for the next valid broker tick instead.
+                if (!currentTick || currentTick.epoch === undefined || currentTick.epoch === null) {
+                    sleep(1);
+                    return false;
+                }
+                var currentTickTime = Number(currentTick.epoch);
+                if (isNaN(currentTickTime)) {
+                    sleep(1);
+                    return false;
+                }
                 if (currentTickTime === BinaryBotPrivateLastTickTime) {
-                    return;
+                    return false;
                 }
                 BinaryBotPrivateLastTickTime = currentTickTime;
                 for (var BinaryBotPrivateI = 0; BinaryBotPrivateI < BinaryBotPrivateTickAnalysisList.length; BinaryBotPrivateI++) {
                     BinaryBotPrivateRun(BinaryBotPrivateTickAnalysisList[BinaryBotPrivateI]);
                 }
+                return true;
             }
             var BinaryBotPrivateLimitations = ${JSON.stringify(limitations)};
             ${window.Blockly.JavaScript.javascriptGenerator.workspaceToCode(this.workspace)}

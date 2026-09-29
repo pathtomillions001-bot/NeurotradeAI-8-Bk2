@@ -86,7 +86,6 @@ describe("bot console contract", () => {
       "parity-forge@1",
       "specialist@1",
       "surge@1",
-      "universal-forge@1",
     ]);
   });
 });

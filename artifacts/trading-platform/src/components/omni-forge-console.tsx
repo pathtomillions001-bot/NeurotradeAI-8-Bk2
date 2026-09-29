@@ -37,6 +37,7 @@ interface ContractTypeInfo {
   digitMax: number | null;
   allowsAuto: boolean;
   needsDigit: boolean;
+  payout?: number;
 }
 
 interface ForgeOptions {
@@ -65,12 +66,12 @@ interface ForgeSummary {
 
 /** Static fallbacks so the panel works even before /options answers. */
 const FALLBACK_TYPES: ContractTypeInfo[] = [
-  { type: "DIGITOVER", label: "Digits Over", digitLabel: "Barrier", digitMin: 0, digitMax: 8, allowsAuto: false, needsDigit: true },
-  { type: "DIGITUNDER", label: "Digits Under", digitLabel: "Barrier", digitMin: 1, digitMax: 9, allowsAuto: false, needsDigit: true },
-  { type: "DIGITEVEN", label: "Even", digitLabel: null, digitMin: null, digitMax: null, allowsAuto: false, needsDigit: false },
-  { type: "DIGITODD", label: "Odd", digitLabel: null, digitMin: null, digitMax: null, allowsAuto: false, needsDigit: false },
-  { type: "DIGITMATCH", label: "Matches", digitLabel: "Digit", digitMin: 0, digitMax: 9, allowsAuto: true, needsDigit: false },
-  { type: "DIGITDIFF", label: "Differs", digitLabel: "Digit", digitMin: 0, digitMax: 9, allowsAuto: true, needsDigit: false },
+  { type: "DIGITOVER", label: "Digits Over", digitLabel: "Barrier", digitMin: 0, digitMax: 8, allowsAuto: false, needsDigit: true, payout: 1.95 },
+  { type: "DIGITUNDER", label: "Digits Under", digitLabel: "Barrier", digitMin: 1, digitMax: 9, allowsAuto: false, needsDigit: true, payout: 1.95 },
+  { type: "DIGITEVEN", label: "Even", digitLabel: null, digitMin: null, digitMax: null, allowsAuto: false, needsDigit: false, payout: 1.95 },
+  { type: "DIGITODD", label: "Odd", digitLabel: null, digitMin: null, digitMax: null, allowsAuto: false, needsDigit: false, payout: 1.95 },
+  { type: "DIGITMATCH", label: "Matches", digitLabel: "Digit", digitMin: 0, digitMax: 9, allowsAuto: true, needsDigit: false, payout: 8.93 },
+  { type: "DIGITDIFF", label: "Differs", digitLabel: "Digit", digitMin: 0, digitMax: 9, allowsAuto: true, needsDigit: false, payout: 1.09 },
 ];
 
 const SHORT_LABEL: Record<ForgeContractType, string> = {
@@ -81,6 +82,42 @@ const SHORT_LABEL: Record<ForgeContractType, string> = {
   DIGITMATCH: "Matches",
   DIGITDIFF: "Differs",
 };
+
+/**
+ * Forge-time rare-entry check (client copy of the API's gate diagnostics):
+ * a contract is "priced tight" when its break-even (1/payout) leaves under
+ * ~1.5pt of headroom over its natural win rate. Over 0, Under 9 and Differs
+ * are the classic trap — they pay ~1.09× against a 91.7% break-even, so
+ * normal entries qualify only on unusually hot tapes. The API re-checks with
+ * the exact gate replica and returns warnings; this is the live preview.
+ */
+const TIGHT_HEADROOM = 0.015;
+interface RareLegNote { label: string; payout: number; breakEven: number; naturalRate: number }
+
+function rareLegNotes(specs: ForgeSpec[], options: ForgeOptions | null): RareLegNote[] {
+  const over = options?.overPayouts ?? {};
+  const under = options?.underPayouts ?? {};
+  const typePayout = (t: ForgeContractType, fallback: number) =>
+    options?.contractTypes.find(ct => ct.type === t)?.payout ?? fallback;
+  const notes: RareLegNote[] = [];
+  for (const spec of specs) {
+    let payout: number;
+    let naturalRate: number;
+    switch (spec.type) {
+      case "DIGITOVER": payout = Number(over[String(spec.digit)]) || 1.09; naturalRate = (9 - spec.digit) / 10; break;
+      case "DIGITUNDER": payout = Number(under[String(spec.digit)]) || 1.09; naturalRate = spec.digit / 10; break;
+      case "DIGITEVEN": case "DIGITODD": payout = typePayout(spec.type, 1.95); naturalRate = 0.5; break;
+      case "DIGITMATCH": payout = typePayout("DIGITMATCH", 8.93); naturalRate = 0.1; break;
+      case "DIGITDIFF": payout = typePayout("DIGITDIFF", 1.09); naturalRate = 0.9; break;
+      default: continue;
+    }
+    const breakEven = 1 / payout;
+    if (breakEven - naturalRate > TIGHT_HEADROOM) {
+      notes.push({ label: specLabel(spec), payout, breakEven, naturalRate });
+    }
+  }
+  return notes;
+}
 
 function specLabel(spec: ForgeSpec): string {
   const base = SHORT_LABEL[spec.type];
@@ -261,6 +298,7 @@ export function OmniForgeConsole({
   const [building, setBuilding] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [lastBuild, setLastBuild] = useState<ForgeSummary | null>(null);
+  const [forgeWarnings, setForgeWarnings] = useState<string[]>([]);
 
   const [symbol, setSymbol] = useState("R_50");
   // The user's example from the brief is the default: mixed categories in
@@ -292,6 +330,8 @@ export function OmniForgeConsole({
 
   const types = options?.contractTypes ?? FALLBACK_TYPES;
   const markets = options?.markets ?? SCAN_MARKETS.map(m => ({ symbol: m.symbol, displayName: m.name }));
+  // Live rare-entry preview on the set being assembled (API re-verifies exactly).
+  const rareNormal = rareLegNotes(normal, options);
 
   if (!bot) return null;
   const a = ACCENTS[bot.accent];
@@ -329,6 +369,8 @@ export function OmniForgeConsole({
       }
       const loaded = loadStrategyIntoBotBuilder({ name: data.name, xml: data.xml, symbol });
       setLastBuild(data.summary ?? null);
+      const apiWarnings: string[] = Array.isArray(data.warnings) ? data.warnings : [];
+      setForgeWarnings(apiWarnings);
       toast.info(`Forging your DBot for ${marketName}…`);
       onOpenChange(false);
       navigate("/bot-builder");
@@ -343,6 +385,11 @@ export function OmniForgeConsole({
             `Verify the blocks, then press Run.`,
           { duration: 14_000 },
         );
+        // The gate's verdict on the chosen legs must never be a silent
+        // surprise — each rare-entry leg gets its own explicit warning.
+        for (const w of apiWarnings.slice(0, 3)) {
+          toast.warning(w, { duration: 16_000 });
+        }
       } else {
         toast.error("The bot builder did not confirm the strategy loaded — open Bot Builder and press Create DBot again.");
       }
@@ -416,6 +463,23 @@ export function OmniForgeConsole({
                 accent={bot.accent}
                 testId="omni-forge-normal-set"
               />
+
+              {/* Rare-entry preview — the Over 0 / Under 9 trap, visible BEFORE forging */}
+              {rareNormal.length > 0 && (
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-2.5 space-y-1" data-testid="rare-entry-hint">
+                  <p className="text-[10px] uppercase tracking-widest font-semibold text-amber-300 flex items-center gap-1.5">
+                    <AlertTriangle className="w-3 h-3" /> Rare-entry {rareNormal.length === 1 ? "leg" : "legs"} in the normal set
+                  </p>
+                  {rareNormal.map(r => (
+                    <p key={r.label} className="text-[9px] text-muted-foreground leading-snug">
+                      <span className="text-amber-200 font-semibold">{r.label}</span> pays {r.payout}× — break-even is{" "}
+                      {(r.breakEven * 100).toFixed(1)}% against a {(r.naturalRate * 100).toFixed(0)}% natural rate, so the
+                      bot only buys it on unusually hot tapes. Expect long quiet stretches; it trades more freely in the
+                      recovery set (looser gate), or set <span className="text-white/70 font-semibold">Force entry after</span> below.
+                    </p>
+                  ))}
+                </div>
+              )}
               <ContractSetEditor
                 title="Recovery contracts"
                 hint="After a loss the bot ranks THIS set on P(win | previous loss) — the state a recovery entry actually fires from — and sizes the stake to clear the debt."
@@ -463,10 +527,10 @@ export function OmniForgeConsole({
                 </button>
                 {showAdvanced && (
                   <div className="space-y-2 pl-1">
-                    <NumInput label="Tick window" value={gate.window} onChange={v => setGate(g => ({ ...g, window: v }))} min={20} max={300} step={10} accent={bot.accent}
-                              hint="Digits the running bot keeps per market. Longer = steadier estimate, slower to notice a regime change." />
+                    <NumInput label="Tick window" value={gate.window} onChange={v => setGate(g => ({ ...g, window: v }))} min={30} max={300} step={10} accent={bot.accent}
+                              hint="Digits the running bot keeps per market (30 is the gate's sample minimum). Longer = steadier estimate, slower to notice a regime change." />
                     <NumInput label="Force entry after" value={gate.forceEntryAfter} onChange={v => setGate(g => ({ ...g, forceEntryAfter: v }))} min={0} max={5000} step={1} accent={bot.accent}
-                              hint="0 = infinite patience. Otherwise the bot takes the highest-ranked candidate after this many refusals." />
+                              hint="0 = infinite patience. Otherwise the bot takes the highest-ranked candidate after this many refusals — the escape hatch for rare-entry legs like Over 0 / Under 9." />
                   </div>
                 )}
               </div>
@@ -494,6 +558,16 @@ export function OmniForgeConsole({
                     <Stat label="Normal set" value={lastBuild.normal.join(" · ")} />
                     <Stat label="Recovery set" value={lastBuild.recovery.join(" · ")} />
                   </div>
+                  {forgeWarnings.length > 0 && (
+                    <div className="space-y-1 pt-1 border-t border-white/5">
+                      {forgeWarnings.map(w => (
+                        <p key={w} className="text-[9px] text-amber-300/90 leading-snug flex items-start gap-1">
+                          <AlertTriangle className="w-2.5 h-2.5 flex-shrink-0 mt-px" />
+                          <span>{w}</span>
+                        </p>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
 

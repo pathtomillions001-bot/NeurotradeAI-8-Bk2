@@ -73,6 +73,24 @@ const FormatMessage = ({ logType, className, extra }: TFormatMessageProps) => {
                 return <Localize i18n_default_text='Welcome back! Your messages have been restored.' />;
             }
 
+            case LogTypes.RUN_METRICS: {
+                const { trades, ticks, busy, decision_ms, buy_ms, cycle_ms } = extra;
+                return (
+                    <Localize
+                        i18n_default_text='Run pace · trades {{trades}} of {{ticks}} ticks ({{busy}} in-contract) · decide {{decision_ms}}ms · buy {{buy_ms}}ms · cycle {{cycle_ms}}ms'
+                        values={{
+                            trades: String(trades ?? 0),
+                            ticks: String(ticks ?? 0),
+                            busy: String(busy ?? 0),
+                            decision_ms: String(decision_ms ?? 0),
+                            buy_ms: String(buy_ms ?? 0),
+                            cycle_ms: String(cycle_ms ?? 0),
+                        }}
+                        options={{ interpolation: { escapeValue: false } }}
+                    />
+                );
+            }
+
             case LogTypes.WELCOME: {
                 const { current_currency } = extra;
                 if (current_currency)

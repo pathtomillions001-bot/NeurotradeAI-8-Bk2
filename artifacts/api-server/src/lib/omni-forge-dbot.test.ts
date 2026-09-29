@@ -23,6 +23,10 @@ import {
   forgePayout,
   forgeFairRate,
   forgeLabel,
+  analyseForgeGate,
+  binomialTail,
+  rareEntrySentence,
+  MIN_GATE_WINDOW,
   OMNI_FORGE_BLOCK_TYPES,
   type OmniForgeInput,
 } from "./omni-forge-dbot";
@@ -132,6 +136,105 @@ describe("omni-forge forge-time maths", () => {
       { type: "DIGITMATCH", digit: -1 },
     ]);
     assert.equal(csv, "DIGITOVER:1:1.23,DIGITEVEN:-1:1.95,DIGITMATCH:-1:8.93");
+  });
+});
+
+describe("omni-forge gate diagnostics — the Over 0 / Under 9 dead zone, measured", () => {
+  it("Over 0 CAN qualify post-fix, but only on hot tapes — and is flagged tight", () => {
+    const [reading] = analyseForgeGate([{ type: "DIGITOVER", digit: 0 }], 120, "NORMAL");
+    assert.ok(reading);
+    // The runtime's EV + Wilson bounds first pass at 113/120 wins.
+    assert.equal(reading.minQualifyingWinRate, 113 / 120);
+    // The whole point of the runtime clustering guard: qualification is now
+    // possible at all (it was 0.0 — mathematically unreachable — before).
+    assert.ok(reading.qualificationChance > 0.03, `expected > 3%, got ${reading.qualificationChance}`);
+    assert.ok(reading.qualificationChance < 0.2, `expected < 20%, got ${reading.qualificationChance}`);
+    assert.equal(reading.tight, true); // 91.7% break-even vs 90% natural
+    assert.equal(reading.sparse, false); // rare, but real: ~8% of fair tapes
+  });
+
+  it("Under 9 is the symmetric trap; Differs shares the 1.09× price", () => {
+    const [under9] = analyseForgeGate([{ type: "DIGITUNDER", digit: 9 }], 120, "NORMAL");
+    const [differs] = analyseForgeGate([{ type: "DIGITDIFF", digit: -1 }], 120, "NORMAL");
+    assert.equal(under9?.tight, true);
+    assert.equal(differs?.tight, true);
+    assert.ok(under9 && differs && Math.abs(under9.qualificationChance - differs.qualificationChance) < 1e-12);
+  });
+
+  it("ordinary barriers keep comfortable headroom and are NOT flagged", () => {
+    for (const spec of [
+      { type: "DIGITOVER", digit: 1 },
+      { type: "DIGITUNDER", digit: 8 },
+      { type: "DIGITEVEN", digit: -1 },
+      { type: "DIGITMATCH", digit: -1 },
+    ] as const) {
+      const [reading] = analyseForgeGate([spec], 120, "NORMAL");
+      assert.equal(reading?.tight, false, `${spec.type} ${spec.digit} should have headroom`);
+      assert.ok(reading && reading.qualificationChance > 0.05);
+    }
+  });
+
+  it("recovery's looser gate admits Over 0 far more often — matching observed behaviour", () => {
+    const [normalReading] = analyseForgeGate([{ type: "DIGITOVER", digit: 0 }], 120, "NORMAL");
+    const [recoveryReading] = analyseForgeGate([{ type: "DIGITOVER", digit: 0 }], 120, "RECOVERY");
+    assert.ok(normalReading && recoveryReading);
+    assert.ok(recoveryReading.qualificationChance > normalReading.qualificationChance * 3);
+    assert.equal(recoveryReading.tight, true); // flagged for expectation setting either way
+  });
+
+  it("marks a leg unreachable below the gate's sample floor", () => {
+    const [reading] = analyseForgeGate([{ type: "DIGITOVER", digit: 4 }], 20, "NORMAL");
+    assert.equal(reading?.minQualifyingWinRate, null);
+    assert.equal(reading?.qualificationChance, 0);
+    assert.equal(reading?.sparse, true);
+  });
+
+  it("binomialTail is exact at the edges and sane in the middle", () => {
+    assert.equal(binomialTail(120, 0, 0.9), 1);
+    assert.equal(binomialTail(120, 121, 0.9), 0);
+    assert.ok(Math.abs(binomialTail(120, 120, 0.9) - Math.pow(0.9, 120)) < 1e-18);
+    assert.ok(Math.abs(binomialTail(120, 113, 0.9) - 0.0784) < 0.005);
+  });
+
+  it("forge warnings + a journal notice ride every rare-entry normal leg", () => {
+    const strategy = buildOmniForgeStrategy({
+      ...BASE,
+      normal: [
+        { type: "DIGITOVER", digit: 0 },
+        { type: "DIGITUNDER", digit: 9 },
+      ],
+    });
+    assert.equal(strategy.warnings.length, 2);
+    assert.match(strategy.warnings[0]!, /Over 0 pays 1\.09×/);
+    assert.match(strategy.warnings[0]!, /recovery set|Force entry after/);
+    assert.match(strategy.xml, /Rare-entry notice: Over 0, Under 9/);
+    assert.match(strategy.xml, /91\.7% tapes/);
+    // The diagnostics are also on the summary for the console's Last forge panel.
+    assert.equal(strategy.summary.gate.normal.length, 2);
+    assert.equal(strategy.summary.gate.normal[0]?.tight, true);
+    assert.equal(strategy.summary.gate.recovery.length, 2);
+
+    // The default mixed set keeps comfortable headroom: no warnings, no notice.
+    const baseline = buildOmniForgeStrategy(BASE);
+    assert.deepEqual(baseline.warnings, []);
+    assert.doesNotMatch(baseline.xml, /Rare-entry notice/);
+  });
+
+  it("the rare-entry sentence carries the contract's own numbers, not model jargon", () => {
+    const [reading] = analyseForgeGate([{ type: "DIGITOVER", digit: 0 }], 120, "NORMAL");
+    assert.ok(reading);
+    const sentence = rareEntrySentence(reading);
+    assert.match(sentence, /91\.7%/);
+    assert.doesNotMatch(sentence, /lower bound|LCB|Wilson|Markov|clustering|EV /i);
+  });
+
+  it("floors a sub-minimum tick window at the runtime's sample floor, loudly", () => {
+    const strategy = buildOmniForgeStrategy({ ...BASE, window: 20 });
+    assert.equal(strategy.summary.window, MIN_GATE_WINDOW);
+    assert.ok(strategy.warnings.some((w) => /Tick window 20/.test(w)));
+    assert.equal(strategy.summary.gate.window, MIN_GATE_WINDOW);
+    // A sane window is left untouched and silent.
+    assert.ok(!buildOmniForgeStrategy({ ...BASE, window: 120 }).warnings.some((w) => /Tick window/.test(w)));
   });
 });
 

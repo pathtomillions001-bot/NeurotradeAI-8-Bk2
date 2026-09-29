@@ -10,6 +10,7 @@ import { SpeedAIFab } from "./speed-ai-fab";
 import { AccountSwitcher } from "./account-switcher";
 import { LiveBotIndicator } from "./live-bot-indicator";
 import { useLiveBots } from "@/lib/live-bots";
+import { useIsBotBuilderActive } from "@/lib/use-bot-builder-active";
 import { preloadBotBuilder } from "@/lib/bot-builder-frame";
 
 const navItems = [
@@ -25,7 +26,13 @@ const navItems = [
 ];
 
 function NavContent({ location, onNavigate }: { location: string; onNavigate?: () => void }) {
-  const { data: engineStatus } = useGetAiEngineStatus({ query: { refetchInterval: 2000 } } as { query: any });
+  // Hot-path courtesy for the embedded Deriv builder: while it owns the main
+  // thread, stop re-rendering the shell every 2s — a render burst mid-tick can
+  // cost the running bot a whole trade opportunity on 1s-tick markets.
+  const isBotBuilder = useIsBotBuilderActive();
+  const { data: engineStatus } = useGetAiEngineStatus({
+    query: { refetchInterval: isBotBuilder ? false : 2000 },
+  } as { query: any });
   const toggleEngine = useToggleAutonomousEngine();
   // Show the server's reason when a toggle is refused (e.g. NeuroAI FAB session active).
   const handleToggle = (running: boolean) =>
@@ -100,7 +107,10 @@ export function Layout({ children }: { children: ReactNode }) {
   // The single source of truth for "which bot is live right now" — polled
   // every 5s + SSE, so a bot that starts in the background appears within
   // seconds and survives a page refresh (the poll re-runs on mount).
-  const liveBots = useLiveBots();
+  // On /bot-builder the interval pauses (builder's main-thread budget — see
+  // use-bot-builder-active.ts); SSE updates keep the chip correct meanwhile.
+  const isBotBuilder = useIsBotBuilderActive();
+  const liveBots = useLiveBots(isBotBuilder ? false : 5_000);
 
   // Boot the Deriv bot builder in the background the moment the app shell is
   // up: the (large) builder bundle downloads and initializes while the user is

@@ -101,10 +101,12 @@ export const OPEN_SPEED_AI_EVENT = "neurotrade:open-speed-ai";
 
 /**
  * All engines currently running for THIS session (the arbiter caps it at one).
- * Polls `/api/bots/live` on an interval and merges SSE `bot_update` payloads
- * between polls. Never throws — an unreachable API keeps the last known state.
+ * Polls `/api/bots/live` on an interval (pass `false` as pollMs to disable the
+ * interval — the one-shot mount refresh and SSE updates still run) and merges
+ * SSE `bot_update` payloads between polls. Never throws — an unreachable API
+ * keeps the last known state.
  */
-export function useLiveBots(pollMs = 5_000): LiveBot[] {
+export function useLiveBots(pollMs: number | false = 5_000): LiveBot[] {
   const [live, setLive] = useState<LiveBot[]>([]);
 
   const refresh = useCallback(async () => {
@@ -121,6 +123,9 @@ export function useLiveBots(pollMs = 5_000): LiveBot[] {
 
   useEffect(() => {
     void refresh();
+    // Polling is paused while the embedded bot builder owns the main thread
+    // (see use-bot-builder-active.ts); SSE keeps the indicator live meanwhile.
+    if (pollMs === false) return;
     const id = setInterval(() => void refresh(), pollMs);
     return () => clearInterval(id);
   }, [refresh, pollMs]);

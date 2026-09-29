@@ -5,6 +5,7 @@ import { createError } from '../../../utils/error';
 import { observer as globalObserver } from '../../../utils/observer';
 import { api_base } from '../../api/api-base';
 import { checkBlocksForProposalRequest, doUntilDone } from '../utils/helpers';
+import RunMetrics from '../utils/run-metrics';
 import { expectInitArg } from '../utils/sanitize';
 import { proposalsReady, start } from './state/actions';
 import * as constants from './state/constants';
@@ -76,6 +77,13 @@ export default class TradeEngine extends Balance(DigitForge(Purchase(Sell(OpenCo
         this.subscription_id_for_accumulators = null;
         this.is_proposal_requested_for_accumulators = false;
         this.store = createStore(rootReducer, applyMiddleware(thunk));
+        // Run-cadence telemetry (reset per user-initiated run in init()).
+        this.run_metrics = new RunMetrics();
+        this.nt_last_proposal_check = 0;
+        if (typeof window !== 'undefined') {
+            // Console escape hatch: __NT_RUN_METRICS__() prints live cadence.
+            window.__NT_RUN_METRICS__ = () => this.run_metrics?.snapshot();
+        }
     }
 
     init(...args) {
@@ -86,6 +94,9 @@ export default class TradeEngine extends Balance(DigitForge(Purchase(Sell(OpenCo
         this.nt_digit_prepared = null;
         this.nt_digit_recovery_confirmation = undefined;
         this.nt_digit_live_payouts = new Map();
+        // Fresh user-initiated run: cadence telemetry starts from zero.
+        this.run_metrics?.reset();
+        this.nt_last_proposal_check = 0;
         this.initArgs = args;
         this.options = options;
         this.startPromise = this.loginAndGetBalance(token);

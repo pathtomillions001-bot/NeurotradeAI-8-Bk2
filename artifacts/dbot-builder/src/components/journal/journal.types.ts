@@ -7,6 +7,13 @@ type TExtraFilterMessage = {
 type TExtraJournal = {
     longcode: string;
     transaction_id: number;
+    // Optional run-cadence telemetry payload (LogTypes.RUN_METRICS).
+    trades?: number;
+    ticks?: number;
+    busy?: number;
+    decision_ms?: number;
+    buy_ms?: number;
+    cycle_ms?: number;
 };
 
 export type TDateItemProps = Record<'date' | 'time', string>;

@@ -13,6 +13,7 @@ import { analyseTurboRecovery } from './turbo-recovery-analysis';
 import { analyseDigitForgeCandidate, DIGIT_FORGE_ANALYSIS_LIMITS } from './digit-forge-analysis';
 import { DIGIT_FORGE_CONTRACTS } from './digit-forge-contracts';
 import { analyseSurgeMarket, SURGE_FORGE_LIMITS } from './surge-forge-analysis';
+import { analyseOmniForgeCandidate, OMNI_FORGE_LIMITS } from './omni-forge-analysis';
 
 let tickListenerKey;
 // The symbol `tickListenerKey` belongs to. Without it, `watchTicks` asked the
@@ -20,8 +21,24 @@ let tickListenerKey;
 // a no-op that silently left the previous monitor registered.
 let tickListenerSymbol;
 
+// Proposal ids expire server-side within seconds. Once proposals are ready we
+// no longer re-select them on EVERY tick (stock deriv-bot does, burning CPU on
+// redux dispatches and template scans), but we refresh on this cadence so a
+// bot that idles between entries never tries to buy a long-dead proposal id.
+const PROPOSAL_REFRESH_INTERVAL_MS = 4000;
+
 export default Engine =>
     class Ticks extends Engine {
+        /**
+         * Proposal hygiene gate for the per-tick callback: real work only while
+         * proposals are pending, plus a low-frequency keepalive after that.
+         */
+        shouldCheckProposalReadiness() {
+            if (!this.is_proposal_subscription_required) return false;
+            if (!this.store.getState().proposalsReady) return true;
+            return Date.now() - (this.nt_last_proposal_check || 0) >= PROPOSAL_REFRESH_INTERVAL_MS;
+        }
+
         async watchTicks(symbol) {
             if (symbol && this.symbol !== symbol) {
                 const previous = tickListenerSymbol ?? this.symbol;
@@ -35,7 +52,8 @@ export default Engine =>
                     });
                 }
                 const callback = ticks => {
-                    if (this.is_proposal_subscription_required) {
+                    if (this.shouldCheckProposalReadiness()) {
+                        this.nt_last_proposal_check = Date.now();
                         this.checkProposalReady();
                     }
                     const lastTick = Array.isArray(ticks) ? ticks[ticks.length - 1] : undefined;
@@ -44,6 +62,14 @@ export default Engine =>
                     // inside the tick callback, which killed the listener and
                     // left the bot waiting for a tick that never came.
                     if (!lastTick || lastTick.epoch === undefined) return;
+                    const { scope } = this.store.getState();
+                    this.run_metrics?.recordTick(
+                        scope === constants.BEFORE_PURCHASE
+                            ? 'armed'
+                            : scope === constants.DURING_PURCHASE
+                              ? 'busy'
+                              : 'idle'
+                    );
                     this.store.dispatch({ type: constants.NEW_TICK, payload: lastTick.epoch });
                 };
 
@@ -318,28 +344,41 @@ export default Engine =>
             return value === undefined ? (field === 'reason' ? 'surge analysis warming up' : 0) : value;
         }
 
-        /**
-         * Omni Forge: rank a USER-DEFINED candidate set — any mix of
-         * Over/Under barriers, Even/Odd, Matches/Differs — across all watched
-         * markets. Same runtime philosophy as ntAnalyseDigitMarkets (no server
-         * or hidden AI in the loop after Run), but the candidate list is not
-         * hardcoded: the generated XML carries it as `TYPE:DIGIT:PAYOUT` CSV
-         * entries (DIGIT −1 = none for parity contracts / auto-pick for
-         * Matches & Differs).
-         *
-         * Mathematics per candidate per market, over the last W digits:
-         *   · Beta(20·p0, 20·(1−p0)) prior shrinks short tapes to fair odds
-         *   · Wilson one-sided 90% lower bound vs the payout's break-even
-         *   · 2-state Markov chain (add-one smoothed); RECOVERY mode weighs
-         *     P(win | previous loss) because that is its true entry state —
-         *     this is what times the recovery shot instead of firing blind
-         *   · loss-clustering ratio and split-half instability as penalties
-         * NORMAL mode demands a proven edge; RECOVERY mode is deliberately
-         * looser (repayment speed beats selectivity) but still refuses tapes
-         * where losses cluster or the candidate is under water.
-         */
+/**
+ * Omni Forge: rank a USER-DEFINED candidate set — any mix of
+ * Over/Under barriers, Even/Odd, Matches/Differs — across all watched
+ * markets. Same runtime philosophy as ntAnalyseDigitMarkets (no server
+ * or hidden AI in the loop after Run), but the candidate list is not
+ * hardcoded: the generated XML carries it as `TYPE:DIGIT:PAYOUT` CSV
+ * entries (DIGIT −1 = none for parity contracts / auto-pick for
+ * Matches & Differs).
+ *
+ * Mathematics per candidate per market, over the last W digits:
+ *   · Beta(20·p0, 20·(1−p0)) prior shrinks short tapes to fair odds
+ *   · Wilson one-sided 90% lower bound vs the payout's break-even
+ *   · 2-state Markov chain (add-one smoothed); RECOVERY mode weighs
+ *     P(win | previous loss) because that is its true entry state —
+ *     this is what times the recovery shot instead of firing blind
+ *   · loss-clustering ratio and split-half instability as penalties
+ * NORMAL mode demands a proven edge; RECOVERY mode is deliberately
+ * looser (repayment speed beats selectivity) but still refuses tapes
+ * where losses cluster or the candidate is under water.
+ *
+ * CLUSTERING GUARD (see analyseOmniForgeCandidate): the ratio divides
+ * by the tape's own loss rate, which collapses exactly when a leg is
+ * about to qualify — Over 0 / Under 9 / Differs price at ~1.09× so
+ * their break-even (91.7%) only admits tapes with ≤ 8% losses. Below
+ * ~OMNI_FORGE_MIN_CLUSTER_LOSSES observed losses the add-one-smoothed
+ * P(loss|loss) is pure smoothing noise ((ll+1)/(ll+lw+2) reads
+ * ≈ 1/(losses+2) no matter how losses are arranged) divided by a
+ * near-zero reference, so the penalty could NEVER pass and those legs
+ * were mathematically barred from normal mode. With too few losses to
+ * measure clustering the statistic is treated as neutral (1); the EV
+ * and Wilson bounds still refuse weak tapes on their own.
+ */
         async ntAnalyseContracts(mode = 'NORMAL', marketsCsv = '', contractsCsv = '', requestedWindow = 120) {
             const isRecovery = mode === 'RECOVERY';
+            const limits = isRecovery ? OMNI_FORGE_LIMITS.recovery : OMNI_FORGE_LIMITS.normal;
             const KNOWN = ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF'];
             const FALLBACK_PAYOUT = {
                 DIGITOVER: 1.95,
@@ -376,7 +415,6 @@ export default Engine =>
             ].slice(0, 8);
             if (!markets.includes(this.symbol)) markets.unshift(this.symbol);
             const windowSize = Math.max(20, Math.min(300, Number(requestedWindow) || 120));
-            const z = 1.282; // one-sided 90% — rejects noise without endless silence
             const rows = [];
             const fallbackSpec = specs[0] ?? {
                 type: 'DIGITOVER',
@@ -426,65 +464,16 @@ export default Engine =>
                             p0 = 0.9;
                         }
                         const wins = digits.map(winOf);
-                        const n = wins.length;
-                        const hits = wins.filter(Boolean).length;
-                        const probability = (hits + 20 * p0) / (n + 20);
-                        const denom = 1 + (z * z) / n;
-                        const centre = probability + (z * z) / (2 * n);
-                        const spread = z * Math.sqrt((probability * (1 - probability) + (z * z) / (4 * n)) / n);
-                        const lowerBound = (centre - spread) / denom;
-                        const breakEven = 1 / spec.payout;
-                        const ev = probability * spec.payout - 1;
-                        let ll = 0,
-                            lw = 0,
-                            wl = 0,
-                            ww = 0;
-                        for (let i = 1; i < n; i++) {
-                            if (!wins[i - 1] && !wins[i]) ll++;
-                            else if (!wins[i - 1]) lw++;
-                            else if (!wins[i]) wl++;
-                            else ww++;
-                        }
-                        const afterLoss = (lw + 1) / (ll + lw + 2);
-                        const afterWin = (ww + 1) / (wl + ww + 2);
-                        const markov = wins[n - 1] ? afterWin : afterLoss;
-                        const lossRate = 1 - probability;
-                        const clustering = (ll + 1) / (ll + lw + 2) / Math.max(0.01, lossRate);
-                        const half = Math.max(10, Math.floor(n / 2));
-                        const recent = wins.slice(-half).filter(Boolean).length / half;
-                        const prior = wins.slice(0, half).filter(Boolean).length / half;
-                        const instability = Math.abs(recent - prior);
-                        // RECOVERY conditions on the loss state it actually enters from.
-                        const conditionalEdge = (isRecovery ? afterLoss : markov) - breakEven;
-                        const score =
-                            100 *
-                            ((lowerBound - breakEven) * 0.55 +
-                                conditionalEdge * 0.25 +
-                                ev * 0.2 -
-                                instability * 0.2 -
-                                Math.max(0, clustering - 1) * 0.08);
-                        const eligible = isRecovery
-                            ? n >= 20 && ev > -0.01 && lowerBound > breakEven - 0.05 && clustering < 1.6
-                            : n >= 30 &&
-                              ev > 0 &&
-                              lowerBound > breakEven - 0.025 &&
-                              instability < 0.16 &&
-                              clustering < 1.45;
+                        // All per-candidate maths lives in the pure module so
+                        // the exact runtime gate is jest-testable and can be
+                        // mirrored by the API's forge-time diagnostics.
+                        const analysis = analyseOmniForgeCandidate({ wins, p0, payout: spec.payout, mode });
                         rows.push({
                             symbol,
                             contract: spec.type,
                             barrier: digit,
                             payout: spec.payout,
-                            samples: n,
-                            probability,
-                            lowerBound,
-                            breakEven,
-                            ev,
-                            markov,
-                            clustering,
-                            instability,
-                            score,
-                            eligible,
+                            ...analysis,
                         });
                     }
                 } catch (_) {
@@ -511,15 +500,15 @@ export default Engine =>
                 return false;
             }
             const blockers = [];
-            if (best.samples < (isRecovery ? 20 : 30)) blockers.push(`samples ${best.samples}/${isRecovery ? 20 : 30}`);
-            if (best.ev <= (isRecovery ? -0.01 : 0)) blockers.push(`EV ${(best.ev * 100).toFixed(2)}%`);
-            if (best.lowerBound <= best.breakEven - (isRecovery ? 0.05 : 0.025))
+            if (best.samples < limits.minSamples) blockers.push(`samples ${best.samples}/${limits.minSamples}`);
+            if (best.ev <= limits.minEv) blockers.push(`EV ${(best.ev * 100).toFixed(2)}%`);
+            if (best.lowerBound <= best.breakEven - limits.lowerBoundMargin)
                 blockers.push(
                     `lower bound ${(best.lowerBound * 100).toFixed(1)}% vs BE ${(best.breakEven * 100).toFixed(1)}%`
                 );
-            if (!isRecovery && best.instability >= 0.16)
+            if (best.instability >= limits.maxInstability)
                 blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
-            if (best.clustering >= (isRecovery ? 1.6 : 1.45))
+            if (best.clustering >= limits.maxClustering)
                 blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
             this.nt_contract_decision = {
                 ...best,

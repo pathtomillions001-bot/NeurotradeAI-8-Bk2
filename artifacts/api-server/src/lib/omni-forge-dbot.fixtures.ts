@@ -50,7 +50,9 @@ export const OMNI_FORGE_FIXTURES: Record<string, OmniForgeInput> = {
    * Parity recovery on a 1s market: Under 7 normal, Even-only recovery. The
    * builder suite drives the shared recovery ladder through this shape and
    * proves an Even purchase carries NO digit while Under carries its barrier.
-   * Boundaries wide so the scripted market controls the run.
+   * Boundaries wide so the scripted market controls the run. The window: 20
+   * below deliberately exercises the generator's floor — the normal gate
+   * needs 30 samples, so the committed XML carries 30 and a warning.
    */
   "omni-forge-1hz100v-under7-even": {
     symbol: "1HZ100V",

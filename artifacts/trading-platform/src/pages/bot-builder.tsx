@@ -49,25 +49,37 @@ export default function BotBuilder() {
   // Keep the builder's session aligned with the account enabled in NeuroTrade:
   // whichever account is active in the app (demo or real) is the one that
   // trades when the user presses Run.
+  //
+  // The postMessage is cheap, but it wakes the builder's main thread — which
+  // is exactly where a running bot's tick loop lives — so it is deduped: only
+  // an actual (connected, loginId) change is pushed into the frame.
+  const lastSyncKeyRef = useRef<string | null>(null);
+  const pushSessionSync = useCallback(
+    (force = false) => {
+      const key = `${Boolean(connectedLoginId)}|${connectedLoginId ?? ""}`;
+      if (!force && lastSyncKeyRef.current === key) return;
+      lastSyncKeyRef.current = key;
+      syncBotBuilderSession(Boolean(connectedLoginId), connectedLoginId);
+    },
+    [connectedLoginId],
+  );
+
   useEffect(() => {
-    syncBotBuilderSession(Boolean(connectedLoginId), connectedLoginId);
-  }, [connectedLoginId]);
+    pushSessionSync();
+  }, [pushSessionSync]);
 
   // Also re-sync right after the page (re)mounts — the frame may have been
   // shown before the account query above resolved.
-  const resyncOnShow = useCallback(() => {
-    syncBotBuilderSession(Boolean(connectedLoginId), connectedLoginId);
-  }, [connectedLoginId]);
   useEffect(() => {
     // The frame is shown synchronously by the effect above; give it a tick
     // so the builder document (on first ever load) has listeners registered.
-    const timeout = window.setTimeout(resyncOnShow, 300);
-    const interval = window.setInterval(resyncOnShow, 4000);
+    const timeout = window.setTimeout(() => pushSessionSync(true), 300);
+    const interval = window.setInterval(() => pushSessionSync(), 4000);
     return () => {
       window.clearTimeout(timeout);
       window.clearInterval(interval);
     };
-  }, [resyncOnShow]);
+  }, [pushSessionSync]);
 
   return (
     <div

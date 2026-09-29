@@ -5,6 +5,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { useGetAccounts, useSwitchAccount, useGetAccount } from "@workspace/api-client-react";
 import { ApiError } from "@workspace/api-client-react";
+import { useIsBotBuilderActive } from "@/lib/use-bot-builder-active";
 
 interface DerivAccount {
   id: number;
@@ -19,10 +20,13 @@ interface DerivAccount {
 export function AccountSwitcher() {
   const [open, setOpen] = useState(false);
   const queryClient = useQueryClient();
+  // Pause the account-list poll while the embedded bot builder owns the main
+  // thread (its trading engine shares that thread; see use-bot-builder-active).
+  const isBotBuilder = useIsBotBuilderActive();
 
   const { data: accounts, isLoading } = useGetAccounts({
     query: {
-      refetchInterval: 15_000,
+      refetchInterval: isBotBuilder ? false : 15_000,
       retry: (count: number, err: unknown) => {
         if (err instanceof ApiError && err.status === 404) return false;
         return count < 2;

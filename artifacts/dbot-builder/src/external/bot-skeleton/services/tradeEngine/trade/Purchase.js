@@ -8,6 +8,8 @@ import { BEFORE_PURCHASE } from './state/constants';
 let delayIndex = 0;
 let purchase_reference;
 
+const nowMs = () => (typeof performance !== 'undefined' ? performance : Date).now();
+
 export default Engine =>
     class Purchase extends Engine {
         /**
@@ -52,6 +54,10 @@ export default Engine =>
                 return Promise.resolve(false);
             }
             this.is_purchasing = true;
+            // Run-cadence telemetry: decision latency ends here (tick → this
+            // call) and entry latency begins (this call → buy response).
+            this.run_metrics?.recordBuyRequest();
+            const request_started_at = nowMs();
 
             const resetPurchasing = () => {
                 this.is_purchasing = false;
@@ -59,6 +65,7 @@ export default Engine =>
 
             const onSuccess = response => {
                 resetPurchasing();
+                this.run_metrics?.recordPurchase(nowMs() - request_started_at);
                 // Don't unnecessarily send a forget request for a purchased contract.
                 const { buy } = response;
 

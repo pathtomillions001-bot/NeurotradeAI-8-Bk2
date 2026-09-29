@@ -2,7 +2,6 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { builderStampPath, hashBuilderSources } from "./bot-skeleton-hash.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const webRoot = path.resolve(__dirname, "..");
@@ -84,33 +83,3 @@ function stripRemoteCssImports(dir) {
 }
 
 stripRemoteCssImports(path.join(builderRoot, "out", "preview"));
-
-// ── Build stamp ───────────────────────────────────────────────────────────────
-// Write the bundle's identity (git sha + CONTENT hash of the bot-skeleton and
-// bridge sources) next to the output. The dev server and the Bot Arena compare
-// this stamp against the live sources — a stale bundle otherwise runs old
-// generated-code preambles / block generators against new forge XML and fails
-// only when the user presses Run, with an interpreter error that never
-// mentions staleness (the ".epoch is not a function" incident).
-const stamped = hashBuilderSources();
-const sha =
-  (process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? process.env.COMMIT_SHA ?? "")
-    .trim() ||
-  spawnSync("git", ["rev-parse", "--short=7", "HEAD"], { cwd: builderRoot, encoding: "utf8" })
-    .stdout?.trim() ||
-  "unknown";
-if (stamped) {
-  const stamp = {
-    service: "dbot-builder",
-    sha,
-    skeletonHash: stamped.hash,
-    sourceFiles: stamped.files,
-    builtAt: new Date().toISOString(),
-  };
-  fs.writeFileSync(builderStampPath(path.join(builderRoot, "out", "preview")), `${JSON.stringify(stamp, null, 2)}\n`);
-  console.log(
-    `[dbot-builder] Stamped bundle: sha ${stamp.sha} · skeleton ${stamp.skeletonHash} (${stamp.sourceFiles} files)`,
-  );
-} else {
-  console.warn("[dbot-builder] Could not hash builder sources — bundle left UNSTAMPED.");
-}

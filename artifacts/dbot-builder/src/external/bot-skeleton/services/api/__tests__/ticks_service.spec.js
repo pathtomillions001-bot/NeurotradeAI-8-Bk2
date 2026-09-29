@@ -10,7 +10,7 @@
  */
 
 import { api_base } from '../api-base';
-import TicksService from '../ticks_service';
+import TicksService, { updateCandles } from '../ticks_service';
 
 jest.mock('../api-base', () => ({
     api_base: {
@@ -53,6 +53,16 @@ function fakeApi() {
 const flush = () => new Promise(resolve => setTimeout(resolve, 0));
 
 describe('TicksService — stream resilience for switching bots', () => {
+    it('seeds an empty candle tape instead of reading epoch from undefined', () => {
+        const candle = { open: 100, high: 101, low: 99, close: 100.5, epoch: 1700000000 };
+        expect(updateCandles([], candle)).toEqual([candle]);
+        expect(updateCandles(undefined, candle)).toEqual([candle]);
+    });
+
+    it('does not throw when a reconnect delivers an incomplete candle', () => {
+        const candles = [{ open: 100, high: 101, low: 99, close: 100.5, epoch: 1700000000 }];
+        expect(() => updateCandles(candles, {})).not.toThrow();
+    });
     let service;
     let api;
 

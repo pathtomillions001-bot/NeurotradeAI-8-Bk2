@@ -32,8 +32,16 @@ const updateTicks = (ticks, newTick) => {
     return last.epoch >= newTick.epoch ? ticks : [...ticks.slice(1), newTick];
 };
 
-const updateCandles = (candles, ohlc) => {
+export const updateCandles = (candles, ohlc) => {
+    // OHLC history can be empty during a reconnect, market switch, or when
+    // Deriv has no candle for the requested symbol yet. `getLast([])` is
+    // undefined; never let that transient response escape the socket handler.
+    if (!Array.isArray(candles) || candles.length === 0) return [ohlc];
+
     const lastCandle = getLast(candles);
+    if (!lastCandle || !Number.isFinite(lastCandle.epoch) || !Number.isFinite(ohlc?.epoch)) {
+        return [...candles.slice(1), ohlc];
+    }
     if (
         (lastCandle.open === ohlc.open &&
             lastCandle.high === ohlc.high &&
@@ -225,7 +233,7 @@ export default class TicksService {
     }
 
     updateCandlesAndCallListeners(address, candles) {
-        if (this.ticks.getIn(address) === candles) {
+        if (this.candles.getIn(address) === candles) {
             return;
         }
         this.candles = this.candles.setIn(address, candles);

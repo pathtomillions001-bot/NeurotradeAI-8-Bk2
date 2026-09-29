@@ -1,13 +1,11 @@
 /**
- * Routes for Omni Forge — the fully user-configurable DBot factory.
+ * Routes for Universal Forge — a user-composed DBot factory that can mix
+ * digit contracts and Rise/Fall in independent normal/recovery sets.
  *
- * Like Digit Forge, Omni Forge has NO scan and NO engine: it never analyses
- * anything server-side and never takes a trade. The console collects the
- * user's OWN contract sets — any mix of Over/Under barriers, Even/Odd and
- * Matches/Differs for normal trades, and an independent mix for recovery —
- * this route renders a Deriv Bot (Blockly) strategy that carries its own
- * analysis, and the web app hands that XML to the embedded builder. Deriv's
- * Run button owns execution from there.
+ * The server still does not trade here: it validates the user's selected
+ * contracts and renders a Blockly DBot whose own runtime ranker analyses,
+ * times, switches markets safely and executes after Deriv's Run button is
+ * pressed in the Bot Builder.
  */
 
 import { Router } from "express";
@@ -21,7 +19,7 @@ import {
   forgePayout,
   forgeFairRate,
   forgeLabel,
-  DIGIT_FORGE_CONTRACT_TYPES,
+  FORGE_CONTRACT_TYPES,
   type ForgeContractSpec,
   type ForgeContractType,
   type OmniForgeInput,
@@ -34,7 +32,7 @@ function parseSpecs(raw: unknown): ForgeContractSpec[] {
   if (!Array.isArray(raw)) return [];
   return raw
     .map((entry: any): ForgeContractSpec | null => {
-      const type = (DIGIT_FORGE_CONTRACT_TYPES as readonly string[]).includes(
+      const type = (FORGE_CONTRACT_TYPES as readonly string[]).includes(
         entry?.type,
       )
         ? (entry.type as ForgeContractType)
@@ -48,7 +46,6 @@ function parseSpecs(raw: unknown): ForgeContractSpec[] {
     .filter((s): s is ForgeContractSpec => s !== null);
 }
 
-/** The user's risk settings — the same two the executors read. */
 async function riskSettings(
   sessionId: string,
 ): Promise<{ markupPercent: number; maxStake: number }> {
@@ -72,7 +69,6 @@ async function riskSettings(
   return { markupPercent, maxStake };
 }
 
-/** Account currency — the builder's trade options are denominated in it. */
 async function accountCurrency(sessionId: string): Promise<string> {
   try {
     let accounts = await db
@@ -99,74 +95,88 @@ async function accountCurrency(sessionId: string): Promise<string> {
   return "USD";
 }
 
-/**
- * The console's vocabulary: every contract type with its digit rules and
- * canonical payout, plus the digit markets — so the panel can never offer a
- * combination the generator rejects.
- */
+function describeContract(type: ForgeContractType) {
+  switch (type) {
+    case "CALL":
+      return {
+        label: "Rise",
+        digitLabel: null,
+        digitMin: null,
+        digitMax: null,
+        allowsAuto: false,
+        needsDigit: false,
+      };
+    case "PUT":
+      return {
+        label: "Fall",
+        digitLabel: null,
+        digitMin: null,
+        digitMax: null,
+        allowsAuto: false,
+        needsDigit: false,
+      };
+    case "DIGITOVER":
+      return {
+        label: "Digits Over",
+        digitLabel: "Barrier",
+        digitMin: 0,
+        digitMax: 8,
+        allowsAuto: false,
+        needsDigit: true,
+      };
+    case "DIGITUNDER":
+      return {
+        label: "Digits Under",
+        digitLabel: "Barrier",
+        digitMin: 1,
+        digitMax: 9,
+        allowsAuto: false,
+        needsDigit: true,
+      };
+    case "DIGITEVEN":
+      return {
+        label: "Even",
+        digitLabel: null,
+        digitMin: null,
+        digitMax: null,
+        allowsAuto: false,
+        needsDigit: false,
+      };
+    case "DIGITODD":
+      return {
+        label: "Odd",
+        digitLabel: null,
+        digitMin: null,
+        digitMax: null,
+        allowsAuto: false,
+        needsDigit: false,
+      };
+    case "DIGITMATCH":
+      return {
+        label: "Matches",
+        digitLabel: "Digit",
+        digitMin: 0,
+        digitMax: 9,
+        allowsAuto: true,
+        needsDigit: false,
+      };
+    case "DIGITDIFF":
+      return {
+        label: "Differs",
+        digitLabel: "Digit",
+        digitMin: 0,
+        digitMax: 9,
+        allowsAuto: true,
+        needsDigit: false,
+      };
+  }
+}
+
 router.get("/options", (_req, res) => {
-  const describe = (type: (typeof DIGIT_FORGE_CONTRACT_TYPES)[number]) => {
-    switch (type) {
-      case "DIGITOVER":
-        return {
-          label: "Digits Over",
-          digitLabel: "Barrier",
-          digitMin: 0,
-          digitMax: 8,
-          allowsAuto: false,
-          needsDigit: true,
-        };
-      case "DIGITUNDER":
-        return {
-          label: "Digits Under",
-          digitLabel: "Barrier",
-          digitMin: 1,
-          digitMax: 9,
-          allowsAuto: false,
-          needsDigit: true,
-        };
-      case "DIGITEVEN":
-        return {
-          label: "Even",
-          digitLabel: null,
-          digitMin: null,
-          digitMax: null,
-          allowsAuto: false,
-          needsDigit: false,
-        };
-      case "DIGITODD":
-        return {
-          label: "Odd",
-          digitLabel: null,
-          digitMin: null,
-          digitMax: null,
-          allowsAuto: false,
-          needsDigit: false,
-        };
-      case "DIGITMATCH":
-        return {
-          label: "Matches",
-          digitLabel: "Digit",
-          digitMin: 0,
-          digitMax: 9,
-          allowsAuto: true,
-          needsDigit: false,
-        };
-      case "DIGITDIFF":
-        return {
-          label: "Differs",
-          digitLabel: "Digit",
-          digitMin: 0,
-          digitMax: 9,
-          allowsAuto: true,
-          needsDigit: false,
-        };
-    }
-  };
   res.json({
-    contractTypes: DIGIT_FORGE_CONTRACT_TYPES.map((type) => ({
+    contractTypes: FORGE_CONTRACT_TYPES.map((type) => ({
       type,
-      ...describe(type),
+      ...describeContract(type),
       payout: forgePayout({
         type,
         digit: type === "DIGITOVER" ? 4 : type === "DIGITUNDER" ? 5 : -1,
@@ -188,26 +198,22 @@ router.get("/options", (_req, res) => {
         forgePayout({ type: "DIGITUNDER", digit: i + 1 }),
       ]),
     ),
-    markets: AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map((m) => ({
+    markets: AUTOMATED_DERIV_MARKETS.map((m) => ({
       symbol: m.symbol,
       displayName: m.displayName,
+      digitEnabled: m.digitEnabled,
     })),
   });
 });
 
-/**
- * Build the strategy. Nothing starts here — the web app posts the XML into
- * the embedded Deriv bot builder, the user verifies the blocks and presses Run.
- */
 router.post("/dbot", async (req, res): Promise<void> => {
   const body = req.body ?? {};
-
   const symbol = typeof body.symbol === "string" ? body.symbol : "";
   const market = isAutomatedMarket(symbol)
     ? AUTOMATED_DERIV_MARKETS.find((m) => m.symbol === symbol)
     : undefined;
-  if (!market?.digitEnabled) {
-    res.status(400).json({ error: "Choose a digit-enabled market" });
+  if (!market) {
+    res.status(400).json({ error: "Choose a supported automated market" });
     return;
   }
 
@@ -225,9 +231,7 @@ router.post("/dbot", async (req, res): Promise<void> => {
   const watchMarkets = (
     requestedWatchMarkets.length > 0
       ? requestedWatchMarkets
-      : AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map(
-          (m) => m.symbol,
-        )
+      : AUTOMATED_DERIV_MARKETS.map((m) => m.symbol)
   ).slice(0, 8);
 
   try {
@@ -257,30 +261,31 @@ router.post("/dbot", async (req, res): Promise<void> => {
         ? Number(body.forceEntryAfter)
         : undefined,
       watchMarkets,
+      strategyName: "Universal Forge",
     };
 
     const strategy = buildOmniForgeStrategy(input);
     res.json({ ok: true, ...strategy });
   } catch (err) {
     const message =
-      err instanceof Error ? err.message : "Could not build the strategy";
-    logger.warn({ err }, "omni-forge dbot build failed");
+      err instanceof Error
+        ? err.message
+        : "Could not build the Universal Forge strategy";
+    logger.warn({ err }, "universal-forge dbot build failed");
     res.status(400).json({ error: message });
   }
 });
 
-/**
- * Risk preview for the panel — the worst-case ladder over the CHOSEN recovery
- * set, so the user sees the capital a ladder can consume BEFORE they build it.
- */
 router.post("/risk", async (req, res): Promise<void> => {
   let recovery: ForgeContractSpec[];
   try {
     recovery = normaliseForgeSet(parseSpecs(req.body?.recovery), "recovery");
   } catch (err) {
-    res.status(400).json({
-      error: err instanceof Error ? err.message : "invalid recovery set",
-    });
+    res
+      .status(400)
+      .json({
+        error: err instanceof Error ? err.message : "invalid recovery set",
+      });
     return;
   }
   const depth = Math.max(

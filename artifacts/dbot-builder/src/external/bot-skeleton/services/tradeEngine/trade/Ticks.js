@@ -396,7 +396,16 @@ export default Engine =>
         async ntAnalyseContracts(mode = 'NORMAL', marketsCsv = '', contractsCsv = '', requestedWindow = 120) {
             const isRecovery = mode === 'RECOVERY';
             const limits = isRecovery ? OMNI_FORGE_LIMITS.recovery : OMNI_FORGE_LIMITS.normal;
-            const KNOWN = ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF'];
+            const KNOWN = [
+                'DIGITOVER',
+                'DIGITUNDER',
+                'DIGITEVEN',
+                'DIGITODD',
+                'DIGITMATCH',
+                'DIGITDIFF',
+                'CALL',
+                'PUT',
+            ];
             const FALLBACK_PAYOUT = {
                 DIGITOVER: 1.95,
                 DIGITUNDER: 1.95,
@@ -404,6 +413,8 @@ export default Engine =>
                 DIGITODD: 1.95,
                 DIGITMATCH: 8.93,
                 DIGITDIFF: 1.09,
+                CALL: 1.92,
+                PUT: 1.92,
             };
             const specs = String(contractsCsv)
                 .split(',')
@@ -443,44 +454,58 @@ export default Engine =>
             const scanOne = async symbol => {
                 try {
                     const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: SCAN_RETRY_LIMIT });
-                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
-                    const digits = ticks.slice(-windowSize).map(t => getLastDigit(Number(t.quote).toFixed(pip)));
-                    if (digits.length < 20) return;
+                    const tail = (Array.isArray(ticks) ? ticks : [])
+                        .filter(t => t && Number.isFinite(Number(t.quote)) && Number.isFinite(Number(t.epoch)))
+                        .slice(-windowSize);
+                    if (tail.length < 2) return;
+                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize() ?? 2;
+                    const prices = tail.map(t => Number(t.quote));
+                    const digits = tail.map(t => getLastDigit(Number(t.quote).toFixed(pip)));
                     const counts = Array.from({ length: 10 }, () => 0);
-                    for (const d of digits) counts[d] += 1;
+                    for (const d of digits) if (Number.isInteger(d) && d >= 0 && d <= 9) counts[d] += 1;
                     for (const spec of specs) {
-                        // Resolve the candidate to a concrete (winFn, p0, digit).
+                        // Resolve the candidate to a concrete win tape, fair rate and digit.
                         let digit = spec.digit;
-                        let winOf;
+                        let wins = [];
                         let p0;
-                        if (spec.type === 'DIGITOVER') {
-                            if (digit < 0 || digit > 8) continue;
-                            winOf = d => d > digit;
-                            p0 = (9 - digit) / 10;
-                        } else if (spec.type === 'DIGITUNDER') {
-                            if (digit < 1 || digit > 9) continue;
-                            winOf = d => d < digit;
-                            p0 = digit / 10;
-                        } else if (spec.type === 'DIGITEVEN') {
-                            digit = -1;
-                            winOf = d => d % 2 === 0;
+                        if (spec.type === 'CALL' || spec.type === 'PUT') {
                             p0 = 0.5;
-                        } else if (spec.type === 'DIGITODD') {
                             digit = -1;
-                            winOf = d => d % 2 === 1;
-                            p0 = 0.5;
-                        } else if (spec.type === 'DIGITMATCH') {
-                            // Auto (−1): the hottest digit of this tape.
-                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.max(...counts));
-                            winOf = d => d === digit;
-                            p0 = 0.1;
+                            for (let i = 1; i < prices.length; i++) {
+                                wins.push(spec.type === 'CALL' ? prices[i] > prices[i - 1] : prices[i] < prices[i - 1]);
+                            }
                         } else {
-                            // DIGITDIFF — auto (−1): the coldest digit of this tape.
-                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.min(...counts));
-                            winOf = d => d !== digit;
-                            p0 = 0.9;
+                            let winOf;
+                            if (spec.type === 'DIGITOVER') {
+                                if (digit < 0 || digit > 8) continue;
+                                winOf = d => d > digit;
+                                p0 = (9 - digit) / 10;
+                            } else if (spec.type === 'DIGITUNDER') {
+                                if (digit < 1 || digit > 9) continue;
+                                winOf = d => d < digit;
+                                p0 = digit / 10;
+                            } else if (spec.type === 'DIGITEVEN') {
+                                digit = -1;
+                                winOf = d => d % 2 === 0;
+                                p0 = 0.5;
+                            } else if (spec.type === 'DIGITODD') {
+                                digit = -1;
+                                winOf = d => d % 2 === 1;
+                                p0 = 0.5;
+                            } else if (spec.type === 'DIGITMATCH') {
+                                // Auto (−1): the hottest digit of this tape.
+                                if (digit < 0 || digit > 9) digit = counts.indexOf(Math.max(...counts));
+                                winOf = d => d === digit;
+                                p0 = 0.1;
+                            } else {
+                                // DIGITDIFF — auto (−1): the coldest digit of this tape.
+                                if (digit < 0 || digit > 9) digit = counts.indexOf(Math.min(...counts));
+                                winOf = d => d !== digit;
+                                p0 = 0.9;
+                            }
+                            wins = digits.filter(d => Number.isInteger(d) && d >= 0 && d <= 9).map(winOf);
                         }
-                        const wins = digits.map(winOf);
+                        if (wins.length === 0) continue;
                         // All per-candidate maths lives in the pure module so
                         // the exact runtime gate is jest-testable and can be
                         // mirrored by the API's forge-time diagnostics.

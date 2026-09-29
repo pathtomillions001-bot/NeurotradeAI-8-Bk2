@@ -170,3 +170,36 @@ describe('Omni Forge gate — sample floor', () => {
         expect(engine.nt_contract_decision.reason).toMatch(/samples 20\/30/);
     });
 });
+describe('Universal Forge direction contracts in ntAnalyseContracts', () => {
+    function directionService(prices) {
+        return {
+            pipSizes: { R_50: 2, R_75: 2 },
+            request: jest.fn(() => Promise.resolve(prices.map((quote, i) => ({ quote, epoch: i + 1 })))),
+            monitor: jest.fn(() => Promise.resolve('key')),
+            stopMonitor: jest.fn(() => Promise.resolve()),
+        };
+    }
+
+    it('can rank and fire a Rise contract from tick-to-tick price outcomes', async () => {
+        const prices = [];
+        let price = 100;
+        for (let i = 0; i < 121; i++) {
+            // 82 rises, then scattered falls: enough to clear CALL's 1.92× break-even.
+            price += i > 0 && i % 6 === 0 ? -0.03 : 0.04;
+            prices.push(Number(price.toFixed(2)));
+        }
+        const engine = newEngine(directionService(prices));
+        const fired = await engine.ntAnalyseContracts('NORMAL', 'R_50', 'CALL:-1:1.92', 120);
+        expect(fired).toBe(true);
+        expect(engine.nt_contract_decision.contract).toBe('CALL');
+        expect(engine.nt_contract_decision.barrier).toBe(-1);
+        expect(engine.nt_contract_decision.eligible).toBe(true);
+    });
+
+    it('holds Rise/Fall when the direction tape is unavailable', async () => {
+        const engine = newEngine(directionService([100]));
+        const fired = await engine.ntAnalyseContracts('NORMAL', 'R_50', 'CALL:-1:1.92,PUT:-1:1.92', 120);
+        expect(fired).toBe(false);
+        expect(engine.nt_contract_decision.reason).toMatch(/feed unavailable|samples/);
+    });
+});

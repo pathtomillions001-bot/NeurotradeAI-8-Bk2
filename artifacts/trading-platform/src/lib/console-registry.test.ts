@@ -65,7 +65,10 @@ describe("resolveConsole", () => {
   it("resolves a bot whose console this bundle implements", () => {
     const resolution = resolveConsole({ console: "dual-lock@1" });
     assert.equal(resolution.ok, true);
-    assert.equal(resolution.ok && resolution.Console, CONSOLE_REGISTRY["dual-lock@1"]);
+    assert.equal(
+      resolution.ok && resolution.Console,
+      CONSOLE_REGISTRY["dual-lock@1"],
+    );
   });
   it("reports (never falls back for) a console this bundle lacks", () => {
     const resolution = resolveConsole({ console: "dual-lock@2" });
@@ -84,7 +87,11 @@ describe("consoleSkew", () => {
   it("is quiet when the catalogue matches this bundle", () => {
     const skew = consoleSkew(
       [
-        { id: "duallock", name: "Dual-Lock Range Sentinel", console: "dual-lock@1" },
+        {
+          id: "duallock",
+          name: "Dual-Lock Range Sentinel",
+          console: "dual-lock@1",
+        },
         { id: "killshot", name: "Kill-Shot Oracle", console: "killshot@1" },
         { id: "parity", name: "Parity Sentinel", console: "specialist@1" },
       ],
@@ -104,7 +111,11 @@ describe("consoleSkew", () => {
     const skew = consoleSkew(
       [
         { id: "apex", name: "Echo Apex", console: "apex@1" },
-        { id: "duallock", name: "Dual-Lock Range Sentinel", console: "dual-lock@1" },
+        {
+          id: "duallock",
+          name: "Dual-Lock Range Sentinel",
+          console: "dual-lock@1",
+        },
         { id: "killshot", name: "Kill-Shot Oracle", console: "killshot@1" },
       ],
       API_CONSOLE_IDS,
@@ -113,14 +124,29 @@ describe("consoleSkew", () => {
 
     assert.equal(skew.skewed, true);
     assert.deepEqual(
-      skew.bots.map(entry => entry.name),
+      skew.bots.map((entry) => entry.name),
       ["Echo Apex", "Dual-Lock Range Sentinel"],
     );
-    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "digit-forge@1", "dual-lock@1", "omni-forge@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
+    assert.deepEqual(skew.missing, [
+      "apex@1",
+      "bastion@1",
+      "digit-forge@1",
+      "dual-lock@1",
+      "omni-forge@1",
+      "omni@2",
+      "overunder-navigator@1",
+      "overunder-turbo@2",
+      "parity-forge@1",
+      "surge@1",
+    ]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {
-    const skew = consoleSkew([], ["specialist@1", "dual-lock@1"], ["specialist@1"]);
+    const skew = consoleSkew(
+      [],
+      ["specialist@1", "dual-lock@1"],
+      ["specialist@1"],
+    );
     assert.equal(skew.skewed, true);
     assert.deepEqual(skew.missing, ["dual-lock@1"]);
   });
@@ -134,7 +160,12 @@ describe("scanner badge contract", () => {
     // Range Sentinel — if a console gains (or loses) a Create DBot action,
     // update SCANNER_CONSOLE_IDS alongside the console change; this test pins
     // the set.
-    const scanners = new Set(["overunder-turbo@2", "bastion@1", "surge@1", "dual-lock@1"]);
+    const scanners = new Set([
+      "overunder-turbo@2",
+      "bastion@1",
+      "surge@1",
+      "dual-lock@1",
+    ]);
     for (const id of WEB_CONSOLE_IDS) {
       assert.equal(
         consoleHasScanner({ console: id }),
@@ -160,12 +191,12 @@ describe("scanner badge contract", () => {
 
   it("marks exactly the consoles that forge a DBot from USER-COMPOSED contract sets", () => {
     // CUSTOM FORGE means "builds a Deriv Bot from contract sets the user
-    // assembles" — Omni Forge is the only such console today; adding another
+    // assembles" — Omni Forge and Universal Forge carry that promise; adding another
     // means adding it to CUSTOM_FORGE_CONSOLE_IDS at the same time.
     for (const id of WEB_CONSOLE_IDS) {
       assert.equal(
         consoleIsCustomForge({ console: id }),
-        id === "omni-forge@1",
+        id === "omni-forge@1" || id === "universal-forge@1",
         `custom-forge mismatch for "${id}" — is the badge contract drift-free with the console's primary action?`,
       );
     }
@@ -174,7 +205,11 @@ describe("scanner badge contract", () => {
 
   it("never tags one console with more than one capability badge", () => {
     for (const id of WEB_CONSOLE_IDS) {
-      const badges = [consoleHasScanner({ console: id }), consoleIsForge({ console: id }), consoleIsCustomForge({ console: id })];
+      const badges = [
+        consoleHasScanner({ console: id }),
+        consoleIsForge({ console: id }),
+        consoleIsCustomForge({ console: id }),
+      ];
       assert.ok(
         badges.filter(Boolean).length <= 1,
         `"${id}" claims more than one badge — scan-and-trade, fixed forge and custom forge are different promises`,
@@ -187,6 +222,9 @@ describe("scanner badge contract", () => {
   });
 
   it("flags the overunder-turbo bot as a scanner regardless of accent/session extras", () => {
-    assert.equal(consoleHasScanner({ console: "overunder-turbo@2" as WebConsoleId }), true);
+    assert.equal(
+      consoleHasScanner({ console: "overunder-turbo@2" as WebConsoleId }),
+      true,
+    );
   });
 });

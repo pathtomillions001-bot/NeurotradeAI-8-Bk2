@@ -26,7 +26,6 @@ let tickListenerSymbol;
 // redux dispatches and template scans), but we refresh on this cadence so a
 // bot that idles between entries never tries to buy a long-dead proposal id.
 const PROPOSAL_REFRESH_INTERVAL_MS = 4000;
-const isValidTick = tick => tick && Number.isFinite(Number(tick.epoch)) && Number.isFinite(Number(tick.quote));
 
 export default Engine =>
     class Ticks extends Engine {
@@ -62,7 +61,7 @@ export default Engine =>
                     // re-subscribed). Destructuring `undefined` here threw
                     // inside the tick callback, which killed the listener and
                     // left the bot waiting for a tick that never came.
-                    if (!isValidTick(lastTick)) return;
+                    if (!lastTick || lastTick.epoch === undefined) return;
                     const { scope } = this.store.getState();
                     this.run_metrics?.recordTick(
                         scope === constants.BEFORE_PURCHASE
@@ -86,19 +85,16 @@ export default Engine =>
 
         getTicks(toString = false) {
             return new Promise(resolve => {
-                this.$scope.ticksService
-                    .request({ symbol: this.symbol })
-                    .then(ticks => {
-                        const ticks_list = (Array.isArray(ticks) ? ticks : []).filter(isValidTick).map(tick => {
-                            if (toString) {
-                                return Number(tick.quote).toFixed(this.getPipSize());
-                            }
-                            return Number(tick.quote);
-                        });
+                this.$scope.ticksService.request({ symbol: this.symbol }).then(ticks => {
+                    const ticks_list = ticks.map(tick => {
+                        if (toString) {
+                            return tick.quote.toFixed(this.getPipSize());
+                        }
+                        return tick.quote;
+                    });
 
-                        resolve(ticks_list);
-                    })
-                    .catch(() => resolve([]));
+                    resolve(ticks_list);
+                });
             });
         }
 
@@ -108,13 +104,7 @@ export default Engine =>
                     .request({ symbol: this.symbol })
                     .then(ticks => {
                         try {
-                            const validTicks = (Array.isArray(ticks) ? ticks : []).filter(isValidTick);
-                            const last = getLast(validTicks);
-                            if (!last) {
-                                resolve(undefined);
-                                return;
-                            }
-                            let last_tick = raw ? last : Number(last.quote);
+                            let last_tick = raw ? getLast(ticks) : getLast(ticks).quote;
                             if (!raw && toString) {
                                 last_tick = last_tick.toFixed(this.getPipSize());
                             }
@@ -124,16 +114,14 @@ export default Engine =>
                         }
                     })
                     .catch(e => {
-                        if (e?.code === 'MarketIsClosed') {
+                        if (e.code === 'MarketIsClosed') {
                             const localizedError = {
                                 ...e,
                                 message: getLocalizedErrorMessage(e.code, e.details),
                             };
                             globalObserver.emit('Error', localizedError);
                             resolve(e.code);
-                            return;
                         }
-                        resolve(undefined);
                     })
             );
         }
@@ -184,15 +172,10 @@ export default Engine =>
                     if (digits.length < 20) return;
                     const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
                     for (const candidate of candidates) {
-                        const live = this.nt_digit_live_payouts?.get(
-                            `${symbol}:${candidate.contract}:${candidate.barrier}`
-                        );
+                        const live = this.nt_digit_live_payouts?.get(`${symbol}:${candidate.contract}:${candidate.barrier}`);
                         const payout = live && Date.now() - live.at < 60000 ? live.payout : candidate.payout;
                         const analysis = analyseDigitForgeCandidate({
-                            digits,
-                            ...candidate,
-                            payout,
-                            mode: normalizedMode,
+                            digits, ...candidate, payout, mode: normalizedMode,
                         });
                         rows.push({ symbol, ...candidate, payout, ...analysis, tickEpoch, digits });
                     }
@@ -361,51 +344,42 @@ export default Engine =>
             return value === undefined ? (field === 'reason' ? 'surge analysis warming up' : 0) : value;
         }
 
-        /**
-         * Omni Forge: rank a USER-DEFINED candidate set — any mix of
-         * Over/Under barriers, Even/Odd, Matches/Differs — across all watched
-         * markets. Same runtime philosophy as ntAnalyseDigitMarkets (no server
-         * or hidden AI in the loop after Run), but the candidate list is not
-         * hardcoded: the generated XML carries it as `TYPE:DIGIT:PAYOUT` CSV
-         * entries (DIGIT −1 = none for parity contracts / auto-pick for
-         * Matches & Differs).
-         *
-         * Mathematics per candidate per market, over the last W digits:
-         *   · Beta(20·p0, 20·(1−p0)) prior shrinks short tapes to fair odds
-         *   · Wilson one-sided 90% lower bound vs the payout's break-even
-         *   · 2-state Markov chain (add-one smoothed); RECOVERY mode weighs
-         *     P(win | previous loss) because that is its true entry state —
-         *     this is what times the recovery shot instead of firing blind
-         *   · loss-clustering ratio and split-half instability as penalties
-         * NORMAL mode demands a proven edge; RECOVERY mode is deliberately
-         * looser (repayment speed beats selectivity) but still refuses tapes
-         * where losses cluster or the candidate is under water.
-         *
-         * CLUSTERING GUARD (see analyseOmniForgeCandidate): the ratio divides
-         * by the tape's own loss rate, which collapses exactly when a leg is
-         * about to qualify — Over 0 / Under 9 / Differs price at ~1.09× so
-         * their break-even (91.7%) only admits tapes with ≤ 8% losses. Below
-         * ~OMNI_FORGE_MIN_CLUSTER_LOSSES observed losses the add-one-smoothed
-         * P(loss|loss) is pure smoothing noise ((ll+1)/(ll+lw+2) reads
-         * ≈ 1/(losses+2) no matter how losses are arranged) divided by a
-         * near-zero reference, so the penalty could NEVER pass and those legs
-         * were mathematically barred from normal mode. With too few losses to
-         * measure clustering the statistic is treated as neutral (1); the EV
-         * and Wilson bounds still refuse weak tapes on their own.
-         */
+/**
+ * Omni Forge: rank a USER-DEFINED candidate set — any mix of
+ * Over/Under barriers, Even/Odd, Matches/Differs — across all watched
+ * markets. Same runtime philosophy as ntAnalyseDigitMarkets (no server
+ * or hidden AI in the loop after Run), but the candidate list is not
+ * hardcoded: the generated XML carries it as `TYPE:DIGIT:PAYOUT` CSV
+ * entries (DIGIT −1 = none for parity contracts / auto-pick for
+ * Matches & Differs).
+ *
+ * Mathematics per candidate per market, over the last W digits:
+ *   · Beta(20·p0, 20·(1−p0)) prior shrinks short tapes to fair odds
+ *   · Wilson one-sided 90% lower bound vs the payout's break-even
+ *   · 2-state Markov chain (add-one smoothed); RECOVERY mode weighs
+ *     P(win | previous loss) because that is its true entry state —
+ *     this is what times the recovery shot instead of firing blind
+ *   · loss-clustering ratio and split-half instability as penalties
+ * NORMAL mode demands a proven edge; RECOVERY mode is deliberately
+ * looser (repayment speed beats selectivity) but still refuses tapes
+ * where losses cluster or the candidate is under water.
+ *
+ * CLUSTERING GUARD (see analyseOmniForgeCandidate): the ratio divides
+ * by the tape's own loss rate, which collapses exactly when a leg is
+ * about to qualify — Over 0 / Under 9 / Differs price at ~1.09× so
+ * their break-even (91.7%) only admits tapes with ≤ 8% losses. Below
+ * ~OMNI_FORGE_MIN_CLUSTER_LOSSES observed losses the add-one-smoothed
+ * P(loss|loss) is pure smoothing noise ((ll+1)/(ll+lw+2) reads
+ * ≈ 1/(losses+2) no matter how losses are arranged) divided by a
+ * near-zero reference, so the penalty could NEVER pass and those legs
+ * were mathematically barred from normal mode. With too few losses to
+ * measure clustering the statistic is treated as neutral (1); the EV
+ * and Wilson bounds still refuse weak tapes on their own.
+ */
         async ntAnalyseContracts(mode = 'NORMAL', marketsCsv = '', contractsCsv = '', requestedWindow = 120) {
             const isRecovery = mode === 'RECOVERY';
             const limits = isRecovery ? OMNI_FORGE_LIMITS.recovery : OMNI_FORGE_LIMITS.normal;
-            const KNOWN = [
-                'DIGITOVER',
-                'DIGITUNDER',
-                'DIGITEVEN',
-                'DIGITODD',
-                'DIGITMATCH',
-                'DIGITDIFF',
-                'CALL',
-                'PUT',
-            ];
+            const KNOWN = ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF'];
             const FALLBACK_PAYOUT = {
                 DIGITOVER: 1.95,
                 DIGITUNDER: 1.95,
@@ -413,8 +387,6 @@ export default Engine =>
                 DIGITODD: 1.95,
                 DIGITMATCH: 8.93,
                 DIGITDIFF: 1.09,
-                CALL: 1.92,
-                PUT: 1.92,
             };
             const specs = String(contractsCsv)
                 .split(',')
@@ -454,58 +426,44 @@ export default Engine =>
             const scanOne = async symbol => {
                 try {
                     const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: SCAN_RETRY_LIMIT });
-                    const tail = (Array.isArray(ticks) ? ticks : [])
-                        .filter(t => t && Number.isFinite(Number(t.quote)) && Number.isFinite(Number(t.epoch)))
-                        .slice(-windowSize);
-                    if (tail.length < 2) return;
-                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize() ?? 2;
-                    const prices = tail.map(t => Number(t.quote));
-                    const digits = tail.map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
+                    const digits = ticks.slice(-windowSize).map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    if (digits.length < 20) return;
                     const counts = Array.from({ length: 10 }, () => 0);
-                    for (const d of digits) if (Number.isInteger(d) && d >= 0 && d <= 9) counts[d] += 1;
+                    for (const d of digits) counts[d] += 1;
                     for (const spec of specs) {
-                        // Resolve the candidate to a concrete win tape, fair rate and digit.
+                        // Resolve the candidate to a concrete (winFn, p0, digit).
                         let digit = spec.digit;
-                        let wins = [];
+                        let winOf;
                         let p0;
-                        if (spec.type === 'CALL' || spec.type === 'PUT') {
-                            p0 = 0.5;
+                        if (spec.type === 'DIGITOVER') {
+                            if (digit < 0 || digit > 8) continue;
+                            winOf = d => d > digit;
+                            p0 = (9 - digit) / 10;
+                        } else if (spec.type === 'DIGITUNDER') {
+                            if (digit < 1 || digit > 9) continue;
+                            winOf = d => d < digit;
+                            p0 = digit / 10;
+                        } else if (spec.type === 'DIGITEVEN') {
                             digit = -1;
-                            for (let i = 1; i < prices.length; i++) {
-                                wins.push(spec.type === 'CALL' ? prices[i] > prices[i - 1] : prices[i] < prices[i - 1]);
-                            }
+                            winOf = d => d % 2 === 0;
+                            p0 = 0.5;
+                        } else if (spec.type === 'DIGITODD') {
+                            digit = -1;
+                            winOf = d => d % 2 === 1;
+                            p0 = 0.5;
+                        } else if (spec.type === 'DIGITMATCH') {
+                            // Auto (−1): the hottest digit of this tape.
+                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.max(...counts));
+                            winOf = d => d === digit;
+                            p0 = 0.1;
                         } else {
-                            let winOf;
-                            if (spec.type === 'DIGITOVER') {
-                                if (digit < 0 || digit > 8) continue;
-                                winOf = d => d > digit;
-                                p0 = (9 - digit) / 10;
-                            } else if (spec.type === 'DIGITUNDER') {
-                                if (digit < 1 || digit > 9) continue;
-                                winOf = d => d < digit;
-                                p0 = digit / 10;
-                            } else if (spec.type === 'DIGITEVEN') {
-                                digit = -1;
-                                winOf = d => d % 2 === 0;
-                                p0 = 0.5;
-                            } else if (spec.type === 'DIGITODD') {
-                                digit = -1;
-                                winOf = d => d % 2 === 1;
-                                p0 = 0.5;
-                            } else if (spec.type === 'DIGITMATCH') {
-                                // Auto (−1): the hottest digit of this tape.
-                                if (digit < 0 || digit > 9) digit = counts.indexOf(Math.max(...counts));
-                                winOf = d => d === digit;
-                                p0 = 0.1;
-                            } else {
-                                // DIGITDIFF — auto (−1): the coldest digit of this tape.
-                                if (digit < 0 || digit > 9) digit = counts.indexOf(Math.min(...counts));
-                                winOf = d => d !== digit;
-                                p0 = 0.9;
-                            }
-                            wins = digits.filter(d => Number.isInteger(d) && d >= 0 && d <= 9).map(winOf);
+                            // DIGITDIFF — auto (−1): the coldest digit of this tape.
+                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.min(...counts));
+                            winOf = d => d !== digit;
+                            p0 = 0.9;
                         }
-                        if (wins.length === 0) continue;
+                        const wins = digits.map(winOf);
                         // All per-candidate maths lives in the pure module so
                         // the exact runtime gate is jest-testable and can be
                         // mirrored by the API's forge-time diagnostics.
@@ -718,12 +676,8 @@ export default Engine =>
         async ntSwitchMarket(nextSymbol) {
             const next = String(nextSymbol || '');
             if (!next || next === this.symbol) return false;
-            if (
-                this.is_purchasing ||
-                this.nt_digit_preparing ||
-                this.nt_digit_purchase_pending ||
-                this.data?.contract?.status === 'open'
-            ) {
+            if (this.is_purchasing || this.nt_digit_preparing || this.nt_digit_purchase_pending ||
+                this.data?.contract?.status === 'open') {
                 globalObserver.emit(
                     'ui.log.warn',
                     `Market switch refused while a trade is being prepared or is open (${this.symbol} → ${next})`

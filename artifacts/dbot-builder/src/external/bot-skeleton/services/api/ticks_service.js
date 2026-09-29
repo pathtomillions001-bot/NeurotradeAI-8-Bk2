@@ -5,38 +5,20 @@ import { observer as globalObserver } from '../../utils/observer';
 import { doUntilDone, getUUID } from '../tradeEngine/utils/helpers';
 import { api_base } from './api-base';
 
-const isFiniteNumber = value => Number.isFinite(Number(value));
+const parseTick = tick => ({
+    epoch: +tick.epoch,
+    quote: +tick.quote,
+});
 
-const parseTick = tick => {
-    if (!tick || !isFiniteNumber(tick.epoch) || !isFiniteNumber(tick.quote)) return null;
-    return {
-        epoch: +tick.epoch,
-        quote: +tick.quote,
-    };
-};
+const parseOhlc = ohlc => ({
+    open: +ohlc.open,
+    high: +ohlc.high,
+    low: +ohlc.low,
+    close: +ohlc.close,
+    epoch: +(ohlc.open_time || ohlc.epoch),
+});
 
-const parseOhlc = ohlc => {
-    if (!ohlc) return null;
-    const epoch = ohlc.open_time || ohlc.epoch;
-    if (
-        !isFiniteNumber(ohlc.open) ||
-        !isFiniteNumber(ohlc.high) ||
-        !isFiniteNumber(ohlc.low) ||
-        !isFiniteNumber(ohlc.close) ||
-        !isFiniteNumber(epoch)
-    ) {
-        return null;
-    }
-    return {
-        open: +ohlc.open,
-        high: +ohlc.high,
-        low: +ohlc.low,
-        close: +ohlc.close,
-        epoch: +epoch,
-    };
-};
-
-const parseCandles = candles => (Array.isArray(candles) ? candles.map(t => parseOhlc(t)).filter(Boolean) : []);
+const parseCandles = candles => candles.map(t => parseOhlc(t));
 
 // A tape can legitimately be empty (an exchange that returned no history, or a
 // cache that was just refreshed): `getLast([])` is undefined, and reading
@@ -44,7 +26,6 @@ const parseCandles = candles => (Array.isArray(candles) ? candles.map(t => parse
 // killed the handler for every symbol — one of the ways a running bot went
 // silent. Seed the tape instead.
 const updateTicks = (ticks, newTick) => {
-    if (!newTick || typeof newTick.epoch !== 'number') return Array.isArray(ticks) ? ticks : [];
     if (!Array.isArray(ticks) || ticks.length === 0) return [newTick];
     const last = getLast(ticks);
     if (!last || typeof last.epoch !== 'number') return [...ticks.slice(1), newTick];
@@ -52,10 +33,7 @@ const updateTicks = (ticks, newTick) => {
 };
 
 const updateCandles = (candles, ohlc) => {
-    if (!ohlc || typeof ohlc.epoch !== 'number') return Array.isArray(candles) ? candles : [];
-    if (!Array.isArray(candles) || candles.length === 0) return [ohlc];
     const lastCandle = getLast(candles);
-    if (!lastCandle || typeof lastCandle.epoch !== 'number') return [...candles.slice(1), ohlc];
     if (
         (lastCandle.open === ohlc.open &&
             lastCandle.high === ohlc.high &&
@@ -264,25 +242,24 @@ export default class TicksService {
             const subscription = api_base.api.onMessage().subscribe(({ data }) => {
                 if (data.msg_type === 'tick') {
                     const { tick } = data;
-                    const { symbol, id } = tick || {};
-                    const parsed = parseTick(tick);
-                    if (!symbol || !parsed) return;
+                    const { symbol, id } = tick;
                     this.last_tick_at[symbol] = Date.now();
                     if (this.ticks.has(symbol)) {
                         this.subscriptions = this.subscriptions.setIn(['tick', symbol], id);
-                        this.updateTicksAndCallListeners(symbol, updateTicks(this.ticks.get(symbol), parsed));
+                        this.updateTicksAndCallListeners(symbol, updateTicks(this.ticks.get(symbol), parseTick(tick)));
                     }
                 }
 
                 if (data.msg_type === 'ohlc') {
                     const { ohlc } = data;
-                    const { symbol, granularity, id } = ohlc || {};
-                    const parsed = parseOhlc(ohlc);
-                    if (!symbol || !parsed) return;
+                    const { symbol, granularity, id } = ohlc;
                     if (this.candles.hasIn([symbol, Number(granularity)])) {
                         this.subscriptions = this.subscriptions.setIn(['ohlc', symbol, Number(granularity)], id);
                         const address = [symbol, Number(granularity)];
-                        this.updateCandlesAndCallListeners(address, updateCandles(this.candles.getIn(address), parsed));
+                        this.updateCandlesAndCallListeners(
+                            address,
+                            updateCandles(this.candles.getIn(address), parseOhlc(ohlc))
+                        );
                     }
                 }
             });

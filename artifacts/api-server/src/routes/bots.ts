@@ -41,7 +41,6 @@ import navigatorRouter from "./overunder-navigator";
 import turboRouter from "./overunder-turbo";
 import digitForgeRouter from "./digit-forge";
 import omniForgeRouter from "./omni-forge";
-import universalForgeRouter from "./universal-forge";
 import * as omni from "../lib/omni-engine";
 import omniRouter from "./omni";
 import { validateShotContract, validateShotPlan, shotLabel, shotPlanLabel, type Certainty } from "../lib/killshot-analysis";
@@ -69,7 +68,6 @@ router.use("/overunder-navigator", navigatorRouter);
 router.use("/overunder-turbo", turboRouter);
 router.use("/digit-forge", digitForgeRouter);
 router.use("/omni-forge", omniForgeRouter);
-router.use("/universal-forge", universalForgeRouter);
 router.use("/omni", omniRouter);
 
 interface ParsedBotBody {
@@ -92,7 +90,7 @@ function validateBotBody(botId: string, body: any): { ok: true; data: ParsedBotB
   if (!bot) return { ok: false, error: "Unknown bot" };
   // Family bots own their own routes; the generic specialist path must never be
   // able to start them with a mismatched config.
-  if (bot.omni || bot.apex || bot.bastion || bot.parityForge || bot.surge || bot.navigator || bot.turbo || bot.forge || bot.omniForge || bot.universalForge || bot.killShotFamily || bot.preLocked || bot.oneShot) {
+  if (bot.omni || bot.apex || bot.bastion || bot.parityForge || bot.surge || bot.navigator || bot.turbo || bot.killShotFamily || bot.preLocked || bot.oneShot) {
     return { ok: false, error: "This bot is deployed from its own console, not the generic bot endpoint" };
   }
   if (bot.preLocked) return { ok: false, error: `${bot.name} uses the /duallock endpoints` };

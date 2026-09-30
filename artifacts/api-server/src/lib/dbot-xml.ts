@@ -161,30 +161,6 @@ export class XmlBuilder {
         `<field name="CONTRACTS">${esc(contractsCsv)}</field><field name="WINDOW">${esc(window)}</field>`,
     };
   }
-  /** Combo Forge: run the digit + Rise/Fall evidence ranker inside the bot runtime. */
-  ntAnalyseCombo(
-    mode: "NORMAL" | "RECOVERY",
-    markets: string[],
-    contractsCsv: string,
-    window: number,
-    strictness: "strict" | "balanced" | "always",
-    markupPercent: number,
-    maxStake: number,
-    debt: string,
-  ): Stmt {
-    return {
-      type: "nt_analyse_combo",
-      inner:
-        `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field>` +
-        `<field name="CONTRACTS">${esc(contractsCsv)}</field><field name="WINDOW">${esc(window)}</field>` +
-        `<field name="STRICTNESS">${strictness}</field><field name="MARKUP">${esc(markupPercent)}</field>` +
-        `<field name="MAXSTAKE">${esc(maxStake)}</field><value name="DEBT">${debt}</value>`,
-    };
-  }
-  /** Combo Forge runtime decision field (vendored builder only). */
-  ntComboDecision(field: string): string {
-    return `<block type="nt_combo_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
-  }
   /** Omni Forge runtime decision field (vendored builder only). */
   ntForgeDecision(field: string): string {
     return `<block type="nt_contract_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;

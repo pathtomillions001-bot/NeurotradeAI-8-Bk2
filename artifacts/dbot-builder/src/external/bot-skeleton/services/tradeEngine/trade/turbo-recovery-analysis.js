@@ -164,4 +164,13 @@ export const TURBO_RECOVERY_ANALYSIS_LIMITS = Object.freeze({
     confidenceZ: CONFIDENCE_Z,
     maxClusterRatio: MAX_CLUSTER_RATIO,
     maxInstability: MAX_INSTABILITY,
+    /**
+     * A debt-sized recovery must hold across this many DISTINCT fresh ticks
+     * before it may fire. Settlement clears the confirmation state after
+     * every trade, so no recovery executes off the first post-loss snapshot —
+     * the timing gate is always re-earned on fresh post-trade data (the Nexus
+     * Hedge rescan mandate; Turbo's recovery contract is fixed, so a rematch
+     * penalty has no meaning here — fresh-data confirmation is the mandate).
+     */
+    recoveryConfirmations: 2,
 });

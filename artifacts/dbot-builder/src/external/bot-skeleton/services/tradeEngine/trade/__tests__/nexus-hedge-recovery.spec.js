@@ -135,6 +135,7 @@ describe('Nexus Hedge recovery rescan', () => {
         expect(engine.nt_hedge_rematch).toEqual({
             key: LOSSER_KEY,
             penalty: NEXUS_HEDGE_LIMITS.rematchPenalty,
+            epoch: 0,
         });
         expect(engine.nt_hedge_pending_entry).toBeUndefined();
 

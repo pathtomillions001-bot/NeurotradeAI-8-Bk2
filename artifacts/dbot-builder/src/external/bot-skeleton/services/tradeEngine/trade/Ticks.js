@@ -9,7 +9,7 @@ import { getDirection, getLastDigit } from '../utils/helpers';
 import { expectPositiveInteger } from '../utils/sanitize';
 import * as constants from './state/constants';
 import { analyseDualLockEntry, DUAL_LOCK_ENTRY_DEFAULTS } from './dual-lock-entry';
-import { analyseTurboRecovery } from './turbo-recovery-analysis';
+import { analyseTurboRecovery, TURBO_RECOVERY_ANALYSIS_LIMITS } from './turbo-recovery-analysis';
 import { analyseDigitForgeCandidate, DIGIT_FORGE_ANALYSIS_LIMITS } from './digit-forge-analysis';
 import { DIGIT_FORGE_CONTRACTS } from './digit-forge-contracts';
 import { analyseSurgeMarket, SURGE_FORGE_LIMITS } from './surge-forge-analysis';
@@ -187,6 +187,33 @@ export default Engine =>
             for (let i = 0; i < markets.length; i += SCAN_BATCH) {
                 await Promise.all(markets.slice(i, i + SCAN_BATCH).map(scanOne));
             }
+            // Post-loss REMATCH penalty (Nexus Hedge rescan mandate): after a
+            // settled loss, the exact losing side/barrier/market starts its
+            // next recovery scans from a decaying score deficit (spanning
+            // exactly the confirmation window below). Without it, one loss
+            // barely dents the posterior and the same tape kept ranking #1 —
+            // the bot re-fired on the market it just lost on. Now an
+            // alternate market/barrier with a comparable edge honestly wins
+            // the post-loss rescan; the loser re-enters only by topping every
+            // penalised fresh scan.
+            const rematch = this.nt_digit_rematch;
+            const rescanInProgress = Boolean(rematch);
+            if (rematch) {
+                for (const row of rows) {
+                    if (`${row.symbol}:${row.contract}:${String(row.barrier)}` === rematch.key) {
+                        row.score -= rematch.penalty;
+                    }
+                }
+                // Age the penalty only when FRESH tape arrived since it was
+                // armed/last aged: repeated interpreter passes over one tick
+                // re-rank deterministically instead of eroding the handicap.
+                const maxEpoch = rows.reduce((max, row) => Math.max(max, row.tickEpoch || 0), 0);
+                if (maxEpoch > (rematch.epoch ?? 0)) {
+                    rematch.epoch = maxEpoch;
+                    rematch.penalty = Math.max(0, rematch.penalty - DIGIT_FORGE_ANALYSIS_LIMITS.rematchDecay);
+                    if (rematch.penalty === 0) this.nt_digit_rematch = undefined;
+                }
+            }
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
             if (!best) {
@@ -228,6 +255,7 @@ export default Engine =>
                 this.nt_digit_recovery_confirmation = undefined;
             }
 
+            const rescanNote = rescanInProgress ? ' · post-loss rescan' : '';
             this.nt_digit_decision = {
                 ...best,
                 mode: normalizedMode,
@@ -235,10 +263,10 @@ export default Engine =>
                 confirmations,
                 changedMarket: best.symbol !== this.symbol,
                 reason: !best.eligible
-                    ? best.reason
+                    ? `${best.reason}${rescanNote}`
                     : recoveryMode && !eligible
-                      ? `HOLD · confirming recovery setup ${confirmations}/${DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations} on a fresh tick`
-                      : best.reason,
+                      ? `HOLD · confirming recovery setup ${confirmations}/${DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations} on a fresh tick${rescanNote}`
+                      : `${best.reason}${rescanNote}`,
             };
             return eligible;
         }
@@ -428,7 +456,8 @@ export default Engine =>
                 try {
                     const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: SCAN_RETRY_LIMIT });
                     const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
-                    const digits = ticks.slice(-windowSize).map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    const tail = ticks.slice(-windowSize);
+                    const digits = tail.map(t => getLastDigit(Number(t.quote).toFixed(pip)));
                     if (digits.length < 20) return;
                     const counts = Array.from({ length: 10 }, () => 0);
                     for (const d of digits) counts[d] += 1;
@@ -469,11 +498,17 @@ export default Engine =>
                         // the exact runtime gate is jest-testable and can be
                         // mirrored by the API's forge-time diagnostics.
                         const analysis = analyseOmniForgeCandidate({ wins, p0, payout: spec.payout, mode });
+                        // Per-row tape epoch: the recovery confirmation below
+                        // only counts DISTINCT fresh ticks, so repeated
+                        // interpreter passes over one snapshot can never arm a
+                        // debt-sized recovery (Nexus Hedge rescan mandate).
+                        const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
                         rows.push({
                             symbol,
                             contract: spec.type,
                             barrier: digit,
                             payout: spec.payout,
+                            tickEpoch,
                             ...analysis,
                         });
                     }
@@ -484,9 +519,37 @@ export default Engine =>
             for (let i = 0; i < markets.length; i += SCAN_BATCH) {
                 await Promise.all(markets.slice(i, i + SCAN_BATCH).map(scanOne));
             }
+            // Post-loss REMATCH penalty (Nexus Hedge rescan mandate): after a
+            // settled loss, settlement armed `nt_omni_rematch` with the exact
+            // losing tuple. One loss barely dents a 30+ sample posterior, so
+            // without this the same tape kept ranking #1 and the bot re-fired
+            // on the market it just lost on. The loser starts its next scans
+            // from a decaying score deficit (spanning exactly the confirmation
+            // window), so an alternate market/contract with a comparable edge
+            // honestly wins the rescan; topping every penalised fresh scan
+            // earns a legitimate re-entry.
+            const rematch = this.nt_omni_rematch;
+            const rescanInProgress = Boolean(rematch);
+            if (rematch) {
+                for (const row of rows) {
+                    if (`${row.symbol}:${row.contract}:${String(row.barrier)}` === rematch.key) {
+                        row.score -= rematch.penalty;
+                    }
+                }
+                // Age the penalty only when FRESH tape arrived since it was
+                // armed/last aged: repeated interpreter passes over one tick
+                // re-rank deterministically instead of eroding the handicap.
+                const maxEpoch = rows.reduce((max, row) => Math.max(max, row.tickEpoch || 0), 0);
+                if (maxEpoch > (rematch.epoch ?? 0)) {
+                    rematch.epoch = maxEpoch;
+                    rematch.penalty = Math.max(0, rematch.penalty - OMNI_FORGE_LIMITS.rematchDecay);
+                    if (rematch.penalty === 0) this.nt_omni_rematch = undefined;
+                }
+            }
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
             if (!best) {
+                this.nt_omni_confirmation = undefined;
                 this.nt_contract_decision = {
                     symbol: this.symbol,
                     contract: fallbackSpec.type,
@@ -511,14 +574,40 @@ export default Engine =>
                 blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
             if (best.clustering >= limits.maxClustering)
                 blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
+
+            // RECOVERY entries must be earned on FRESH data (Nexus Hedge
+            // rescan mandate): the same candidate has to stay best across
+            // OMNI_FORGE_LIMITS.recoveryConfirmations DISTINCT ticks, and
+            // settlement clears this state after every trade — so no recovery
+            // ever executes without a genuinely fresh, post-trade rescan of
+            // every watched market.
+            let confirmations = 0;
+            let eligible = best.eligible;
+            if (isRecovery && best.eligible) {
+                const key = `${best.symbol}:${best.contract}:${String(best.barrier)}`;
+                const previous = this.nt_omni_confirmation;
+                if (previous?.key === key && previous.epoch !== best.tickEpoch) confirmations = previous.count + 1;
+                else if (previous?.key === key && previous.epoch === best.tickEpoch) confirmations = previous.count;
+                else confirmations = 1;
+                this.nt_omni_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
+                eligible = confirmations >= OMNI_FORGE_LIMITS.recoveryConfirmations;
+            } else {
+                this.nt_omni_confirmation = undefined;
+            }
+
+            const rescanNote = rescanInProgress ? ' · post-loss rescan' : '';
             this.nt_contract_decision = {
                 ...best,
                 changedMarket: best.symbol !== this.symbol,
+                eligible,
+                confirmations,
                 reason: best.eligible
-                    ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%`
-                    : `HOLD: ${blockers.join(', ') || 'no qualified edge'}`,
+                    ? eligible
+                        ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%${rescanNote}`
+                        : `HOLD · confirming recovery setup ${confirmations}/${OMNI_FORGE_LIMITS.recoveryConfirmations} on a fresh tick${rescanNote}`
+                    : `HOLD: ${blockers.join(', ') || 'no qualified edge'}${rescanNote}`,
             };
-            return best.eligible;
+            return eligible;
         }
 
         async ntContractDecision(field) {
@@ -625,8 +714,15 @@ export default Engine =>
                         row.score -= rematch.penalty;
                     }
                 }
-                rematch.penalty = Math.max(0, rematch.penalty - NEXUS_HEDGE_LIMITS.rematchDecay);
-                if (rematch.penalty === 0) this.nt_hedge_rematch = undefined;
+                // Age the penalty only when FRESH tape arrived since it was
+                // armed/last aged: repeated interpreter passes over one tick
+                // re-rank deterministically instead of eroding the handicap.
+                const maxEpoch = rows.reduce((max, row) => Math.max(max, row.tickEpoch || 0), 0);
+                if (maxEpoch > (rematch.epoch ?? 0)) {
+                    rematch.epoch = maxEpoch;
+                    rematch.penalty = Math.max(0, rematch.penalty - NEXUS_HEDGE_LIMITS.rematchDecay);
+                    if (rematch.penalty === 0) this.nt_hedge_rematch = undefined;
+                }
             }
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
@@ -702,7 +798,12 @@ export default Engine =>
                 const windowSize = Math.max(40, Math.min(300, Number(requestedWindow) || 120));
                 const ticks = await this.$scope.ticksService.request({ symbol: this.symbol });
                 const pip = this.$scope.ticksService.pipSizes?.[this.symbol] ?? this.getPipSize() ?? 2;
-                const digits = ticks.slice(-windowSize).map(tick => getLastDigit(Number(tick.quote).toFixed(pip)));
+                const tail = ticks.slice(-windowSize);
+                const digits = tail.map(tick => getLastDigit(Number(tick.quote).toFixed(pip)));
+                // The fresh-tick confirmation below only counts DISTINCT ticks,
+                // so repeated interpreter passes over one snapshot never arm a
+                // debt-sized recovery (Nexus Hedge rescan mandate).
+                const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
 
                 // Prefer the proposal currently prepared by Trade Definition.
                 // Its payout/ask ratio is the true live total-return multiplier;
@@ -719,7 +820,7 @@ export default Engine =>
                 const stake = Number(requestedStake) || Number(this.tradeOptions?.amount) || 0;
                 const balance = Number(this.getBalance?.('NUM')) || 0;
 
-                this.nt_turbo_recovery_decision = analyseTurboRecovery({
+                const rawDecision = analyseTurboRecovery({
                     digits,
                     contract,
                     barrier,
@@ -727,8 +828,37 @@ export default Engine =>
                     stake,
                     balance,
                 });
+                // A debt-sized recovery must hold on FRESH data: the timing
+                // gate has to pass across N distinct ticks, and settlement
+                // clears this state after every trade — so a recovery never
+                // fires off the first post-loss snapshot (Nexus Hedge rescan
+                // mandate). Turbo's recovery contract is fixed, so there is
+                // nothing to demote; fresh-data persistence is the mandate.
+                let confirmations = 0;
+                let eligible = rawDecision.eligible;
+                if (eligible) {
+                    const key = `${this.symbol}:${String(contract)}:${Number(barrier)}`;
+                    const previous = this.nt_turbo_recovery_confirmation;
+                    if (previous?.key === key && previous.epoch !== tickEpoch) confirmations = previous.count + 1;
+                    else if (previous?.key === key && previous.epoch === tickEpoch) confirmations = previous.count;
+                    else confirmations = 1;
+                    this.nt_turbo_recovery_confirmation = { key, epoch: tickEpoch, count: confirmations };
+                    eligible = confirmations >= TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations;
+                } else {
+                    this.nt_turbo_recovery_confirmation = undefined;
+                }
+                this.nt_turbo_recovery_decision = {
+                    ...rawDecision,
+                    eligible,
+                    confirmations,
+                    reason:
+                        rawDecision.eligible && !eligible
+                            ? `HOLD · confirming recovery setup ${confirmations}/${TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations} on a fresh tick`
+                            : rawDecision.reason,
+                };
                 return this.nt_turbo_recovery_decision.eligible;
             } catch (_) {
+                this.nt_turbo_recovery_confirmation = undefined;
                 this.nt_turbo_recovery_decision = {
                     eligible: false,
                     probability: 0,

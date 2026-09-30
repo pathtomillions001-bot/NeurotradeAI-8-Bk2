@@ -77,7 +77,25 @@ export default Engine =>
                     delete this.tradeOptions.prediction;
                 }
             }
-            return this.purchase(type);
+            // Record the exact tuple being bought so settlement (Total.js) can
+            // pair outcome → loser and arm the post-loss rematch penalty that
+            // forces the next recovery scan to earn its entry on fresh data
+            // across the whole watch-list (Nexus Hedge rescan mandate).
+            // Cleared if the buy never happened.
+            this.nt_omni_pending_entry = {
+                symbol: this.symbol,
+                contract: type,
+                barrier: isParity ? -1 : Number.isFinite(digit) ? digit : -1,
+            };
+            const result = this.purchase(type);
+            Promise.resolve(result)
+                .then(purchased => {
+                    if (purchased === false) this.nt_omni_pending_entry = undefined;
+                })
+                .catch(() => {
+                    this.nt_omni_pending_entry = undefined;
+                });
+            return result;
         }
 
         purchase(contract_type, quotedPurchase) {

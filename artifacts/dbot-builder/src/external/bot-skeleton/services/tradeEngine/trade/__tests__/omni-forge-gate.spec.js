@@ -116,10 +116,17 @@ describe('Omni Forge normal-mode gate — the Over 0 / Under 9 dead zone', () =>
         expect(engine.nt_contract_decision.eligible).toBe(false);
     });
 
-    it('fires Over 0 in RECOVERY from the looser gate, exactly as before the fix', async () => {
+    it('fires Over 0 in RECOVERY from the looser gate once the fresh-tick confirmation completes', async () => {
         // 110/120 wins: below the normal EV floor but inside recovery's
         // EV ≥ −1% / LCB ≥ BE−5pt bounds, with exactly 10 measurable losses.
-        const engine = newEngine(fakeTicksService(tape({ n: 120, losses: 10, win: 9, lose: 0 })));
+        // The post-trade rescan mandate adds ONE difference vs the old
+        // behaviour: the gate-pass is confirmed on a fresh tick before fire.
+        const digits = tape({ n: 120, losses: 10, win: 9, lose: 0 });
+        const engine = newEngine(fakeTicksService(digits));
+        expect(await engine.ntAnalyseContracts('RECOVERY', 'R_50', 'DIGITOVER:0:1.09', 120)).toBe(false);
+        expect(engine.nt_contract_decision.reason).toContain('confirming recovery setup 1/2');
+
+        digits.push(9);
         const fired = await engine.ntAnalyseContracts('RECOVERY', 'R_50', 'DIGITOVER:0:1.09', 120);
         expect(fired).toBe(true);
         expect(engine.nt_contract_decision.eligible).toBe(true);

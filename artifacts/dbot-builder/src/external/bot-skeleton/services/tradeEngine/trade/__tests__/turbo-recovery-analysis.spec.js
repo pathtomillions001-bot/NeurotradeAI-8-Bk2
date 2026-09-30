@@ -72,7 +72,10 @@ describe('Turbo in-bot recovery analysis', () => {
             }
         }
         const TickEngine = withTicks(BaseEngine);
-        const quotes = Array.from({ length: 161 }, (_, index) => ({ quote: index % 2 === 0 ? 100.0 : 100.09 }));
+        const quotes = Array.from({ length: 161 }, (_, index) => ({
+            quote: index % 2 === 0 ? 100.0 : 100.09,
+            epoch: index + 1,
+        }));
         const engine = new TickEngine({
             ticksService: {
                 pipSizes: { R_100: 2 },
@@ -80,6 +83,10 @@ describe('Turbo in-bot recovery analysis', () => {
             },
         });
 
+        // The post-trade rescan mandate holds the first sighting at 1/2…
+        await expect(engine.ntAnalyseTurboRecovery('DIGITOVER', 4, 1.8, 200, 1)).resolves.toBe(false);
+        // …and a genuinely fresh tick (same loss-context ending) completes it.
+        quotes.push({ quote: 100.0, epoch: 162 });
         await expect(engine.ntAnalyseTurboRecovery('DIGITOVER', 4, 1.8, 200, 1)).resolves.toBe(true);
         await expect(engine.ntTurboRecoveryDecision('eligible')).resolves.toBe(true);
         await expect(engine.ntTurboRecoveryDecision('payout')).resolves.toBeCloseTo(1.95);

@@ -5,6 +5,8 @@ import { createError } from '../../../utils/error';
 import { observer as globalObserver } from '../../../utils/observer';
 import { info, log } from '../utils/broadcast';
 import { NEXUS_HEDGE_LIMITS } from './nexus-hedge-analysis';
+import { OMNI_FORGE_LIMITS } from './omni-forge-analysis';
+import { DIGIT_FORGE_ANALYSIS_LIMITS } from './digit-forge-analysis';
 
 const skeleton = {
     totalProfit: 0,
@@ -42,25 +44,50 @@ export default Engine =>
 
             const win = profit > 0;
 
-            // Nexus Hedge Forge bookkeeping: EVERY settled trade — win or loss —
-            // must be followed by a genuinely fresh rescan of every watched
-            // market before any recovery entry may fire, so the fresh-tick
-            // confirmation is always invalidated here. On a LOSS, the rematch
-            // penalty additionally demotes the exact losing tuple for the next
-            // scans, so the rescan is a real contest across the watch-list
-            // instead of a re-fire on the tape that just lost. Both fields are
-            // Nexus-only: untouched strategies are unaffected.
+            // Recovery rescan mandate (Nexus Hedge, Omni Forge, Digit Forge,
+            // Over/Under Turbo): EVERY settled trade — win or loss — must be
+            // followed by a genuinely fresh rescan before any recovery entry
+            // may fire, so every forge family's fresh-tick confirmation is
+            // invalidated here. On a LOSS, each family that actually traded
+            // also arms a rematch penalty against the exact losing tuple, so
+            // the rescan is a real contest across the watch-list instead of a
+            // re-fire on the tape that just lost. (Turbo's recovery contract
+            // is fixed, so there is nothing to demote — fresh-data
+            // confirmation is its whole mandate.) All fields are forge-only:
+            // stock strategies are unaffected.
             this.nt_hedge_confirmation = undefined;
+            this.nt_omni_confirmation = undefined;
+            this.nt_digit_recovery_confirmation = undefined;
+            this.nt_turbo_recovery_confirmation = undefined;
             if (win) {
                 this.nt_hedge_rematch = undefined;
+                this.nt_omni_rematch = undefined;
+                this.nt_digit_rematch = undefined;
             }
-            if (!win && this.nt_hedge_pending_entry) {
-                this.nt_hedge_rematch = {
-                    key: `${this.nt_hedge_pending_entry.symbol}:${this.nt_hedge_pending_entry.contract}:${String(this.nt_hedge_pending_entry.barrier)}`,
-                    penalty: NEXUS_HEDGE_LIMITS.rematchPenalty,
-                };
+            if (!win) {
+                // The armed epoch anchors the penalty to the tape the losing
+                // trade was placed on, so rankers age the handicap only when
+                // FRESH ticks arrive — repeated passes over one snapshot
+                // re-rank deterministically rather than eroding it.
+                const families = [
+                    ['nt_hedge_pending_entry', 'nt_hedge_rematch', NEXUS_HEDGE_LIMITS.rematchPenalty, this.nt_hedge_decision],
+                    ['nt_omni_pending_entry', 'nt_omni_rematch', OMNI_FORGE_LIMITS.rematchPenalty, this.nt_contract_decision],
+                    ['nt_digit_pending_entry', 'nt_digit_rematch', DIGIT_FORGE_ANALYSIS_LIMITS.rematchPenalty, this.nt_digit_decision],
+                ];
+                for (const [pendingField, rematchField, penalty, decision] of families) {
+                    const entry = this[pendingField];
+                    if (entry) {
+                        this[rematchField] = {
+                            key: `${entry.symbol}:${entry.contract}:${String(entry.barrier)}`,
+                            penalty,
+                            epoch: Number(decision?.tickEpoch) || 0,
+                        };
+                    }
+                }
             }
             this.nt_hedge_pending_entry = undefined;
+            this.nt_omni_pending_entry = undefined;
+            this.nt_digit_pending_entry = undefined;
 
             const accountStat = this.getAccountStat();
 

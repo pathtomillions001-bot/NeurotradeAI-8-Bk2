@@ -215,6 +215,30 @@ export class XmlBuilder {
   ntTurboRecoveryDecision(field: string): string {
     return `<block type="nt_turbo_recovery_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
   }
+  /** Adaptive multi-market Turbo recovery scan (2026-09-30): scans ALL watchMarkets for the fixed recovery contract with Bayesian timing. */
+  ntAnalyseTurboMarkets(
+    markets: string[],
+    contract: "DIGITOVER" | "DIGITUNDER",
+    barrier: number,
+    payout: string,
+    window: number,
+    stake: string,
+  ): Stmt {
+    return {
+      type: "nt_analyse_turbo_markets",
+      inner:
+        `<field name=\"MARKETS\">${esc(markets.join(","))}</field>` +
+        `<field name=\"CONTRACT\">${contract}</field>` +
+        `<field name=\"BARRIER\">${esc(barrier)}</field>` +
+        `<field name=\"WINDOW\">${esc(window)}</field>` +
+        `<value name=\"PAYOUT\">${payout}</value>` +
+        `<value name=\"STAKE\">${stake}</value>`,
+    };
+  }
+  /** Read a field from the latest adaptive Turbo markets decision. */
+  ntTurboMarketsDecision(field: string): string {
+    return `<block type="nt_turbo_markets_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
   /**
    * Dual-Lock: time the FIRST entry of the run (and only the first). The scan
    * still owns market/side/barrier; this gate only delays the start, and its

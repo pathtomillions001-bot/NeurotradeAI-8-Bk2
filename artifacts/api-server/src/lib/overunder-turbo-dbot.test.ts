@@ -151,17 +151,19 @@ describe("buildTurboDbotStrategy", () => {
 
   it("gates every recovery attempt behind the in-bot Bayesian timing decision", () => {
     const { xml, summary } = buildTurboDbotStrategy(baseInput({ recoveryWindow: 160 }));
-    assert.match(xml, /<block type="nt_analyse_turbo_recovery"/);
+    // 2026-09-30: Turbo is now adaptive multi-market — gates via nt_analyse_turbo_markets (scans all watchMarkets)
+    assert.match(xml, /<block type="nt_analyse_turbo_markets"/);
     assert.match(xml, /<field name="CONTRACT">DIGITOVER<\/field>/);
     assert.match(xml, /<field name="BARRIER">4<\/field>/);
     assert.match(xml, /<field name="WINDOW">160<\/field>/);
-    assert.match(xml, /<block type="nt_turbo_recovery_decision"[^>]*><field name="FIELD">eligible<\/field>/);
+    assert.match(xml, /<block type="nt_turbo_markets_decision"[^>]*><field name="FIELD">eligible<\/field>/);
     assert.match(xml, /<field name="FIELD">reason<\/field>/);
     assert.match(xml, /<field name="FIELD">probability<\/field>/);
     assert.match(xml, /<field name="FIELD">lowerBound<\/field>/);
     assert.match(xml, /RECOVERY WAIT ·/);
     assert.match(xml, /RECOVERY READY · step/);
     assert.match(xml, /waiting for a qualified recovery entry/);
+    assert.match(xml, /TURBO SWITCH/);
     assert.equal(summary.recoveryWindow, 160);
   });
 
@@ -183,7 +185,7 @@ describe("buildTurboDbotStrategy", () => {
 
   it("names the strategy after the lock and escapes text safely", () => {
     const { name, xml } = buildTurboDbotStrategy(baseInput({ displayName: "Vol <100> & \"Co\"" }));
-    assert.equal(name, "NeuroTrade Turbo R_100 Over 2 to Over 4");
+    assert.equal(name, "NeuroTrade Turbo R_100 Over 2 to Over 4 · 1M adaptive");
     assert.doesNotMatch(xml, /Vol <100>/);
     assert.match(xml, /Vol &lt;100&gt; &amp; &quot;Co&quot;/);
   });

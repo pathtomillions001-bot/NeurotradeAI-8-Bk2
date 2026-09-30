@@ -233,12 +233,22 @@ export default Engine =>
                 return false;
             }
 
-            // Debt-sized entries need persistence, not one flattering snapshot.
-            // Count confirmations only on DISTINCT ticks and only while the same
-            // market/contract/barrier remains best. Repeated interpreter passes
-            // over one tick therefore cannot accidentally arm a recovery buy.
+            // ── Intelligent recovery rescan (2026-09-30) ──────────────────────
+            // Debt-sized entries need persistence across FRESH ticks, not one
+            // flattering snapshot. Count confirmations only on DISTINCT ticks
+            // and only while the same market/contract/barrier remains best.
+            // Repeated interpreter passes over one tick cannot arm a recovery.
+            // Adaptive: when consecutive losses ≥3, required confirmations
+            // escalate from 2 → 3 — larger debt demands more proof before a
+            // sized recovery fires. Settlement always clears confirmation, so
+            // no recovery may fire without a genuinely fresh post-trade rescan
+            // of every watched market.
             let eligible = best.eligible;
             let confirmations = 0;
+            const lossRun = this._consecutiveLosses || 0;
+            const requiredConfirmations = lossRun >= 3
+                ? Math.min(3, DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations + 1)
+                : DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations;
             if (recoveryMode && best.eligible) {
                 const key = `${best.symbol}:${best.contract}:${best.barrier}`;
                 const previous = this.nt_digit_recovery_confirmation;
@@ -250,22 +260,23 @@ export default Engine =>
                     confirmations = 1;
                 }
                 this.nt_digit_recovery_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
-                eligible = confirmations >= DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations;
+                eligible = confirmations >= requiredConfirmations;
             } else {
                 this.nt_digit_recovery_confirmation = undefined;
             }
 
-            const rescanNote = rescanInProgress ? ' · post-loss rescan' : '';
+            const rescanNote = rescanInProgress ? ` · post-loss rescan (lossRun ${lossRun})` : '';
             this.nt_digit_decision = {
                 ...best,
                 mode: normalizedMode,
                 eligible,
                 confirmations,
+                requiredConfirmations,
                 changedMarket: best.symbol !== this.symbol,
                 reason: !best.eligible
                     ? `${best.reason}${rescanNote}`
                     : recoveryMode && !eligible
-                      ? `HOLD · confirming recovery setup ${confirmations}/${DIGIT_FORGE_ANALYSIS_LIMITS.recoveryConfirmations} on a fresh tick${rescanNote}`
+                      ? `HOLD · confirming recovery setup ${confirmations}/${requiredConfirmations} on a fresh tick${rescanNote}`
                       : `${best.reason}${rescanNote}`,
             };
             return eligible;
@@ -575,14 +586,20 @@ export default Engine =>
             if (best.clustering >= limits.maxClustering)
                 blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
 
+            // ── Intelligent recovery rescan (2026-09-30) ──────────────────────
             // RECOVERY entries must be earned on FRESH data (Nexus Hedge
             // rescan mandate): the same candidate has to stay best across
-            // OMNI_FORGE_LIMITS.recoveryConfirmations DISTINCT ticks, and
-            // settlement clears this state after every trade — so no recovery
-            // ever executes without a genuinely fresh, post-trade rescan of
-            // every watched market.
+            // N distinct ticks, and settlement clears this state after every
+            // trade — so no recovery ever executes without a genuinely fresh,
+            // post-trade rescan of every watched market. Adaptive: when
+            // consecutive losses ≥3, required confirmations escalate 2→3 —
+            // larger debt demands more proof.
             let confirmations = 0;
             let eligible = best.eligible;
+            const omniLossRun = this._consecutiveLosses || 0;
+            const omniRequired = omniLossRun >= 3
+                ? Math.min(3, OMNI_FORGE_LIMITS.recoveryConfirmations + 1)
+                : OMNI_FORGE_LIMITS.recoveryConfirmations;
             if (isRecovery && best.eligible) {
                 const key = `${best.symbol}:${best.contract}:${String(best.barrier)}`;
                 const previous = this.nt_omni_confirmation;
@@ -590,21 +607,22 @@ export default Engine =>
                 else if (previous?.key === key && previous.epoch === best.tickEpoch) confirmations = previous.count;
                 else confirmations = 1;
                 this.nt_omni_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
-                eligible = confirmations >= OMNI_FORGE_LIMITS.recoveryConfirmations;
+                eligible = confirmations >= omniRequired;
             } else {
                 this.nt_omni_confirmation = undefined;
             }
 
-            const rescanNote = rescanInProgress ? ' · post-loss rescan' : '';
+            const rescanNote = rescanInProgress ? ` · post-loss rescan (lossRun ${omniLossRun})` : '';
             this.nt_contract_decision = {
                 ...best,
                 changedMarket: best.symbol !== this.symbol,
                 eligible,
                 confirmations,
+                requiredConfirmations: omniRequired,
                 reason: best.eligible
                     ? eligible
                         ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%${rescanNote}`
-                        : `HOLD · confirming recovery setup ${confirmations}/${OMNI_FORGE_LIMITS.recoveryConfirmations} on a fresh tick${rescanNote}`
+                        : `HOLD · confirming recovery setup ${confirmations}/${omniRequired} on a fresh tick${rescanNote}`
                     : `HOLD: ${blockers.join(', ') || 'no qualified edge'}${rescanNote}`,
             };
             return eligible;
@@ -742,15 +760,21 @@ export default Engine =>
             if (best.instability >= limits.maxInstability) blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
             if (best.clustering >= limits.maxClustering) blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
 
+            // ── Intelligent recovery rescan (2026-09-30) ──────────────────────
             // RECOVERY entries must be earned on FRESH data. The same candidate
-            // has to stay best across NEXUS_HEDGE_LIMITS.recoveryConfirmations
-            // DISTINCT ticks (repeated passes over one tick do not count), and
-            // settlement clears this state after every trade — so no recovery
-            // ever executes without a genuinely fresh, post-trade rescan of
-            // every watched market. This is what stops the old "loss → instant
-            // re-fire on the same snapshot" loop.
+            // has to stay best across N distinct ticks (repeated passes over
+            // one tick do not count), and settlement clears this state after
+            // every trade — so no recovery ever executes without a genuinely
+            // fresh, post-trade rescan of every watched market. Adaptive: when
+            // consecutive losses ≥3, required confirmations escalate 2→3 —
+            // larger hedge debt demands more proof. This is what stops the old
+            // "loss → instant re-fire on the same snapshot" loop.
             let confirmations = 0;
             let eligible = best.eligible;
+            const hedgeLossRun = this._consecutiveLosses || 0;
+            const hedgeRequired = hedgeLossRun >= 3
+                ? Math.min(3, NEXUS_HEDGE_LIMITS.recoveryConfirmations + 1)
+                : NEXUS_HEDGE_LIMITS.recoveryConfirmations;
             if (isRecovery && best.eligible) {
                 const key = `${best.symbol}:${best.contract}:${String(best.barrier)}`;
                 const previous = this.nt_hedge_confirmation;
@@ -758,20 +782,21 @@ export default Engine =>
                 else if (previous?.key === key && previous.epoch === best.tickEpoch) confirmations = previous.count;
                 else confirmations = 1;
                 this.nt_hedge_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
-                eligible = confirmations >= NEXUS_HEDGE_LIMITS.recoveryConfirmations;
+                eligible = confirmations >= hedgeRequired;
             } else {
                 this.nt_hedge_confirmation = undefined;
             }
 
-            const rescanNote = rescanInProgress ? ' · post-loss rescan' : '';
+            const rescanNote = rescanInProgress ? ` · post-loss rescan (lossRun ${hedgeLossRun})` : '';
             this.nt_hedge_decision = {
                 ...best, changedMarket: best.symbol !== this.symbol,
                 eligible,
                 confirmations,
+                requiredConfirmations: hedgeRequired,
                 reason: best.eligible
                     ? eligible
                         ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%${rescanNote}`
-                        : `HOLD · confirming recovery setup ${confirmations}/${NEXUS_HEDGE_LIMITS.recoveryConfirmations} on a fresh tick${rescanNote}`
+                        : `HOLD · confirming recovery setup ${confirmations}/${hedgeRequired} on a fresh tick${rescanNote}`
                     : `HOLD: ${blockers.join(', ') || 'no qualified edge'}${rescanNote}`,
             };
             return eligible;
@@ -828,14 +853,22 @@ export default Engine =>
                     stake,
                     balance,
                 });
+                // ── Intelligent recovery rescan (2026-09-30) ─────────────────
                 // A debt-sized recovery must hold on FRESH data: the timing
                 // gate has to pass across N distinct ticks, and settlement
                 // clears this state after every trade — so a recovery never
                 // fires off the first post-loss snapshot (Nexus Hedge rescan
-                // mandate). Turbo's recovery contract is fixed, so there is
-                // nothing to demote; fresh-data persistence is the mandate.
+                // mandate). Adaptive: when consecutive losses ≥3, required
+                // confirmations escalate 2→3 — larger debt demands more proof.
+                // Multi-market Turbo additionally demotes the losing market
+                // (see ntAnalyseTurboMarkets) so an alternate market wins the
+                // rescan instead of looping on one tape.
                 let confirmations = 0;
                 let eligible = rawDecision.eligible;
+                const turboLossRun = this._consecutiveLosses || 0;
+                const turboRequired = turboLossRun >= 3
+                    ? Math.min(3, TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations + 1)
+                    : TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations;
                 if (eligible) {
                     const key = `${this.symbol}:${String(contract)}:${Number(barrier)}`;
                     const previous = this.nt_turbo_recovery_confirmation;
@@ -843,7 +876,7 @@ export default Engine =>
                     else if (previous?.key === key && previous.epoch === tickEpoch) confirmations = previous.count;
                     else confirmations = 1;
                     this.nt_turbo_recovery_confirmation = { key, epoch: tickEpoch, count: confirmations };
-                    eligible = confirmations >= TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations;
+                    eligible = confirmations >= turboRequired;
                 } else {
                     this.nt_turbo_recovery_confirmation = undefined;
                 }
@@ -851,9 +884,11 @@ export default Engine =>
                     ...rawDecision,
                     eligible,
                     confirmations,
+                    requiredConfirmations: turboRequired,
+                    lossRun: turboLossRun,
                     reason:
                         rawDecision.eligible && !eligible
-                            ? `HOLD · confirming recovery setup ${confirmations}/${TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations} on a fresh tick`
+                            ? `HOLD · confirming recovery setup ${confirmations}/${turboRequired} on a fresh tick (lossRun ${turboLossRun})`
                             : rawDecision.reason,
                 };
                 return this.nt_turbo_recovery_decision.eligible;
@@ -878,6 +913,150 @@ export default Engine =>
         async ntTurboRecoveryDecision(field) {
             const value = this.nt_turbo_recovery_decision?.[field];
             return value === undefined ? (field === 'reason' ? 'HOLD · recovery analysis warming up' : 0) : value;
+        }
+
+        /**
+         * Turbo Adaptive Recovery — multi-market rescan (2026-09-30 fix).
+         * The legacy `ntAnalyseTurboRecovery` was single-market LOCKED — the
+         * root cause of the 10-loss lock. This new primitive mirrors
+         * `ntAnalyseDigitMarkets` but with Turbo's Bayesian conditional timing
+         * maths: it scans ALL watchMarkets for the FIXED recovery contract,
+         * picks the best eligible market, and enforces the intelligent rescan
+         * mandate — 2 fresh ticks (3 when lossRun≥3) + progressive rematch
+         * demotion so an alternate market honestly wins the post-loss rescan.
+         * No recovery may fire without a fresh multi-market rescan, and no
+         * repeated tick can arm it. The XML switches markets via
+         * `ntSwitchMarket` when the decision's market differs.
+         */
+        async ntAnalyseTurboMarkets(
+            marketsCsv = '',
+            contract = 'DIGITOVER',
+            barrier = 4,
+            fallbackPayout = 1.95,
+            requestedWindow = 120,
+            requestedStake = 0
+        ) {
+            const recoveryContract = contract === 'DIGITUNDER' ? 'DIGITUNDER' : 'DIGITOVER';
+            const recoveryBarrier = Math.max(0, Math.min(9, Math.trunc(Number(barrier) || 4)));
+            const markets = [...new Set(String(marketsCsv).split(',').map(s => s.trim()).filter(Boolean))].slice(0, 8);
+            if (!markets.includes(this.symbol)) markets.unshift(this.symbol);
+            const windowSize = Math.max(40, Math.min(300, Number(requestedWindow) || 120));
+            const stake = Number(requestedStake) || Number(this.tradeOptions?.amount) || 0;
+            const balance = Number(this.getBalance?.('NUM')) || Number(this.getBalance?.()) || 0;
+            const lossRun = this._consecutiveLosses || 0;
+            const required = lossRun >= 3
+                ? Math.min(3, TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations + 1)
+                : TURBO_RECOVERY_ANALYSIS_LIMITS.recoveryConfirmations;
+
+            const rows = [];
+            const scanOne = async symbol => {
+                try {
+                    const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: 3 });
+                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize() ?? 2;
+                    const tail = ticks.slice(-windowSize);
+                    const digits = tail.map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    if (digits.length < 20) return;
+                    const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
+                    const proposal = [...(this.data?.proposals ?? [])].reverse().find(r => {
+                        const sameContract = r?.contract_type === recoveryContract;
+                        const sameBarrier = r?.barrier === undefined || Number(r.barrier) === recoveryBarrier;
+                        const sameSymbol = !r?.underlying_symbol || r.underlying_symbol === symbol;
+                        return sameContract && sameBarrier;
+                    });
+                    const ask = Number(proposal?.ask_price);
+                    const totalReturn = Number(proposal?.payout);
+                    const livePayout = ask > 0 && totalReturn > ask ? totalReturn / ask : Number.NaN;
+                    const payout = Number.isFinite(livePayout) ? livePayout : Number(fallbackPayout);
+                    const analysis = analyseTurboRecovery({ digits, contract: recoveryContract, barrier: recoveryBarrier, payout, stake, balance });
+                    // Score for ranking: lowerBound edge + utility - clustering/instability
+                    const score = 100 * ((analysis.lowerBound - analysis.breakEven) * 0.6 + analysis.expectedUtility * 0.1 - Math.max(0, analysis.clusterRatio - 1) * 0.12 - analysis.instability * 0.15);
+                    rows.push({ symbol, contract: recoveryContract, barrier: recoveryBarrier, payout, stake, balance, tickEpoch, digits, ...analysis, score });
+                } catch (_) { /* one market unavailable must not stop the scan */ }
+            };
+            for (let i = 0; i < markets.length; i += 3) {
+                await Promise.all(markets.slice(i, i + 3).map(scanOne));
+            }
+
+            // Progressive rematch: demote the exact losing market so an
+            // alternate honestly wins the rescan. Penalty scales with lossRun.
+            const rematch = this.nt_turbo_rematch;
+            const rescanInProgress = Boolean(rematch);
+            if (rematch) {
+                for (const row of rows) {
+                    if (`${row.symbol}:${row.contract}:${String(row.barrier)}` === rematch.key || row.symbol === rematch.key.split(':')[0]) {
+                        row.score -= rematch.penalty;
+                        row.eligible = row.eligible && row.score > -50; // keep eligible flag but demote heavily
+                    }
+                }
+                const maxEpoch = rows.reduce((m, r) => Math.max(m, r.tickEpoch || 0), 0);
+                if (maxEpoch > (rematch.epoch ?? 0)) {
+                    rematch.epoch = maxEpoch;
+                    rematch.penalty = Math.max(0, rematch.penalty - TURBO_RECOVERY_ANALYSIS_LIMITS.rematchDecay);
+                    if (rematch.penalty === 0) this.nt_turbo_rematch = undefined;
+                }
+            }
+
+            rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+            const best = rows[0];
+            if (!best) {
+                this.nt_turbo_markets_confirmation = undefined;
+                this.nt_turbo_markets_decision = {
+                    symbol: this.symbol,
+                    contract: recoveryContract,
+                    barrier: recoveryBarrier,
+                    payout: Number(fallbackPayout),
+                    eligible: false,
+                    score: -999,
+                    samples: 0,
+                    confirmations: 0,
+                    requiredConfirmations: required,
+                    reason: 'HOLD · recovery feeds unavailable; retrying safely',
+                    changedMarket: false,
+                };
+                return false;
+            }
+
+            // Confirmation on DISTINCT fresh ticks per chosen market tuple
+            let confirmations = 0;
+            let eligible = best.eligible;
+            if (best.eligible) {
+                const key = `${best.symbol}:${best.contract}:${String(best.barrier)}`;
+                const prev = this.nt_turbo_markets_confirmation;
+                if (prev?.key === key && prev.epoch !== best.tickEpoch) confirmations = prev.count + 1;
+                else if (prev?.key === key && prev.epoch === best.tickEpoch) confirmations = prev.count;
+                else confirmations = 1;
+                this.nt_turbo_markets_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
+                eligible = confirmations >= required;
+            } else {
+                this.nt_turbo_markets_confirmation = undefined;
+            }
+
+            const note = rescanInProgress ? ` · post-loss rescan (lossRun ${lossRun})` : '';
+            this.nt_turbo_markets_decision = {
+                ...best,
+                eligible,
+                confirmations,
+                requiredConfirmations: required,
+                changedMarket: best.symbol !== this.symbol,
+                reason: !best.eligible
+                    ? `${best.reason}${note}`
+                    : !eligible
+                        ? `HOLD · confirming Turbo recovery ${confirmations}/${required} on fresh tick ${best.symbol}${note}`
+                        : `${best.reason} · market ${best.symbol}${note}`,
+            };
+            // Also mirror into legacy decision so Total.js fallback can see it
+            this.nt_turbo_recovery_decision = this.nt_turbo_markets_decision;
+            return eligible;
+        }
+
+        async ntTurboMarketsDecision(field) {
+            const v = this.nt_turbo_markets_decision?.[field] ?? this.nt_turbo_recovery_decision?.[field];
+            return v === undefined ? (field === 'reason' ? 'HOLD · Turbo markets warming up' : 0) : v;
+        }
+
+        async ntRecordTurboPending(symbol, contract, barrier) {
+            this.nt_turbo_pending_entry = { symbol: String(symbol), contract: String(contract), barrier: Number(barrier), tickEpoch: Date.now() };
+            return true;
         }
 
         /**

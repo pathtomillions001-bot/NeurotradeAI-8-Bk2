@@ -18,19 +18,23 @@ export const NEXUS_HEDGE_LIMITS = Object.freeze({
     confidenceZ: 1.282,
     minClusterLosses: 10,
     // A debt-sized recovery must persist as the best candidate on this many
-    // DISTINCT fresh ticks before it may fire. The count restarts after every
-    // settled trade (settlement clears the confirmation state), so no recovery
-    // executes without a genuinely fresh post-trade rescan of every watched
-    // market — and one flattering snapshot can never arm it.
+    // DISTINCT fresh ticks before it may fire. Count restarts after every
+    // settled trade (settlement clears confirmation), so no recovery executes
+    // without a genuinely fresh post-trade rescan of every watched market.
+    // Upgraded 2026-09-30: escalates to 3 confirmations when lossRun ≥3 —
+    // larger debt demands more fresh proof before a hedge stake fires.
     recoveryConfirmations: 2,
-    // After a settled LOSS the exact losing tuple (symbol:contract:barrier)
-    // starts its next scans from a score deficit, so an alternate market or
-    // contract with a comparable edge wins the rescan instead of the bot
-    // re-firing on the tape it just lost on. The deficit decays per scan and
-    // spans exactly the confirmation window; if the loser still tops every
-    // penalised scan, it re-enters honestly.
-    rematchPenalty: 3,
-    rematchDecay: 1.5,
+    // After a settled LOSS the exact losing tuple starts its next scans from
+    // a STRONG score deficit that decays SLOWLY and SCALES with loss streak.
+    // Old 3pt/1.5 lasted only 2 fresh ticks — the same tape kept ranking #1
+    // and the bot looped 10 losses on one market. Now base 8, decay 0.8
+    // (≈10 ticks), plus Total.js scales as base + 2·(lossRun-1): a 3-loss
+    // streak penalises 12, a 5-loss streak 16 — the longer the lock, the
+    // harder the rescan forces a market/contract switch. No recovery without
+    // a fresh rescan; loser re-enters only by topping every penalised scan.
+    rematchPenalty: 8,
+    rematchDecay: 0.8,
+    rematchPenaltyPerLoss: 2,
     normal: Object.freeze({
         minSamples: 30,
         minEv: 0,

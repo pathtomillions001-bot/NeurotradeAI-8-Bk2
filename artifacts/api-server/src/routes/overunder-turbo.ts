@@ -280,11 +280,28 @@ router.post("/dbot", async (req, res): Promise<void> => {
       Math.round(Number(analysis?.metrics?.recoveryDepthP95) || 4),
     );
 
+    // Intelligent recovery: if the console does not ship an explicit watchlist
+    // we seed it from every digit-enabled market (generator keeps ≤8 and pins
+    // the scanned symbol first). Recovery then rescans all of them on every
+    // loss, including recovery-loss, so no recovery purchase fires without a
+    // fresh multi-market contest.
+    const requestedWatchMarkets = Array.isArray((body as any).watchMarkets)
+      ? ((body as any).watchMarkets as unknown[]).filter(
+          (s): s is string => typeof s === "string" && isAutomatedMarket(s),
+        )
+      : [];
+    const watchMarkets = (
+      requestedWatchMarkets.length > 0
+        ? requestedWatchMarkets
+        : AUTOMATED_DERIV_MARKETS.filter((m) => m.digitEnabled).map((m) => m.symbol)
+    ).slice(0, 8);
+
     const strategy = buildTurboDbotStrategy({
       symbol: market.symbol,
       displayName: market.displayName,
       normal,
       recovery,
+      watchMarkets,
       stake: body.stake,
       takeProfit: Number(body.takeProfit) > 0 ? Number(body.takeProfit) : params.takeProfit,
       stopLoss: Number(body.stopLoss) > 0 ? Number(body.stopLoss) : params.stopLoss,

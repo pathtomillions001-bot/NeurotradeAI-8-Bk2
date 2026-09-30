@@ -165,12 +165,27 @@ export const TURBO_RECOVERY_ANALYSIS_LIMITS = Object.freeze({
     maxClusterRatio: MAX_CLUSTER_RATIO,
     maxInstability: MAX_INSTABILITY,
     /**
+     * ── Intelligent recovery rescan (2026-09-30) ───────────────────────────
      * A debt-sized recovery must hold across this many DISTINCT fresh ticks
-     * before it may fire. Settlement clears the confirmation state after
-     * every trade, so no recovery executes off the first post-loss snapshot —
-     * the timing gate is always re-earned on fresh post-trade data (the Nexus
-     * Hedge rescan mandate; Turbo's recovery contract is fixed, so a rematch
-     * penalty has no meaning here — fresh-data confirmation is the mandate).
+     * before it may fire. Settlement clears confirmation after EVERY trade, so
+     * no recovery executes off the first post-loss snapshot — the timing gate
+     * is always re-earned on fresh post-trade data (the Nexus Hedge rescan
+     * mandate). Upgraded: when lossRun ≥3, confirmations escalate to 3 —
+     * larger debt needs more proof. When watchMarkets are supplied,
+     * `ntAnalyseTurboMarkets` additionally scans ALL watched markets and an
+     * alternate market with a qualifying edge wins the rescan (see rematch).
      */
     recoveryConfirmations: 2,
+    /**
+     * Post-loss rematch: after a settled LOSS the exact losing tuple
+     * (symbol:contract:barrier) starts its next scans from a score deficit.
+     * Turbo was previously fixed-contract with no market rescan — the 10-loss
+     * lock. Now when `watchMarkets` is supplied, recovery scans every watched
+     * market and the loser is demoted (base 10, decay 1.0, scales
+     * +2·(lossRun-1)), so an alternate market honestly wins the rescan.
+     * Without watchMarkets, confirmation alone prevents instant re-fire.
+     */
+    rematchPenalty: 10,
+    rematchDecay: 1.0,
+    rematchPenaltyPerLoss: 2,
 });

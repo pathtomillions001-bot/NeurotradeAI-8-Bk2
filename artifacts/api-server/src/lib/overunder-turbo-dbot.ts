@@ -12,27 +12,34 @@
  *   presses Deriv's own Run: from then on Deriv Bot executes the trades, not
  *   the Turbo engine.
  *
- * WHAT THE GENERATED BOT DOES (1:1 with the Turbo engine's LOCKED mode)
+ * WHAT THE GENERATED BOT DOES (1:1 with the Turbo engine, now ADAPTIVE)
  * ────────────────────────────────────────────────────────────────────────
- *   · Trades the scanned market only, 1-tick Over/Under digit contracts.
- *   · ARM ONCE: before the first purchase it waits until the normal contract's
- *     hit-rate over the last 40 digits is ≥ its break-even (1 / payout), or
- *     the arming window elapses (`armTimeoutTicks`) — then it never re-arms.
- *   · Normal entries retain Turbo's continuous cadence after arming.
- *   · Recovery entries are NOT blind: before every attempt the running DBot
- *     requires a Bayesian conditional 90% lower bound above live break-even,
- *     stable tape, low loss clustering and positive balance-aware log utility.
+ *   · Trades 1-tick Over/Under digit contracts; normal leg ARMs ONCE (waits
+ *     until hit-rate ≥ break-even or timeout) then retains continuous cadence.
+ *   · Recovery is INTELLIGENTLY ADAPTIVE (2026-09-30 fix): before every
+ *     recovery attempt the DBot rescans ALL watchMarkets (≤8) for the FIXED
+ *     recovery contract (Over 4/5, Under 4/5) using the same Bayesian
+ *     conditional 90% lower bound, clustering, instability and log-utility
+ *     timing model, picks the BEST qualifying market, and switches via
+ *     ntSwitchMarket. A progressive rematch penalty (base 10 +2 per
+ *     consecutive loss, decay 1.0 over ~10 fresh ticks) guarantees an
+ *     alternate market wins the post-loss rescan instead of looping on one
+ *     tape. No recovery may fire without a fresh multi-market rescan:
+ *     2 distinct fresh ticks required (3 when lossRun ≥3), and settlement
+ *     always clears confirmation.
  *   · Recovery stake = debt × (1 + markup %) / (payout − 1), floored at $0.35,
- *     capped at the account's max trade stake and at the live balance, rounded
- *     UP to cents — the same `getBotRecoveryStake` maths as every specialist bot.
- *   · A recovery win pays the net profit into the debt; recovery ends the moment
- *     debt reaches zero (a partial win keeps recovery active on the remainder).
- *   · Circuit breaker: `breakerDepth` consecutive losses stops the bot (the
- *     Turbo engine's only non-TP/SL halt).
+ *     capped at max stake and live balance, rounded UP to cents — the same
+ *     `getBotRecoveryStake` maths as every specialist bot, re-sized after the
+ *     live payout from the rescanned market is quoted.
+ *   · A recovery win pays net profit into the debt; recovery ends when debt
+ *     reaches zero (partial win keeps recovery active).
+ *   · Circuit breaker: `breakerDepth` consecutive losses stops the bot.
  *   · Take-profit / stop-loss on Deriv's own total-profit counter end the run.
  *
- *   The one thing a DBot cannot do is Turbo's SWITCHING mode (Deriv Bot fixes
- *   the market in its trade definition), so the generated bot is a LOCKED bot.
+ *   Previously the DBot was LOCKED to one market (the scan's market). That
+ *   single-market lock is what allowed 10 consecutive losses on one hostile
+ *   tape. Now the recovery leg is fully adaptive and rescans all markets
+ *   every time; the trade-definition market is only the initial market.
  *
  * BUILDER COMPATIBILITY
  * ─────────────────────
@@ -78,6 +85,8 @@ export interface TurboDbotInput {
   armTimeoutTicks?: number;
   /** Digits used by the in-bot recovery timing model (default 120). */
   recoveryWindow?: number;
+  /** Markets the in-bot recovery ranker may switch to (≤8, always includes symbol). Upgraded 2026-09-30: adaptive multi-market recovery. */
+  watchMarkets?: string[];
 }
 
 export interface TurboDbotStrategy {
@@ -106,10 +115,11 @@ export interface TurboDbotStrategy {
     armTimeoutTicks: number;
     recoveryWindow: number;
     currency: string;
+    watchMarkets: string[];
   };
 }
 
-/** Every block type the generated strategy may contain, including the two vendored recovery-analysis blocks. */
+/** Every block type the generated strategy may contain, including the vendored recovery-analysis blocks (2026-09-30: adaptive multi-market). */
 export const TURBO_DBOT_BLOCK_TYPES = Object.freeze([
   "trade_definition",
   "trade_definition_market",
@@ -130,6 +140,9 @@ export const TURBO_DBOT_BLOCK_TYPES = Object.freeze([
   "lastDigitList",
   "nt_analyse_turbo_recovery",
   "nt_turbo_recovery_decision",
+  "nt_analyse_turbo_markets",
+  "nt_turbo_markets_decision",
+  "nt_switch_market",
   "lists_getSublist",
   "lists_length",
   "controls_forEach",
@@ -202,6 +215,9 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
   const normalLabel = contractLabel(input.normal);
   const recoveryLabel = contractLabel(input.recovery);
   const currency = /^[A-Za-z]{3,5}$/.test(input.currency) ? input.currency.toUpperCase() : "USD";
+  const watchMarkets = [input.symbol, ...(input.watchMarkets ?? [])]
+    .filter((s, i, all) => /^[A-Za-z0-9_]+$/.test(s) && all.indexOf(s) === i)
+    .slice(0, 8);
 
   const x = new XmlBuilder();
 
@@ -227,6 +243,7 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     recoveryReason: "Recovery Analysis",
     recoveryProbability: "Recovery Probability",
     recoveryLowerBound: "Recovery Lower Bound",
+    activeSymbol: "Active Market",
     profit: "Profit",
     lastStake: "Last Stake",
     lastReturn: "Last Return",
@@ -258,13 +275,15 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     x.set(V.recoveryReason, x.text("recovery analysis warming up")),
     x.set(V.recoveryProbability, x.num(0)),
     x.set(V.recoveryLowerBound, x.num(0)),
+    x.set(V.activeSymbol, x.text(input.symbol)),
     x.notify(
       "info",
       x.text(
         `NeuroTrade Turbo · ${input.displayName} · ${normalLabel} normal → ${recoveryLabel} recovery · ` +
           `stake ${money(input.stake)} · TP ${money(input.takeProfit)} · SL ${money(input.stopLoss)} · ` +
-          `recovery: Bayesian 90% timing over ${recoveryWindow} digits · markup ${markupPercent}% · ` +
-          `circuit breaker ${breakerDepth} losses`,
+          `${watchMarkets.length} market${watchMarkets.length === 1 ? "" : "s"} adaptive recovery · ` +
+          `Bayesian 90% timing over ${recoveryWindow} digits · markup ${markupPercent}% · ` +
+          `circuit breaker ${breakerDepth} losses · intelligent rescan: every recovery rescans ${watchMarkets.length} markets, progressive rematch penalty, 2-tick (3 when lossRun≥3) fresh confirmation`,
       ),
     ),
   ];
@@ -358,21 +377,45 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     ]),
     x.notify("success", x.get(V.message)),
   ];
+  // ── Intelligent Recovery Rescan (2026-09-30) ──────────────────────────────
+  // Every recovery now rescans ALL watchMarkets for the fixed recovery
+  // contract. The ranker uses the same Bayesian conditional timing model
+  // (lower bound, clustering, instability, log utility) but picks the BEST
+  // eligible market, then switches via ntSwitchMarket. A progressive rematch
+  // penalty (base 10, +2 per consecutive loss, decay 1.0 over ~10 fresh
+  // ticks) guarantees an alternate market wins the post-loss rescan. No
+  // recovery may fire without a fresh multi-market rescan: 2 distinct fresh
+  // ticks required (3 when lossRun ≥3), and settlement always clears
+  // confirmation. This is what stops the 10-loss lock on one tape.
   const recoveryGate: Stmt[] = [
     x.set(V.recoveryChecks, x.arith("ADD", x.get(V.recoveryChecks), x.num(1))),
     x.set(V.recoveryReady, x.bool(false)),
-    x.ntAnalyseTurboRecovery(
+    // Adaptive multi-market scan: when watchMarkets supplied (≤8), scan all
+    // of them and pick the best qualifying recovery market. Single-market
+    // legacy bots still pass a 1-element list and behave as before.
+    x.ntAnalyseTurboMarkets(
+      watchMarkets,
       input.recovery.side,
       input.recovery.barrier,
       x.get(V.recPayout),
       recoveryWindow,
       x.get(V.stake),
     ),
-    x.set(V.recoveryReady, x.ntTurboRecoveryDecision("eligible")),
-    x.set(V.recoveryReason, x.ntTurboRecoveryDecision("reason")),
-    x.set(V.recoveryProbability, x.ntTurboRecoveryDecision("probability")),
-    x.set(V.recoveryLowerBound, x.ntTurboRecoveryDecision("lowerBound")),
+    x.set(V.activeSymbol, x.ntTurboMarketsDecision("symbol")),
+    x.set(V.recoveryReady, x.ntTurboMarketsDecision("eligible")),
+    x.set(V.recoveryReason, x.ntTurboMarketsDecision("reason")),
+    x.set(V.recoveryProbability, x.ntTurboMarketsDecision("probability")),
+    x.set(V.recoveryLowerBound, x.ntTurboMarketsDecision("lowerBound")),
+    x.set(V.recPayout, x.ntTurboMarketsDecision("payout")),
     x.ifElse([
+      {
+        cond: x.compare("EQ", x.ntTurboMarketsDecision("changedMarket"), x.bool(true)),
+        then: [
+          x.ntSwitchMarket(x.get(V.activeSymbol)),
+          x.joinInto(V.message, [x.text("TURBO SWITCH · now analysing"), x.get(V.activeSymbol)]),
+          x.notify("info", x.get(V.message)),
+        ],
+      },
       {
         cond: x.compare("EQ", x.get(V.recoveryReady), x.bool(true)),
         then: [...recoveryReadyReport, purchaseCurrentContract()],
@@ -598,7 +641,7 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
     afterPurchase +
     `</xml>`;
 
-  const name = `NeuroTrade Turbo ${input.symbol} ${normalLabel} to ${recoveryLabel}`;
+  const name = `NeuroTrade Turbo ${input.symbol} ${normalLabel} to ${recoveryLabel} · ${watchMarkets.length}M adaptive`;
 
   return {
     name,
@@ -623,6 +666,7 @@ export function buildTurboDbotStrategy(input: TurboDbotInput): TurboDbotStrategy
       armTimeoutTicks,
       recoveryWindow,
       currency,
+      watchMarkets,
     },
   };
 }

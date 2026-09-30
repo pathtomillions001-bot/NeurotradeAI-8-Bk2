@@ -45,18 +45,22 @@ export const OMNI_FORGE_LIMITS = Object.freeze({
      * DISTINCT fresh ticks before it may fire. Settlement clears the
      * confirmation state after every trade, so no recovery executes without a
      * genuinely fresh post-trade rescan of every watched market — exactly the
-     * Nexus Hedge rescan mandate.
+     * Nexus Hedge rescan mandate. Upgraded 2026-09-30: confirmations escalate
+     * to 3 when lossRun ≥3 (see Ticks.js) — larger debt = more proof required.
      */
     recoveryConfirmations: 2,
     /**
      * After a settled LOSS the exact losing tuple (symbol:contract:barrier)
-     * starts its next scans from a score deficit (decaying per scan, spanning
-     * exactly the confirmation window), so an alternate market/contract with
-     * a comparable edge wins the rescan instead of the bot re-firing on the
-     * tape it just lost on.
+     * starts its next scans from a STRONG score deficit (decaying slowly and
+     * scaling with loss streak). Old 3pt/1.5 lasted only 2 fresh ticks — the
+     * same tape kept winning. Now base 8, decay 0.8 (≈10 ticks), plus
+     * Total.js scales as base + 2·(lossRun-1): a 3-loss streak penalises 12,
+     * a 5-loss streak 16 — the longer the lock, the harder the rescan forces
+     * a market/contract switch. No recovery may fire without a fresh rescan.
      */
-    rematchPenalty: 3,
-    rematchDecay: 1.5,
+    rematchPenalty: 8,
+    rematchDecay: 0.8,
+    rematchPenaltyPerLoss: 2,
     normal: Object.freeze({
         minSamples: 30,
         minEv: 0,

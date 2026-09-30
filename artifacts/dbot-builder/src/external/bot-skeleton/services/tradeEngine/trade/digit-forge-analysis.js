@@ -149,13 +149,25 @@ export const DIGIT_FORGE_ANALYSIS_LIMITS = Object.freeze({
     maxRecoveryClusterRatio: 1.2,
     maxRecoveryInstability: 0.12,
     maxRecoveryAdverseRun: 2,
+    // ── Intelligent recovery rescan (2026-09-30 fix) ──────────────────────────
     // After a settled LOSS the exact losing tuple (symbol:contract:barrier)
-    // starts its next recovery scans from a score deficit (decaying per scan,
-    // spanning exactly the confirmation window), so an alternate market or
-    // barrier with a comparable edge wins the post-loss rescan instead of the
-    // bot re-firing on the tape it just lost on. Confirmation (above) still
-    // applies, so the loser re-enters only by topping every penalised fresh
-    // scan — the Nexus Hedge rescan mandate.
-    rematchPenalty: 3,
-    rematchDecay: 1.5,
+    // starts its next recovery scans from a STRONG score deficit that decays
+    // SLOWLY and SCALES with the loss streak. The old 3pt/1.5-decay lasted
+    // only 2 fresh ticks — one loss barely dents a 50+ sample posterior, so
+    // the same tape kept ranking #1 and the bot re-fired on the tape it just
+    // lost on for up to 10 losses. Now:
+    //   • base penalty 8 (≈ 800 score points) guarantees an alternate market
+    //     with a comparable edge wins the post-loss rescan;
+    //   • decay 0.8 lasts ~10 fresh ticks, so the loser cannot re-enter until
+    //     it genuinely tops every penalised scan;
+    //   • Total.js scales the penalty as base + 2·(lossRun-1), so a 3-loss
+    //     streak penalises 12pts and a 5-loss streak 16pts — the longer the
+    //     lock, the harder the rescan forces a market switch.
+    // Confirmation (2 distinct fresh ticks) still applies on top: no recovery
+    // may fire without a genuinely fresh post-trade rescan of every watched
+    // market, and repeated passes over one snapshot never count.
+    rematchPenalty: 8,
+    rematchDecay: 0.8,
+    // Loss-run adaptive: Total.js computes `penalty = base + 2·(lossRun-1)`.
+    rematchPenaltyPerLoss: 2,
 });

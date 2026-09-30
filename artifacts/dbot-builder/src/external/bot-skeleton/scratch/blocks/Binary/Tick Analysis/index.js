@@ -13,6 +13,7 @@ import './neurotrade_contract_forge';
 import './neurotrade_nexus_hedge';
 import './neurotrade_surge_forge';
 import './neurotrade_turbo_recovery';
+import './neurotrade_turbo_markets';
 import './neurotrade_dual_lock_entry';
 import './neurotrade_bastion_entry';
 import './stat';

@@ -1,10 +1,11 @@
 import { config } from '../constants/config';
 import { acceptedTypesFor } from './mandatory-block-aliases';
 
-// NeuroTrade: `nt_purchase_contract` (Omni Forge) and `nt_purchase_digit_trade`
-// (Digit Forge) stand in for the stock `purchase` block. The alias map is shared
-// with scratch/utils/index.js via utils/mandatory-block-aliases.js so the Run
-// button and this check cannot drift apart.
+// NeuroTrade: `nt_purchase_contract` (Omni Forge), `nt_purchase_digit_trade`
+// (Digit Forge) and `nt_purchase_hedge` (Nexus Hedge Forge) stand in for the
+// stock `purchase` block. The alias map is shared with scratch/utils/index.js
+// via utils/mandatory-block-aliases.js so the Run button and this check cannot
+// drift apart.
 
 export const hasAllRequiredBlocks = () => {
     const blocks_in_workspace = window.Blockly.derivWorkspace.getAllBlocks();

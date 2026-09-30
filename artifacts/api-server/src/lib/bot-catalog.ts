@@ -153,7 +153,10 @@ export const BOT_CATALOG: BotDefinition[] = [
       "Best market AND best contract per cycle, with safe between-contract market switching and Page-Hinkley freeze when the tape drifts",
       "Valid Blockly XML guaranteed: every block type is vendored-allowlisted, unique ids, no Run errors",
     ],
-    accent: "teal",
+    // Violet, not teal: Omni Forge and Parity Forge already own teal, and the
+    // three forges are near-identical layouts, so a shared accent made the
+    // universal forge indistinguishable from them in the Bot Arena.
+    accent: "violet",
     icon: "target",
     hasSides: false,
     hasDigitLock: false,

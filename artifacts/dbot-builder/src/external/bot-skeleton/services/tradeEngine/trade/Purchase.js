@@ -34,7 +34,24 @@ export default Engine =>
                     this.tradeOptions.prediction = Number.isFinite(digit) && digit >= 0 && digit <= 9 ? digit : Number.isFinite(seeded) && seeded >= 0 && seeded <= 9 ? seeded : 0;
                 } else delete this.tradeOptions.prediction;
             }
-            return this.purchase(type);
+            // Record the exact tuple being bought so settlement (Total.js) can
+            // pair outcome → loser and arm the post-loss rematch penalty that
+            // forces the next recovery scan to earn its entry on fresh data
+            // across the whole watch-list. Cleared if the buy never happened.
+            this.nt_hedge_pending_entry = {
+                symbol: this.symbol,
+                contract: type,
+                barrier: isNoDigit ? -1 : Number.isFinite(digit) ? digit : -1,
+            };
+            const result = this.purchase(type);
+            Promise.resolve(result)
+                .then(purchased => {
+                    if (purchased === false) this.nt_hedge_pending_entry = undefined;
+                })
+                .catch(() => {
+                    this.nt_hedge_pending_entry = undefined;
+                });
+            return result;
         }
 
         ntPurchaseContract(contract_type, barrier) {

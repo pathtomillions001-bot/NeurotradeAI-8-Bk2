@@ -365,6 +365,16 @@ class DBot {
                     sleep(5);
                     currentTickTime = Bot.getLastTick(true);
                 }
+                // The tape can be momentarily EMPTY right after Run (socket still
+                // connecting), after a market switch, or when a subscription was
+                // just re-seeded — getLastTick(true) then resolves undefined and
+                // reading .epoch here threw "Cannot read property 'epoch' of
+                // undefined" inside the interpreter, STOPPING the bot from its
+                // own journal. Skip this pass and wait for the first real tick.
+                if (!currentTickTime || currentTickTime.epoch === undefined) {
+                    sleep(1);
+                    return;
+                }
                 currentTickTime = currentTickTime.epoch;
                 if (currentTickTime === BinaryBotPrivateLastTickTime) {
                     return;

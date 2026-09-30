@@ -4,6 +4,7 @@ import { LogTypes } from '../../../constants/messages';
 import { createError } from '../../../utils/error';
 import { observer as globalObserver } from '../../../utils/observer';
 import { info, log } from '../utils/broadcast';
+import { NEXUS_HEDGE_LIMITS } from './nexus-hedge-analysis';
 
 const skeleton = {
     totalProfit: 0,
@@ -40,6 +41,26 @@ export default Engine =>
             const profit = getRoundedNumber(Number(sellPrice) - Number(buyPrice), currency);
 
             const win = profit > 0;
+
+            // Nexus Hedge Forge bookkeeping: EVERY settled trade — win or loss —
+            // must be followed by a genuinely fresh rescan of every watched
+            // market before any recovery entry may fire, so the fresh-tick
+            // confirmation is always invalidated here. On a LOSS, the rematch
+            // penalty additionally demotes the exact losing tuple for the next
+            // scans, so the rescan is a real contest across the watch-list
+            // instead of a re-fire on the tape that just lost. Both fields are
+            // Nexus-only: untouched strategies are unaffected.
+            this.nt_hedge_confirmation = undefined;
+            if (win) {
+                this.nt_hedge_rematch = undefined;
+            }
+            if (!win && this.nt_hedge_pending_entry) {
+                this.nt_hedge_rematch = {
+                    key: `${this.nt_hedge_pending_entry.symbol}:${this.nt_hedge_pending_entry.contract}:${String(this.nt_hedge_pending_entry.barrier)}`,
+                    penalty: NEXUS_HEDGE_LIMITS.rematchPenalty,
+                };
+            }
+            this.nt_hedge_pending_entry = undefined;
 
             const accountStat = this.getAccountStat();
 

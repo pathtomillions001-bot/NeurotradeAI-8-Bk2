@@ -78,6 +78,21 @@ describe("nexus-hedge input validation", () => {
       assert.ok(allowed.has(t), `block type ${t} not allowed`);
     }
   });
+  it("force entry (patience) is a normal-mode privilege — it can never fire a recovery", () => {
+    const strat = buildNexusHedgeStrategy({ ...BASE, forceEntryAfter: 5 });
+    const forceIdx = strat.xml.indexOf(`Patience limit ${5}`);
+    assert.ok(forceIdx > 0, "a strategy forged with forceEntryAfter must carry the patience branch");
+    // The patience branch must sit behind an AND gate whose first leg is
+    // `In Recovery == FALSE`: debt-sized recovery stakes always earn their
+    // entry through the rescan + fresh-tick confirmation gate instead.
+    const before = strat.xml.slice(0, forceIdx);
+    const andIdx = before.lastIndexOf("logic_operation");
+    const inRecoveryIdx = before.lastIndexOf("In Recovery");
+    assert.ok(andIdx > 0, "patience branch is gated by logic_operation");
+    assert.ok(inRecoveryIdx > andIdx, "the AND gate's first leg is the In Recovery == FALSE check");
+    // Without forceEntryAfter nothing emits logic_operation (guard the guard).
+    assert.ok(!buildNexusHedgeStrategy(BASE).xml.includes("logic_operation"));
+  });
   it("fixtures are stable", () => {
     for (const f of NEXUS_HEDGE_FIXTURES) {
       const a = renderFixture(f.input);

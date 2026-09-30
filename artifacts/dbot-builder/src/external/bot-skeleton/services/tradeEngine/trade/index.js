@@ -94,6 +94,12 @@ export default class TradeEngine extends Balance(DigitForge(Purchase(Sell(OpenCo
         this.nt_digit_prepared = null;
         this.nt_digit_recovery_confirmation = undefined;
         this.nt_digit_live_payouts = new Map();
+        // Nexus Hedge: fresh runs carry no ranker memory — no half-armed
+        // recovery confirmation and no rematch penalty from a previous run.
+        this.nt_hedge_decision = undefined;
+        this.nt_hedge_confirmation = undefined;
+        this.nt_hedge_rematch = undefined;
+        this.nt_hedge_pending_entry = undefined;
         // Fresh user-initiated run: cadence telemetry starts from zero.
         this.run_metrics?.reset();
         this.nt_last_proposal_check = 0;

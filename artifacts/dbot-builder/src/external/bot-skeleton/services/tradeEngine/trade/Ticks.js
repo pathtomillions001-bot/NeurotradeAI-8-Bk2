@@ -595,16 +595,43 @@ export default Engine =>
                         // If anti-correlated, uplift.
                         const hedge = 0; // neutral for now; Ticks wrapper can compute cross-contract phi later
                         const analysis = analyseNexusHedgeCandidate({ wins, p0, payout: spec.payout, mode, hedge });
-                        rows.push({ symbol, contract: spec.type, barrier: digit, payout: spec.payout, ...analysis });
+                        // Per-row tape epoch: the recovery confirmation below only
+                        // counts DISTINCT fresh ticks, so repeated interpreter passes
+                        // over one snapshot can never arm a debt-sized recovery.
+                        const tickEpoch = Number(tail[tail.length - 1]?.epoch) || 0;
+                        rows.push({ symbol, contract: spec.type, barrier: digit, payout: spec.payout, tickEpoch, ...analysis });
                     }
                 } catch (_) { /* one unavailable market must not stop the bot */ }
             };
             for (let i = 0; i < markets.length; i += 3) {
                 await Promise.all(markets.slice(i, i + 3).map(scanOne));
             }
+            // Post-loss REMATCH penalty: after a settled loss, settlement armed
+            // `nt_hedge_rematch` with the exact losing tuple (symbol:contract:
+            // barrier). One loss barely dents a 30+ sample posterior, so without
+            // this the same tape kept ranking #1 and the bot re-fired on the
+            // market it just lost on — repeatedly, up to circuit-breaker depth.
+            // The loser starts its next scans from a score deficit (decaying
+            // per scan, spanning exactly the confirmation window), so an
+            // alternate market/contract with a comparable edge honestly wins
+            // the rescan. If the loser still tops every penalised, fresh scan,
+            // re-entering it is the ranker's real answer, not an accident of
+            // stale tape.
+            const rematch = this.nt_hedge_rematch;
+            const rescanInProgress = Boolean(rematch);
+            if (rematch) {
+                for (const row of rows) {
+                    if (`${row.symbol}:${row.contract}:${String(row.barrier)}` === rematch.key) {
+                        row.score -= rematch.penalty;
+                    }
+                }
+                rematch.penalty = Math.max(0, rematch.penalty - NEXUS_HEDGE_LIMITS.rematchDecay);
+                if (rematch.penalty === 0) this.nt_hedge_rematch = undefined;
+            }
             rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
             const best = rows[0];
             if (!best) {
+                this.nt_hedge_confirmation = undefined;
                 this.nt_hedge_decision = {
                     symbol: this.symbol, contract: fallbackSpec.type, barrier: fallbackSpec.digit,
                     payout: fallbackSpec.payout, eligible: false, score: -999, samples: 0,
@@ -618,11 +645,40 @@ export default Engine =>
             if (best.lowerBound <= best.breakEven - limits.lowerBoundMargin) blockers.push(`lower bound ${(best.lowerBound * 100).toFixed(1)}% vs BE ${(best.breakEven * 100).toFixed(1)}%`);
             if (best.instability >= limits.maxInstability) blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
             if (best.clustering >= limits.maxClustering) blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
+
+            // RECOVERY entries must be earned on FRESH data. The same candidate
+            // has to stay best across NEXUS_HEDGE_LIMITS.recoveryConfirmations
+            // DISTINCT ticks (repeated passes over one tick do not count), and
+            // settlement clears this state after every trade — so no recovery
+            // ever executes without a genuinely fresh, post-trade rescan of
+            // every watched market. This is what stops the old "loss → instant
+            // re-fire on the same snapshot" loop.
+            let confirmations = 0;
+            let eligible = best.eligible;
+            if (isRecovery && best.eligible) {
+                const key = `${best.symbol}:${best.contract}:${String(best.barrier)}`;
+                const previous = this.nt_hedge_confirmation;
+                if (previous?.key === key && previous.epoch !== best.tickEpoch) confirmations = previous.count + 1;
+                else if (previous?.key === key && previous.epoch === best.tickEpoch) confirmations = previous.count;
+                else confirmations = 1;
+                this.nt_hedge_confirmation = { key, epoch: best.tickEpoch, count: confirmations };
+                eligible = confirmations >= NEXUS_HEDGE_LIMITS.recoveryConfirmations;
+            } else {
+                this.nt_hedge_confirmation = undefined;
+            }
+
+            const rescanNote = rescanInProgress ? ' · post-loss rescan' : '';
             this.nt_hedge_decision = {
                 ...best, changedMarket: best.symbol !== this.symbol,
-                reason: best.eligible ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%` : `HOLD: ${blockers.join(', ') || 'no qualified edge'}`,
+                eligible,
+                confirmations,
+                reason: best.eligible
+                    ? eligible
+                        ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%${rescanNote}`
+                        : `HOLD · confirming recovery setup ${confirmations}/${NEXUS_HEDGE_LIMITS.recoveryConfirmations} on a fresh tick${rescanNote}`
+                    : `HOLD: ${blockers.join(', ') || 'no qualified edge'}${rescanNote}`,
             };
-            return best.eligible;
+            return eligible;
         }
 
         async ntHedgeDecision(field) {

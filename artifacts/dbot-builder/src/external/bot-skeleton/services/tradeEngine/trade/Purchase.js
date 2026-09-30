@@ -21,6 +21,22 @@ export default Engine =>
          * for Even/Odd (a parity buy must not carry a barrier) — then defers
          * to the standard purchase path (scope guard, retries, logging).
          */
+        ntPurchaseHedge(contract_type, barrier) {
+            const type = String(contract_type || '').toUpperCase();
+            const digit = Math.trunc(Number(barrier));
+            // Hedge supports Rise/Fall (CALL/PUT) plus all digit types — parity/Rise/Fall carry no prediction
+            const isNoDigit = type === 'DIGITEVEN' || type === 'DIGITODD' || type === 'CALL' || type === 'PUT';
+            const needsDigit = ['DIGITOVER', 'DIGITUNDER', 'DIGITMATCH', 'DIGITDIFF'].includes(type);
+            if (this.tradeOptions) {
+                if (isNoDigit) delete this.tradeOptions.prediction;
+                else if (needsDigit) {
+                    const seeded = Math.trunc(Number(this.tradeOptions.prediction));
+                    this.tradeOptions.prediction = Number.isFinite(digit) && digit >= 0 && digit <= 9 ? digit : Number.isFinite(seeded) && seeded >= 0 && seeded <= 9 ? seeded : 0;
+                } else delete this.tradeOptions.prediction;
+            }
+            return this.purchase(type);
+        }
+
         ntPurchaseContract(contract_type, barrier) {
             const type = String(contract_type || '').toUpperCase();
             const digit = Math.trunc(Number(barrier));

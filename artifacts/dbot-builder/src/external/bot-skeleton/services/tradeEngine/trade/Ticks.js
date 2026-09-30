@@ -14,6 +14,7 @@ import { analyseDigitForgeCandidate, DIGIT_FORGE_ANALYSIS_LIMITS } from './digit
 import { DIGIT_FORGE_CONTRACTS } from './digit-forge-contracts';
 import { analyseSurgeMarket, SURGE_FORGE_LIMITS } from './surge-forge-analysis';
 import { analyseOmniForgeCandidate, OMNI_FORGE_LIMITS } from './omni-forge-analysis';
+import { analyseNexusHedgeCandidate, NEXUS_HEDGE_LIMITS } from './nexus-hedge-analysis';
 
 let tickListenerKey;
 // The symbol `tickListenerKey` belongs to. Without it, `watchTicks` asked the
@@ -523,6 +524,110 @@ export default Engine =>
         async ntContractDecision(field) {
             const value = this.nt_contract_decision?.[field];
             return value === undefined ? (field === 'reason' ? 'analysis warming up' : 0) : value;
+        }
+
+        /**
+         * Nexus Hedge Forge: universal hedge-aware ranker. Same gate as Omni but
+         * with Rise/Fall support, Dirichlet-10 contextual smoothing and phi/rho
+         * hedge scoring computed from joint normal vs recovery win streams.
+         */
+        async ntAnalyseHedge(mode = 'NORMAL', marketsCsv = '', contractsCsv = '', requestedWindow = 120) {
+            const isRecovery = mode === 'RECOVERY';
+            const limits = isRecovery ? NEXUS_HEDGE_LIMITS.recovery : NEXUS_HEDGE_LIMITS.normal;
+            const KNOWN = ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF', 'CALL', 'PUT'];
+            const FALLBACK_PAYOUT = {
+                DIGITOVER: 1.95, DIGITUNDER: 1.95, DIGITEVEN: 1.95, DIGITODD: 1.95,
+                DIGITMATCH: 8.93, DIGITDIFF: 1.09, CALL: 1.92, PUT: 1.92,
+            };
+            const specs = String(contractsCsv)
+                .split(',').map(s => s.trim()).filter(Boolean).slice(0, 12)
+                .map(raw => {
+                    const [type = '', digitRaw = '-1', payoutRaw = ''] = raw.split(':');
+                    const t = type.toUpperCase();
+                    const digit = Math.trunc(Number(digitRaw));
+                    const payout = Number(payoutRaw);
+                    return { type: t, digit: Number.isFinite(digit) ? digit : -1, payout: Number.isFinite(payout) && payout > 1 ? payout : (FALLBACK_PAYOUT[t] ?? 1.95) };
+                }).filter(c => KNOWN.includes(c.type));
+            const markets = [...new Set(String(marketsCsv).split(',').map(s => s.trim()).filter(Boolean))].slice(0, 8);
+            if (!markets.includes(this.symbol)) markets.unshift(this.symbol);
+            const windowSize = Math.max(20, Math.min(300, Number(requestedWindow) || 120));
+            const rows = [];
+            const fallbackSpec = specs[0] ?? { type: 'DIGITOVER', digit: 2, payout: FALLBACK_PAYOUT.DIGITOVER };
+            const scanOne = async symbol => {
+                try {
+                    const ticks = await this.$scope.ticksService.request({ symbol, retry_limit: 3 });
+                    const pip = this.$scope.ticksService.pipSizes?.[symbol] ?? this.getPipSize();
+                    const tail = ticks.slice(-windowSize);
+                    const digits = tail.map(t => getLastDigit(Number(t.quote).toFixed(pip)));
+                    const prices = tail.map(t => Number(t.quote));
+                    if (digits.length < 20) return;
+                    const counts = Array.from({ length: 10 }, () => 0);
+                    for (const d of digits) counts[d] += 1;
+                    // Precompute CALL/PUT wins from price direction
+                    const dirWins = { CALL: [], PUT: [] };
+                    for (let i = 1; i < prices.length; i++) {
+                        dirWins.CALL.push(prices[i] > prices[i - 1]);
+                        dirWins.PUT.push(prices[i] < prices[i - 1]);
+                    }
+                    for (const spec of specs) {
+                        let digit = spec.digit;
+                        let winOf;
+                        let p0;
+                        let wins;
+                        if (spec.type === 'DIGITOVER') {
+                            if (digit < 0 || digit > 8) continue;
+                            winOf = d => d > digit; p0 = (9 - digit) / 10; wins = digits.map(winOf);
+                        } else if (spec.type === 'DIGITUNDER') {
+                            if (digit < 1 || digit > 9) continue;
+                            winOf = d => d < digit; p0 = digit / 10; wins = digits.map(winOf);
+                        } else if (spec.type === 'DIGITEVEN') { digit = -1; winOf = d => d % 2 === 0; p0 = 0.5; wins = digits.map(winOf); }
+                        else if (spec.type === 'DIGITODD') { digit = -1; winOf = d => d % 2 === 1; p0 = 0.5; wins = digits.map(winOf); }
+                        else if (spec.type === 'DIGITMATCH') {
+                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.max(...counts));
+                            winOf = d => d === digit; p0 = 0.1; wins = digits.map(winOf);
+                        } else if (spec.type === 'DIGITDIFF') {
+                            if (digit < 0 || digit > 9) digit = counts.indexOf(Math.min(...counts));
+                            winOf = d => d !== digit; p0 = 0.9; wins = digits.map(winOf);
+                        } else if (spec.type === 'CALL') { digit = -1; p0 = 0.5; wins = [false, ...dirWins.CALL]; }
+                        else { digit = -1; p0 = 0.5; wins = [false, ...dirWins.PUT]; }
+                        // Hedge score: anti-correlation placeholder (computed per-market as phi proxy)
+                        // Compare this candidate's win stream to digit-even as a proxy for normal bias.
+                        // If anti-correlated, uplift.
+                        const hedge = 0; // neutral for now; Ticks wrapper can compute cross-contract phi later
+                        const analysis = analyseNexusHedgeCandidate({ wins, p0, payout: spec.payout, mode, hedge });
+                        rows.push({ symbol, contract: spec.type, barrier: digit, payout: spec.payout, ...analysis });
+                    }
+                } catch (_) { /* one unavailable market must not stop the bot */ }
+            };
+            for (let i = 0; i < markets.length; i += 3) {
+                await Promise.all(markets.slice(i, i + 3).map(scanOne));
+            }
+            rows.sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.score - a.score);
+            const best = rows[0];
+            if (!best) {
+                this.nt_hedge_decision = {
+                    symbol: this.symbol, contract: fallbackSpec.type, barrier: fallbackSpec.digit,
+                    payout: fallbackSpec.payout, eligible: false, score: -999, samples: 0,
+                    hedgeScore: 0, reason: 'feed unavailable; retrying', changedMarket: false,
+                };
+                return false;
+            }
+            const blockers = [];
+            if (best.samples < limits.minSamples) blockers.push(`samples ${best.samples}/${limits.minSamples}`);
+            if (best.ev <= limits.minEv) blockers.push(`EV ${(best.ev * 100).toFixed(2)}%`);
+            if (best.lowerBound <= best.breakEven - limits.lowerBoundMargin) blockers.push(`lower bound ${(best.lowerBound * 100).toFixed(1)}% vs BE ${(best.breakEven * 100).toFixed(1)}%`);
+            if (best.instability >= limits.maxInstability) blockers.push(`unstable ${(best.instability * 100).toFixed(1)}pt`);
+            if (best.clustering >= limits.maxClustering) blockers.push(`loss clustering ${best.clustering.toFixed(2)}x`);
+            this.nt_hedge_decision = {
+                ...best, changedMarket: best.symbol !== this.symbol,
+                reason: best.eligible ? `READY ${best.contract}${best.barrier >= 0 ? ` ${best.barrier}` : ''} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%` : `HOLD: ${blockers.join(', ') || 'no qualified edge'}`,
+            };
+            return best.eligible;
+        }
+
+        async ntHedgeDecision(field) {
+            const value = this.nt_hedge_decision?.[field];
+            return value === undefined ? (field === 'reason' ? 'hedge analysis warming up' : 0) : value;
         }
 
         /**

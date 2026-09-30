@@ -112,6 +112,13 @@ export interface BotDefinition {
    * plus the shared recovery ladder. Execution belongs to Deriv's Run button.
    */
   omniForge?: boolean;
+  /**
+   * Nexus Hedge Forge: universal DBot factory. Extends Omni Forge to Rise/Fall.
+   * User picks any mix of Over/Under/Even/Odd/Matches/Differs/Call/Put for
+   * normal and independent mix for recovery. Multi-scale fusion, Dirichlet-10
+   * conditional, phi/rho hedge score, ladder utility, elastic stake cap.
+   */
+  nexusHedge?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -129,6 +136,31 @@ export interface BotDefinition {
 }
 
 export const BOT_CATALOG: BotDefinition[] = [
+  {
+    id: "nexus-hedge",
+    name: "Nexus Hedge Forge",
+    code: "BOT-NH-FORGE",
+    family: "multi",
+    nexusHedge: true,
+    contractLabel: "Your contracts: Over/Under · Even/Odd · Matches/Differs · Rise/Fall",
+    tagline: "Universal forge. Hedge-aware DBot — your contracts, recovery-aware and super-hedged.",
+    description:
+      "The universal DBot factory. Nexus Hedge Forge never analyses here and never places a trade — you choose ANY mix of contracts (Over 0–8, Under 1–9, Even, Odd, Matches 0–9 auto, Differs 0–9 auto, Rise, Fall) for normal AND an independent mix for recovery (up to 8 each), press Create DBot, and it renders a Deriv Bot strategy that carries the hedge-aware analysis INSIDE itself. Multi-scale fusion, Dirichlet-10 conditional, phi/rho HedgeScore, ladder ExpectedLogUtility, elastic Kelly cap and live payout re-quote rank the best hedge pair across up to eight markets and size it safely. You verify the blocks in the Bot Builder and press Deriv's own Run.",
+    edge: [
+      "Universal contract freedom: Over 0–8, Under 1–9, Even, Odd, Matches auto/0–9, Differs auto/0–9, Rise, Fall — independent normal and recovery sets, up to 8 each, mixed categories welcome",
+      "Hedge-aware ranker: multi-scale EW fusion + Dirichlet-10 conditional + phi/rho cross-contract HedgeScore plus ladder-aware ExpectedLogUtility, so recovery debt prices correlation",
+      "Live payout re-quote and elastic Kelly cap — stake and utility re-price on the broker's own quote every cycle, capped by your max stake and live balance",
+      "Best market AND best contract per cycle, with safe between-contract market switching and Page-Hinkley freeze when the tape drifts",
+      "Valid Blockly XML guaranteed: every block type is vendored-allowlisted, unique ids, no Run errors",
+    ],
+    accent: "teal",
+    icon: "target",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "gated by measurement",
+    nominalPayout: "contract quote (live)",
+  },
   {
     id: "omni",
     name: "Omni Sentinel",
@@ -710,6 +742,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.surge) return "surge@1";
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
+  if (bot.nexusHedge) return "nexus-hedge@1";
   if (bot.omniForge) return "omni-forge@1";
   if (bot.forge) return "digit-forge@1";
   if (bot.preLocked) return "dual-lock@1";

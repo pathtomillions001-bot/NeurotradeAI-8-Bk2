@@ -32,6 +32,8 @@ export const WEB_CONSOLE_IDS = [
   "digit-forge@1",
   /** Omni Forge — user-chosen contract mixes for normal AND recovery, forged into a DBot. */
   "omni-forge@1",
+  /** Nexus Hedge Forge — universal mix including Rise/Fall, hedge-aware. */
+  "nexus-hedge@1",
   /** Parity Forge — Even/Odd parity specialist with recovery-first intelligence. */
   "parity-forge@1",
   /** Vector Surge — Rise/Fall momentum specialist with recovery-first intelligence. */

@@ -1,5 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   buildNexusHedgeStrategy,
   normaliseNexusSet,
@@ -12,7 +14,13 @@ import {
   NEXUS_HEDGE_BLOCK_TYPES,
   type NexusHedgeInput,
 } from "./nexus-hedge-dbot";
-import { NEXUS_HEDGE_FIXTURES, renderFixture } from "./nexus-hedge-dbot.fixtures";
+import {
+  NEXUS_HEDGE_FIXTURES,
+  fixtureFileName,
+  fixturesDir,
+  fixtureXml,
+  renderFixture,
+} from "./nexus-hedge-dbot.fixtures";
 
 const BASE: NexusHedgeInput = {
   symbol: "R_50",
@@ -80,5 +88,41 @@ describe("nexus-hedge input validation", () => {
   it("binomial tail correct", () => {
     assert.equal(nexusBinomialTail(10, 0, 0.5), 1);
     assert.ok(nexusBinomialTail(10, 8, 0.5) < 0.06);
+  });
+});
+
+describe("committed builder fixtures", () => {
+  it("match the current generator output for every fixture", () => {
+    for (const fixture of NEXUS_HEDGE_FIXTURES) {
+      const committed = readFileSync(join(fixturesDir(), fixtureFileName(fixture.name)), "utf8");
+      assert.equal(
+        committed,
+        fixtureXml(fixture.name),
+        `${fixtureFileName(fixture.name)} is stale — regenerate with: npx tsx src/lib/nexus-hedge-dbot.fixtures.ts --write`,
+      );
+    }
+  });
+
+  it("buy through nt_purchase_hedge, which the builder's Run-button gate accepts", () => {
+    // The generated strategies carry no stock `purchase` block, so Deriv's
+    // mandatory-block gate only lets them run while `nt_purchase_hedge` stays
+    // listed in the builder's MANDATORY_BLOCK_ALIASES.purchase. When it was
+    // missing, Run failed with "The Purchase block is mandatory and cannot be
+    // deleted/disabled." — the builder's nexus-hedge-strategy.spec.js proves the
+    // gate itself; this keeps the alias list honest from the API side too.
+    const aliases = readFileSync(
+      join(fixturesDir(), "..", "..", "..", "external", "bot-skeleton", "utils", "mandatory-block-aliases.js"),
+      "utf8",
+    );
+    const purchase = /purchase:\s*\[([^\]]*)\]/.exec(aliases)?.[1] ?? "";
+    for (const fixture of NEXUS_HEDGE_FIXTURES) {
+      const xml = fixtureXml(fixture.name);
+      assert.ok(xml.includes('type="nt_purchase_hedge"'), `${fixture.name} must buy through nt_purchase_hedge`);
+      assert.ok(!xml.includes('type="purchase"'), `${fixture.name} must not carry a stock purchase block`);
+      assert.ok(
+        purchase.includes("'nt_purchase_hedge'"),
+        "mandatory-block-aliases.js no longer accepts nt_purchase_hedge — the Run button will refuse every Nexus strategy",
+      );
+    }
   });
 });

@@ -412,15 +412,17 @@ const getAllRequiredBlocks = (workspace, required_block_types) => {
  * Omni Forge (and any strategy that needs to buy an arbitrary contract type with
  * a just-in-time digit) purchases through the `nt_purchase_contract` block
  * instead of the stock `purchase` block. Digit Forge purchases through
- * `nt_purchase_digit_trade`. Those blocks ARE the strategy's purchase
- * mechanism, so they satisfy the mandatory "purchase" requirement exactly the
- * way `purchase` does. Without this the run-button gate rejects a perfectly
- * valid workspace with "The Purchase block is mandatory…".
+ * `nt_purchase_digit_trade`, Nexus Hedge Forge through `nt_purchase_hedge`.
+ * Those blocks ARE the strategy's purchase mechanism, so they satisfy the
+ * mandatory "purchase" requirement exactly the way `purchase` does. Without
+ * this the run-button gate rejects a perfectly valid workspace with "The
+ * Purchase block is mandatory…".
  *
  * The map lives in utils/mandatory-block-aliases.js so the Run button
  * (isAllRequiredBlocksEnabled) and utils/workspace.js (hasAllRequiredBlocks)
  * cannot drift apart again — the drift is what let Digit Forge's
- * `nt_purchase_digit_trade` through unfixed after Omni Forge's alias landed.
+ * `nt_purchase_digit_trade` and then Nexus Hedge Forge's `nt_purchase_hedge`
+ * through unfixed after Omni Forge's alias landed.
  */
 
 /** True when the workspace holds at least one block that satisfies `required_block_type`. */

@@ -79,6 +79,7 @@ describe("bot console contract", () => {
       "dual-lock@1",
       "killshot-family@1",
       "killshot@1",
+      "nexus-hedge@1",
       "omni-forge@1",
       "omni@2",
       "overunder-navigator@1",

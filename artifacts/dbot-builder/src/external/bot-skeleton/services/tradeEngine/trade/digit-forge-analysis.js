@@ -149,4 +149,13 @@ export const DIGIT_FORGE_ANALYSIS_LIMITS = Object.freeze({
     maxRecoveryClusterRatio: 1.2,
     maxRecoveryInstability: 0.12,
     maxRecoveryAdverseRun: 2,
+    // After a settled LOSS the exact losing tuple (symbol:contract:barrier)
+    // starts its next recovery scans from a score deficit (decaying per scan,
+    // spanning exactly the confirmation window), so an alternate market or
+    // barrier with a comparable edge wins the post-loss rescan instead of the
+    // bot re-firing on the tape it just lost on. Confirmation (above) still
+    // applies, so the loser re-enters only by topping every penalised fresh
+    // scan — the Nexus Hedge rescan mandate.
+    rematchPenalty: 3,
+    rematchDecay: 1.5,
 });

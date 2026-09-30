@@ -228,7 +228,16 @@ export default Engine =>
                 this.trade_option = null;
                 this.proposal_templates = [];
                 const purchased = await this.purchase(contract, quote);
-                if (purchased) this.nt_digit_recovery_confirmation = undefined;
+                if (purchased) {
+                    this.nt_digit_recovery_confirmation = undefined;
+                    // Record the exact tuple being bought so settlement
+                    // (Total.js) can pair outcome → loser and arm the
+                    // post-loss rematch penalty — an alternate market/barrier
+                    // with a comparable edge then wins the next recovery scan
+                    // instead of re-firing on the tape that just lost
+                    // (Nexus Hedge rescan mandate).
+                    this.nt_digit_pending_entry = { symbol, contract, barrier };
+                }
                 return Boolean(purchased);
             } finally {
                 this.nt_digit_purchase_pending = false;

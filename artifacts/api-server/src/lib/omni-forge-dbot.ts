@@ -22,7 +22,14 @@
  *     tapes where losses cluster. When several recovery contracts are chosen
  *     (e.g. Even/Odd AND Over 4), the bot picks the best contract AND the
  *     best market for that moment, switching markets safely between
- *     contracts when another tape is measurably stronger.
+ *     contracts when another tape is measurably stronger. NO recovery trade
+ *     may fire without a fresh post-settlement rescan: the runtime clears
+ *     the confirmation state after every settled trade and the best recovery
+ *     candidate must persist across two distinct fresh ticks; after a loss
+ *     the exact losing tuple also starts from a decaying score deficit, so
+ *     an alternate market/contract with a comparable edge wins the rescan
+ *     (patience/force-entry never applies to recovery — debt-sized stakes
+ *     always earn their entry).
  *   · Stakes: base stake in normal mode; the shared `getBotRecoveryStake`
  *     ladder in recovery — debt × (1 + markup) / (payout − 1), floored at
  *     0.35, capped by max stake and live balance, rounded up to the cent.
@@ -187,6 +194,7 @@ export const OMNI_FORGE_BLOCK_TYPES = Object.freeze([
   "controls_if",
   "logic_compare",
   "logic_boolean",
+  "logic_operation",
   "math_number",
   "math_number_positive",
   "math_arithmetic",
@@ -709,8 +717,17 @@ export function buildOmniForgeStrategy(input: OmniForgeInput): OmniForgeStrategy
         cond: x.compare("EQ", x.get(V.gate), x.bool(true)),
         then: [...entryReport(), x.set(V.fire, x.bool(true))],
       },
+      // Patience (force entry) is a NORMAL-mode privilege only — identical to
+      // the Digit Forge and Nexus Hedge rules. A debt-sized recovery must
+      // always earn its entry through the runtime gate: fresh post-settlement
+      // rescan + fresh-tick confirmations. A patience-fired recovery would
+      // bypass exactly the rescan rule that keeps recovery stakes honest.
       ...(forceEntryAfter > 0 ? [{
-        cond: x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
+        cond: x.logic(
+          "AND",
+          x.compare("EQ", x.get(V.inRecovery), x.bool(false)),
+          x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
+        ),
         then: [
           x.notify("warn", x.text(`Patience limit ${forceEntryAfter}: entering on the best available setup`)),
           ...entryReport(),

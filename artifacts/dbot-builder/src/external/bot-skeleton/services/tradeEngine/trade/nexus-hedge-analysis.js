@@ -17,6 +17,20 @@ export const NEXUS_HEDGE_LIMITS = Object.freeze({
     dirichletAlpha: 10,
     confidenceZ: 1.282,
     minClusterLosses: 10,
+    // A debt-sized recovery must persist as the best candidate on this many
+    // DISTINCT fresh ticks before it may fire. The count restarts after every
+    // settled trade (settlement clears the confirmation state), so no recovery
+    // executes without a genuinely fresh post-trade rescan of every watched
+    // market — and one flattering snapshot can never arm it.
+    recoveryConfirmations: 2,
+    // After a settled LOSS the exact losing tuple (symbol:contract:barrier)
+    // starts its next scans from a score deficit, so an alternate market or
+    // contract with a comparable edge wins the rescan instead of the bot
+    // re-firing on the tape it just lost on. The deficit decays per scan and
+    // spans exactly the confirmation window; if the loser still tops every
+    // penalised scan, it re-enters honestly.
+    rematchPenalty: 3,
+    rematchDecay: 1.5,
     normal: Object.freeze({
         minSamples: 30,
         minEv: 0,

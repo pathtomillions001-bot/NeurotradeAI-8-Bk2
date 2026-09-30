@@ -55,6 +55,24 @@ const BASE: OmniForgeInput = {
   watchMarkets: ["R_10", "R_25", "R_75"],
 };
 
+describe("omni-forge recovery rescan mandate", () => {
+  it("force entry (patience) is a normal-mode privilege — it can never fire a recovery", () => {
+    const strat = buildOmniForgeStrategy({ ...BASE, forceEntryAfter: 5 });
+    const forceIdx = strat.xml.indexOf(`Patience limit ${5}`);
+    assert.ok(forceIdx > 0, "a strategy forged with forceEntryAfter must carry the patience branch");
+    // The patience branch must sit behind an AND gate whose first leg is
+    // `In Recovery == FALSE`: debt-sized recovery stakes always earn their
+    // entry through the fresh-tick confirmation + rematch gate instead.
+    const before = strat.xml.slice(0, forceIdx);
+    const andIdx = before.lastIndexOf("logic_operation");
+    const inRecoveryIdx = before.lastIndexOf("In Recovery");
+    assert.ok(andIdx > 0, "patience branch is gated by logic_operation");
+    assert.ok(inRecoveryIdx > andIdx, "the AND gate's first leg is the In Recovery == FALSE check");
+    // Without forceEntryAfter nothing emits logic_operation (guard the guard).
+    assert.ok(!buildOmniForgeStrategy(BASE).xml.includes("logic_operation"));
+  });
+});
+
 describe("omni-forge input validation", () => {
   it("rejects an empty normal set", () => {
     assert.throws(() => buildOmniForgeStrategy({ ...BASE, normal: [] }), /at least one contract/);

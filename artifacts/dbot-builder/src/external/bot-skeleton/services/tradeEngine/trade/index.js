@@ -94,6 +94,21 @@ export default class TradeEngine extends Balance(DigitForge(Purchase(Sell(OpenCo
         this.nt_digit_prepared = null;
         this.nt_digit_recovery_confirmation = undefined;
         this.nt_digit_live_payouts = new Map();
+        // Forge recovery rescan mandate: fresh runs carry no ranker memory —
+        // no half-armed recovery confirmation, rematch penalty, or unpaired
+        // pending entry from a previous run (Nexus Hedge, Omni Forge, Digit
+        // Forge, Over/Under Turbo).
+        this.nt_hedge_decision = undefined;
+        this.nt_hedge_confirmation = undefined;
+        this.nt_hedge_rematch = undefined;
+        this.nt_hedge_pending_entry = undefined;
+        this.nt_contract_decision = undefined;
+        this.nt_omni_confirmation = undefined;
+        this.nt_omni_rematch = undefined;
+        this.nt_omni_pending_entry = undefined;
+        this.nt_digit_rematch = undefined;
+        this.nt_digit_pending_entry = undefined;
+        this.nt_turbo_recovery_confirmation = undefined;
         // Fresh user-initiated run: cadence telemetry starts from zero.
         this.run_metrics?.reset();
         this.nt_last_proposal_check = 0;

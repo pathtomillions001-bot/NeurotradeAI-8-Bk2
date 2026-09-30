@@ -23,7 +23,13 @@
  *     contracts are anti-correlated (phi > 0 / rho < 0) they earn a hedge
  *     bonus, so the bot automatically prefers a recovery that wins when normal
  *     loses. Switching markets safely between contracts when another tape is
- *     measurably stronger.
+ *     measurably stronger. NO recovery trade may fire without a fresh
+ *     post-settlement rescan: the runtime clears the confirmation state after
+ *     every settled trade and the best recovery candidate must persist across
+ *     two distinct fresh ticks; after a loss the exact losing tuple also
+ *     starts from a decaying score deficit, so an alternate market/contract
+ *     with a comparable edge wins the rescan (patience/force-entry never
+ *     applies to recovery — debt-sized stakes always earn their entry).
  *   · Stakes: base stake in normal mode; the shared `getBotRecoveryStake`
  *     ladder in recovery — debt × (1 + markup) / (payout − 1) × elastic,
  *     where elastic = 1/(1+0.8*(ξ-1)+0.6*volStress) breathes in clustered
@@ -184,6 +190,8 @@ export const NEXUS_HEDGE_BLOCK_TYPES = Object.freeze([
   "controls_if",
   "logic_compare",
   "logic_boolean",
+  "logic_operation",
+  "logic_negate",
   "math_number",
   "math_number_positive",
   "math_arithmetic",
@@ -698,8 +706,17 @@ export function buildNexusHedgeStrategy(input: NexusHedgeInput): NexusHedgeStrat
         cond: x.compare("EQ", x.get(V.gate), x.bool(true)),
         then: [...entryReport(), x.set(V.fire, x.bool(true))],
       },
+      // Patience (force entry) is a NORMAL-mode privilege only. A debt-sized
+      // recovery must always earn its entry through the runtime gate: fresh
+      // post-settlement rescan + fresh-tick confirmations. Letting the
+      // patience timer fire a recovery would bypass exactly the rescan rule
+      // that keeps recovery stakes honest.
       ...(forceEntryAfter > 0 ? [{
-        cond: x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
+        cond: x.logic(
+          "AND",
+          x.compare("EQ", x.get(V.inRecovery), x.bool(false)),
+          x.compare("GTE", x.get(V.evalTicks), x.num(forceEntryAfter)),
+        ),
         then: [
           x.notify("warn", x.text(`Patience limit ${forceEntryAfter}: entering on best available hedge setup`)),
           ...entryReport(),

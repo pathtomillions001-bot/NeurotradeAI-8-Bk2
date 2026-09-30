@@ -40,6 +40,23 @@ export const OMNI_FORGE_LIMITS = Object.freeze({
     confidenceZ: 1.282, // one-sided 90% — rejects noise without endless silence
     /** Losses needed before P(loss|loss) is more signal than add-one noise. */
     minClusterLosses: 10,
+    /**
+     * A debt-sized recovery must persist as the best candidate on this many
+     * DISTINCT fresh ticks before it may fire. Settlement clears the
+     * confirmation state after every trade, so no recovery executes without a
+     * genuinely fresh post-trade rescan of every watched market — exactly the
+     * Nexus Hedge rescan mandate.
+     */
+    recoveryConfirmations: 2,
+    /**
+     * After a settled LOSS the exact losing tuple (symbol:contract:barrier)
+     * starts its next scans from a score deficit (decaying per scan, spanning
+     * exactly the confirmation window), so an alternate market/contract with
+     * a comparable edge wins the rescan instead of the bot re-firing on the
+     * tape it just lost on.
+     */
+    rematchPenalty: 3,
+    rematchDecay: 1.5,
     normal: Object.freeze({
         minSamples: 30,
         minEv: 0,

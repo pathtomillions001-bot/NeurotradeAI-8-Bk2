@@ -30,8 +30,6 @@ export const WEB_CONSOLE_IDS = [
   /** Over/Under Turbo — continuous-fire over/under: scan once, lock, trade non-stop. */
   "overunder-turbo@2",
   "digit-forge@1",
-  /** Combo Forge — evidence-gated digits + Rise/Fall mixes for normal AND recovery, forged into a DBot. */
-  "combo-forge@1",
   /** Omni Forge — user-chosen contract mixes for normal AND recovery, forged into a DBot. */
   "omni-forge@1",
   /** Parity Forge — Even/Odd parity specialist with recovery-first intelligence. */

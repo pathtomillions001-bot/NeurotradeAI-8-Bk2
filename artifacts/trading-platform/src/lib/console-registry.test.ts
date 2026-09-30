@@ -39,7 +39,6 @@ const API_CONSOLE_IDS = [
   "parity-forge@1",
   "digit-forge@1",
   "omni-forge@1",
-  "combo-forge@1",
   "specialist@1",
   "surge@1",
   "dual-lock@1",
@@ -117,7 +116,7 @@ describe("consoleSkew", () => {
       skew.bots.map(entry => entry.name),
       ["Echo Apex", "Dual-Lock Range Sentinel"],
     );
-    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "combo-forge@1", "digit-forge@1", "dual-lock@1", "omni-forge@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
+    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "digit-forge@1", "dual-lock@1", "omni-forge@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {
@@ -161,12 +160,12 @@ describe("scanner badge contract", () => {
 
   it("marks exactly the consoles that forge a DBot from USER-COMPOSED contract sets", () => {
     // CUSTOM FORGE means "builds a Deriv Bot from contract sets the user
-    // assembles" — Omni Forge and Combo Forge are the only such consoles today; adding another
+    // assembles" — Omni Forge is the only such console today; adding another
     // means adding it to CUSTOM_FORGE_CONSOLE_IDS at the same time.
     for (const id of WEB_CONSOLE_IDS) {
       assert.equal(
         consoleIsCustomForge({ console: id }),
-        id === "omni-forge@1" || id === "combo-forge@1",
+        id === "omni-forge@1",
         `custom-forge mismatch for "${id}" — is the badge contract drift-free with the console's primary action?`,
       );
     }

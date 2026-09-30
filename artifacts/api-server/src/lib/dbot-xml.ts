@@ -270,6 +270,31 @@ export class XmlBuilder {
       inner: `<value name="SYMBOL">${symbol}</value>`,
     };
   }
+  /** Nexus Hedge: rank user-chosen hedge contracts per market */
+  nexusAnalyse(
+    mode: "NORMAL" | "RECOVERY",
+    markets: string[],
+    contractsCsv: string,
+    window: number,
+  ): Stmt {
+    return {
+      type: "nt_analyse_hedge",
+      inner:
+        `<field name="MODE">${mode}</field><field name="MARKETS">${esc(markets.join(","))}</field>` +
+        `<field name="CONTRACTS">${esc(contractsCsv)}</field><field name="WINDOW">${esc(window)}</field>`,
+    };
+  }
+  /** Nexus Hedge decision field */
+  nexusDecision(field: string): string {
+    return `<block type="nt_hedge_decision" id="${this.id()}"><field name="FIELD">${esc(field)}</field></block>`;
+  }
+  /** Nexus Hedge purchase */
+  nexusPurchase(contract: string, barrier: string): Stmt {
+    return {
+      type: "nt_purchase_hedge",
+      inner: `<value name="CONTRACT">${contract}</value><value name="BARRIER">${barrier}</value>`,
+    };
+  }
   lastN(list: string, n: number): string {
     return (
       `<block type="lists_getSublist" id="${this.id()}"><mutation at1="true" at2="false"></mutation>` +

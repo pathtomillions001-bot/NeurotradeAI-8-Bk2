@@ -201,7 +201,18 @@ export default class JournalStore {
             }
         }
 
-        this.pushMessage(processedMessage, MessageTypes.ERROR);
+        // Last line of defence: the journal renders `{message as string}` for
+        // ERROR rows, so an undefined/empty/object payload produced a blank
+        // error row (or a React crash for Error objects) — the "bot stopped
+        // with no error text" symptom. Every error row must carry real text.
+        const finalMessage =
+            typeof processedMessage === 'string' && processedMessage.trim()
+                ? processedMessage
+                : processedMessage instanceof Error && processedMessage.message
+                  ? processedMessage.message
+                  : localize('Unknown error');
+
+        this.pushMessage(finalMessage, MessageTypes.ERROR);
     }
 
     onNotify(data: TNotifyData) {

@@ -248,13 +248,19 @@ export const recoverFromError = (promiseFn, recoverFn, errors_to_ignore, delay_i
                     error?.error?.code ?? error?.name,
                     () =>
                         new Promise(recoverResolve => {
-                            const getGlobalTimeouts = () => globalObserver.getState('global_timeouts') ?? [];
+                            // Map shape: {[timerId]: {is_cancellable, msg_type}} — never an array.
+                            const getGlobalTimeouts = () => globalObserver.getState('global_timeouts') ?? {};
 
                             const timeout = setTimeout(
                                 () => {
-                                    const global_timeouts = getGlobalTimeouts();
+                                    const global_timeouts = { ...getGlobalTimeouts() };
                                     delete global_timeouts[timeout];
-                                    globalObserver.setState(global_timeouts);
+                                    // setState(key, value) doesn't exist — passing the
+                                    // map positionally MERGED its timer-id keys into the
+                                    // observer's state root and never touched
+                                    // state.global_timeouts, so the entry looked pending
+                                    // forever to stop()/clearSubscriptions().
+                                    globalObserver.setState({ global_timeouts });
                                     recoverResolve();
                                 },
                                 getBackoffDelayInMs(error, delay_index)

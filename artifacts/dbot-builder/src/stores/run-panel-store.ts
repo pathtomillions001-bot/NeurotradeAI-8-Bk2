@@ -7,6 +7,7 @@ import { contract_stages, TContractStage } from '@/constants/contract-stage';
 import { run_panel } from '@/constants/run-panel';
 import { ErrorTypes, MessageTypes, observer, unrecoverable_errors } from '@/external/bot-skeleton';
 import { getSelectedTradeType } from '@/external/bot-skeleton/scratch/utils';
+import { normalizeErrorPayload } from '@/external/bot-skeleton/utils/error';
 import { handleBackendError, isBackendError } from '@/utils/error-handler';
 // import { journalError, switch_account_notification } from '@/utils/bot-notifications';
 import GTM from '@/utils/gtm';
@@ -653,8 +654,13 @@ export default class RunPanelStore {
     };
 
     onError = (data: { error: any }) => {
-        // data.error for API errors, data for code errors
-        const error = data.error || data;
+        // data.error for API errors, data for code errors — and `data` itself
+        // can be `undefined` when an engine promise does a bare reject().
+        // `data.error || data` then produced `undefined` and the very first
+        // `error.code` read crashed INSIDE the observer emit — which skipped
+        // dbot.stopBot() and left the bot frozen mid-run with no journal text.
+        // Normalise so the payload always exposes a real message for the journal.
+        const error = normalizeErrorPayload((data && typeof data === 'object' ? data.error : undefined) ?? data);
         if (unrecoverable_errors.includes(error.code)) {
             this.root_store.summary_card.clear();
             this.error_type = ErrorTypes.UNRECOVERABLE_ERRORS;

@@ -9,6 +9,7 @@ import { clearAuthData } from '@/utils/auth-utils';
 import { handleBackendError, isBackendError } from '@/utils/error-handler';
 import { activeSymbolsProcessorService } from '../../../../services/active-symbols-processor.service';
 import { observer as globalObserver } from '../../utils/observer';
+import { clearGlobalTimeouts } from '../tradeEngine/utils/global-timeouts';
 import { doUntilDone, socket_state } from '../tradeEngine/utils/helpers';
 import {
     CONNECTION_STATUS,
@@ -485,12 +486,18 @@ class APIBase {
         this.subscriptions.forEach(s => s.unsubscribe());
         this.subscriptions = [];
 
-        // Resetting timeout resolvers
-        const global_timeouts = globalObserver.getState('global_timeouts') ?? [];
-
-        global_timeouts.forEach((_: unknown, i: number) => {
-            clearTimeout(i);
-        });
+        // Resetting timeout resolvers. `global_timeouts` is an OBJECT MAP
+        // ({[timerId]: {…}}) written by recoverFromError — iterating it with
+        // array `.forEach` threw "global_timeouts.forEach is not a function"
+        // here, which made terminateSession() reject before tick subscriptions
+        // were released and aborted the stop/restart chain with no journal
+        // trace. Keep teardown best-effort and shape-safe.
+        try {
+            clearGlobalTimeouts(globalObserver);
+        } catch (error) {
+            // eslint-disable-next-line no-console
+            console.warn('clearGlobalTimeouts failed during subscription cleanup (ignored):', error);
+        }
     }
 }
 

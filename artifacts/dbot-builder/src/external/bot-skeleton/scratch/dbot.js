@@ -4,6 +4,7 @@ import { api_base } from '../services/api/api-base';
 import ApiHelpers from '../services/api/api-helpers';
 import Interpreter from '../services/tradeEngine/utils/interpreter';
 import { compareXml, observer as globalObserver } from '../utils';
+import { normalizeErrorPayload } from '../utils/error';
 import { getSavedWorkspaces, saveWorkspaceToRecent } from '../utils/local-storage';
 import { isDbotRTL } from '../utils/workspace';
 import main_xml from './xml/main.xml';
@@ -301,8 +302,16 @@ class DBot {
 
                 api_base.setIsRunning(true);
                 this.interpreter.run(code).catch(error => {
-                    globalObserver.emit('Error', error);
-                    this.stopBot();
+                    // Journal feedback must never be able to skip the shutdown:
+                    // a subscriber throwing inside emit('Error') used to leave
+                    // stopBot() uncalled — the engine looked silently dead.
+                    // Normalise so the Error channel always receives an object
+                    // with a readable message, even for bare reject()s/strings.
+                    try {
+                        globalObserver.emit('Error', normalizeErrorPayload(error));
+                    } finally {
+                        this.stopBot();
+                    }
                 });
             } catch (error) {
                 globalObserver.emit('Error', error);

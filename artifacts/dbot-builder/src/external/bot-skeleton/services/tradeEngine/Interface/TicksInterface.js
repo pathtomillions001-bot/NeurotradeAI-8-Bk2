@@ -20,6 +20,14 @@ const getTicksInterface = tradeEngine => {
         ntSurgeDecision: (...args) => tradeEngine.ntSurgeDecision(...args),
         ntAnalyseTurboRecovery: (...args) => tradeEngine.ntAnalyseTurboRecovery(...args),
         ntTurboRecoveryDecision: (...args) => tradeEngine.ntTurboRecoveryDecision(...args),
+        // Multi-market Turbo recovery scanner. The nt_analyse_turbo_markets /
+        // nt_turbo_markets_decision blocks generate Bot.ntAnalyseTurboMarkets /
+        // Bot.ntTurboMarketsDecision and the trade engine implements both, but
+        // they were never exposed here — the interpreter only async-wraps THIS
+        // object, so the bot-code call was `undefined(...)` and the journal
+        // showed the literal "undefined is not a function" before the bot died.
+        ntAnalyseTurboMarkets: (...args) => tradeEngine.ntAnalyseTurboMarkets(...args),
+        ntTurboMarketsDecision: (...args) => tradeEngine.ntTurboMarketsDecision(...args),
         ntAnalyseDualLockEntry: (...args) => tradeEngine.ntAnalyseDualLockEntry(...args),
         ntDualLockEntryDecision: (...args) => tradeEngine.ntDualLockEntryDecision(...args),
         ntAnalyseBastionEntry: (...args) => tradeEngine.ntAnalyseBastionEntry(...args),

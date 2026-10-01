@@ -2,10 +2,12 @@ import { isMultiplierContract } from '@/components/shared';
 import cloneThorough from '@/utils/clone';
 import JSInterpreter from '@deriv/js-interpreter';
 import { unrecoverable_errors } from '../../../constants/messages';
+import { normalizeErrorPayload } from '../../../utils/error';
 import { observer as globalObserver } from '../../../utils/observer';
 import { api_base } from '../../api/api-base';
 import Interface from '../Interface';
 import { createScope } from './cliTools';
+import { clearGlobalTimeouts, getGlobalTimeouts } from './global-timeouts';
 
 JSInterpreter.prototype.takeStateSnapshot = function () {
     const newStateStack = cloneThorough(this.stateStack, undefined, undefined, undefined, true);
@@ -90,8 +92,13 @@ const Interpreter = () => {
                     loop();
                 })
                 .catch(e => {
-                    // e.error for errors get from API, e for code errors
-                    $scope.observer.emit('Error', e.error || e);
+                    // e.error for errors get from API, e for code errors — and NEITHER
+                    // when an interface promise does a bare `reject()`. Emitting
+                    // `undefined` into the 'Error' channel crashed the onError
+                    // subscriber below (it read `.code` unguarded), turning the
+                    // failure into an unhandled rejection while the interpreter
+                    // stayed paused: the bot froze mid-run with no journal entry.
+                    $scope.observer.emit('Error', normalizeErrorPayload(e?.error ?? e));
                 });
         };
 
@@ -144,6 +151,16 @@ const Interpreter = () => {
             pseudo_bot_interface,
             'ntPurchaseContract',
             createAsync(js_interpreter, bot_interface.ntPurchaseContract)
+        );
+        // Nexus Hedge buys through ntPurchaseHedge the same way Omni Forge buys
+        // through ntPurchaseContract. Without the explicit async wrap it fell
+        // back to the synchronous nativeToPseudo bridge: bot code didn't wait
+        // for the buy, and a rejected purchase became an unhandled rejection
+        // invisible to the journal instead of an 'Error' emit.
+        js_interpreter.setProperty(
+            pseudo_bot_interface,
+            'ntPurchaseHedge',
+            createAsync(js_interpreter, bot_interface.ntPurchaseHedge)
         );
         for (const name of ['ntPrepareDigitTrade', 'ntPurchaseDigitTrade']) {
             js_interpreter.setProperty(pseudo_bot_interface, name, createAsync(js_interpreter, bot_interface[name]));
@@ -217,16 +234,21 @@ const Interpreter = () => {
             };
 
             try {
-                const global_timeouts = globalObserver.getState('global_timeouts') ?? [];
-                const is_timeouts_cancellable = Object.keys(global_timeouts).every(
-                    timeout => global_timeouts[timeout].is_cancellable
+                const global_timeouts = getGlobalTimeouts(globalObserver);
+                const is_timeouts_cancellable = Object.values(global_timeouts).every(
+                    timeout => timeout?.is_cancellable
                 );
 
                 if (!bot.tradeEngine.contractId && is_timeouts_cancellable) {
                     api_base.is_stopping = true;
                     // When user is rate limited, allow them to stop the bot immediately
                     // granted there is no active contract.
-                    global_timeouts.forEach(timeout => clearTimeout(global_timeouts[timeout]));
+                    // NOTE: `global_timeouts` is an OBJECT MAP ({[timerId]: {…}}) written
+                    // by recoverFromError, never an array — calling `.forEach` on it here
+                    // threw "global_timeouts.forEach is not a function" mid-stop, and that
+                    // rejection was silently swallowed by dbot.stopBot(). Result: the bot
+                    // stopped mid-run and the journal recorded NOTHING.
+                    clearGlobalTimeouts(globalObserver);
                     terminateSession().finally(() => settle());
                 } else if (
                     bot.tradeEngine.isSold === false &&
@@ -299,34 +321,66 @@ const Interpreter = () => {
                 if ($scope.stopped) {
                     return;
                 }
+                // Normalise FIRST. Rejections reaching this point can be
+                // `undefined` (bare reject), a bare string (`throw 'x'` in bot
+                // code comes back as String(value) from the interpreter), or a
+                // message-less `{ code }` wrapper. Reading `.code` / `.message`
+                // off those crashed INSIDE this observer handler: the emit then
+                // became an unhandled rejection, `reject`/`stopBot` never ran,
+                // and the interpreter sat paused mid-run with zero journal text.
+                const error = normalizeErrorPayload(e);
                 // DBot handles 'InvalidToken' internally
-                if (e.code === 'InvalidToken') {
+                if (error.code === 'InvalidToken') {
                     globalObserver.emit('client.invalid_token');
                     return;
                 }
-                if (shouldStopOnError(bot, e?.code)) {
-                    globalObserver.emit('ui.log.error', e.message);
+                if (shouldStopOnError(bot, error.code)) {
+                    globalObserver.emit('ui.log.error', error.message);
                     globalObserver.emit('bot.click_stop');
                     return;
                 }
 
                 $scope.is_error_triggered = true;
-                if (!shouldRestartOnError(bot, e.code) || !botStarted(bot)) {
-                    reject(e);
+                if (!shouldRestartOnError(bot, error.code) || !botStarted(bot)) {
+                    reject(error);
                     return;
                 }
 
-                globalObserver.emit('Error', e);
+                globalObserver.emit('Error', error);
                 const { initArgs, tradeOptions } = bot.tradeEngine;
-                terminateSession();
-                init();
-                $scope.observer.register('Error', onError);
-                bot.tradeEngine.init(...initArgs);
-                bot.tradeEngine.start(tradeOptions);
-                const canRestoreState = $scope.startState && interpreter?.restoreStateSnapshot instanceof Function;
-                if (canRestoreState) {
-                    revert($scope.startState);
-                }
+                // Tear the old session down BEFORE re-initialising, and never
+                // let a teardown rejection (routine Deriv `forget` refusals)
+                // skip the restart — previously a rejected terminateSession()
+                // here meant the algorithm simply never ran again.
+                Promise.resolve(terminateSession())
+                    .catch(() => {})
+                    .then(() => {
+                        if (api_base.is_stopping) {
+                            // The user pressed Stop while the restart was in flight.
+                            return;
+                        }
+                        init();
+                        $scope.observer.register('Error', onError);
+                        bot.tradeEngine.init(...initArgs);
+                        bot.tradeEngine.start(tradeOptions);
+                        const canRestoreState =
+                            $scope.startState && interpreter?.restoreStateSnapshot instanceof Function;
+                        if (canRestoreState) {
+                            revert($scope.startState);
+                        } else {
+                            // No time-machine snapshot: init() left `interpreter` as a
+                            // bare `{}`, so nothing ran `loop()` ever again — a bot with
+                            // restart-on-error silently idled after its first error.
+                            // Rebuild the interpreter on the SAME code and continue the
+                            // original run promise instead.
+                            interpreter = new JSInterpreter(code, initFunc);
+                            // init() also reset onFinish to a noop — restore THIS run's
+                            // resolver so a bot that finishes cleanly after a restart
+                            // still settles the original run promise.
+                            onFinish = resolve;
+                            loop();
+                        }
+                    });
             };
 
             $scope.observer.register('Error', onError);

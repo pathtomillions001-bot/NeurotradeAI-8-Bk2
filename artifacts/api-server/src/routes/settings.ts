@@ -7,6 +7,9 @@ import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
 
 const router = Router();
+const revisions = new Map<string,number>();
+export function settingsRevision(sessionId:string):number { return revisions.get(sessionId) ?? 0; }
+
 
 async function getOrCreateSettings(sessionId: string) {
   const existing = await db.select().from(settingsTable)
@@ -116,6 +119,7 @@ router.put("/", async (req, res): Promise<void> => {
       .where(eq(settingsTable.id, settings.id))
       .returning();
 
+    revisions.set(req.sessionId,settingsRevision(req.sessionId)+1);
     logger.info({ id: updated.id }, "Settings saved successfully");
     // Notify only this browser session so another visitor's UI is never affected.
     broadcastSSE("settings_updated", {

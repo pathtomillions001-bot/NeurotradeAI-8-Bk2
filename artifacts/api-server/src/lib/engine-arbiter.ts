@@ -34,6 +34,12 @@ import { getBrowserSessionId } from "./session";
 export type TradingOwner = "autonomous" | "neuroai" | "bots";
 
 const ownersBySession = new Map<string, TradingOwner>();
+const quarantinedSessions = new Map<string,string>();
+/** Unresolved money movement blocks every executor until exact reconciliation. */
+export function quarantineTrading(sessionId:string,reason:string):void { quarantinedSessions.set(sessionId,reason); }
+export function clearTradingQuarantine(sessionId:string):void { quarantinedSessions.delete(sessionId); }
+export function tradingBlockReason(sessionId?:string):string|null { return quarantinedSessions.get(scopeKey(sessionId)) ?? null; }
+
 
 function scopeKey(sessionId?: string): string {
   if (sessionId) return sessionId;
@@ -48,6 +54,7 @@ function scopeKey(sessionId?: string): string {
  */
 export function acquireTradingOwnership(owner: TradingOwner, sessionId?: string): boolean {
   const key = scopeKey(sessionId);
+  if (quarantinedSessions.has(key)) return false;
   const active = ownersBySession.get(key) ?? null;
   if (active === null || active === owner) {
     ownersBySession.set(key, owner);
@@ -69,7 +76,7 @@ export function currentTradingOwner(sessionId?: string): TradingOwner | null {
 
 /** True when `owner` holds the execution lock on `sessionId`'s account right now. */
 export function hasTradingOwnership(owner: TradingOwner, sessionId?: string): boolean {
-  return ownersBySession.get(scopeKey(sessionId)) === owner;
+  return !tradingBlockReason(sessionId) && ownersBySession.get(scopeKey(sessionId)) === owner;
 }
 
 /** Human-readable owner label for error messages and UI toasts. */

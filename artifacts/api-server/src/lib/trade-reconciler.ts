@@ -24,6 +24,8 @@ import { db } from "@workspace/db";
 import { accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq, gte, inArray, sql } from "drizzle-orm";
 import { fetchDerivProfitTable } from "./deriv";
+import { settleAutonomousTrade } from "./autonomous-settlement";
+import { getFallbackPayout } from "./payouts";
 import { logger } from "./logger";
 import { runWithSession } from "./session";
 import * as recoveryEngine from "./agents/recovery-engine";
@@ -41,6 +43,7 @@ interface UnsettledRow {
   symbol: string;
   contractType: string;
   stake: string;
+  barrier?: number | null;
   derivContractId: string | null;
   agentReasoning: string | null;
   createdAt: Date;
@@ -98,6 +101,7 @@ export async function reconcileUnsettledTrades(): Promise<number> {
         symbol: tradesTable.symbol,
         contractType: tradesTable.contractType,
         stake: tradesTable.stake,
+        barrier: tradesTable.barrier,
         derivContractId: tradesTable.derivContractId,
         agentReasoning: tradesTable.agentReasoning,
         createdAt: tradesTable.createdAt,
@@ -117,6 +121,11 @@ export async function reconcileUnsettledTrades(): Promise<number> {
     // One Deriv lookup per session (the journal is per connected account).
     const bySession = new Map<string, UnsettledRow[]>();
     for (const row of rows) {
+      if (row.agentReasoning?.startsWith("[AUTONOMOUS NOT PURCHASED]")) {
+        await db.update(tradesTable).set({status:"error",closedAt:new Date(),profit:"0",payout:"0"})
+          .where(and(eq(tradesTable.id,row.id),inArray(tradesTable.status,["open","error"])));
+        continue;
+      }
       const list = bySession.get(row.sessionId) ?? [];
       list.push(row);
       bySession.set(row.sessionId, list);
@@ -159,12 +168,25 @@ export async function reconcileUnsettledTrades(): Promise<number> {
           // be fuzzy-matched by this legacy display-only reconciliation path.
           // Restart recovery is resumed by Omni's next explicit deployment.
           if (row.agentReasoning?.startsWith("[Omni Sentinel] ")) continue;
+          if (row.agentReasoning?.startsWith("[AUTONOMOUS NOT PURCHASED]")) continue;
+          const autonomousPending = row.agentReasoning?.startsWith("[AUTONOMOUS PENDING]");
+          // Ambiguous acknowledgements without an ID require investigation.
+          // Never guess that a nearby same-stake transaction is this purchase.
+          if (autonomousPending && !row.derivContractId) continue;
           const tx = findTransaction(row, transactions);
           if (!tx) continue;
           const buyPrice = Number(tx.buy_price ?? 0);
           const sellPrice = Number(tx.sell_price ?? 0);
           const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
           const won = profit > 0;
+          if (autonomousPending) {
+            const applied = await settleAutonomousTrade({ sessionId,tradeId:row.id,won,profit,stake:buyPrice,
+              payout:sellPrice,payoutMultiplier:won && buyPrice > 0 ? sellPrice/buyPrice : getFallbackPayout(row.contractType,row.barrier),
+              contractType:row.contractType,entryPrice:buyPrice,exitPrice:sellPrice,
+              contractId:String(tx.contract_id),closedAt:tx.sell_time ? new Date(Number(tx.sell_time)*1000) : new Date() });
+            if (applied) settled++;
+            continue;
+          }
           await db
             .update(tradesTable)
             .set({

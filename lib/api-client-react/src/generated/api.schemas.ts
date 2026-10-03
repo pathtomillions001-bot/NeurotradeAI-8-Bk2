@@ -259,6 +259,9 @@ export const TradeInputDurationUnit = {
   d: 'd',
 } as const;
 
+/**
+ * One contract per request. Quantity and order arrays are not supported.
+ */
 export interface TradeInput {
   symbol: string;
   contractType: string;
@@ -438,6 +441,39 @@ export interface RecoveryStatus {
   highestStep?: number;
 }
 
+export interface RecoveryCandidate {
+  symbol: string;
+  contractType: string;
+  /** @nullable */
+  barrier: number | null;
+  duration: number;
+  probability: number;
+  /** Conservative screening estimate; not a guarantee of sequential confidence coverage. */
+  lowerProbability: number;
+  /** Lower probability times total payout multiplier minus one, per unit stake. */
+  conservativeEV: number;
+  samples: number;
+  effectiveSamples: number;
+  model: string;
+  payoutMultiplier?: number;
+  growth?: number;
+  qualified?: boolean;
+  reason?: string;
+  validationBrier?: number;
+  baselineBrier?: number;
+  generation?: number;
+  sequence?: number;
+}
+
+/**
+ * @nullable
+ */
+export type RecoveryAnalysis = {
+  phase: string;
+  reason: string;
+  candidate?: RecoveryCandidate;
+} | null;
+
 export interface AiEngineStatus {
   isRunning: boolean;
   mode: AiEngineStatusMode;
@@ -454,6 +490,7 @@ export interface AiEngineStatus {
      */
   cooldownUntil?: string | null;
   recovery?: RecoveryStatus;
+  recoveryAnalysis?: RecoveryAnalysis | null;
 }
 
 export interface EngineToggleInput {

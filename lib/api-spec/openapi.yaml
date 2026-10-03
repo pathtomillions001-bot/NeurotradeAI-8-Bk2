@@ -1019,6 +1019,62 @@ components:
           description: ISO timestamp when the cooldown ends and engine auto-resumes
         recovery:
           $ref: "#/components/schemas/RecoveryStatus"
+        recoveryAnalysis:
+          $ref: "#/components/schemas/RecoveryAnalysis"
+
+    RecoveryAnalysis:
+      type: ["object", "null"]
+      required: [phase, reason]
+      properties:
+        phase:
+          type: string
+        reason:
+          type: string
+        candidate:
+          $ref: "#/components/schemas/RecoveryCandidate"
+
+    RecoveryCandidate:
+      type: object
+      required: [symbol, contractType, barrier, duration, probability, lowerProbability, conservativeEV, samples, effectiveSamples, model]
+      properties:
+        symbol:
+          type: string
+        contractType:
+          type: string
+        barrier:
+          type: ["integer", "null"]
+        duration:
+          type: integer
+        probability:
+          type: number
+        lowerProbability:
+          type: number
+          description: Conservative screening estimate; not a guarantee of sequential confidence coverage.
+        conservativeEV:
+          type: number
+          description: Lower probability times total payout multiplier minus one, per unit stake.
+        samples:
+          type: integer
+        effectiveSamples:
+          type: number
+        model:
+          type: string
+        payoutMultiplier:
+          type: number
+        growth:
+          type: number
+        qualified:
+          type: boolean
+        reason:
+          type: string
+        validationBrier:
+          type: number
+        baselineBrier:
+          type: number
+        generation:
+          type: integer
+        sequence:
+          type: integer
 
     RecoveryStatus:
       type: object

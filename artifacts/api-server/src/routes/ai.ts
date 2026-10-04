@@ -1,10 +1,22 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
-import { and, sql, desc, eq } from "drizzle-orm";
-import { tickManager, DERIV_MARKETS, AUTOMATED_DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
-import { runRecoveryConsensus, getBestConsensus } from "../lib/agents/recovery-consensus";
+import { and, sql, desc, eq, inArray } from "drizzle-orm";
+import { tickManager, DERIV_MARKETS, AUTOMATED_DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket, tickSecondsFor, LiveTradeExecutionError } from "../lib/deriv";
+import { runRecoveryConsensus } from "../lib/agents/recovery-consensus";
+import type { RecoveryConsensusResult } from "../lib/agents/recovery-consensus";
+import type { DigitSnapshot } from "../lib/digit-tape";
+import {
+  adjustRecoveryEstimateForSelection,
+  evaluateRecoveryEconomics,
+  estimateRecoveryProbability,
+  isUsableRecoverySnapshot,
+  MIN_RECOVERY_EFFECTIVE_SAMPLE_SIZE,
+  recoveryDurationFor,
+} from "../lib/agents/recovery-quality";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
+import { getFallbackPayout } from "../lib/payouts";
+import { isUnsettledTradeRecord, NO_PURCHASE_CONFIRMED_MARKER, reconcileUnsettledTrades } from "../lib/trade-reconciler";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
@@ -183,6 +195,8 @@ interface EngineInstance {
   groupCursors: number[];
   /** Prevents an immediate second scan while a trade is still being journalled */
   lastTradeCompletedAt: Date | null;
+  /** Live/open trades still waiting for Deriv confirmation; no new order while >0. */
+  pendingUnsettledTrades: number;
 }
 
 const enginesBySession = new Map<string, EngineInstance>();
@@ -213,6 +227,7 @@ function getEngine(sessionId: string): EngineInstance {
       recentTradesBySymbol: new Map(),
       groupCursors: [0, 0, 0, 0],
       lastTradeCompletedAt: null,
+      pendingUnsettledTrades: 0,
     };
     enginesBySession.set(sessionId, engine);
   }
@@ -222,8 +237,12 @@ function getEngine(sessionId: string): EngineInstance {
 const MAX_TRADES_SAME_SYMBOL = 2;
 const SAME_SYMBOL_COOLDOWN_MS = 8 * 60 * 1000; // 8 minutes
 
-// Stale open-trade threshold — shared between normal path and recovery fast path
-const STALE_OPEN_MS = 2 * 60 * 1000; // 2 minutes
+// A row older than this is eligible for an inline Deriv reconciliation sweep.
+// It is NEVER auto-converted from open to error: an unknown live purchase must
+// block new orders until the broker outcome is found or definitively resolved.
+const STALE_OPEN_MS = 90_000;
+const INLINE_RECONCILE_INTERVAL_MS = 30_000;
+const lastInlineReconcileBySession = new Map<string, number>();
 
 // Groups: 0=Volatility 1s (1HZ*), 1=Volatility (R_*), 2=Jump (JD*), 3=Bull/Bear
 const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
@@ -518,6 +537,42 @@ async function syncLiveBalance(
   } catch { /* ignore */ }
 }
 
+/**
+ * Before every autonomous scan, reconcile and gate on this account's unresolved
+ * broker trades. An open/unknown order is never silently marked stale and then
+ * followed by another buy; the engine waits while the reconciler queries Deriv.
+ */
+async function loadUnsettledTrades(sessionId: string) {
+  const rows = await db.select({
+    id: tradesTable.id,
+    status: tradesTable.status,
+    agentReasoning: tradesTable.agentReasoning,
+    createdAt: tradesTable.createdAt,
+  }).from(tradesTable).where(and(
+    eq(tradesTable.sessionId, sessionId),
+    inArray(tradesTable.status, ["open", "error"]),
+  ));
+  return rows.filter(isUnsettledTradeRecord);
+}
+
+async function refreshUnsettledTradeGate(engine: EngineInstance): Promise<number> {
+  const sessionId = engine.sessionId;
+  let pending = await loadUnsettledTrades(sessionId);
+  if (pending.length > 0) {
+    const oldestAge = Math.max(...pending.map((row) => Date.now() - new Date(row.createdAt).getTime()));
+    const lastSweep = lastInlineReconcileBySession.get(sessionId) ?? 0;
+    if (oldestAge >= STALE_OPEN_MS && Date.now() - lastSweep >= INLINE_RECONCILE_INTERVAL_MS) {
+      lastInlineReconcileBySession.set(sessionId, Date.now());
+      await reconcileUnsettledTrades(sessionId);
+      pending = await loadUnsettledTrades(sessionId);
+    }
+  }
+
+  engine.pendingUnsettledTrades = pending.length;
+  if (pending.length === 0) lastInlineReconcileBySession.delete(sessionId);
+  return pending.length;
+}
+
 // ── Autonomous loop ───────────────────────────────────────────────────────────
 function runAutonomousLoop(engine: EngineInstance): void {
   // Bind this engine's account session into AsyncLocalStorage so everything
@@ -564,6 +619,18 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
     const derivAccountId = account?.derivAccountId ?? account?.loginId ?? null;
     const journalManager = getJournalManager(sessionId);
     if (token && derivAccountId) journalManager.setCredentials(token, derivAccountId);
+
+    const pendingTrades = await refreshUnsettledTradeGate(engine);
+    if (pendingTrades > 0) {
+      logger.warn({ sessionId, pendingTrades }, "Autonomous is waiting for Deriv to reconcile unsettled trades; no new order will be sent");
+      broadcastEngineSSE(engine, "scan_complete", {
+        symbol: null, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
+        marketsScanned: 0, shouldTrade: false, rejectReason: "unsettled_trade_pending",
+        pendingUnsettledTrades: pendingTrades,
+      });
+      scheduleNext(engine, false, 10_000);
+      return;
+    }
 
     const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
     // Normalize: accept both CALL/PUT and RISE/FALL, unify to CALL/PUT
@@ -693,34 +760,17 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
     const eoTypes  = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
     const mdTypes  = preferredContractTypes.filter(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
 
-    // ── Recovery Fast Path ────────────────────────────────────────────────────────────
-    // When in recovery mode, skip the full 8-agent tournament entirely. Instead, run a
-    // fast 3-window consensus check (50 / 100 / 150 ticks) on ALL eligible markets in
-    // parallel. Execute the recovery trade the instant ALL THREE windows agree — this
-    // eliminates the 30+ min delays caused by quality floors, regime gates, and multi-
-    // family tournament scoring in the normal path.
+    // ── Recovery candidate path ──────────────────────────────────────────────────────
+    // Recovery retains a compact candidate scan, but overlapping-window agreement is
+    // only a stability screen. Every candidate also needs homogeneous fresh per-symbol
+    // feed data, exact-expiry outcome evidence, a selection-adjusted lower probability
+    // bound, and positive expected value at a fresh payout quote before sizing/execution.
+    // No candidate is forced merely because recovery debt is active.
     //
     // Contract types: only the user's enabled recovery types (no switching).
     // Markets: the same contractCompatibleMarkets as the normal path (no switching).
     // Barriers: user's recoveryOverDigit / recoveryUnderDigit (no overrides).
     if (recoveryEngine.isInRecovery()) {
-      // ── Open-trade guard ──────────────────────────────────────────────────────────
-      const recovOpenTrades = await db.select().from(tradesTable).where(and(eq(tradesTable.sessionId, sessionId), eq(tradesTable.status, "open")));
-      if (recovOpenTrades.length > 0) {
-        const nowMs = Date.now();
-        const stale = recovOpenTrades.filter(t => nowMs - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
-        if (stale.length > 0) {
-          await Promise.all(stale.map(t =>
-            db.update(tradesTable).set({
-              status: "error", profit: "0", payout: "0", closedAt: new Date(),
-              agentReasoning: `${t.agentReasoning ?? ""} [AUTO-RECOVERED: stale open trade]`,
-            }).where(eq(tradesTable.id, t.id)).catch(() => {}),
-          ));
-        }
-        const fresh = recovOpenTrades.filter(t => nowMs - new Date(t.createdAt).getTime() <= STALE_OPEN_MS);
-        if (fresh.length > 0) { scheduleNext(engine, false); return; }
-      }
-
       // ── Journal-settle delay ──────────────────────────────────────────────────────
       if (engine.lastTradeCompletedAt && (Date.now() - engine.lastTradeCompletedAt.getTime()) < 12_000) {
         scheduleNext(engine, false, 3000);
@@ -749,38 +799,133 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
         logger.warn("Recovery: no recovery contract types configured — falling back to normal scan");
         // Fall through to normal tournament
       } else {
-        // ── 3-window consensus scan across all eligible markets ───────────────────
+        // The three overlapping windows are a stability screen only. Recovery
+        // decisions use one clean per-symbol source generation, exact-expiry
+        // outcome statistics, an uncertainty adjustment, and the actual quote.
         broadcastEngineSSE(engine, "scan_started", { groups: ["Recovery"], ts: Date.now() });
+        const liveExecution = !!token && !paperTradeMode;
+        const rawDuration = tradingSettings.tradeDurationSec ?? 5;
 
-        const consensusInputs = await Promise.all(
-          contractCompatibleMarkets.map(async (m) => {
-            const marketTypes = recoveryTypes.filter(ct => !ct.startsWith("DIGIT") || m.digitEnabled);
-            if (marketTypes.length === 0) return { symbol: m.symbol, market: m, results: [] };
-            const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 150) : [];
-            const prices = tickManager.getTicks(m.symbol, 150);
-            const results = runRecoveryConsensus(
+        const consensusInputs: Array<{
+          symbol: string;
+          market: (typeof contractCompatibleMarkets)[number];
+          snapshot: DigitSnapshot | null;
+          results: RecoveryConsensusResult[];
+        }> = await Promise.all(contractCompatibleMarkets.map(async (m) => {
+          const marketTypes = recoveryTypes.filter(ct => !ct.startsWith("DIGIT") || m.digitEnabled);
+          if (marketTypes.length === 0 || !m.digitEnabled) {
+            return { symbol: m.symbol, market: m, snapshot: null, results: [] };
+          }
+          const snapshot = tickManager.getDigitSnapshot(m.symbol, 1000);
+          if (!snapshot) return { symbol: m.symbol, market: m, snapshot: null, results: [] };
+          const expectedSource = liveExecution ? "live" : snapshot.tick.source;
+          const usable = isUsableRecoverySnapshot(snapshot, {
+            expectedSource,
+            minTicks: 150,
+            maxAgeMs: tickSecondsFor(m.symbol) * 3_000,
+          });
+          if (!usable || (liveExecution && !tickManager.getConnectionStatus())) {
+            return { symbol: m.symbol, market: m, snapshot: null, results: [] };
+          }
+          const digits = snapshot.ticks.map((tick) => tick.digit);
+          const prices = snapshot.ticks.map((tick) => tick.price);
+          return {
+            symbol: m.symbol,
+            market: m,
+            snapshot,
+            results: runRecoveryConsensus(
               digits, prices, marketTypes,
               tradingSettings.recoveryOverDigit, tradingSettings.recoveryUnderDigit,
-            );
-            return { symbol: m.symbol, market: m, results };
+            ),
+          };
+        }));
+
+        const stableCandidates = consensusInputs.flatMap((input) =>
+          input.results.filter((result) => result.agreed && input.snapshot).map((result) => {
+            const snapshot = input.snapshot!;
+            const duration = recoveryDurationFor(result.contractType, rawDuration);
+            const digits = snapshot.ticks.map((tick) => tick.digit);
+            const prices = snapshot.ticks.map((tick) => tick.price);
+            const estimate = estimateRecoveryProbability({
+              contractType: result.contractType,
+              barrier: result.barrier,
+              duration,
+              digits,
+              prices,
+            });
+            const fallbackMultiplier = getFallbackPayout(result.contractType, result.barrier);
+            const preliminary = evaluateRecoveryEconomics(estimate, fallbackMultiplier);
+            return {
+              symbol: input.symbol,
+              market: input.market,
+              snapshot,
+              result,
+              duration,
+              estimate,
+              preliminary,
+            };
           }),
+        ).filter((candidate) =>
+          candidate.estimate !== null &&
+          candidate.estimate.effectiveSampleSize >= MIN_RECOVERY_EFFECTIVE_SAMPLE_SIZE,
         );
 
-        const winner = getBestConsensus(consensusInputs);
+        // Avoid flooding the public proposal socket if many symbols agree at
+        // once. Fallback payouts are used only to prioritize fresh quote checks;
+        // they never authorize a real-money recovery order.
+        const candidatesToQuote = stableCandidates
+          .sort((a, b) =>
+            b.preliminary.expectedValueLowerBound - a.preliminary.expectedValueLowerBound ||
+            (b.estimate?.effectiveSampleSize ?? 0) - (a.estimate?.effectiveSampleSize ?? 0),
+          )
+          .slice(0, 12);
 
-        if (!winner) {
-          logger.info({ marketsScanned: contractCompatibleMarkets.length, types: recoveryTypes },
-            "Recovery: 3-window consensus not yet reached — rescanning in 3s");
+        const qualifiedCandidates = (await Promise.all(candidatesToQuote.map(async (candidate) => {
+          const adjustedEstimate = adjustRecoveryEstimateForSelection(
+            candidate.estimate!,
+            stableCandidates.length,
+            candidate.result.contractType === "DIGITMATCH" || candidate.result.contractType === "DIGITDIFF" ? 10 : 1,
+          );
+          const quote = await resolveRecoveryPayout({
+            symbol: candidate.symbol,
+            contractType: candidate.result.contractType,
+            barrier: candidate.result.barrier,
+            duration: candidate.duration,
+            durationUnit: "t",
+            currency: account?.currency ?? "USD",
+            forceRefresh: liveExecution,
+          });
+          if (liveExecution && quote.source !== "live") return null;
+          const economics = evaluateRecoveryEconomics(adjustedEstimate, quote.payoutMultiplier);
+          if (!economics.acceptable) return null;
+          return { ...candidate, estimate: adjustedEstimate, quote, economics };
+        }))).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+          .sort((a, b) =>
+            b.economics.expectedValueLowerBound - a.economics.expectedValueLowerBound ||
+            (b.estimate?.effectiveSampleSize ?? 0) - (a.estimate?.effectiveSampleSize ?? 0),
+          );
+
+        if (qualifiedCandidates.length === 0) {
+          const stableCount = stableCandidates.length;
+          const liveSymbols = consensusInputs.filter((input) => input.snapshot?.tick.source === "live").length;
+          logger.info({
+            marketsScanned: contractCompatibleMarkets.length,
+            liveSymbols,
+            stableCandidates: stableCount,
+            types: recoveryTypes,
+          }, "Recovery: no candidate cleared the live-data, uncertainty, and payout-aware EV gates — rescanning");
           broadcastEngineSSE(engine, "scan_complete", {
             symbol: null, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
             marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
-            rejectReason: "recovery_no_consensus", sessionLossCount: engine.sessionLossCount,
+            rejectReason: stableCount > 0 ? "recovery_quality_gate" : "recovery_no_fresh_consensus",
+            sessionLossCount: engine.sessionLossCount,
             consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
           });
           scheduleNext(engine, false, 3000);
           return;
         }
 
+        const winner = qualifiedCandidates[0];
         const { symbol: recovSymbol, market: recovMarket, result: cons } = winner;
 
         // Per-symbol cooldown safety net (symbols already filtered in contractCompatibleMarkets,
@@ -794,30 +939,32 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
 
         const recovContractType = cons.contractType;
         const recovBarrier      = cons.barrier;
+        // Keep the legacy point estimate passed into recoveryEngine sizing
+        // unchanged. The separate empirical estimate below is only an eligibility
+        // gate / paper outcome model; it never re-sizes or changes recovery mode.
         const recovWinP         = cons.avgWinProbability;
-        const recovDirection    = recovContractType === "CALL" ? "up"
-          : recovContractType === "PUT" ? "down" : "hold";
-        const rawDur = tradingSettings.tradeDurationSec ?? 5;
-        const recovDuration = (recovContractType === "DIGITEVEN" || recovContractType === "DIGITODD")
-          ? Math.max(5, rawDur)
-          : (recovContractType === "DIGITMATCH" || recovContractType === "DIGITDIFF")
-            ? Math.max(1, Math.min(5, rawDur))
-            : rawDur;
+        const recovQualityWinP  = winner.estimate!.probability;
+        const recovWinLower     = winner.estimate!.lowerWinProbability;
+        const recovDirection    = recovContractType === "CALL" || recovContractType === "RISE" ? "up"
+          : recovContractType === "PUT" || recovContractType === "FALL" ? "down" : "hold";
+        const recovDuration     = winner.duration;
+        const recovPayoutQuote  = winner.quote;
+        const recovPayoutMult   = winner.economics.payoutMultiplier;
 
-        // Price the exact candidate immediately before sizing it. Live proposal
-        // wins; the canonical user-provided payout schedule is the fallback.
-        const recovPayoutQuote = await resolveRecoveryPayout({
-          symbol: recovSymbol,
-          contractType: recovContractType,
-          barrier: recovBarrier,
-          duration: recovDuration,
-          durationUnit: "t",
-          currency: account?.currency ?? "USD",
-        });
-        const recovPayoutMult = recovPayoutQuote.payoutMultiplier;
+        // Recovery stake — preserve the user's existing Split/Instant sizing
+        // calculation and configured limits exactly; signal quality only gates
+        // whether the selected candidate is allowed to reach this calculation.
+        if (liveExecution && (!Number.isFinite(balance) || balance <= 0)) {
+          logger.warn({ sessionId, balance }, "Recovery skipped: live account balance is unavailable or non-positive");
+          broadcastEngineSSE(engine, "scan_complete", {
+            symbol: recovSymbol, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
+            marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
+            rejectReason: "recovery_balance_unavailable",
+          });
+          scheduleNext(engine, false, 3000);
+          return;
+        }
 
-        // Recovery stake — sizes from remaining debt plus an optional original
-        // target profit (sizing only) and this candidate's net live payout.
         const riskBaseAmount = tradingSettings.riskAmountType === "percentage"
           ? balance * tradingSettings.riskAmountValue / 100
           : tradingSettings.riskAmountValue;
@@ -832,18 +979,46 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
         // down here or an "exact" instant stake can finish a cent short.
         const recovStake = Math.max(0.35, Math.min(recovStakeRaw, tradingSettings.maxTradeStake));
 
+        // Revalidate source, freshness and generation after candidate selection,
+        // quote and sizing. A stale/reconnected feed is a wait condition, not a
+        // reason to reuse the old signal for a live buy.
+        const executionSnapshot = tickManager.getDigitSnapshot(recovSymbol, 150);
+        const expectedSource = winner.snapshot.tick.source;
+        const dataStillUsable = isUsableRecoverySnapshot(executionSnapshot, {
+          expectedSource,
+          minTicks: 150,
+          maxAgeMs: tickSecondsFor(recovSymbol) * 3_000,
+          expectedGeneration: winner.snapshot.tick.generation,
+          minimumSequence: winner.snapshot.tick.sequence,
+        });
+        if (!dataStillUsable || (liveExecution && !tickManager.getConnectionStatus())) {
+          logger.info({ symbol: recovSymbol, expectedSource }, "Recovery skipped: feed changed or became stale before execution");
+          broadcastEngineSSE(engine, "scan_complete", {
+            symbol: recovSymbol, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
+            marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
+            rejectReason: "recovery_feed_changed_before_buy",
+          });
+          scheduleNext(engine, false, 3000);
+          return;
+        }
+
         const recovBarrierToStore = recovContractType.includes("DIGIT") ? (recovBarrier ?? null) : null;
 
         logger.info({
           symbol: recovSymbol, contractType: recovContractType, barrier: recovBarrier,
           stake: recovStake, winP: (recovWinP * 100).toFixed(1) + "%",
-          payout: recovPayoutMult, payoutSource: recovPayoutQuote.source, reason: cons.reason,
-        }, "Recovery: 3-window consensus reached — executing recovery trade");
+          winPLower: (recovWinLower * 100).toFixed(1) + "%",
+          effectiveSampleSize: winner.estimate!.effectiveSampleSize,
+          breakEvenProbability: winner.economics.breakEvenProbability,
+          evLowerPerUnit: winner.economics.expectedValueLowerBound,
+          payout: recovPayoutMult, payoutSource: recovPayoutQuote.source,
+          dataSource: winner.snapshot.tick.source, reason: cons.reason,
+        }, "Recovery candidate passed payout-aware quality gate — executing");
 
         broadcastEngineSSE(engine, "scan_complete", {
           symbol: recovSymbol,
-          quality: Math.min(99, Math.round(cons.avgStrength * 200 + 60)),
-          confidence: Math.round(recovWinP * 100),
+          quality: Math.min(99, Math.max(0, Math.round(50 + winner.economics.expectedValueLowerBound * 100))),
+          confidence: Math.round(recovWinLower * 100),
           agentScores: engine.lastAgentScores,
           marketsScanned: contractCompatibleMarkets.length,
           shouldTrade: true, rejectReason: null, sessionLossCount: engine.sessionLossCount,
@@ -857,7 +1032,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
         let rWon: boolean, rProfit: number, rEntryPrice: number, rExitPrice: number, rActualPayout: number;
 
         if (paperTradeMode || !token) {
-          rWon = Math.random() < recovWinP;
+          rWon = Math.random() < recovQualityWinP;
           rProfit = rWon ? estimatedRecovPayout - recovStake : -recovStake;
           rActualPayout = rWon ? estimatedRecovPayout : 0;
           rEntryPrice = rExitPrice = tickManager.getLatestPrice(recovSymbol) ?? 100;
@@ -879,7 +1054,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
             entryPrice: String(rEntryPrice), exitPrice: String(rExitPrice),
             aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
             isAutonomous: true,
-            agentReasoning: `[PAPER RECOVERY] 3-window consensus: ${cons.reason}`,
+            agentReasoning: `[PAPER RECOVERY] quality gate passed; p=${recovQualityWinP.toFixed(4)}, pLower=${recovWinLower.toFixed(4)}, evLower=${winner.economics.expectedValueLowerBound.toFixed(5)}; ${cons.reason}`,
             duration: recovDuration, durationUnit: "t", closedAt: new Date(),
           });
         } else {
@@ -890,7 +1065,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
             stake: String(recovStake), direction: recovDirection, status: "open",
             aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
             isAutonomous: true,
-            agentReasoning: `[RECOVERY] 3-window consensus: ${cons.reason}`,
+            agentReasoning: `[RECOVERY] quality gate passed; p=${recovQualityWinP.toFixed(4)}, pLower=${recovWinLower.toFixed(4)}, evLower=${winner.economics.expectedValueLowerBound.toFixed(5)}; ${cons.reason}`,
             duration: recovDuration, durationUnit: "t",
           }).returning();
 
@@ -900,6 +1075,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
             confidence: Math.round(recovWinP * 100),
           });
 
+          let acknowledgedContractId: string | null = null;
           try {
             if (!isAutomatedMarket(recovSymbol)) {
               throw new Error(`${recovMarket.displayName} is blocked from autonomous recovery execution`);
@@ -911,7 +1087,14 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
               currency: account?.currency ?? "USD",
               accountId: derivAccountId!,
               barrier: recovContractType.includes("DIGIT") ? (recovBarrier ?? undefined) : undefined,
+              minimumPayoutMultiplier: liveExecution ? 1 / recovWinLower : undefined,
             });
+            acknowledgedContractId = String(liveRes.contractId);
+            // Persist the exact broker id immediately; a process restart must not
+            // require a same-stake fuzzy match to find this recovery contract.
+            await db.update(tradesTable)
+              .set({ derivContractId: acknowledgedContractId })
+              .where(eq(tradesTable.id, openTrade.id));
             rEntryPrice = liveRes.buyPrice;
             const contractRes = await waitForContractResult(token, derivAccountId!, liveRes.contractId, (recovDuration + 30) * 1000);
             rWon = contractRes.won;
@@ -922,29 +1105,49 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
             await syncLiveBalance(sessionId, token, derivAccountId!);
           } catch (liveErr) {
             const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-            logger.warn({ errMsg, symbol: recovSymbol }, "Recovery live trade failed — marking as error");
+            const mayHaveExecuted = acknowledgedContractId !== null ||
+              (liveErr instanceof LiveTradeExecutionError && liveErr.mayHaveExecuted);
+            logger.warn({
+              errMsg, symbol: recovSymbol, contractId: acknowledgedContractId,
+              mayHaveExecuted,
+            }, mayHaveExecuted
+              ? "Recovery outcome unknown — preserving unsettled row and blocking further orders until reconciliation"
+              : "Recovery buy was definitively not placed");
             try {
-              await db.update(tradesTable).set({
+              await db.update(tradesTable).set(mayHaveExecuted ? {
+                status: "open",
+                derivContractId: acknowledgedContractId,
+                agentReasoning: `[RECOVERY][OUTCOME_UNKNOWN] ${cons.reason} [${errMsg}]`,
+              } : {
                 status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                agentReasoning: `[RECOVERY] ${cons.reason} [FAILED: ${errMsg}]`,
+                agentReasoning: `[RECOVERY] ${NO_PURCHASE_CONFIRMED_MARKER} ${cons.reason} [${errMsg}]`,
               }).where(eq(tradesTable.id, openTrade.id));
-            } catch { /* ignore */ }
-            broadcastEngineSSE(engine, "trade_completed", {
-              id: openTrade.id, symbol: recovSymbol, won: false, profit: "0",
-              contract: recovContractType, error: errMsg,
-            });
+            } catch (dbErr) {
+              logger.error({ dbErr, tradeId: openTrade.id }, "Could not persist recovery execution state; startup reconciliation will inspect the open journal row");
+            }
+            if (mayHaveExecuted) {
+              broadcastEngineSSE(engine, "trade_pending", {
+                id: openTrade.id, symbol: recovSymbol, contract: recovContractType,
+                contractId: acknowledgedContractId, pending: true, error: errMsg,
+              });
+            } else {
+              broadcastEngineSSE(engine, "trade_completed", {
+                id: openTrade.id, symbol: recovSymbol, won: false, profit: "0",
+                contract: recovContractType, error: errMsg, noPurchase: true,
+              });
+            }
             engine.lastTradeCompletedAt = new Date();
             const slErr = engine.recentTradesBySymbol.get(recovSymbol) ?? [];
             slErr.push(new Date());
             engine.recentTradesBySymbol.set(recovSymbol, slErr.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
-            scheduleNext(engine, true);
+            scheduleNext(engine, mayHaveExecuted ? false : true, mayHaveExecuted ? 10_000 : undefined);
             return;
           }
 
           recordTradeOutcome(recovSymbol, recovContractType, recovBarrier ?? null, rWon, rProfit, recovStake);
           recoveryEngine.recordOutcome(
             rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3,
-            recovContractType, recovPayoutMult,
+            recovContractType, recovPayoutMult, `trade:${openTrade.id}`,
           );
           if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
 
@@ -1231,41 +1434,6 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
     };
     engine.currentMarket = bestMarket.symbol;
 
-    // ── Guard: block if there is already an open/in-progress trade ───────────
-    // Stale "open" trades (> 2 minutes old) are auto-recovered as "error" so
-    // they never permanently freeze the loop. This handles the crash path where
-    // executeLiveTrade OR waitForContractResult threw after the DB insert but
-    // before the status update — leaving a ghost trade that blocked the engine
-    // indefinitely (the engine keeps finding the ghost every 3s and backing off).
-    // STALE_OPEN_MS is defined at module scope above
-    const openTrades = await db.select().from(tradesTable).where(and(eq(tradesTable.sessionId, sessionId), eq(tradesTable.status, "open")));
-    if (openTrades.length > 0) {
-      const now = Date.now();
-      const staleTrades = openTrades.filter(t => now - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
-      if (staleTrades.length > 0) {
-        logger.warn(
-          { staleIds: staleTrades.map(t => t.id), ages: staleTrades.map(t => Math.round((now - new Date(t.createdAt).getTime()) / 1000) + "s") },
-          "Autonomous: auto-recovering stale open trades — settlement result unknown, marking as error",
-        );
-        await Promise.all(
-          staleTrades.map(t =>
-            db.update(tradesTable)
-              .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                     agentReasoning: `${t.agentReasoning ?? ""} [AUTO-RECOVERED: trade left open after crash — settlement unknown]` })
-              .where(eq(tradesTable.id, t.id))
-              .catch(dbErr => logger.error({ dbErr, tradeId: t.id }, "Failed to auto-recover stale open trade")),
-          ),
-        );
-      }
-      const freshTrades = openTrades.filter(t => now - new Date(t.createdAt).getTime() <= STALE_OPEN_MS);
-      if (freshTrades.length > 0) {
-        logger.info({ openCount: freshTrades.length }, "Autonomous: open trade in progress — waiting before next scan");
-        scheduleNext(engine, false);
-        return;
-      }
-      // All open trades were stale and have been cleared — fall through and continue
-    }
-
     // ── Guard: require minimum time since last trade settled ─────────────────
     // Ensures the Deriv journal has time to record the closed trade before we start
     // the next scan. This prevents the engine from opening a second trade while the
@@ -1541,6 +1709,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
         ev: analysis.expectedValue,
       });
 
+      let acknowledgedContractId: string | null = null;
       try {
         if (!isAutomatedMarket(bestMarket.symbol)) {
           throw new Error(`${bestMarket.displayName} is blocked from autonomous execution`);
@@ -1557,6 +1726,10 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
           accountId: derivAccountId!,
           barrier: effectiveContractType.includes("DIGIT") ? effectiveBarrier : undefined,
         });
+        acknowledgedContractId = String(liveResult.contractId);
+        await db.update(tradesTable)
+          .set({ derivContractId: acknowledgedContractId })
+          .where(eq(tradesTable.id, openTrade.id));
         entryPrice = liveResult.buyPrice;
         // Wait for Deriv to settle the contract — timeout = ticks * 1s + 30s buffer
         const contractResult = await waitForContractResult(token, derivAccountId!, liveResult.contractId, (duration + 30) * 1000);
@@ -1571,43 +1744,47 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
         await syncLiveBalance(sessionId, token, derivAccountId!);
       } catch (liveErr) {
         const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-        logger.warn({ liveErrMsg: errMsg, symbol: bestMarket.symbol, contractType: effectiveContractType }, "Live autonomous trade failed — outcome unknown, marking as error");
-        // Mark as "error" (NOT "lost") — Deriv may still settle this contract as a WIN.
-        // Marking as "lost" would create a false loss that corrupts consecutive-loss count
-        // and daily P&L, causing the engine to falsely trigger loss-streak / loss-limit stops
-        // even when the actual Deriv journal shows wins.
-        //
-        // IMPORTANT: wrap this DB update in its own try/catch. If it throws (DB hiccup,
-        // network drop), the exception must NOT propagate to the outer catch — that would
-        // leave the trade stuck as "open" permanently and freeze the loop (the stale-trade
-        // auto-recovery above handles it if that happens, but preventing it is better).
+        const mayHaveExecuted = acknowledgedContractId !== null ||
+          (liveErr instanceof LiveTradeExecutionError && liveErr.mayHaveExecuted);
+        logger.warn({
+          liveErrMsg: errMsg, symbol: bestMarket.symbol, contractType: effectiveContractType,
+          contractId: acknowledgedContractId, mayHaveExecuted,
+        }, mayHaveExecuted
+          ? "Autonomous outcome unknown — preserving unsettled trade and waiting for Deriv reconciliation"
+          : "Autonomous order was definitively not placed");
         try {
-          await db.update(tradesTable)
-            .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                   agentReasoning: `${output.reasoning} [EXECUTION FAILED: ${errMsg}]` })
-            .where(eq(tradesTable.id, openTrade.id));
+          await db.update(tradesTable).set(mayHaveExecuted ? {
+            status: "open",
+            derivContractId: acknowledgedContractId,
+            agentReasoning: `${output.reasoning} [OUTCOME_UNKNOWN: ${errMsg}]`,
+          } : {
+            status: "error", profit: "0", payout: "0", closedAt: new Date(),
+            agentReasoning: `${output.reasoning} ${NO_PURCHASE_CONFIRMED_MARKER} [${errMsg}]`,
+          }).where(eq(tradesTable.id, openTrade.id));
         } catch (dbErr) {
           logger.error({ dbErr, tradeId: openTrade.id },
-            "Failed to mark live trade as error in DB — stale-open guard will auto-recover on next iteration");
+            "Failed to persist autonomous execution state; the open trade will block subsequent orders and reconciliation will retry");
         }
-        broadcastEngineSSE(engine, "trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
-          profit: "0", contract: effectiveContractType, error: errMsg });
-        // No forceRefresh here — the trade never settled on Deriv so the
-        // profit_table has nothing new to fetch. Calling it was contributing
-        // to the concurrent-pagination rate-limit cascade.
-
-        // Do NOT touch engine.sessionLossCount here — the contract outcome
-        // is unknown (Deriv may have settled it as won). Adding a false loss count here
-        // is what caused consecutive-loss / daily-limit false-positives.
-        // Only record the cooldown timestamp so the engine waits before re-scanning
-        // (gives Deriv time to settle the contract before another trade is attempted).
+        if (mayHaveExecuted) {
+          broadcastEngineSSE(engine, "trade_pending", {
+            id: openTrade.id, symbol: bestMarket.symbol, pending: true,
+            contractId: acknowledgedContractId, contract: effectiveContractType, error: errMsg,
+          });
+        } else {
+          broadcastEngineSSE(engine, "trade_failed", {
+            id: openTrade.id, symbol: bestMarket.symbol, noPurchase: true,
+            contract: effectiveContractType, error: errMsg,
+          });
+        }
         engine.lastTradeCompletedAt = new Date();
         const symNowErr = new Date();
         const symLogErr = engine.recentTradesBySymbol.get(bestMarket.symbol) ?? [];
         symLogErr.push(symNowErr);
         engine.recentTradesBySymbol.set(bestMarket.symbol, symLogErr.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
 
-        scheduleNext(engine, true);
+        // Unknown outcomes do not count as losses and never permit a fresh buy.
+        // The shared preflight retries broker reconciliation before scanning.
+        scheduleNext(engine, mayHaveExecuted ? false : true, mayHaveExecuted ? 10_000 : undefined);
         return;
       }
 
@@ -1616,7 +1793,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
       if (isTracked) {
         recoveryEngine.recordOutcome(
           won, profit, stake, settings?.maxRecoverySteps ?? 3,
-          effectiveContractType, effectivePayoutMultiplier,
+          effectiveContractType, effectivePayoutMultiplier, `trade:${openTrade.id}`,
         );
       }
       // Update structural loss pattern detector — prevents re-entering the same
@@ -2015,7 +2192,11 @@ router.get("/engine/status", async (req, res): Promise<void> => {
   ));
   // This account's OWN independent engine instance — never another session's.
   const engine = getEngine(req.sessionId);
-  const liveScores = await getComputedAgentScores(engine);
+  const [liveScores, unsettledRows] = await Promise.all([
+    getComputedAgentScores(engine),
+    loadUnsettledTrades(req.sessionId),
+  ]);
+  engine.pendingUnsettledTrades = unsettledRows.length;
 
   res.json({
     isRunning: engine.running, mode: engine.running ? engine.mode : "manual",
@@ -2042,6 +2223,7 @@ router.get("/engine/status", async (req, res): Promise<void> => {
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: engine.cooldownUntil?.toISOString() ?? null,
     sessionLossCount: engine.sessionLossCount,
+    pendingUnsettledTrades: engine.pendingUnsettledTrades,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: AUTOMATED_DERIV_MARKETS.length,
     recovery: buildRecoveryPayload(true),
@@ -2097,7 +2279,11 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       .where(eq(settingsTable.id, settings[0].id));
   }
 
-  const toggleScores = await getComputedAgentScores(engine);
+  const [toggleScores, unsettledRows] = await Promise.all([
+    getComputedAgentScores(engine),
+    loadUnsettledTrades(req.sessionId),
+  ]);
+  engine.pendingUnsettledTrades = unsettledRows.length;
   res.json({
     isRunning: engine.running, mode: engine.mode,
     agentStatuses: AGENT_NAMES.map((name, i) => {
@@ -2115,6 +2301,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: engine.cooldownUntil?.toISOString() ?? null,
     sessionLossCount: engine.sessionLossCount,
+    pendingUnsettledTrades: engine.pendingUnsettledTrades,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: AUTOMATED_DERIV_MARKETS.length,
     recovery: buildRecoveryPayload(true),

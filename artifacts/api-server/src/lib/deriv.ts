@@ -855,6 +855,9 @@ class DerivTickManager extends EventEmitter {
   private lastTickMs = new Map<string, number>();
   /** Epoch (ms) of the last tick BROKER-SIDE, per symbol — the tick-window clock. */
   private lastTickEpochMs = new Map<string, number>();
+  /** Provenance is per symbol; a single live tick must never make every symbol look live. */
+  private tickSourceBySymbol = new Map<string, "live" | "simulated">();
+  private tickGenerationBySymbol = new Map<string, number>();
   private digitTape = new DigitTape();
 
   private pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -969,12 +972,19 @@ class DerivTickManager extends EventEmitter {
 
   getLiveTickCount(): number {
     let total = 0;
-    for (const [, v] of this.tickBuffers) total += v.length;
+    for (const [symbol, ticks] of this.tickBuffers) {
+      if (this.tickSourceBySymbol.get(symbol) === "live") total += ticks.length;
+    }
     return total;
   }
 
+  /** True only when this symbol has a fresh, per-symbol live feed (not a seeded buffer). */
   isLiveData(symbol: string): boolean {
-    return (this.tickBuffers.get(symbol) ?? []).length >= 5;
+    const maxAgeMs = tickSecondsFor(symbol) * 3_000;
+    const lastTickMs = this.lastTickMs.get(symbol) ?? 0;
+    return this.tickSourceBySymbol.get(symbol) === "live" &&
+      (this.tickBuffers.get(symbol) ?? []).length >= 5 &&
+      lastTickMs > 0 && Date.now() - lastTickMs <= maxAgeMs;
   }
 
   getTickHealth(): {
@@ -994,7 +1004,9 @@ class DerivTickManager extends EventEmitter {
       liveSymbols: live,
       totalSymbols: valid.length,
       invalidSymbols: this.invalidSymbols.size,
-      usingSimulated: this.usingSimulated,
+      // The simulator is process-wide, but source is per symbol. Keep reporting
+      // simulation while any requested symbol still has simulated history.
+      usingSimulated: this.usingSimulated || valid.some((sym) => this.tickSourceBySymbol.get(sym) === "simulated"),
     };
   }
 
@@ -1169,10 +1181,25 @@ class DerivTickManager extends EventEmitter {
     const market = getMarketInfo(symbol);
     if (!market) return;
 
-    if (market.digitEnabled && !this.digitTape.push({
-      symbol, price, digit: extractLastDigit(price, market.pipSize), epoch,
-      receivedAt: Date.now(), source: "live",
-    }, tickSecondsFor(symbol) * 1000)) return;
+    const digitTick = market.digitEnabled
+      ? this.digitTape.push({
+          symbol, price, digit: extractLastDigit(price, market.pipSize), epoch,
+          receivedAt: Date.now(), source: "live",
+        }, tickSecondsFor(symbol) * 1000)
+      : null;
+    if (market.digitEnabled && !digitTick) return;
+
+    const previousSource = this.tickSourceBySymbol.get(symbol);
+    const previousGeneration = this.tickGenerationBySymbol.get(symbol);
+    // Never let simulated or pre-gap ticks contaminate an execution decision
+    // after a live-source handoff. DigitTape also starts a new generation on a
+    // source change or a sufficiently long live-feed gap.
+    if (previousSource !== "live" || (digitTick && previousGeneration !== digitTick.generation)) {
+      this.tickBuffers.set(symbol, []);
+      this.digitBuffers.set(symbol, []);
+    }
+    this.tickSourceBySymbol.set(symbol, "live");
+    if (digitTick) this.tickGenerationBySymbol.set(symbol, digitTick.generation);
 
     if (this.usingSimulated) this.stopSimulation();
 
@@ -1284,10 +1311,20 @@ class DerivTickManager extends EventEmitter {
     const rounded = Math.round(price * factor) / factor;
     const simEpochMs = Math.floor(Date.now() / 1000) * 1000;
     this.lastTickEpochMs.set(market.symbol, simEpochMs);
-    if (market.digitEnabled) this.digitTape.push({
-      symbol: market.symbol, price: rounded, digit: extractLastDigit(rounded, market.pipSize),
-      epoch: Math.floor(Date.now() / 1000), receivedAt: Date.now(), source: "simulated",
-    }, tickSecondsFor(market.symbol) * 1000);
+    const digitTick = market.digitEnabled
+      ? this.digitTape.push({
+          symbol: market.symbol, price: rounded, digit: extractLastDigit(rounded, market.pipSize),
+          epoch: Math.floor(Date.now() / 1000), receivedAt: Date.now(), source: "simulated",
+        }, tickSecondsFor(market.symbol) * 1000)
+      : null;
+    const previousSource = this.tickSourceBySymbol.get(market.symbol);
+    const previousGeneration = this.tickGenerationBySymbol.get(market.symbol);
+    if (previousSource !== "simulated" || (digitTick && previousGeneration !== digitTick.generation)) {
+      this.tickBuffers.set(market.symbol, []);
+      this.digitBuffers.set(market.symbol, []);
+    }
+    this.tickSourceBySymbol.set(market.symbol, "simulated");
+    if (digitTick) this.tickGenerationBySymbol.set(market.symbol, digitTick.generation);
 
     const prices = this.tickBuffers.get(market.symbol) ?? [];
     prices.push(rounded);
@@ -1611,6 +1648,18 @@ export interface LiveTradeResult {
   buyPrice: number;
   entrySpot: number;
   longcode: string;
+  payoutMultiplier?: number;
+}
+
+/**
+ * Distinguishes a definite pre-buy rejection from an unknown buy acknowledgement.
+ * Unknown acknowledgements must be reconciled before the engine sends another order.
+ */
+export class LiveTradeExecutionError extends Error {
+  constructor(message: string, readonly mayHaveExecuted: boolean) {
+    super(message);
+    this.name = "LiveTradeExecutionError";
+  }
 }
 
 export interface ContractResult {
@@ -1632,6 +1681,8 @@ export interface ContractProposal {
   payout: number;
   stake: number;
   payoutMultiplier: number;
+  /** False when Deriv omitted the payout and a display-only fallback was used. */
+  payoutVerified?: boolean;
   spot: number;
   longcode: string;
   proposalId: string;
@@ -3103,11 +3154,14 @@ export async function getContractProposal(
 
     if (msg?.msg_type === "proposal" && msg.proposal) {
       const askPrice = Number(msg.proposal.ask_price ?? params.stake);
-      const payout = Number(msg.proposal.payout ?? askPrice * RISE_FALL_PAYOUT);
+      const rawPayout = Number(msg.proposal.payout);
+      const payoutVerified = Number.isFinite(askPrice) && askPrice > 0 && Number.isFinite(rawPayout) && rawPayout > 0;
+      const payout = payoutVerified ? rawPayout : askPrice * RISE_FALL_PAYOUT;
       return {
         payout,
         stake: askPrice,
-        payoutMultiplier: askPrice > 0 ? payout / askPrice : RISE_FALL_PAYOUT,
+        payoutMultiplier: payoutVerified ? payout / askPrice : RISE_FALL_PAYOUT,
+        payoutVerified,
         spot: Number(msg.proposal.spot ?? 0),
         longcode: msg.proposal.longcode ?? "",
         proposalId: String(msg.proposal.id ?? ""),
@@ -3173,14 +3227,17 @@ export async function executeLiveTrade(
     growthRate?: number;
     /** ACCU only: exchange-side take-profit in account currency. */
     takeProfit?: number;
+    /** Recovery only: refuse to buy if the authenticated quote is not better than this gross multiplier. */
+    minimumPayoutMultiplier?: number;
   },
 ): Promise<LiveTradeResult> {
   const accountId = params.accountId;
 
   if (!bearerToken || !accountId) {
-    throw new Error(
+    throw new LiveTradeExecutionError(
       "No authenticated session. Please sign in with Deriv (OAuth) to enable live trading. " +
       "A Bearer token and account ID are required for the new Deriv API.",
+      false,
     );
   }
 
@@ -3220,34 +3277,60 @@ export async function executeLiveTrade(
   }
 
   if (!proposalMsg) {
-    throw new Error("Trade execution timeout — Deriv did not answer the quote request.");
+    throw new LiveTradeExecutionError("Trade execution timeout — Deriv did not answer the quote request.", false);
   }
   if (proposalMsg.error) {
     logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
-    throw new Error(proposalMsg.error.message ?? "Trade rejected by Deriv");
+    throw new LiveTradeExecutionError(proposalMsg.error.message ?? "Trade rejected by Deriv", false);
   }
   if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
-    throw new Error("Deriv returned an unexpected response to the quote request.");
+    throw new LiveTradeExecutionError("Deriv returned an unexpected response to the quote request.", false);
   }
 
   const proposalId = String(proposalMsg.proposal.id);
   const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
+  const quotedPayout = Number(proposalMsg.proposal.payout);
+  if (params.minimumPayoutMultiplier !== undefined) {
+    const actualMultiplier = askPrice > 0 && Number.isFinite(quotedPayout) && quotedPayout > 0
+      ? quotedPayout / askPrice
+      : Number.NaN;
+    if (!Number.isFinite(actualMultiplier)) {
+      throw new LiveTradeExecutionError("Deriv's authenticated quote did not include a verifiable payout; no buy was sent.", false);
+    }
+    if (actualMultiplier <= params.minimumPayoutMultiplier) {
+      throw new LiveTradeExecutionError(
+        `Deriv's authenticated payout (${actualMultiplier.toFixed(4)}x) no longer clears the recovery EV threshold; no buy was sent.`,
+        false,
+      );
+    }
+  }
   logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
 
-  const buyMsg = await accountRequest(
-    bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
-  );
-  if (!buyMsg) throw new Error("Trade execution timeout — Deriv did not confirm the purchase.");
-  if (buyMsg.error) throw new Error(buyMsg.error.message ?? "Trade rejected by Deriv");
+  let buyMsg: any;
+  try {
+    buyMsg = await accountRequest(
+      bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new LiveTradeExecutionError(`Buy acknowledgement failed after submission: ${message}`, true);
+  }
+  if (!buyMsg) throw new LiveTradeExecutionError("Trade execution timeout — Deriv did not confirm the purchase.", true);
+  if (buyMsg.error) throw new LiveTradeExecutionError(buyMsg.error.message ?? "Trade rejected by Deriv", false);
   if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
-    throw new Error("Deriv returned an unexpected response to the buy request.");
+    throw new LiveTradeExecutionError("Deriv returned an unexpected response to the buy request.", true);
+  }
+  const contractId = Number(buyMsg.buy.contract_id);
+  if (!Number.isSafeInteger(contractId) || contractId <= 0) {
+    throw new LiveTradeExecutionError("Deriv acknowledged a buy without a valid contract id; the outcome is unknown.", true);
   }
 
   return {
-    contractId: buyMsg.buy.contract_id,
+    contractId,
     buyPrice: Number(buyMsg.buy.buy_price),
     entrySpot: Number(buyMsg.buy.start_time ?? 0),
     longcode: buyMsg.buy.longcode ?? "",
+    payoutMultiplier: quotedPayout > 0 && askPrice > 0 ? quotedPayout / askPrice : undefined,
   };
 }
 

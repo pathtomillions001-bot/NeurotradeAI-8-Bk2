@@ -1,14 +1,10 @@
 /**
  * Recovery Consensus Engine
  *
- * Replaces the full 8-agent tournament scan during recovery mode.
- * Instead of running the heavy coordinator pipeline (which has quality gates,
- * regime checks, and multi-family tournaments that can take 30+ minutes to
- * align), this module runs a fast, contract-specific analysis in three
- * independent tick windows: 50, 100, and 150 ticks/digits.
- *
- * A recovery trade fires the instant ALL THREE windows agree — this is the
- * sole quality gate. No coordinator, no quality floor, no regime gate.
+ * Produces a fast contract-specific candidate/stability signal for recovery.
+ * Its 50/100/150 windows overlap and are NOT independent confirmations. The
+ * result must pass the separate payout-aware, uncertainty-adjusted recovery
+ * quality gate before it can be traded; consensus alone never authorizes an order.
  *
  * Rules enforced here:
  *  - Only the user's recovery contract types are analyzed (no contract switching)
@@ -39,8 +35,13 @@ export interface WindowAnalysis {
 
 // ── Consensus result ──────────────────────────────────────────────────────────
 
+/** A contract-family vote is not executable consensus unless its exact barrier matches. */
+export function windowsChooseSameDigit(digits: Array<number | null>): boolean {
+  return digits.length > 0 && digits[0] !== null && digits.every((digit) => digit === digits[0]);
+}
+
 export interface RecoveryConsensusResult {
-  /** True only when all 3 windows independently recommend the same trade */
+  /** Stability flag: all overlapping windows recommend the same executable contract. */
   agreed: boolean;
   contractType: string;        // e.g. "DIGITOVER", "DIGITMATCH", "CALL"
   barrier: number | null;      // exact barrier/digit to use
@@ -174,15 +175,16 @@ function analyzeMatchContract(
   const md100 = runMD(w100);
   const md150 = runMD(w150);
 
-  const agreed = !!(md50?.matchRecommended && md100?.matchRecommended && md150?.matchRecommended);
-
-  // Pick the digit agreed upon by the most windows; fall back to 150-window digit
-  const d50  = md50?.matchDigit  ?? 0;
-  const d100 = md100?.matchDigit ?? 0;
-  const d150 = md150?.matchDigit ?? 0;
-  const counts: Record<number, number> = {};
-  for (const d of [d50, d100, d150]) counts[d] = (counts[d] ?? 0) + 1;
-  const bestDigit = [d50, d100, d150].sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0))[0];
+  // All windows must recommend MATCH on the SAME executable barrier. Agreement
+  // on the contract family while choosing different digits is not consensus.
+  const d50  = md50?.matchDigit  ?? null;
+  const d100 = md100?.matchDigit ?? null;
+  const d150 = md150?.matchDigit ?? null;
+  const agreed = !!(
+    md50?.matchRecommended && md100?.matchRecommended && md150?.matchRecommended &&
+    windowsChooseSameDigit([d50, d100, d150])
+  );
+  const bestDigit = d150 ?? d100 ?? d50 ?? 0;
 
   const p50  = md50?.matchWinProbability  ?? 0;
   const p100 = md100?.matchWinProbability ?? 0;
@@ -226,15 +228,16 @@ function analyzeDiffContract(
   const md100 = runMD(w100);
   const md150 = runMD(w150);
 
-  const agreed = !!(md50?.diffRecommended && md100?.diffRecommended && md150?.diffRecommended);
-
-  // Pick the coldest diff digit agreed upon by the most windows
-  const d50  = md50?.diffDigit  ?? 0;
-  const d100 = md100?.diffDigit ?? 0;
-  const d150 = md150?.diffDigit ?? 0;
-  const counts: Record<number, number> = {};
-  for (const d of [d50, d100, d150]) counts[d] = (counts[d] ?? 0) + 1;
-  const bestDigit = [d50, d100, d150].sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0))[0];
+  // All windows must recommend DIFF on the SAME executable barrier. Agreement
+  // on the family while choosing different digits is not consensus.
+  const d50  = md50?.diffDigit  ?? null;
+  const d100 = md100?.diffDigit ?? null;
+  const d150 = md150?.diffDigit ?? null;
+  const agreed = !!(
+    md50?.diffRecommended && md100?.diffRecommended && md150?.diffRecommended &&
+    windowsChooseSameDigit([d50, d100, d150])
+  );
+  const bestDigit = d150 ?? d100 ?? d50 ?? 0;
 
   const p50  = md50?.diffWinProbability  ?? 0;
   const p100 = md100?.diffWinProbability ?? 0;

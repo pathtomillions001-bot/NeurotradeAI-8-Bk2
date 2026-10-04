@@ -22,7 +22,7 @@
 
 import { db } from "@workspace/db";
 import { accountsTable, settingsTable, tradesTable } from "@workspace/db";
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { fetchDerivProfitTable } from "./deriv";
 import { logger } from "./logger";
 import { runWithSession } from "./session";
@@ -30,8 +30,6 @@ import * as recoveryEngine from "./agents/recovery-engine";
 
 /** Trades older than this that are still `open` are considered unsettled. */
 const RECONCILE_AFTER_MS = 90_000;
-/** How far back to look for unsettled rows (a day is plenty). */
-const RECONCILE_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** How many unsettled rows to examine per sweep. */
 const RECONCILE_BATCH = 100;
 
@@ -44,6 +42,15 @@ interface UnsettledRow {
   derivContractId: string | null;
   agentReasoning: string | null;
   createdAt: Date;
+}
+
+/** A definitive pre-buy rejection is not an unsettled broker contract. */
+export const NO_PURCHASE_CONFIRMED_MARKER = "[NO_PURCHASE_CONFIRMED]";
+
+export function isUnsettledTradeRecord(trade: { status: string; agentReasoning?: string | null }): boolean {
+  return trade.status === "open" || (
+    trade.status === "error" && !trade.agentReasoning?.includes(NO_PURCHASE_CONFIRMED_MARKER)
+  );
 }
 
 function normalizeContractType(ct: string): string[] {
@@ -69,27 +76,52 @@ export function findTransaction(row: UnsettledRow, transactions: any[]): any | n
   const family = normalizeContractType(row.contractType);
   const stake = Number(row.stake);
   const createdSec = Math.floor(row.createdAt.getTime() / 1000);
-  return (
-    transactions.find((t) => {
-      if (t.underlying_symbol && row.symbol && t.underlying_symbol !== row.symbol) return false;
-      if (t.contract_type && !family.includes(String(t.contract_type))) return false;
-      if (Math.abs(Number(t.buy_price ?? 0) - stake) > 0.02) return false;
-      const purchaseSec = Number(t.purchase_time ?? 0);
-      if (purchaseSec && Math.abs(purchaseSec - createdSec) > 300) return false;
-      return true;
-    }) ?? null
-  );
+  const candidates = transactions.flatMap((transaction) => {
+    const symbol = String(transaction.underlying_symbol ?? transaction.symbol ?? "");
+    const contractType = String(transaction.contract_type ?? "");
+    const purchaseRaw = Number(transaction.purchase_time ?? 0);
+    const purchaseSec = purchaseRaw > 1e11 ? purchaseRaw / 1000 : purchaseRaw;
+    if (symbol !== row.symbol || !family.includes(contractType)) return [];
+    if (!Number.isFinite(Number(transaction.buy_price)) || Math.abs(Number(transaction.buy_price) - stake) > 0.02) return [];
+    // Without the broker timestamp the fallback match is not safe enough to
+    // reconcile a real-money row.
+    if (!Number.isFinite(purchaseSec) || purchaseSec <= 0) return [];
+    const timeDelta = Math.abs(purchaseSec - createdSec);
+    if (timeDelta > 300) return [];
+    return [{ transaction, timeDelta }];
+  }).sort((a, b) => a.timeDelta - b.timeDelta);
+
+  if (candidates.length === 0) return null;
+  // Never settle two local rows from the same broker transaction, and avoid a
+  // fuzzy match when two same-stake contracts are indistinguishable in time.
+  if (candidates.length > 1 && candidates[1].timeDelta - candidates[0].timeDelta < 3) return null;
+  return candidates[0].transaction;
 }
 
 /**
  * Settle every `open`/`error` trade that Deriv has already resolved.
  * Returns the number of rows settled.
  */
-export async function reconcileUnsettledTrades(): Promise<number> {
+let reconciliationInFlight: Promise<number> | null = null;
+
+/** Single-flight the periodic sweep and an autonomous-loop preflight sweep. */
+export function reconcileUnsettledTrades(sessionId?: string): Promise<number> {
+  if (reconciliationInFlight) return reconciliationInFlight;
+  const work = reconcileUnsettledTradesInner(sessionId);
+  reconciliationInFlight = work.finally(() => { reconciliationInFlight = null; });
+  return reconciliationInFlight;
+}
+
+async function reconcileUnsettledTradesInner(sessionId?: string): Promise<number> {
   let settled = 0;
   try {
-    const since = new Date(Date.now() - RECONCILE_WINDOW_MS);
     const cutoff = new Date(Date.now() - RECONCILE_AFTER_MS);
+
+    const filters = [
+      inArray(tradesTable.status, ["open", "error"]),
+      sql`${tradesTable.createdAt} <= ${cutoff}`,
+    ];
+    if (sessionId) filters.push(eq(tradesTable.sessionId, sessionId));
 
     const rows = (await db
       .select({
@@ -103,13 +135,8 @@ export async function reconcileUnsettledTrades(): Promise<number> {
         createdAt: tradesTable.createdAt,
       })
       .from(tradesTable)
-      .where(
-        and(
-          inArray(tradesTable.status, ["open", "error"]),
-          gte(tradesTable.createdAt, since),
-          sql`${tradesTable.createdAt} <= ${cutoff}`,
-        ),
-      )
+      .where(and(...filters))
+      .orderBy(desc(tradesTable.createdAt))
       .limit(RECONCILE_BATCH)) as UnsettledRow[];
 
     if (rows.length === 0) return 0;
@@ -152,6 +179,7 @@ export async function reconcileUnsettledTrades(): Promise<number> {
           100,
         );
         if (transactions.length === 0) continue;
+        const claimedContractIds = new Set<string>();
 
         for (const row of sessionRows) {
           // Omni owns a durable purchase intent and atomically settles it with
@@ -159,23 +187,31 @@ export async function reconcileUnsettledTrades(): Promise<number> {
           // be fuzzy-matched by this legacy display-only reconciliation path.
           // Restart recovery is resumed by Omni's next explicit deployment.
           if (row.agentReasoning?.startsWith("[Omni Sentinel] ")) continue;
-          const tx = findTransaction(row, transactions);
+          if (row.agentReasoning?.includes(NO_PURCHASE_CONFIRMED_MARKER)) continue;
+          const tx = findTransaction(row, transactions.filter((candidate) =>
+            !claimedContractIds.has(String(candidate.contract_id ?? "")),
+          ));
           if (!tx) continue;
+          const contractId = String(tx.contract_id ?? "");
+          if (!contractId || claimedContractIds.has(contractId)) continue;
+          claimedContractIds.add(contractId);
           const buyPrice = Number(tx.buy_price ?? 0);
           const sellPrice = Number(tx.sell_price ?? 0);
           const profit = Math.round((sellPrice - buyPrice) * 100) / 100;
           const won = profit > 0;
-          await db
+          const updatedRows = await db
             .update(tradesTable)
             .set({
               status: won ? "won" : "lost",
               profit: String(profit),
               payout: String(won ? buyPrice + profit : 0),
               exitPrice: String(sellPrice || buyPrice),
-              derivContractId: tx.contract_id != null ? String(tx.contract_id) : row.derivContractId,
+              derivContractId: contractId,
               closedAt: tx.sell_time ? new Date(Number(tx.sell_time) * 1000) : new Date(),
             })
-            .where(eq(tradesTable.id, row.id));
+            .where(and(eq(tradesTable.id, row.id), inArray(tradesTable.status, ["open", "error"])))
+            .returning({ id: tradesTable.id });
+          if (updatedRows.length === 0) continue;
           settled++;
           // A REAL money outcome must reach the shared recovery ledger. This row
           // was abandoned (open/error) by the engine that opened it, so without
@@ -191,7 +227,7 @@ export async function reconcileUnsettledTrades(): Promise<number> {
                 ? Math.round(((buyPrice + profit) / buyPrice) * 1000) / 1000
                 : 1;
               recoveryEngine.recordOutcome(
-                won, profit, buyPrice, maxRecoverySteps, row.contractType, payoutMultiplier,
+                won, profit, buyPrice, maxRecoverySteps, row.contractType, payoutMultiplier, `trade:${row.id}`,
               );
             });
           } catch (ledgerErr) {

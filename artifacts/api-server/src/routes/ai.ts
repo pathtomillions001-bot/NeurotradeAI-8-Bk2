@@ -2,24 +2,9 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { and, sql, desc, eq } from "drizzle-orm";
-import { tickManager, tickSecondsFor, DERIV_MARKETS, AUTOMATED_DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
+import { tickManager, DERIV_MARKETS, AUTOMATED_DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
 import { runRecoveryConsensus, getBestConsensus } from "../lib/agents/recovery-consensus";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
-import { getFallbackPayout } from "../lib/payouts";
-import {
-  calculateRecoveryV2Stake,
-  compareRecoveryCandidates,
-  describeRecoveryCandidate,
-  evaluateRecoveryCandidates,
-  isRecoveryDecisionV2Enabled,
-  priceRecoveryCandidate,
-  recoveryHypothesisCount,
-  RECOVERY_V2_MAX_QUOTE_CANDIDATES,
-  RECOVERY_V2_MIN_EXPECTED_VALUE,
-  RECOVERY_V2_PREFILTER_EV_FLOOR,
-  type RecoveryCandidateV2,
-} from "../lib/recovery-decision-v2";
-import { getVerifiedRecoveryMarketTape } from "../lib/recovery-history-v2";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
@@ -42,8 +27,6 @@ import {
 } from "../lib/engine-arbiter";
 
 const router = Router();
-const RECOVERY_DECISION_V2_ENABLED = isRecoveryDecisionV2Enabled();
-const RECOVERY_V2_RESCAN_MS = 2_000;
 
 // ── Recovery state persistence ────────────────────────────────────────────────
 /** Load persisted recovery state from DB on server startup. */
@@ -170,23 +153,6 @@ export async function loadRecoveryStateFromDb(): Promise<void> {
 // disable, stop, or trade on another account — even when both apps are open in
 // the same browser or the same Google account. The trading arbiter is likewise
 // scoped per session (see lib/engine-arbiter.ts).
-interface RecoveryExecutionDecision {
-  symbol: string;
-  market: (typeof AUTOMATED_DERIV_MARKETS)[number];
-  contractType: string;
-  barrier: number | null;
-  winProbability: number;
-  duration: number;
-  reason: string;
-  quality: number;
-  payoutMultiplier: number;
-  payoutSource: "live" | "fallback";
-  v2: boolean;
-  candidate?: RecoveryCandidateV2;
-  maxTickAgeMs?: number;
-  verifiedBalance?: number;
-}
-
 interface EngineInstance {
   sessionId: string;
   running: boolean;
@@ -300,16 +266,6 @@ async function getAccountAndSettings(sessionId: string) {
     account: accounts.length > 0 ? accounts[0] : null,
   };
 }
-
-function recoveryDurationFor(contractType: string, configuredDuration: number): number {
-  const rawDuration = Number(configuredDuration) || 5;
-  return (contractType === "DIGITEVEN" || contractType === "DIGITODD")
-    ? Math.max(5, rawDuration)
-    : (contractType === "DIGITMATCH" || contractType === "DIGITDIFF")
-      ? Math.max(1, Math.min(5, rawDuration))
-      : rawDuration;
-}
-
 
 function buildTradingSettings(s: any, preferredContractTypes: string[]): TradingSettings {
   return {
@@ -547,10 +503,9 @@ async function syncLiveBalance(
   sessionId: string,
   token: string,
   derivAccountId: string,
-  forceRefresh = false,
 ) {
   try {
-    const balance = await getLiveBalance(token, derivAccountId, forceRefresh);
+    const balance = await getLiveBalance(token, derivAccountId);
     if (balance === null) return;
     const activeAccounts = await db.select().from(accountsTable).where(and(
       eq(accountsTable.sessionId, sessionId),
@@ -739,15 +694,15 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
     const mdTypes  = preferredContractTypes.filter(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
 
     // ── Recovery Fast Path ────────────────────────────────────────────────────────────
-    // Recovery remains isolated from the normal 8-agent tournament. By default it uses
-    // recovery decision v2: verified live history, horizon-matched outcomes, payout/EV
-    // and uncertainty gates, and bounded edge-based sizing. AUTONOMOUS_RECOVERY_V2=false
-    // restores the old three-window consensus path without changing normal trading.
+    // When in recovery mode, skip the full 8-agent tournament entirely. Instead, run a
+    // fast 3-window consensus check (50 / 100 / 150 ticks) on ALL eligible markets in
+    // parallel. Execute the recovery trade the instant ALL THREE windows agree — this
+    // eliminates the 30+ min delays caused by quality floors, regime gates, and multi-
+    // family tournament scoring in the normal path.
     //
     // Contract types: only the user's enabled recovery types (no switching).
     // Markets: the same contractCompatibleMarkets as the normal path (no switching).
-    // Over/Under barriers: user's recoveryOverDigit / recoveryUnderDigit (no overrides).
-    // Match/Diff digits are separate recovery-v2 candidates, evaluated and ranked by EV.
+    // Barriers: user's recoveryOverDigit / recoveryUnderDigit (no overrides).
     if (recoveryEngine.isInRecovery()) {
       // ── Open-trade guard ──────────────────────────────────────────────────────────
       const recovOpenTrades = await db.select().from(tradesTable).where(and(eq(tradesTable.sessionId, sessionId), eq(tradesTable.status, "open")));
@@ -772,29 +727,12 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
         return;
       }
 
-      // Recovery v2 never fabricates a random paper outcome. Until the dedicated
-      // shadow-settlement path is enabled, it requires an authenticated live buy
-      // and a real Deriv feed. The v1 path remains available via the feature flag.
-      if (RECOVERY_DECISION_V2_ENABLED && (paperTradeMode || !token || !derivAccountId)) {
-        const reason = paperTradeMode ? "recovery_v2_shadow_settlement_required" : "recovery_v2_live_account_required";
-        logger.info({ sessionId, reason }, "Recovery v2 is waiting for verified live execution prerequisites");
-        broadcastEngineSSE(engine, "scan_complete", {
-          symbol: null, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
-          marketsScanned: 0, shouldTrade: false, rejectReason: reason,
-          sessionLossCount: engine.sessionLossCount,
-          consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-        });
-        scheduleNext(engine, false, RECOVERY_V2_RESCAN_MS);
-        return;
-      }
-
       // ── Per-symbol cooldown check on all markets ──────────────────────────────────
       // (cooledDownSymbols already populated above from engine.recentTradesBySymbol)
 
       // ── Build recovery contract type list ─────────────────────────────────────────
-      // Preserve the configured family rotation: MATCH is allowed early, while
-      // DIFF can replace it after three MATCH losses. V2 still scores individual
-      // barriers by conservative EV rather than choosing one by recovery debt.
+      // MATCH/DIFF strategy: DIGITMATCH in early recovery (high payout recovers debt fast),
+      // DIGITDIFF after 3 consecutive MATCH losses (near-certain partial recovery).
       const consecutiveMatchLosses = recoveryEngine.getState().consecutiveMatchLosses;
       const recoveryTypes: string[] = [...ouTypes, ...eoTypes, ...dirTypes];
       if (mdTypes.length > 0) {
@@ -808,382 +746,108 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
       }
 
       if (recoveryTypes.length === 0) {
-        if (RECOVERY_DECISION_V2_ENABLED) {
-          logger.warn("Recovery v2: no recovery contract types configured — refusing to fall through to normal trading");
+        logger.warn("Recovery: no recovery contract types configured — falling back to normal scan");
+        // Fall through to normal tournament
+      } else {
+        // ── 3-window consensus scan across all eligible markets ───────────────────
+        broadcastEngineSSE(engine, "scan_started", { groups: ["Recovery"], ts: Date.now() });
+
+        const consensusInputs = await Promise.all(
+          contractCompatibleMarkets.map(async (m) => {
+            const marketTypes = recoveryTypes.filter(ct => !ct.startsWith("DIGIT") || m.digitEnabled);
+            if (marketTypes.length === 0) return { symbol: m.symbol, market: m, results: [] };
+            const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 150) : [];
+            const prices = tickManager.getTicks(m.symbol, 150);
+            const results = runRecoveryConsensus(
+              digits, prices, marketTypes,
+              tradingSettings.recoveryOverDigit, tradingSettings.recoveryUnderDigit,
+            );
+            return { symbol: m.symbol, market: m, results };
+          }),
+        );
+
+        const winner = getBestConsensus(consensusInputs);
+
+        if (!winner) {
+          logger.info({ marketsScanned: contractCompatibleMarkets.length, types: recoveryTypes },
+            "Recovery: 3-window consensus not yet reached — rescanning in 3s");
           broadcastEngineSSE(engine, "scan_complete", {
             symbol: null, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
             marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
-            rejectReason: "recovery_v2_no_contract_types", sessionLossCount: engine.sessionLossCount,
+            rejectReason: "recovery_no_consensus", sessionLossCount: engine.sessionLossCount,
             consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
           });
-          scheduleNext(engine, false, RECOVERY_V2_RESCAN_MS);
-          return;
-        }
-        logger.warn("Recovery: no recovery contract types configured — falling back to normal scan");
-        // Preserve the legacy fallback only when recovery v2 is explicitly disabled.
-      } else {
-        broadcastEngineSSE(engine, "scan_started", {
-          groups: [RECOVERY_DECISION_V2_ENABLED ? "Recovery v2" : "Recovery"], ts: Date.now(),
-        });
-
-        let recoveryDecision: RecoveryExecutionDecision | null = null;
-
-        if (RECOVERY_DECISION_V2_ENABLED) {
-          const hypothesisCount = recoveryHypothesisCount(contractCompatibleMarkets.length, recoveryTypes);
-          const configuredDuration = tradingSettings.tradeDurationSec ?? 5;
-          const marketEvaluations = await Promise.all(contractCompatibleMarkets.map(async (market) => {
-            const marketTypes = recoveryTypes.filter(ct => !ct.startsWith("DIGIT") || market.digitEnabled);
-            if (marketTypes.length === 0) {
-              return { market, tape: null, candidates: [] as RecoveryCandidateV2[], dataReason: "no_compatible_contract_types" };
-            }
-            const tape = await getVerifiedRecoveryMarketTape(market.symbol, market.pipSize);
-            if (tape.rejectionReason || !tape.snapshot) {
-              return { market, tape, candidates: [] as RecoveryCandidateV2[], dataReason: tape.rejectionReason ?? "no_tick_snapshot" };
-            }
-            const candidates = evaluateRecoveryCandidates({
-              symbol: market.symbol,
-              samples: tape.samples,
-              contractTypes: marketTypes,
-              recoveryOverBarrier: tradingSettings.recoveryOverDigit,
-              recoveryUnderBarrier: tradingSettings.recoveryUnderDigit,
-              durationFor: (contractType) => recoveryDurationFor(contractType, configuredDuration),
-              hypothesisCount,
-              sourceGeneration: tape.snapshot.tick.generation,
-              latestSequence: tape.snapshot.tick.sequence,
-              latestReceivedAt: tape.snapshot.tick.receivedAt,
-            });
-            return { market, tape, candidates, dataReason: null };
-          }));
-
-          const rawCandidates = marketEvaluations.flatMap((entry) => entry.candidates);
-          const rejections: Record<string, number> = {};
-          const countRejection = (reason: string) => { rejections[reason] = (rejections[reason] ?? 0) + 1; };
-          for (const entry of marketEvaluations) {
-            if (entry.dataReason) countRejection(entry.dataReason);
-          }
-
-          const prefiltered = rawCandidates.flatMap((candidate) => {
-            if (candidate.rejectionReason) {
-              countRejection(candidate.rejectionReason);
-              return [];
-            }
-            const fallbackPayout = getFallbackPayout(candidate.contractType, candidate.barrier);
-            const fallbackLowerEv = candidate.lowerWinProbability * fallbackPayout - 1;
-            if (fallbackLowerEv < RECOVERY_V2_PREFILTER_EV_FLOOR) {
-              countRejection("fallback_ev_outside_quote_prefilter");
-              return [];
-            }
-            return [{ candidate, fallbackPayout, fallbackLowerEv }];
-          }).sort((a, b) => b.fallbackLowerEv - a.fallbackLowerEv || compareRecoveryCandidates(a.candidate, b.candidate));
-
-          const quoteBatch = prefiltered.slice(0, RECOVERY_V2_MAX_QUOTE_CANDIDATES);
-          if (prefiltered.length > quoteBatch.length) {
-            countRejection("quote_shortlist_limit");
-          }
-          const quotedCandidates = await Promise.all(quoteBatch.map(async (entry) => {
-            const { candidate } = entry;
-            const quote = await resolveRecoveryPayout({
-              symbol: candidate.symbol,
-              contractType: candidate.contractType,
-              barrier: candidate.barrier,
-              duration: candidate.duration,
-              durationUnit: "t",
-              currency: account?.currency ?? "USD",
-              forceRefresh: true,
-            });
-            const priced = priceRecoveryCandidate(
-              candidate,
-              quote.payoutMultiplier,
-              quote.source,
-              RECOVERY_V2_MIN_EXPECTED_VALUE,
-            );
-            if (!priced.accepted) countRejection(priced.rejectionReason ?? "candidate_rejected");
-            return { candidate: priced, quote, fallbackLowerEv: entry.fallbackLowerEv };
-          }));
-          const eligibleCandidates = quotedCandidates
-            .filter((entry) => entry.candidate.accepted)
-            .sort((a, b) => compareRecoveryCandidates(a.candidate, b.candidate));
-          const candidateKey = (candidate: RecoveryCandidateV2) =>
-            `${candidate.symbol}|${candidate.contractType}|${candidate.barrier ?? ""}|${candidate.duration}`;
-          const quotedCandidateKeys = new Set(quotedCandidates.map((entry) => candidateKey(entry.candidate)));
-
-          const diagnosticCandidates = [
-            ...quotedCandidates.map((entry) => entry.candidate),
-            ...prefiltered
-              .filter((entry) => !quotedCandidateKeys.has(candidateKey(entry.candidate)))
-              .map((entry) => priceRecoveryCandidate(entry.candidate, entry.fallbackPayout, "fallback")),
-          ]
-            .sort((a, b) => {
-              const aEv = a.lowerExpectedValue ?? (a.lowerWinProbability * getFallbackPayout(a.contractType, a.barrier) - 1);
-              const bEv = b.lowerExpectedValue ?? (b.lowerWinProbability * getFallbackPayout(b.contractType, b.barrier) - 1);
-              return bEv - aEv || b.effectiveSampleSize - a.effectiveSampleSize;
-            })
-            .slice(0, 8)
-            .map((candidate) => ({
-              symbol: candidate.symbol,
-              contractType: candidate.contractType,
-              barrier: candidate.barrier,
-              duration: candidate.duration,
-              p: candidate.winProbability,
-              lowerP: candidate.lowerWinProbability,
-              uncertainty: candidate.uncertainty,
-              sampleSize: candidate.sampleSize,
-              effectiveSampleSize: candidate.effectiveSampleSize,
-              payout: candidate.payoutMultiplier,
-              payoutSource: candidate.payoutSource,
-              expectedValue: candidate.expectedValue,
-              lowerExpectedValue: candidate.lowerExpectedValue,
-              accepted: candidate.accepted,
-              rejectionReason: candidate.rejectionReason,
-            }));
-
-          logger.info({
-            sessionId,
-            marketsScanned: contractCompatibleMarkets.length,
-            liveMarkets: marketEvaluations.filter((entry) => entry.tape?.feedSource === "live" && !entry.dataReason).length,
-            historyWarmedMarkets: marketEvaluations.filter((entry) => entry.tape?.historyUsed).length,
-            hypotheses: hypothesisCount,
-            evaluatedCandidates: rawCandidates.length,
-            quoteCandidates: quoteBatch.length,
-            acceptedCandidates: eligibleCandidates.length,
-            rejectionCounts: rejections,
-            topCandidates: diagnosticCandidates,
-          }, "Recovery v2 scan diagnostics");
-
-          if (eligibleCandidates.length === 0) {
-            const hasLiveTape = marketEvaluations.some((entry) => entry.tape?.feedSource === "live" && !entry.dataReason);
-            const rejectReason = !hasLiveTape
-              ? "recovery_v2_no_fresh_live_feed"
-              : rawCandidates.length === 0
-                ? "recovery_v2_no_valid_candidates"
-                : prefiltered.length === 0
-                  ? "recovery_v2_insufficient_edge_or_samples"
-                  : "recovery_v2_no_live_positive_ev";
-            broadcastEngineSSE(engine, "scan_complete", {
-              symbol: null, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
-              marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
-              rejectReason, sessionLossCount: engine.sessionLossCount,
-              consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-              recoveryV2: { hypotheses: hypothesisCount, rejections, topCandidates: diagnosticCandidates },
-            });
-            scheduleNext(engine, false, RECOVERY_V2_RESCAN_MS);
-            return;
-          }
-
-          const selected = eligibleCandidates[0]!;
-          const tape = marketEvaluations.find((entry) => entry.market.symbol === selected.candidate.symbol)?.tape;
-          const selectedMarket = contractCompatibleMarkets.find((market) => market.symbol === selected.candidate.symbol);
-          const recovSymHist = engine.recentTradesBySymbol.get(selected.candidate.symbol) ?? [];
-          if (recovSymHist.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS).length >= MAX_TRADES_SAME_SYMBOL) {
-            logger.info({ symbol: selected.candidate.symbol }, "Recovery v2: symbol just hit cooldown — rescanning");
-            scheduleNext(engine, false, 500);
-            return;
-          }
-          if (!tape?.snapshot || !selectedMarket) {
-            logger.warn({ symbol: selected.candidate.symbol }, "Recovery v2: selected candidate lost its market or live snapshot");
-            scheduleNext(engine, false, RECOVERY_V2_RESCAN_MS);
-            return;
-          }
-          const verifiedBalance = await getLiveBalance(token!, derivAccountId!, true);
-          if (verifiedBalance === null || !Number.isFinite(verifiedBalance) || verifiedBalance <= 0) {
-            logger.info({ sessionId }, "Recovery v2: unable to verify a positive live account balance; waiting instead of sizing from stale settings");
-            broadcastEngineSSE(engine, "scan_complete", {
-              symbol: selected.candidate.symbol, quality: 0, confidence: 0,
-              agentScores: engine.lastAgentScores, marketsScanned: contractCompatibleMarkets.length,
-              shouldTrade: false, rejectReason: "recovery_v2_live_balance_unavailable",
-              sessionLossCount: engine.sessionLossCount,
-              consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-            });
-            scheduleNext(engine, false, RECOVERY_V2_RESCAN_MS);
-            return;
-          }
-
-          recoveryDecision = {
-            symbol: selected.candidate.symbol,
-            market: selectedMarket,
-            contractType: selected.candidate.contractType,
-            barrier: selected.candidate.barrier,
-            winProbability: selected.candidate.winProbability,
-            duration: selected.candidate.duration,
-            reason: describeRecoveryCandidate(selected.candidate),
-            quality: Math.min(99, Math.max(0, Math.round(50 + (selected.candidate.lowerExpectedValue ?? 0) * 1_000))),
-            payoutMultiplier: selected.quote.payoutMultiplier,
-            payoutSource: selected.quote.source,
-            v2: true,
-            candidate: selected.candidate,
-            verifiedBalance,
-            maxTickAgeMs: Math.max(5_000, tickSecondsFor(selected.candidate.symbol) * 3_000),
-          };
-        } else {
-          // Legacy recovery path remains available as an immediate rollback.
-          const consensusInputs = await Promise.all(
-            contractCompatibleMarkets.map(async (market) => {
-              const marketTypes = recoveryTypes.filter(ct => !ct.startsWith("DIGIT") || market.digitEnabled);
-              if (marketTypes.length === 0) return { symbol: market.symbol, market, results: [] };
-              const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 150) : [];
-              const prices = tickManager.getTicks(market.symbol, 150);
-              const results = runRecoveryConsensus(
-                digits, prices, marketTypes,
-                tradingSettings.recoveryOverDigit, tradingSettings.recoveryUnderDigit,
-              );
-              return { symbol: market.symbol, market, results };
-            }),
-          );
-          const winner = getBestConsensus(consensusInputs);
-          if (!winner) {
-            logger.info({ marketsScanned: contractCompatibleMarkets.length, types: recoveryTypes },
-              "Recovery: 3-window consensus not yet reached — rescanning in 3s");
-            broadcastEngineSSE(engine, "scan_complete", {
-              symbol: null, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
-              marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
-              rejectReason: "recovery_no_consensus", sessionLossCount: engine.sessionLossCount,
-              consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-            });
-            scheduleNext(engine, false, 3000);
-            return;
-          }
-          const recovSymHist = engine.recentTradesBySymbol.get(winner.symbol) ?? [];
-          if (recovSymHist.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS).length >= MAX_TRADES_SAME_SYMBOL) {
-            logger.info({ symbol: winner.symbol }, "Recovery: symbol just hit cooldown — rescanning");
-            scheduleNext(engine, false, 500);
-            return;
-          }
-          const cons = winner.result;
-          const recovDuration = recoveryDurationFor(cons.contractType, tradingSettings.tradeDurationSec ?? 5);
-          const quote = await resolveRecoveryPayout({
-            symbol: winner.symbol,
-            contractType: cons.contractType,
-            barrier: cons.barrier,
-            duration: recovDuration,
-            durationUnit: "t",
-            currency: account?.currency ?? "USD",
-          });
-          recoveryDecision = {
-            symbol: winner.symbol,
-            market: winner.market,
-            contractType: cons.contractType,
-            barrier: cons.barrier,
-            winProbability: cons.avgWinProbability,
-            duration: recovDuration,
-            reason: cons.reason,
-            quality: Math.min(99, Math.round(cons.avgStrength * 200 + 60)),
-            payoutMultiplier: quote.payoutMultiplier,
-            payoutSource: quote.source,
-            v2: false,
-          };
-        }
-
-        if (!recoveryDecision) {
-          scheduleNext(engine, false, RECOVERY_V2_RESCAN_MS);
+          scheduleNext(engine, false, 3000);
           return;
         }
 
-        const recovSymbol = recoveryDecision.symbol;
-        const recovMarket = recoveryDecision.market;
-        const recovContractType = recoveryDecision.contractType;
-        const recovBarrier = recoveryDecision.barrier;
-        const recovWinP = recoveryDecision.winProbability;
-        const recovDirection = recovContractType === "CALL" ? "up"
+        const { symbol: recovSymbol, market: recovMarket, result: cons } = winner;
+
+        // Per-symbol cooldown safety net (symbols already filtered in contractCompatibleMarkets,
+        // but guard against the rare mid-scan race where the cooldown was just reached)
+        const recovSymHist = engine.recentTradesBySymbol.get(recovSymbol) ?? [];
+        if (recovSymHist.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS).length >= MAX_TRADES_SAME_SYMBOL) {
+          logger.info({ symbol: recovSymbol }, "Recovery: symbol just hit cooldown — rescanning");
+          scheduleNext(engine, false, 500);
+          return;
+        }
+
+        const recovContractType = cons.contractType;
+        const recovBarrier      = cons.barrier;
+        const recovWinP         = cons.avgWinProbability;
+        const recovDirection    = recovContractType === "CALL" ? "up"
           : recovContractType === "PUT" ? "down" : "hold";
-        const recovDuration = recoveryDecision.duration;
-        const recoveryReason = recoveryDecision.reason;
-        const recoveryLabel = recoveryDecision.v2 ? "RECOVERY V2" : "RECOVERY";
-        const recovPayoutQuote = {
-          payoutMultiplier: recoveryDecision.payoutMultiplier,
-          source: recoveryDecision.payoutSource,
-        };
+        const rawDur = tradingSettings.tradeDurationSec ?? 5;
+        const recovDuration = (recovContractType === "DIGITEVEN" || recovContractType === "DIGITODD")
+          ? Math.max(5, rawDur)
+          : (recovContractType === "DIGITMATCH" || recovContractType === "DIGITDIFF")
+            ? Math.max(1, Math.min(5, rawDur))
+            : rawDur;
+
+        // Price the exact candidate immediately before sizing it. Live proposal
+        // wins; the canonical user-provided payout schedule is the fallback.
+        const recovPayoutQuote = await resolveRecoveryPayout({
+          symbol: recovSymbol,
+          contractType: recovContractType,
+          barrier: recovBarrier,
+          duration: recovDuration,
+          durationUnit: "t",
+          currency: account?.currency ?? "USD",
+        });
         const recovPayoutMult = recovPayoutQuote.payoutMultiplier;
 
-        const recoverySizingBalance = recoveryDecision.v2
-          ? (recoveryDecision.verifiedBalance ?? 0)
-          : balance;
+        // Recovery stake — sizes from remaining debt plus an optional original
+        // target profit (sizing only) and this candidate's net live payout.
         const riskBaseAmount = tradingSettings.riskAmountType === "percentage"
-          ? recoverySizingBalance * tradingSettings.riskAmountValue / 100
+          ? balance * tradingSettings.riskAmountValue / 100
           : tradingSettings.riskAmountValue;
-        const recoveryBaseStake = Math.max(0.35, Math.min(riskBaseAmount, tradingSettings.maxTradeStake));
-        let recovStake: number;
-        if (recoveryDecision.v2 && recoveryDecision.candidate) {
-          const sizing = calculateRecoveryV2Stake({
-            candidate: recoveryDecision.candidate,
-            balance: recoverySizingBalance,
-            baseStake: recoveryBaseStake,
-            maxTradeStake: tradingSettings.maxTradeStake,
-            maxRiskPerTrade: tradingSettings.maxRiskPerTrade,
-            unrecoveredDebt: recoveryEngine.getState().unrecoveredAmount,
-          });
-          if (!sizing.stake) {
-            logger.info({
-              symbol: recovSymbol,
-              reason: sizing.reason,
-              riskCap: sizing.riskCap,
-              kellyFraction: sizing.kellyFraction,
-              lowerWinProbability: recoveryDecision.candidate.lowerWinProbability,
-              payoutMultiplier: recovPayoutMult,
-            }, "Recovery v2: statistically positive candidate rejected by stake/risk sizing");
-            broadcastEngineSSE(engine, "scan_complete", {
-              symbol: recovSymbol, quality: recoveryDecision.quality,
-              confidence: Math.round(recovWinP * 100), agentScores: engine.lastAgentScores,
-              marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
-              rejectReason: "recovery_v2_stake_below_minimum", sessionLossCount: engine.sessionLossCount,
-              consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-            });
-            scheduleNext(engine, false, RECOVERY_V2_RESCAN_MS);
-            return;
-          }
-          recovStake = sizing.stake;
-          logger.info({
-            symbol: recovSymbol,
-            requestedRecoveryDebt: recoveryEngine.getState().unrecoveredAmount,
-            stake: recovStake,
-            riskCap: sizing.riskCap,
-            accountRiskPct: recoverySizingBalance > 0 ? (recovStake / recoverySizingBalance * 100).toFixed(3) : "n/a",
-            kellyFraction: sizing.kellyFraction,
-            lowerExpectedValue: recoveryDecision.candidate.lowerExpectedValue,
-          }, "Recovery v2: edge-sized stake is capped independently of recovery debt");
-        } else {
-          const recovStakeRaw = recoveryEngine.getDynamicRecoveryStake(
-            recoveryBaseStake,
-            tradingSettings.maxTradeStake, balance, recovPayoutMult, recovWinP,
-            tradingSettings.riskProfile, tradingSettings.recoveryMultiplier,
-            tradingSettings.recoveryMethod, tradingSettings.maxRecoverySteps,
-            tradingSettings.recoveryAutoMode,
-          );
-          // Preserve legacy rounding and sizing only while v2 is disabled.
-          recovStake = Math.max(0.35, Math.min(recovStakeRaw, tradingSettings.maxTradeStake));
-        }
+        const recovStakeRaw = recoveryEngine.getDynamicRecoveryStake(
+          Math.max(0.35, Math.min(riskBaseAmount, tradingSettings.maxTradeStake)),
+          tradingSettings.maxTradeStake, balance, recovPayoutMult, recovWinP,
+          tradingSettings.riskProfile, tradingSettings.recoveryMultiplier,
+          tradingSettings.recoveryMethod, tradingSettings.maxRecoverySteps,
+          tradingSettings.recoveryAutoMode,
+        );
+        // The recovery engine already rounds upward to cents; do not round back
+        // down here or an "exact" instant stake can finish a cent short.
+        const recovStake = Math.max(0.35, Math.min(recovStakeRaw, tradingSettings.maxTradeStake));
+
+        const recovBarrierToStore = recovContractType.includes("DIGIT") ? (recovBarrier ?? null) : null;
 
         logger.info({
           symbol: recovSymbol, contractType: recovContractType, barrier: recovBarrier,
           stake: recovStake, winP: (recovWinP * 100).toFixed(1) + "%",
-          payout: recovPayoutMult, payoutSource: recovPayoutQuote.source,
-          reason: recoveryReason,
-          lowerWinProbability: recoveryDecision.candidate?.lowerWinProbability,
-          lowerExpectedValue: recoveryDecision.candidate?.lowerExpectedValue,
-        }, recoveryDecision.v2
-          ? "Recovery v2: live quote and conservative EV gates passed — executing"
-          : "Recovery: 3-window consensus reached — executing recovery trade");
-
-        const recovBarrierToStore = recovContractType.includes("DIGIT") ? (recovBarrier ?? null) : null;
+          payout: recovPayoutMult, payoutSource: recovPayoutQuote.source, reason: cons.reason,
+        }, "Recovery: 3-window consensus reached — executing recovery trade");
 
         broadcastEngineSSE(engine, "scan_complete", {
           symbol: recovSymbol,
-          quality: recoveryDecision.quality,
+          quality: Math.min(99, Math.round(cons.avgStrength * 200 + 60)),
           confidence: Math.round(recovWinP * 100),
           agentScores: engine.lastAgentScores,
           marketsScanned: contractCompatibleMarkets.length,
           shouldTrade: true, rejectReason: null, sessionLossCount: engine.sessionLossCount,
           consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-          recoveryV2: recoveryDecision.candidate ? {
-            winProbability: recoveryDecision.candidate.winProbability,
-            lowerWinProbability: recoveryDecision.candidate.lowerWinProbability,
-            upperWinProbability: recoveryDecision.candidate.upperWinProbability,
-            uncertainty: recoveryDecision.candidate.uncertainty,
-            sampleSize: recoveryDecision.candidate.sampleSize,
-            effectiveSampleSize: recoveryDecision.candidate.effectiveSampleSize,
-            payoutMultiplier: recoveryDecision.candidate.payoutMultiplier,
-            expectedValue: recoveryDecision.candidate.expectedValue,
-            lowerExpectedValue: recoveryDecision.candidate.lowerExpectedValue,
-          } : undefined,
         });
 
         engine.currentMarket = recovSymbol;
@@ -1215,7 +879,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
             entryPrice: String(rEntryPrice), exitPrice: String(rExitPrice),
             aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
             isAutonomous: true,
-            agentReasoning: `[PAPER ${recoveryLabel}] ${recoveryReason}`,
+            agentReasoning: `[PAPER RECOVERY] 3-window consensus: ${cons.reason}`,
             duration: recovDuration, durationUnit: "t", closedAt: new Date(),
           });
         } else {
@@ -1226,7 +890,7 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
             stake: String(recovStake), direction: recovDirection, status: "open",
             aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
             isAutonomous: true,
-            agentReasoning: `[${recoveryLabel}] ${recoveryReason}`,
+            agentReasoning: `[RECOVERY] 3-window consensus: ${cons.reason}`,
             duration: recovDuration, durationUnit: "t",
           }).returning();
 
@@ -1247,16 +911,6 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
               currency: account?.currency ?? "USD",
               accountId: derivAccountId!,
               barrier: recovContractType.includes("DIGIT") ? (recovBarrier ?? undefined) : undefined,
-              ...(recoveryDecision.v2 && recoveryDecision.candidate ? {
-                recoveryGuard: {
-                  lowerWinProbability: recoveryDecision.candidate.lowerWinProbability,
-                  minimumExpectedValue: RECOVERY_V2_MIN_EXPECTED_VALUE,
-                  maxStake: recovStake,
-                  expectedGeneration: recoveryDecision.candidate.sourceGeneration,
-                  minimumSequence: recoveryDecision.candidate.latestSequence,
-                  maxTickAgeMs: recoveryDecision.maxTickAgeMs ?? 6_000,
-                },
-              } : {}),
             });
             rEntryPrice = liveRes.buyPrice;
             const contractRes = await waitForContractResult(token, derivAccountId!, liveRes.contractId, (recovDuration + 30) * 1000);
@@ -1265,14 +919,14 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
             rActualPayout = rWon ? recovStake + rProfit : 0;
             rEntryPrice = contractRes.entrySpot || liveRes.buyPrice;
             rExitPrice  = contractRes.exitSpot  || rEntryPrice;
-            await syncLiveBalance(sessionId, token, derivAccountId!, recoveryDecision.v2);
+            await syncLiveBalance(sessionId, token, derivAccountId!);
           } catch (liveErr) {
             const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
             logger.warn({ errMsg, symbol: recovSymbol }, "Recovery live trade failed — marking as error");
             try {
               await db.update(tradesTable).set({
                 status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                agentReasoning: `[${recoveryLabel}] ${recoveryReason} [FAILED: ${errMsg}]`,
+                agentReasoning: `[RECOVERY] ${cons.reason} [FAILED: ${errMsg}]`,
               }).where(eq(tradesTable.id, openTrade.id));
             } catch { /* ignore */ }
             broadcastEngineSSE(engine, "trade_completed", {

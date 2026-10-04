@@ -20,9 +20,9 @@ function normalizeContractType(contractType: string): string {
  * Resolve the payout multiplier used by recovery stake math.
  *
  * The public Deriv proposal is requested with a $1 stake so its payout can be
- * read directly as a multiplier. Ordinary callers may use the canonical fallback
- * schedule when a quote is unavailable. Live autonomous recovery can request a
- * fresh quote and must reject that fallback before submitting a real-money order.
+ * read directly as a multiplier. If the quote cannot be obtained quickly, the
+ * canonical user-provided payout schedule is used. Quotes are cached briefly so
+ * an instant recovery loop does not add a WebSocket round-trip to every trade.
  */
 export async function resolveRecoveryPayout(params: {
   symbol: string;
@@ -31,8 +31,6 @@ export async function resolveRecoveryPayout(params: {
   duration: number;
   durationUnit?: string;
   currency?: string;
-  /** Bypass the short-lived public-quote cache for an execution decision. */
-  forceRefresh?: boolean;
 }): Promise<RecoveryPayoutQuote> {
   const contractType = normalizeContractType(params.contractType);
   const fallback: RecoveryPayoutQuote = {
@@ -45,7 +43,7 @@ export async function resolveRecoveryPayout(params: {
   const currency = params.currency || "USD";
   const key = [params.symbol, contractType, params.barrier ?? "", duration, durationUnit, currency].join(":");
   const cached = quoteCache.get(key);
-  if (!params.forceRefresh && cached && cached.expiresAt > Date.now()) return cached.quote;
+  if (cached && cached.expiresAt > Date.now()) return cached.quote;
 
   try {
     const proposal = await Promise.race([
@@ -64,7 +62,7 @@ export async function resolveRecoveryPayout(params: {
     ]);
 
     const multiplier = Number(proposal?.payoutMultiplier);
-    if (proposal?.payoutVerified !== false && Number.isFinite(multiplier) && multiplier > 1) {
+    if (Number.isFinite(multiplier) && multiplier > 1) {
       const quote: RecoveryPayoutQuote = { payoutMultiplier: multiplier, source: "live" };
       quoteCache.set(key, { quote, expiresAt: Date.now() + LIVE_QUOTE_TTL_MS });
       return quote;

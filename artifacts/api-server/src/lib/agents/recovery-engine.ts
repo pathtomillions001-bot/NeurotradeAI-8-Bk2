@@ -58,7 +58,6 @@ export interface RecoveryState {
   originPayoutMultiplier:   number;       // total-return multiplier of that original normal trade
   resetDate:                string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
   consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥3
-  processedOutcomeIds:      string[];     // bounded idempotency keys for journal/reconciler replays
 }
 
 /** Local calendar date in user's timezone in YYYY-MM-DD. Uses the tz offset stored in lib/tz so it agrees with the daily stats on the frontend. */
@@ -79,7 +78,6 @@ function freshState(): RecoveryState {
     originPayoutMultiplier:   1,
     resetDate:                todayKey(),
     consecutiveMatchLosses:   0,
-    processedOutcomeIds:      [],
   };
 }
 
@@ -151,13 +149,9 @@ function applyNewDay(): void {
   const prevTargetProfit     = state.targetProfit;
   const prevRemainingTarget  = state.remainingTargetProfit;
   const prevOriginPayout     = state.originPayoutMultiplier;
-  const prevProcessedOutcomeIds = state.processedOutcomeIds ?? [];
   const hadCarryOver         = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
 
-  replaceState({
-    ...freshState(),
-    processedOutcomeIds: prevProcessedOutcomeIds,
-  }, initializedSessions.has(activeSessionId()));
+  replaceState(freshState(), initializedSessions.has(activeSessionId()));
 
   // Carry 50% of any unrecovered debt into the new day (capped at 3× base stake).
   // A hard wipe would silently discard real account losses from late-night trades.
@@ -497,16 +491,9 @@ export function recordOutcome(
   maxRecoverySteps: number,
   contractType?: string,
   payoutMultiplier = 1,
-  idempotencyKey?: string,
 ): RecoveryState {
   ensureFreshDay();
-  const key = typeof idempotencyKey === "string" ? idempotencyKey.trim().slice(0, 160) : "";
-  const processedIds = state.processedOutcomeIds ?? [];
-  if (key && processedIds.includes(key)) return state;
-
-  const next = reduceRecoveryOutcome({ ...state }, won, profit, stakeUsed, maxRecoverySteps, contractType, payoutMultiplier);
-  if (key) next.processedOutcomeIds = [...processedIds, key].slice(-1024);
-  replaceState(next);
+  replaceState(reduceRecoveryOutcome({ ...state }, won, profit, stakeUsed, maxRecoverySteps, contractType, payoutMultiplier));
   // Existing callers retain automatic persistence; transactional consumers can
   // commit reduceRecoveryOutcome() alongside the journal, then seedState().
   persistToDb().catch(() => {});
@@ -519,8 +506,7 @@ function collapseIfDebtCleared(): void {
   if (!state.inRecovery) return;
   if (toCents(state.unrecoveredAmount) > 0) return;
   const preservedBaseStake = state.baseStake;
-  const processedOutcomeIds = state.processedOutcomeIds ?? [];
-  replaceState({ ...freshState(), processedOutcomeIds });
+  replaceState(freshState());
   state.baseStake = preservedBaseStake;
 }
 
@@ -530,10 +516,7 @@ export function resetAll(): void {
 
 /** Overwrite the entire recovery state (used when syncing from the Deriv journal). */
 export function seedState(data: RecoveryState): void {
-  replaceState({
-    ...data,
-    processedOutcomeIds: Array.isArray(data.processedOutcomeIds) ? data.processedOutcomeIds.slice(-1024) : [],
-  });
+  replaceState({ ...data });
   collapseIfDebtCleared();
 }
 
@@ -573,7 +556,6 @@ export function loadState(json: string): void {
         // Legacy per-family rows predate this feature — always treat as "not today".
         resetDate:                "",
         consecutiveMatchLosses:   0,
-        processedOutcomeIds:      [],
       });
       if (!inRecovery) replaceState(freshState());
       collapseIfDebtCleared();
@@ -604,11 +586,8 @@ export function loadState(json: string): void {
       // pre-existing carry-over debt from before this feature existed is cleared
       // immediately on load rather than silently resurrected.
       resetDate:                typeof parsed.resetDate === "string" ? parsed.resetDate : "",
-      // New fields default for rows saved before they existed.
+      // New field — default to 0 for rows saved before this feature existed
       consecutiveMatchLosses:   Number(parsed.consecutiveMatchLosses) || 0,
-      processedOutcomeIds: Array.isArray(parsed.processedOutcomeIds)
-        ? parsed.processedOutcomeIds.filter((id: unknown) => typeof id === "string").slice(-1024)
-        : [],
     });
   } catch {
     /* ignore malformed state — start fresh */

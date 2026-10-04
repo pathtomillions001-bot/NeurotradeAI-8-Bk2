@@ -815,31 +815,7 @@ export const GetAiEngineStatusResponse = zod.object({
   "remainingTargetProfit": zod.number().optional().describe('Remaining optional sizing-target profit. Never keeps recovery active once loss debt is cleared.'),
   "originPayoutMultiplier": zod.number().optional().describe('Total-return payout multiplier of the normal trade whose loss started recovery'),
   "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
-}).optional(),
-  "recoveryAnalysis": zod.object({
-  "phase": zod.string(),
-  "reason": zod.string(),
-  "candidate": zod.object({
-  "symbol": zod.string(),
-  "contractType": zod.string(),
-  "barrier": zod.number().nullable(),
-  "duration": zod.number(),
-  "probability": zod.number(),
-  "lowerProbability": zod.number().describe('Conservative screening estimate; not a guarantee of sequential confidence coverage.'),
-  "conservativeEV": zod.number().describe('Lower probability times total payout multiplier minus one, per unit stake.'),
-  "samples": zod.number(),
-  "effectiveSamples": zod.number(),
-  "model": zod.string(),
-  "payoutMultiplier": zod.number().optional(),
-  "growth": zod.number().optional(),
-  "qualified": zod.boolean().optional(),
-  "reason": zod.string().optional(),
-  "validationBrier": zod.number().optional(),
-  "baselineBrier": zod.number().optional(),
-  "generation": zod.number().optional(),
-  "sequence": zod.number().optional()
 }).optional()
-}).nullish()
 })
 
 
@@ -880,31 +856,7 @@ export const ToggleAutonomousEngineResponse = zod.object({
   "remainingTargetProfit": zod.number().optional().describe('Remaining optional sizing-target profit. Never keeps recovery active once loss debt is cleared.'),
   "originPayoutMultiplier": zod.number().optional().describe('Total-return payout multiplier of the normal trade whose loss started recovery'),
   "highestStep": zod.number().optional().describe('The highest recovery step among all families currently in recovery')
-}).optional(),
-  "recoveryAnalysis": zod.object({
-  "phase": zod.string(),
-  "reason": zod.string(),
-  "candidate": zod.object({
-  "symbol": zod.string(),
-  "contractType": zod.string(),
-  "barrier": zod.number().nullable(),
-  "duration": zod.number(),
-  "probability": zod.number(),
-  "lowerProbability": zod.number().describe('Conservative screening estimate; not a guarantee of sequential confidence coverage.'),
-  "conservativeEV": zod.number().describe('Lower probability times total payout multiplier minus one, per unit stake.'),
-  "samples": zod.number(),
-  "effectiveSamples": zod.number(),
-  "model": zod.string(),
-  "payoutMultiplier": zod.number().optional(),
-  "growth": zod.number().optional(),
-  "qualified": zod.boolean().optional(),
-  "reason": zod.string().optional(),
-  "validationBrier": zod.number().optional(),
-  "baselineBrier": zod.number().optional(),
-  "generation": zod.number().optional(),
-  "sequence": zod.number().optional()
 }).optional()
-}).nullish()
 })
 
 

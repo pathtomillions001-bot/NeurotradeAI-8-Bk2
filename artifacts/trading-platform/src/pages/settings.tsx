@@ -321,17 +321,11 @@ export default function Settings() {
         <CardHeader className="pb-2">
           <CardTitle className="text-base">Engine Configuration</CardTitle>
           <CardDescription className="text-xs">Core AI engine parameters that control how and when the engine trades.</CardDescription>
-          <p className="text-xs text-muted-foreground mt-2">
-            Main autonomous recovery uses your selected Split or Instant mode and Auto or Manual sizing,
-            including your manual multiplier and maximum recovery steps. The configured maximum stake
-            and available balance still apply. Conservative positive EV remains required for entry.
-            Paper mode uses a separate ledger and future feed ticks; restart the engine after changing trade mode.
-          </p>
         </CardHeader>
         <CardContent>
           <SettingRow
             label="Paper Trade Mode"
-            description="Main autonomous paper trades use separate records and debt, without sending broker orders. Account journal statistics remain live-account statistics. Restart after changing mode."
+            description="Log all trades to the journal without sending real orders to Deriv. Use to test strategies with zero risk. Turn off to go live."
           >
             <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
           </SettingRow>

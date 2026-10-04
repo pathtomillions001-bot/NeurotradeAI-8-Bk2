@@ -3158,16 +3158,6 @@ export function isRetryableDerivError(msg: any): boolean {
  *  4. On proposal response, send `buy` with the proposal ID
  *  5. On buy confirmation, resolve with contract details
  */
-/** Optional single-order safeguards. Existing callers keep their current API. */
-export interface LiveTradeGuards {
-  validateBuy(quote: { askPrice: number; payout: number; quotedAt: number }): void;
-  beforeBuy?(): Promise<void>;
-  onBuy?(result: LiveTradeResult): Promise<void>;
-}
-export class PurchaseOutcomeUnknownError extends Error {
-  constructor(message: string) { super(message); this.name = "PurchaseOutcomeUnknownError"; }
-}
-
 export async function executeLiveTrade(
   bearerToken: string,
   params: {
@@ -3183,7 +3173,6 @@ export async function executeLiveTrade(
     growthRate?: number;
     /** ACCU only: exchange-side take-profit in account currency. */
     takeProfit?: number;
-    guards?: LiveTradeGuards;
   },
 ): Promise<LiveTradeResult> {
   const accountId = params.accountId;
@@ -3245,38 +3234,21 @@ export async function executeLiveTrade(
   const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
   logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
 
-  const quote = { askPrice, payout: Number(proposalMsg.proposal.payout), quotedAt: Date.now() };
-  params.guards?.validateBuy(quote);
-  await params.guards?.beforeBuy?.();
-  let sent = false;
-  let buyMsg: any;
-  try {
-    buyMsg = await getAccountConnection(bearerToken, accountId).request(
-      { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
-      {
-        // Checked inside the throttled queue, not merely before awaiting it.
-        beforeSend: () => params.guards?.validateBuy(quote),
-        onSent: () => { sent = true; },
-      },
-    );
-  } catch (err) {
-    if (sent) throw new PurchaseOutcomeUnknownError(`Purchase outcome unknown: ${err instanceof Error ? err.message : String(err)}`);
-    throw err;
-  }
-  if (!buyMsg) throw new PurchaseOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");
+  const buyMsg = await accountRequest(
+    bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
+  );
+  if (!buyMsg) throw new Error("Trade execution timeout — Deriv did not confirm the purchase.");
   if (buyMsg.error) throw new Error(buyMsg.error.message ?? "Trade rejected by Deriv");
-  if (buyMsg.msg_type !== "buy" || !buyMsg.buy || !buyMsg.buy.contract_id) {
-    throw new PurchaseOutcomeUnknownError("Deriv returned an unexpected response to the buy request.");
+  if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
+    throw new Error("Deriv returned an unexpected response to the buy request.");
   }
-  const result = {
+
+  return {
     contractId: buyMsg.buy.contract_id,
     buyPrice: Number(buyMsg.buy.buy_price),
     entrySpot: Number(buyMsg.buy.start_time ?? 0),
     longcode: buyMsg.buy.longcode ?? "",
   };
-  try { await params.guards?.onBuy?.(result); }
-  catch (err) { throw new PurchaseOutcomeUnknownError(`Purchased contract ${result.contractId}; persistence failed: ${String(err)}`); }
-  return result;
 }
 
 // ── Profit table fetch via OTP WebSocket ──────────────────────────────────────

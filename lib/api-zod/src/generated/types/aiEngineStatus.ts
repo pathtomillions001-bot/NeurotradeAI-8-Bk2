@@ -7,7 +7,6 @@
  */
 import type { AgentStatus } from './agentStatus';
 import type { AiEngineStatusMode } from './aiEngineStatusMode';
-import type { RecoveryAnalysis } from './recoveryAnalysis';
 import type { RecoveryStatus } from './recoveryStatus';
 
 export interface AiEngineStatus {
@@ -26,5 +25,4 @@ export interface AiEngineStatus {
      */
   cooldownUntil?: string | null;
   recovery?: RecoveryStatus;
-  recoveryAnalysis?: RecoveryAnalysis | null;
 }

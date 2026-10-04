@@ -174,6 +174,23 @@ describe("settleRecoveryWin (shared helper)", () => {
 });
 
 describe("main autonomous engine recordOutcome", () => {
+  it("applies the same settled trade outcome at most once, including after state reload", () => {
+    recoveryEngine.resetAll();
+    recoveryEngine.recordOutcome(false, -1, 1, MAX_STEPS, "DIGITOVER", 1.4, "trade:reconcile-1");
+    assert.equal(recoveryEngine.getState().unrecoveredAmount, 1);
+
+    recoveryEngine.recordOutcome(false, -1, 1, MAX_STEPS, "DIGITOVER", 1.4, "trade:reconcile-1");
+    assert.equal(recoveryEngine.getState().unrecoveredAmount, 1);
+    assert.equal(recoveryEngine.getState().recoveryStep, 1);
+
+    const snapshot = recoveryEngine.serializeState();
+    recoveryEngine.resetAll();
+    recoveryEngine.loadState(snapshot);
+    recoveryEngine.recordOutcome(false, -1, 1, MAX_STEPS, "DIGITOVER", 1.4, "trade:reconcile-1");
+    assert.equal(recoveryEngine.getState().unrecoveredAmount, 1);
+    assert.equal(recoveryEngine.getState().recoveryStep, 1);
+  });
+
   it("reported sequence exits recovery and selects normal next", () => {
     const state = playReportedSequenceMain();
     assert.equal(state.inRecovery, false);

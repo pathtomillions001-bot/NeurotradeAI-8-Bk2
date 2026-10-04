@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import {
   closeAccountConnections,
   executeLiveTrade,
+  LiveTradeExecutionError,
   getAccountConnection,
   isRetryableDerivError,
   waitForContractResult,
@@ -93,6 +94,33 @@ describe("single-contract execution", () => {
     await assert.rejects(executeLiveTrade(token, params), /Invalid contract/);
     assert.equal(sent.length, 1);
     assert.equal(sent.filter((m) => m.buy).length, 0);
+  });
+
+  it("rejects an authenticated payout that no longer clears the recovery threshold before buying", async () => {
+    const sent = fakeTransport((m) => m.proposal ? proposal : purchase);
+    await assert.rejects(
+      executeLiveTrade(token, { ...params, minimumPayoutMultiplier: 1.63 }),
+      /no longer clears the recovery EV threshold/,
+    );
+    assert.equal(sent.filter((m) => m.proposal).length, 1);
+    assert.equal(sent.filter((m) => m.buy).length, 0);
+  });
+
+  it("returns the authenticated payout multiplier when the quote passes", async () => {
+    const sent = fakeTransport((m) => m.proposal ? proposal : purchase);
+    const result = await executeLiveTrade(token, { ...params, minimumPayoutMultiplier: 1.6 });
+    assert.equal(result.payoutMultiplier, 1.63);
+    assert.equal(sent.filter((m) => m.buy).length, 1);
+  });
+
+  it("classifies an unacknowledged buy as possibly executed so the engine will reconcile", async () => {
+    const sent = fakeTransport((m) => m.proposal ? proposal : null);
+    await assert.rejects(executeLiveTrade(token, params), (error: unknown) => {
+      assert.ok(error instanceof LiveTradeExecutionError);
+      assert.equal(error.mayHaveExecuted, true);
+      return true;
+    });
+    assert.equal(sent.filter((m) => m.buy).length, 1);
   });
 
   it("never automatically repeats an unacknowledged purchase", async () => {

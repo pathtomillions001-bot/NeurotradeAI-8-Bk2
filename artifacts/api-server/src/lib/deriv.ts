@@ -24,6 +24,7 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
 import { DigitTape, type DigitSnapshot } from "./digit-tape";
+import { recoveryExecutionProposalRejection, type RecoveryExecutionGuard } from "./recovery-decision-v2";
 import { logger } from "./logger";
 import { RISE_FALL_PAYOUT } from "./payouts";
 import {
@@ -1632,6 +1633,8 @@ export interface ContractProposal {
   payout: number;
   stake: number;
   payoutMultiplier: number;
+  /** Whether payout and ask price came from a valid broker proposal, not a legacy estimate. */
+  quoteSource?: "live" | "fallback";
   spot: number;
   longcode: string;
   proposalId: string;
@@ -3050,10 +3053,11 @@ export async function authorizeWithDeriv(bearerToken: string): Promise<DerivAcco
 export async function getLiveBalance(
   bearerToken: string,
   accountId?: string | null,
+  forceRefresh = false,
 ): Promise<number | null> {
   const cacheKey = accountId ? `${accountId}:${bearerToken.slice(-12)}` : `token:${bearerToken.slice(-12)}`;
   const cached = balanceCacheByAccount.get(cacheKey);
-  if (cached && Date.now() - cached.cachedAt < BALANCE_CACHE_TTL_MS) return cached.balance;
+  if (!forceRefresh && cached && Date.now() - cached.cachedAt < BALANCE_CACHE_TTL_MS) return cached.balance;
 
   try {
     const accounts = await getDerivAccounts(bearerToken);
@@ -3103,11 +3107,15 @@ export async function getContractProposal(
 
     if (msg?.msg_type === "proposal" && msg.proposal) {
       const askPrice = Number(msg.proposal.ask_price ?? params.stake);
-      const payout = Number(msg.proposal.payout ?? askPrice * RISE_FALL_PAYOUT);
+      const livePayout = Number(msg.proposal.payout);
+      const hasLivePayout = Number.isFinite(askPrice) && askPrice > 0 &&
+        Number.isFinite(livePayout) && livePayout > askPrice;
+      const payout = hasLivePayout ? livePayout : askPrice * RISE_FALL_PAYOUT;
       return {
         payout,
         stake: askPrice,
         payoutMultiplier: askPrice > 0 ? payout / askPrice : RISE_FALL_PAYOUT,
+        quoteSource: hasLivePayout ? "live" : "fallback",
         spot: Number(msg.proposal.spot ?? 0),
         longcode: msg.proposal.longcode ?? "",
         proposalId: String(msg.proposal.id ?? ""),
@@ -3173,6 +3181,8 @@ export async function executeLiveTrade(
     growthRate?: number;
     /** ACCU only: exchange-side take-profit in account currency. */
     takeProfit?: number;
+    /** Optional recovery-only guard rechecked against the actual proposal and live feed before buy. */
+    recoveryGuard?: RecoveryExecutionGuard;
   },
 ): Promise<LiveTradeResult> {
   const accountId = params.accountId;
@@ -3232,6 +3242,25 @@ export async function executeLiveTrade(
 
   const proposalId = String(proposalMsg.proposal.id);
   const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
+  if (params.recoveryGuard) {
+    const latestTick = tickManager.getDigitSnapshot(params.symbol, 1)?.tick ?? null;
+    const rejection = recoveryExecutionProposalRejection({
+      guard: params.recoveryGuard,
+      proposal: { askPrice, payout: Number(proposalMsg.proposal.payout) },
+      latestTick,
+      now: Date.now(),
+    });
+    if (rejection) {
+      logger.warn({
+        symbol: params.symbol,
+        contractType: params.contractType,
+        rejection,
+        askPrice,
+        maxStake: params.recoveryGuard.maxStake,
+      }, "executeLiveTrade: recovery v2 quote/feed revalidation rejected the buy");
+      throw new Error(`Recovery v2 execution revalidation failed: ${rejection}`);
+    }
+  }
   logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
 
   const buyMsg = await accountRequest(

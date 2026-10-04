@@ -31,6 +31,8 @@ export async function resolveRecoveryPayout(params: {
   duration: number;
   durationUnit?: string;
   currency?: string;
+  /** Skip the short-lived quote cache when a current payout is required. */
+  forceRefresh?: boolean;
 }): Promise<RecoveryPayoutQuote> {
   const contractType = normalizeContractType(params.contractType);
   const fallback: RecoveryPayoutQuote = {
@@ -43,7 +45,7 @@ export async function resolveRecoveryPayout(params: {
   const currency = params.currency || "USD";
   const key = [params.symbol, contractType, params.barrier ?? "", duration, durationUnit, currency].join(":");
   const cached = quoteCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) return cached.quote;
+  if (!params.forceRefresh && cached && cached.expiresAt > Date.now()) return cached.quote;
 
   try {
     const proposal = await Promise.race([
@@ -62,7 +64,7 @@ export async function resolveRecoveryPayout(params: {
     ]);
 
     const multiplier = Number(proposal?.payoutMultiplier);
-    if (Number.isFinite(multiplier) && multiplier > 1) {
+    if (proposal?.quoteSource === "live" && Number.isFinite(multiplier) && multiplier > 1) {
       const quote: RecoveryPayoutQuote = { payoutMultiplier: multiplier, source: "live" };
       quoteCache.set(key, { quote, expiresAt: Date.now() + LIVE_QUOTE_TTL_MS });
       return quote;

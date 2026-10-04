@@ -1,4 +1,3 @@
-import { currentTradingOwner, tradingBlockReason } from "../lib/engine-arbiter";
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
@@ -307,11 +306,6 @@ router.post("/assist", async (req, res): Promise<void> => {
 // ── Manual trade execution ─────────────────────────────────────────────────────
 
 router.post("/", async (req, res): Promise<void> => {
-  const executionBlock = tradingBlockReason(req.sessionId);
-  if (executionBlock || currentTradingOwner(req.sessionId) === "autonomous") {
-    res.status(409).json({error:executionBlock ?? "Stop the autonomous engine before placing a manual trade on this account"});
-    return;
-  }
   const parseResult = ExecuteTradeBody.safeParse(req.body);
   if (!parseResult.success) {
     res.status(400).json({ error: "Invalid trade parameters" });

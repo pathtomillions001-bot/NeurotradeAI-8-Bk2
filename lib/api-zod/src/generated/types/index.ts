@@ -40,8 +40,6 @@ export * from './rankedMarket';
 export * from './rankedMarketCategory';
 export * from './rankedMarketTrend';
 export * from './rankedMarketVolatility';
-export * from './recoveryAnalysis';
-export * from './recoveryCandidate';
 export * from './recoveryFamilyState';
 export * from './recoveryFamilyStateFamily';
 export * from './recoveryStatus';

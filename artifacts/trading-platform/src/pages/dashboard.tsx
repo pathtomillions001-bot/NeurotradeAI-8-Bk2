@@ -1,4 +1,3 @@
-import type { RecoveryAnalysis } from "@workspace/api-client-react";
 import { useState, useEffect, useRef, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -67,27 +66,6 @@ function formatCooldown(secs: number): string {
   const s = secs % 60;
   if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
   return `${s}s`;
-}
-
-function RecoveryAnalysisCard({ analysis, paper }: { analysis?:RecoveryAnalysis|null; paper:boolean }) {
-  if (!analysis) return null;
-  const c=analysis.candidate;
-  return <Card className="border-primary/25" aria-live="polite">
-    <CardContent className="p-4 space-y-2">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold">Recovery analysis · {paper ? "Paper ledger" : "Account ledger"}</h2>
-        <Badge variant="outline">{analysis.phase}</Badge>
-      </div>
-      <p className="text-sm text-muted-foreground">{analysis.reason}</p>
-      {c && <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono">
-        <div>Candidate<div className="mt-1">{c.symbol} · {c.contractType}{c.barrier!=null ? ` ${c.barrier}` : ""} · {c.duration}t</div></div>
-        <div>Estimated / lower probability<div className="mt-1">{(c.probability*100).toFixed(1)}% / {(c.lowerProbability*100).toFixed(1)}%</div></div>
-        <div>Conservative EV per stake<div className="mt-1">{(c.conservativeEV*100).toFixed(2)}%</div></div>
-        <div>Held-out observations<div className="mt-1">{c.samples} ({Math.floor(c.effectiveSamples)} effective) · {c.model}</div></div>
-      </div>}
-      <p className="text-[11px] text-muted-foreground">Reassesses on fresh ticks. Evidence thresholds do not relax with waiting time. Estimates are not a guarantee of profit.</p>
-    </CardContent>
-  </Card>;
 }
 
 // ── Recovery stat card (in the top KPI row) ───────────────────────────────────
@@ -567,7 +545,7 @@ export default function Dashboard() {
         const payload = JSON.parse(e.data);
         const won = payload?.won;
         const profit = parseFloat(payload?.profit ?? "0");
-        if (won !== undefined && !payload.error) {
+        if (won !== undefined) {
           setPendingResults(prev => [...prev.slice(-9), {
             won: !!won,
             profit,
@@ -579,8 +557,6 @@ export default function Dashboard() {
         setIsScanningGroups(false);
       } catch {}
     });
-
-    es.addEventListener("trade_cancelled", () => { setTournamentWinner(null); setIsScanningGroups(false); refetchEngine(); });
 
     es.addEventListener("journal_refreshed", () => {
       queryClient.invalidateQueries({ queryKey: ["derivJournal"] });
@@ -756,8 +732,6 @@ export default function Dashboard() {
           </motion.div>
         )}
       </AnimatePresence>
-
-      <RecoveryAnalysisCard analysis={engine?.recoveryAnalysis} paper={!!(engine as any)?.paperTradeMode} />
 
       {/* Stat strip — displayStats applies pending optimistic updates instantly */}
       <div className="space-y-2">

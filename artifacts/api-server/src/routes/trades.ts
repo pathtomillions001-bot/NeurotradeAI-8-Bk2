@@ -3,8 +3,7 @@ import { db } from "@workspace/db";
 import { tradesTable, accountsTable, settingsTable } from "@workspace/db";
 import { eq, desc, and, sql } from "drizzle-orm";
 import { ExecuteTradeBody, GetTradesQueryParams, GetTradeParams } from "@workspace/api-zod";
-import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getJournalManager, isAutomatedMarket, LiveTradeExecutionError } from "../lib/deriv";
-import { NO_PURCHASE_CONFIRMED_MARKER } from "../lib/trade-reconciler";
+import { tickManager, DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getJournalManager, isAutomatedMarket } from "../lib/deriv";
 import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { analyzeCompletedTrade } from "../lib/agents/trade-intelligence";
@@ -445,7 +444,6 @@ router.post("/", async (req, res): Promise<void> => {
       durationUnit: durationUnit ?? "t",
     }).returning();
 
-    let acknowledgedContractId: string | null = null;
     try {
       // Deriv requires stake with max 2 decimal places
       const liveStake = Math.round(stake * 100) / 100;
@@ -461,13 +459,12 @@ router.post("/", async (req, res): Promise<void> => {
         barrier,
       });
 
-      acknowledgedContractId = String(liveResult.contractId);
       // Wait for Deriv to settle the contract — ticks * 1s + 30s safety buffer
       // Record Deriv's contract id immediately: if this request is interrupted
       // (restart, dropped connection) the reconciler can still settle the trade
       // from Deriv's profit table.
       await db.update(tradesTable)
-        .set({ derivContractId: acknowledgedContractId })
+        .set({ derivContractId: String(liveResult.contractId) })
         .where(eq(tradesTable.id, openTrade.id));
       const contractResult = await waitForContractResult(
         token!, account!.derivAccountId ?? account!.loginId,
@@ -482,31 +479,14 @@ router.post("/", async (req, res): Promise<void> => {
     } catch (liveErr) {
       const rawErrMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
       const errMsg = friendlyErrorMessage(liveErr);
-      const mayHaveExecuted = acknowledgedContractId !== null ||
-        (liveErr instanceof LiveTradeExecutionError && liveErr.mayHaveExecuted);
-      logger.warn({ liveErrMsg: rawErrMsg, symbol, contractType, barrier, acknowledgedContractId, mayHaveExecuted }, "Live manual trade failed");
-      // Keep unknown acknowledgements open for reconciliation and block an
-      // autonomous order; only a positively identified pre-buy failure is closed.
-      const failureState = mayHaveExecuted
-        ? {
-            status: "open",
-            derivContractId: acknowledgedContractId,
-            agentReasoning: `[LIVE][OUTCOME_UNKNOWN] ${errMsg} ${(analysis as any).reasoning ?? ""}`,
-          }
-        : {
-            status: "error",
-            profit: "0",
-            payout: "0",
-            closedAt: new Date(),
-            agentReasoning: `[LIVE] ${NO_PURCHASE_CONFIRMED_MARKER} ${errMsg} ${(analysis as any).reasoning ?? ""}`,
-          };
-      try {
-        await db.update(tradesTable)
-          .set(failureState)
-          .where(eq(tradesTable.id, openTrade.id));
-      } catch (dbErr) {
-        logger.error({ dbErr, tradeId: openTrade.id }, "Could not persist manual trade execution state; the open journal row will keep autonomous trading blocked");
-      }
+      logger.warn({ liveErrMsg: rawErrMsg, symbol, contractType, barrier }, "Live manual trade failed");
+      // Mark as "error" (not "lost") — outcome is unknown when execution throws.
+      // The consecutive-loss counter in the autonomous loop counts only "lost" records,
+      // so an unknown outcome must never pollute the streak or trigger false cooldowns.
+      await db.update(tradesTable)
+        .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
+               agentReasoning: `[LIVE — FAILED: ${errMsg}] ${(analysis as any).reasoning ?? ""}` })
+        .where(eq(tradesTable.id, openTrade.id));
       res.status(500).json({ error: `Trade execution failed — ${errMsg}` });
       return;
     }
@@ -519,7 +499,7 @@ router.post("/", async (req, res): Promise<void> => {
     {
       const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
       recoveryEngine.setPersistenceSession(req.sessionId);
-      if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType, payoutMultiplier, `trade:${openTrade.id}`);
+      if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType, payoutMultiplier);
     }
 
     // actualPayout = total returned to account when won (stake + net profit), 0 when lost

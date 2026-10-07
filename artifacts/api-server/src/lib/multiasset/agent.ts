@@ -25,12 +25,14 @@ import { assessRegime, isRegimeTradeable } from "./regime";
 import { bestTarget, simulateTrade, type MonteCarloResult } from "./montecarlo";
 import { evaluateRisk, type RiskDecision, type RiskPolicy, type RiskState } from "./risk";
 import { kellyFraction, pointValuePerLot, priceToPoints, sizePosition, type SizingResult } from "./sizing";
+import { assessNewsGate, type NewsGate } from "./news";
 import {
   TIMEFRAME_MINUTES,
   type AccountSnapshot,
   type ArmedPlan,
   type Bar,
   type ManagementPlan,
+  type NewsFeed,
   type Position,
   type Quote,
   type SymbolSpec,
@@ -49,6 +51,8 @@ export interface AgentInput {
   specs: Map<string, SymbolSpec>;
   riskState: RiskState;
   policy?: Partial<RiskPolicy>;
+  /** MT5 high-impact calendar status. Missing/unavailable fails new entries closed. */
+  news?: NewsFeed | null;
   now?: number;
   /** Minimum expectancy (in R, after costs) required to arm. */
   minEdgeR?: number;
@@ -65,6 +69,8 @@ export interface AgentDecision {
   monteCarlo: MonteCarloResult | null;
   sizing: SizingResult | null;
   risk: RiskDecision;
+  /** Red-folder calendar gate evaluated with this decision. */
+  news: NewsGate;
   /** Every gate that failed, in evaluation order. Shown verbatim in the UI. */
   rejections: string[];
   /** Short machine-readable summary for the signal log. */
@@ -244,7 +250,19 @@ export function evaluate(input: AgentInput): AgentDecision {
   });
   rejections.push(...risk.breaches);
 
-  // ── 2. Confluence ─────────────────────────────────────────────────────────
+  // ── 2. Red-folder calendar ────────────────────────────────────────────────
+  // The terminal's MT5 economic calendar is authoritative. An unavailable or
+  // stale calendar is a safety failure, not a green light, so fresh entries
+  // are paused until the terminal can confirm the event schedule again.
+  // Pure-agent callers (unit tests and offline research) can omit `news` to
+  // evaluate price logic in isolation. The live Desk always supplies its MT5
+  // feed; an explicitly unavailable feed then fails closed below.
+  const news = input.news === undefined
+    ? { status: "clear" as const, blocked: false, reason: null, relevantEvents: [], checkedAt: now }
+    : assessNewsGate(input.spec, input.news, input.mode, now);
+  if (news.blocked && news.reason) rejections.push(news.reason);
+
+  // ── 3. Confluence ─────────────────────────────────────────────────────────
   const confluence = scoreConfluence({
     symbol: input.symbol,
     mode: input.mode,
@@ -262,6 +280,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     monteCarlo: null,
     sizing: null,
     risk,
+    news,
     rejections: [...rejections, ...extra],
     summary: `${input.symbol} ${input.mode}: no trade (score ${confluence.score.toFixed(0)}/${threshold.toFixed(0)}).`,
     evaluatedAt: now,
@@ -416,6 +435,7 @@ export function evaluate(input: AgentInput): AgentDecision {
       monteCarlo,
       sizing,
       risk,
+      news,
       rejections,
       summary:
         `${input.symbol} ${input.mode}: no trade — ${rejections[0] ?? "gate failed"} ` +
@@ -491,7 +511,11 @@ export function evaluate(input: AgentInput): AgentDecision {
           aligned: true,
         },
       ],
-      warnings: [...confluence.warnings, ...risk.reasons],
+      warnings: [
+        ...confluence.warnings,
+        ...risk.reasons,
+        ...(news.reason ? [news.reason] : []),
+      ],
     },
   };
 
@@ -504,6 +528,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     monteCarlo,
     sizing,
     risk,
+    news,
     rejections: [],
     summary:
       `${input.symbol} ${input.mode}: ${side.toUpperCase()} ${sizing.lots} lots armed — ` +

@@ -1,19 +1,28 @@
 /**
- * Multi-Asset Desk — client types and data access.
+ * Multi-Asset Desk — client-side transport shapes and API access.
  *
- * Mirrors artifacts/api-server/src/lib/multiasset/types.ts. The two are kept
- * in step by the shapes being narrow and by the terminal rendering `source`
- * on screen, so a mismatch shows up immediately rather than silently.
+ * Desk data is always broker-originated. Before MT5 pairs the API returns an
+ * explicit empty connection state; it never manufactures a balance, quote or
+ * chart series for presentation.
  */
 
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
-
 export function deskUrl(path: string): string {
   return `${BASE}/api${path}`;
 }
 
-export type Timeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
-export const TIMEFRAMES: Timeframe[] = ["M1", "M5", "M15", "M30", "H1", "H4", "D1"];
+export type AssetClass = "forex" | "metals" | "indices" | "commodities" | "crypto" | "futures" | "stocks" | "other";
+export const ASSET_CLASSES: AssetClass[] = ["forex", "metals", "indices", "commodities", "crypto", "futures", "stocks", "other"];
+export const ASSET_CLASS_LABELS: Record<AssetClass, string> = {
+  forex: "Forex",
+  metals: "Metals",
+  indices: "Indices",
+  commodities: "Commodities",
+  crypto: "Crypto",
+  futures: "Futures",
+  stocks: "Stocks",
+  other: "Other",
+};
 
 export type TradeMode = "scalp" | "intraday" | "swing";
 export const TRADE_MODES: { id: TradeMode; label: string; blurb: string }[] = [
@@ -22,17 +31,43 @@ export const TRADE_MODES: { id: TradeMode; label: string; blurb: string }[] = [
   { id: "swing", label: "Swing", blurb: "H1–D1 emphasis · multi-day horizon" },
 ];
 
-export type Bar = [number, number, number, number, number, number];
+export interface Market {
+  symbol: string;
+  description: string;
+  path: string;
+  assetClass: AssetClass;
+  tradeable: boolean;
+  selected: boolean;
+  dataStatus: "live" | "warming" | "stale";
+  lastQuoteAt: number | null;
+}
 
 export interface Instrument {
   symbol: string;
-  assetClass: string;
-  digits: number;
-  bid: number;
-  ask: number;
-  spreadPoints: number;
-  changePct: number;
-  watched: boolean;
+  description: string;
+  assetClass: AssetClass;
+  digits: number | null;
+  bid: number | null;
+  ask: number | null;
+  spreadPoints: number | null;
+  changePct: number | null;
+  watched: true;
+  dataStatus: "live" | "warming" | "stale";
+  lastQuoteAt: number | null;
+}
+
+export interface Account {
+  balance: number;
+  equity: number;
+  margin: number;
+  freeMargin: number;
+  marginLevel: number;
+  currency: string;
+  leverage: number;
+  mode: string;
+  isLive: boolean;
+  dayStartEquity?: number;
+  peakEquity?: number;
 }
 
 export interface Position {
@@ -50,18 +85,6 @@ export interface Position {
   initialRiskMoney?: number;
 }
 
-export interface PlanRationale {
-  confluenceScore: number;
-  grade: string;
-  regime: string;
-  winProbability: number;
-  expectancyR: number;
-  rewardRisk: number;
-  markovPersistence: number;
-  factors: { label: string; detail: string; weight: number; aligned: boolean }[];
-  warnings: string[];
-}
-
 export interface ArmedPlan {
   id: string;
   symbol: string;
@@ -76,11 +99,10 @@ export interface ArmedPlan {
   riskPoints: number;
   expiresAt: number;
   createdAt: number;
-  rationale: PlanRationale;
 }
 
 export interface TimeframeView {
-  timeframe: Timeframe;
+  timeframe: string;
   bias: "up" | "down" | "neutral";
   kind: string;
   confidence: number;
@@ -90,6 +112,14 @@ export interface TimeframeView {
   contribution: number;
   trendQuality: number;
   volatilityRatio: number;
+}
+
+export interface NewsGate {
+  status: "clear" | "blackout" | "unavailable";
+  blocked: boolean;
+  reason: string | null;
+  relevantEvents: HighImpactNewsEvent[];
+  checkedAt: number | null;
 }
 
 export interface AgentDecision {
@@ -127,6 +157,7 @@ export interface AgentDecision {
     explanation: string;
   } | null;
   risk: { allow: boolean; riskPct: number; scoreBump: number; reasons: string[]; breaches: string[] };
+  news: NewsGate;
   rejections: string[];
   summary: string;
 }
@@ -153,8 +184,27 @@ export interface JournalEntry {
   message: string;
 }
 
+export interface HighImpactNewsEvent {
+  id: string;
+  time: number;
+  currency: string;
+  country: string;
+  name: string;
+  importance: "high";
+  actual?: number | null;
+  forecast?: number | null;
+  previous?: number | null;
+}
+
+export interface NewsFeed {
+  available: boolean;
+  checkedAt: number;
+  events: HighImpactNewsEvent[];
+  detail?: string;
+}
+
 export interface DeskStateResponse {
-  source: "replay" | "mt5";
+  source: "mt5" | "unlinked";
   terminal: {
     accountId: string;
     login: number;
@@ -164,22 +214,18 @@ export interface DeskStateResponse {
     lastSyncAt: number;
     stale: boolean;
   } | null;
-  account: {
-    balance: number;
-    equity: number;
-    margin: number;
-    freeMargin: number;
-    marginLevel: number;
-    currency: string;
-    leverage: number;
-    mode: string;
-    isLive: boolean;
-    dayStartEquity?: number;
-    peakEquity?: number;
-  };
+  account: Account | null;
   mode: TradeMode;
   autoTrade: boolean;
   watchlist: string[];
+  market: {
+    catalogCount: number;
+    selectedCount: number;
+    liveSymbols: number;
+    warmingSymbols: number;
+    staleSymbols: number;
+    quoteFreshForMs: number;
+  };
   positions: Position[];
   plans: ArmedPlan[];
   policy: RiskPolicy;
@@ -192,15 +238,17 @@ export interface DeskStateResponse {
       haltedUntilNextSession: boolean;
       haltReason: string | null;
     };
-    budget: { usedPct: number; remainingMoney: number; limitMoney: number };
+    budget: { usedPct: number; remainingMoney: number; limitMoney: number } | null;
     exposure: { key: string; riskMoney: number; riskPct: number }[];
   };
+  news: NewsFeed;
   journal: JournalEntry[];
   serverTime: number;
 }
 
 export interface ScanRow {
   symbol: string;
+  status: "live" | "warming" | "stale";
   armed: boolean;
   direction: "up" | "down" | "none";
   score: number;
@@ -213,25 +261,19 @@ export interface ScanRow {
   summary: string;
 }
 
-// ── Fetch helpers ────────────────────────────────────────────────────────────
-
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(deskUrl(path), {
     headers: init?.body ? { "Content-Type": "application/json" } : undefined,
     ...init,
   });
   if (!response.ok) {
-    // Surface the server's reason: the desk's refusals are the product, and
-    // flattening them into "request failed" would hide the explanation.
     let message = `${response.status} ${response.statusText}`;
     try {
       const body = await response.json();
       if (body?.error) message = body.error;
-      if (Array.isArray(body?.rejections) && body.rejections.length > 0) {
-        message = `${message}: ${body.rejections[0]}`;
-      }
+      if (Array.isArray(body?.rejections) && body.rejections.length > 0) message = `${message}: ${body.rejections[0]}`;
     } catch {
-      /* non-JSON error body */
+      // non-JSON response
     }
     throw new Error(message);
   }
@@ -240,57 +282,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const deskApi = {
   state: () => request<DeskStateResponse>("/desk/state"),
-  instruments: () => request<{ source: string; instruments: Instrument[] }>("/desk/instruments"),
-  candles: (symbol: string, timeframe: Timeframe) =>
-    request<{ symbol: string; timeframe: Timeframe; source: string; bars: Bar[]; spec: { digits: number } }>(
-      `/desk/candles?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}`,
-    ),
-  analysis: (symbol: string, mode: TradeMode) =>
-    request<{ source: string; horizonMinutes: number; decision: AgentDecision }>(
-      `/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`,
-    ),
-  scan: (mode: TradeMode) =>
-    request<{ mode: TradeMode; source: string; results: ScanRow[] }>(`/desk/scan?mode=${mode}`),
-  arm: (symbol: string, mode: TradeMode) =>
-    request<{ plan: ArmedPlan }>("/desk/arm", {
-      method: "POST",
-      body: JSON.stringify({ symbol, mode }),
-    }),
+  markets: () => request<{ source: "mt5" | "unlinked"; markets: Market[]; catalogCount: number }>("/desk/markets"),
+  instruments: () => request<{ source: "mt5" | "unlinked"; instruments: Instrument[] }>("/desk/instruments"),
+  analysis: (symbol: string, mode: TradeMode) => request<{ source: "mt5"; horizonMinutes: number; decision: AgentDecision }>(`/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`),
+  scan: (mode: TradeMode) => request<{ mode: TradeMode; source: "mt5"; results: ScanRow[]; coverage: { selected: number; live: number; warming: number; stale: number }; scannedAt: number }>(`/desk/scan?mode=${mode}`),
+  arm: (symbol: string, mode: TradeMode) => request<{ plan: ArmedPlan }>("/desk/arm", { method: "POST", body: JSON.stringify({ symbol, mode }) }),
   cancelPlan: (id: string) => request<{ ok: true }>(`/desk/plans/${id}`, { method: "DELETE" }),
-  closePosition: (ticket: number, lots?: number) =>
-    request<{ ok: true }>(`/desk/positions/${ticket}/close`, {
-      method: "POST",
-      body: JSON.stringify(lots === undefined ? {} : { lots }),
-    }),
-  flatten: (reason: string) =>
-    request<{ ok: true }>("/desk/flatten", { method: "POST", body: JSON.stringify({ reason }) }),
-  settings: (patch: Record<string, unknown>) =>
-    request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy }>(
-      "/desk/settings",
-      { method: "POST", body: JSON.stringify(patch) },
-    ),
-  resumeSymbol: (symbol: string) =>
-    request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
-  projection: (params: { winProbability: number; rewardRisk: number; trades: number }) =>
-    request<{
-      assumptions: Record<string, number>;
-      disciplined: ProjectionResult;
-      martingale: ProjectionResult;
-      note: string;
-    }>(
-      `/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`,
-    ),
-  pairingCode: () =>
-    request<{ pairingCode: string; expiresInMs: number }>("/bridge/pairing-code", { method: "POST" }),
-  bridgeStatus: () =>
-    request<{
-      linked: boolean;
-      login?: number;
-      server?: string;
-      lastSyncAgeMs?: number;
-      stale?: boolean;
-      queuedCommands?: number;
-    }>("/bridge/status"),
+  closePosition: (ticket: number, lots?: number) => request<{ ok: true }>(`/desk/positions/${ticket}/close`, { method: "POST", body: JSON.stringify(lots === undefined ? {} : { lots }) }),
+  flatten: (reason: string) => request<{ ok: true }>("/desk/flatten", { method: "POST", body: JSON.stringify({ reason }) }),
+  settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
+  resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
+  projection: (params: { winProbability: number; rewardRisk: number; trades: number }) => request<{ assumptions: Record<string, number>; disciplined: ProjectionResult; martingale: ProjectionResult; note: string }>(`/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`),
+  pairingCode: () => request<{ pairingCode: string; expiresInMs: number }>("/bridge/pairing-code", { method: "POST" }),
+  bridgeStatus: () => request<{
+    linked: boolean;
+    login?: number;
+    server?: string;
+    lastSyncAgeMs?: number;
+    stale?: boolean;
+    queuedCommands?: number;
+    catalogCount: number;
+    selectedCount: number;
+    calendarAvailable?: boolean;
+    calendarAgeMs?: number | null;
+  }>("/bridge/status"),
   unpair: () => request<{ ok: true }>("/bridge/unpair", { method: "POST" }),
 };
 
@@ -301,12 +316,6 @@ export interface ProjectionResult {
   ruinProbability: number;
 }
 
-// ── Formatting ───────────────────────────────────────────────────────────────
-
-export function formatPrice(value: number, digits: number): string {
-  return value.toFixed(digits);
-}
-
 export function formatMoney(value: number, currency = "USD"): string {
   const sign = value < 0 ? "−" : "";
   return `${sign}${currency === "USD" ? "$" : ""}${Math.abs(value).toFixed(2)}${currency === "USD" ? "" : ` ${currency}`}`;
@@ -314,16 +323,11 @@ export function formatMoney(value: number, currency = "USD"): string {
 
 export function gradeColor(grade: string): string {
   switch (grade) {
-    case "A+":
-      return "text-emerald-400 border-emerald-500/40 bg-emerald-500/10";
-    case "A":
-      return "text-green-400 border-green-500/40 bg-green-500/10";
-    case "B":
-      return "text-amber-400 border-amber-500/40 bg-amber-500/10";
-    case "C":
-      return "text-orange-400 border-orange-500/40 bg-orange-500/10";
-    default:
-      return "text-zinc-400 border-zinc-600/40 bg-zinc-500/10";
+    case "A+": return "text-emerald-400 border-emerald-500/40 bg-emerald-500/10";
+    case "A": return "text-green-400 border-green-500/40 bg-green-500/10";
+    case "B": return "text-amber-400 border-amber-500/40 bg-amber-500/10";
+    case "C": return "text-orange-400 border-orange-500/40 bg-orange-500/10";
+    default: return "text-zinc-400 border-zinc-600/40 bg-zinc-500/10";
   }
 }
 

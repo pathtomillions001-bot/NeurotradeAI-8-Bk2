@@ -1,8 +1,10 @@
 # Multi-Asset Desk — architecture & protocol
 
-Status: **implemented (phase 1–3 core)**
-Scope: forex, metals, indices, commodities, crypto and futures CFDs, executed on the
-user's own MetaTrader 5 account through a local Expert Advisor bridge.
+Status: **implemented (live-terminal-only v2)**
+Scope: forex, metals, indices, commodities, crypto, futures CFDs and broker-listed
+stocks/other products, executed on the user's own MetaTrader 5 account through a
+local Expert Advisor bridge. The Desk intentionally has no replay/mock-data path;
+see [`mt5-live-desk-v2.md`](./mt5-live-desk-v2.md) for installation and live-data safeguards.
 
 This document is the contract. Every number the system computes is defined here,
 and every module listed has unit tests that encode these rules.
@@ -286,13 +288,13 @@ account id, never a credential.
 docs/multi-asset-architecture.md             ← this file
 artifacts/api-server/src/lib/multiasset/
   types.ts  math.ts  markov.ts  regime.ts  montecarlo.ts
-  confluence.ts  sizing.ts  risk.ts  agent.ts  store.ts  simulator.ts
+  confluence.ts  sizing.ts  risk.ts  news.ts  agent.ts  store.ts
 artifacts/api-server/src/routes/
-  desk.ts     ← terminal-facing API
-  bridge.ts   ← EA-facing API
-artifacts/trading-platform/src/pages/terminal.tsx     ← Bloomberg-style desk
-artifacts/trading-platform/src/components/terminal/*  ← panes
-artifacts/mt5-ea/NeurotradeBridge.mq5                 ← the EA
+  desk.ts     ← terminal-facing live-only API
+  bridge.ts   ← EA-facing pairing/catalogue/sync API
+artifacts/trading-platform/src/pages/terminal.tsx     ← responsive operations desk
+artifacts/trading-platform/src/components/terminal/*  ← data/risk/news panes
+artifacts/mt5-ea/NeurotradeBridge.mq5                 ← resilient MT5 EA v2
 ```
 
 Tests: `sizing.test.ts`, `math.test.ts`, `markov.test.ts`, `montecarlo.test.ts`,

@@ -17,6 +17,8 @@
  */
 
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import type { ArmedPlan, BridgeCommand, SyncResponse } from "./types";
 
@@ -256,6 +258,22 @@ test("the command splitter handles several commands and nested braces", () => {
 
 test("an empty command list yields no commands", () => {
   assert.deepEqual(splitCommands(JSON.stringify(sampleResponse([]))), []);
+});
+
+test("the v2 EA remains attached while pairing is unavailable and discovers all broker markets", () => {
+  const ea = readFileSync(
+    path.resolve(import.meta.dirname, "../../../../mt5-ea/NeurotradeBridge.mq5"),
+    "utf8",
+  );
+  // The failure that motivated v2: an initial pairing error returned
+  // INIT_FAILED, so MT5 silently removed the EA from the chart. Pairing now
+  // retries from the timer and OnInit has only the successful return path.
+  assert.match(ea, /int\s+OnInit\s*\(\)/);
+  assert.match(ea, /return\s*\(INIT_SUCCEEDED\)/);
+  assert.doesNotMatch(ea, /return\s*\(INIT_FAILED\)/);
+  assert.match(ea, /SymbolsTotal\(false\)/, "catalogue must enumerate the broker universe, not a hard-coded CSV");
+  assert.match(ea, /CalendarValueHistory/, "EA must source red-folder events from MT5's economic calendar");
+  assert.match(ea, /UpdateSubscriptions/, "server-selected markets must update without reattaching the EA");
 });
 
 test("sizing round-trips through the wire without precision loss", () => {

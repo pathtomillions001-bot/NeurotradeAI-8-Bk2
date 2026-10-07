@@ -9,6 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createRiskState, DEFAULT_RISK_POLICY, type RiskPolicy, type RiskState } from "./risk";
+import { createSymbolTicks, syntheticSeries, type SymbolTicks } from "./subminute";
 import type {
   AccountSnapshot,
   ArmedPlan,
@@ -90,6 +91,35 @@ export interface JournalEntry {
   detail?: unknown;
 }
 
+/**
+ * The result of one automatic best-market pass.
+ *
+ * The desk runs this on the terminal's heartbeat while auto-trade is on: it
+ * analyses every selected market for the active mode, ranks the ones that pass
+ * every gate, and arms the best. `ranked` is kept (top few) so "why did it take
+ * that one instead of mine?" is answerable from the UI rather than guessed at.
+ */
+export interface AutoSelectRecord {
+  at: number;
+  mode: TradeMode;
+  /** Selected markets considered this pass. */
+  scanned: number;
+  /** Markets that cleared every gate. */
+  qualified: number;
+  /** Symbol that was armed, or null when nothing qualified. */
+  chosen: string | null;
+  /** One-line explanation, shown verbatim on the desk. */
+  reason: string;
+  /** Best few candidates, in rank order. */
+  ranked: {
+    symbol: string;
+    expectancyR: number | null;
+    score: number;
+    grade: string;
+    armed: boolean;
+  }[];
+}
+
 export interface DeskState {
   sessionId: string;
   /** Linked terminal, or null while unpaired. */
@@ -168,6 +198,28 @@ export interface DeskState {
   positionModes: Map<number, TradeMode>;
   /** Last time the equity curve was sampled, to keep the series bounded. */
   lastEquitySampleAt: number;
+  /**
+   * Sub-minute candles built from the tick feed, per symbol.
+   *
+   * Kept beside `candles` rather than inside it: these are the server's own
+   * synthesis (see subminute.ts), not broker history, and they must never be
+   * requested from the EA or merged with a bar the broker sent.
+   */
+  ticks: Map<string, SymbolTicks>;
+  /** Outcome of the most recent automatic best-market pass, if any. */
+  lastAutoSelect: AutoSelectRecord | null;
+  /** Throttle stamp for the automatic best-market pass. */
+  lastAutoSelectAt: number;
+  /** When the last "nothing qualified" note was journalled, for rate limiting. */
+  lastAutoSelectNoteAt: number;
+  /**
+   * Rolling start index into the watchlist for the automatic best-market pass.
+   *
+   * A user may select any number of markets and every one of them is evaluated
+   * over successive passes; the window rotates so a long watchlist is covered
+   * without analysing hundreds of symbols inside one heartbeat.
+   */
+  autoSelectCursor: number;
 }
 
 const desks = new Map<string, DeskState>();
@@ -212,6 +264,11 @@ export function getDesk(sessionId: string): DeskState {
       planModes: new Map(),
       positionModes: new Map(),
       lastEquitySampleAt: 0,
+      ticks: new Map(),
+      lastAutoSelect: null,
+      lastAutoSelectAt: 0,
+      lastAutoSelectNoteAt: 0,
+      autoSelectCursor: 0,
     };
     desks.set(sessionId, desk);
   }
@@ -234,6 +291,7 @@ export function clearTerminalData(desk: DeskState): void {
   desk.specs.clear();
   desk.quotes.clear();
   desk.candles.clear();
+  desk.ticks.clear();
   desk.news = { ...UNAVAILABLE_NEWS };
   desk.positions = [];
   desk.plans.clear();
@@ -247,6 +305,10 @@ export function clearTerminalData(desk: DeskState): void {
   desk.equityHistory = [];
   desk.clockSkewMs = null;
   desk.lastQuoteAgeMs = null;
+  desk.lastAutoSelect = null;
+  desk.lastAutoSelectAt = 0;
+  desk.lastAutoSelectNoteAt = 0;
+  desk.autoSelectCursor = 0;
   // `outcomes` deliberately survives an unlink: it is the desk's own learned
   // win-rate prior, and re-learning it from zero on every re-pair is how a
   // broker symbol that trades badly keeps getting traded.
@@ -301,13 +363,32 @@ export function upsertCandles(desk: DeskState, series: CandleSeries): void {
   desk.candles.set(key, { ...series, bars: merged.slice(-MAX_BARS) });
 }
 
+/**
+ * Every series available for a symbol — broker frames plus the server's own
+ * sub-minute frames.
+ *
+ * Merging here (rather than at each call site) is what makes S10/S30 visible to
+ * the agent, the scanner and any consumer of /desk/series with no extra
+ * plumbing. A synthetic frame that is not yet dense enough is simply absent.
+ */
 export function seriesFor(desk: DeskState, symbol: string): Partial<Record<Timeframe, import("./types").Bar[]>> {
   const out: Partial<Record<Timeframe, import("./types").Bar[]>> = {};
   for (const [key, series] of desk.candles) {
     if (!key.startsWith(`${symbol}|`)) continue;
     out[series.timeframe] = series.bars;
   }
+  Object.assign(out, syntheticSeries(desk.ticks.get(symbol)));
   return out;
+}
+
+/** The tick accumulator for a symbol, created on first use. */
+export function ticksFor(desk: DeskState, symbol: string): SymbolTicks {
+  let state = desk.ticks.get(symbol);
+  if (!state) {
+    state = createSymbolTicks(symbol);
+    desk.ticks.set(symbol, state);
+  }
+  return state;
 }
 
 // ── Command queue ────────────────────────────────────────────────────────────
@@ -511,6 +592,12 @@ export function pruneDeselectedSymbols(desk: DeskState): number {
     const symbol = key.split("|")[0];
     if (selected.has(symbol)) continue;
     desk.candles.delete(key);
+  }
+  // Sub-minute candles are derived from this symbol's ticks; keeping them would
+  // leave a ten-second chart on screen for a market that is no longer selected.
+  for (const symbol of [...desk.ticks.keys()]) {
+    if (selected.has(symbol)) continue;
+    desk.ticks.delete(symbol);
   }
   for (const [planId, plan] of [...desk.plans]) {
     if (selected.has(plan.symbol)) continue;

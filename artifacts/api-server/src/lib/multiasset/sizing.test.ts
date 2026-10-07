@@ -226,9 +226,48 @@ test("rejects when widening the stop destroys the reward:risk", () => {
 
 test("rejects a stop the spread would eat", () => {
   const spec: SymbolSpec = { ...EURUSD, spreadPoints: 40 };
-  // 40-point spread against a 100-point stop = 40%, over the 25% limit.
+  // 40-point spread against a 100-point stop = 40%, over forex's 35% ceiling.
   const result = sizePosition(request({ spec, entry: 1.0845, sl: 1.0835 }));
   assert.equal(result.ok, false);
+  assert.equal(result.rejection, "spread_too_wide");
+  assert.match(result.explanation, /ceiling for forex/);
+});
+
+test("the same cost is judged against the symbol's own asset class", () => {
+  // Identical arithmetic — a 40-point spread against a 100-point stop — on two
+  // instruments that quote nothing alike. One ceiling for both is what banned
+  // crypto and index CFDs from the desk.
+  const forex: SymbolSpec = { ...EURUSD, spreadPoints: 40 };
+  const refused = sizePosition(request({ spec: forex, entry: 1.0845, sl: 1.0835 }));
+  assert.equal(refused.rejection, "spread_too_wide");
+
+  const crypto: SymbolSpec = {
+    ...EURUSD,
+    symbol: "BTCUSD",
+    assetClass: "crypto",
+    point: 0.01,
+    tickSize: 0.01,
+    tickValue: 0.01,
+    contractSize: 1,
+    spreadPoints: 40,
+    baseCurrency: "BTC",
+  };
+  const allowed = sizePosition(request({ spec: crypto, entry: 20_000, sl: 19_999 }));
+  assert.equal(allowed.rejection, null, allowed.explanation);
+  assert.equal(allowed.ok, true);
+  assert.ok(allowed.riskPoints >= 100, "same 100-point stop");
+});
+
+test("an explicit limit still overrides the asset class policy", () => {
+  const crypto: SymbolSpec = { ...EURUSD, symbol: "BTCUSD", assetClass: "crypto", spreadPoints: 40 };
+  const result = sizePosition(
+    request({
+      spec: crypto,
+      entry: 1.0845,
+      sl: 1.0835,
+      limits: { maxSpreadFractionOfStop: 0.1 },
+    }),
+  );
   assert.equal(result.rejection, "spread_too_wide");
 });
 

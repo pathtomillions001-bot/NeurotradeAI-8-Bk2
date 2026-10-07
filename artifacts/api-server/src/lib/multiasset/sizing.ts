@@ -20,6 +20,7 @@
  * safely is a normal, frequent and correct outcome — see docs/multi-asset-architecture.md §2.1.
  */
 
+import { costPolicyFor } from "./asset-costs";
 import type { Position, Side, SymbolSpec } from "./types";
 
 export interface SizingLimits {
@@ -35,11 +36,19 @@ export interface SizingLimits {
   minRewardRisk: number;
 }
 
+/**
+ * Fallback limits for a caller that supplies none.
+ *
+ * The two cost ceilings here are only a fallback: `sizePosition` resolves them
+ * from the SYMBOL'S ASSET CLASS (asset-costs.ts) unless the caller overrides
+ * them explicitly. A fixed pair of numbers cannot describe both a 0.2-pip
+ * EURUSD quote and a BTCUSD quote twenty points wide.
+ */
 export const DEFAULT_SIZING_LIMITS: SizingLimits = {
   minMarginLevelPct: 500,
-  maxCostFractionOfRisk: 0.33,
+  maxCostFractionOfRisk: 0.35,
   maxRiskPct: 2,
-  maxSpreadFractionOfStop: 0.25,
+  maxSpreadFractionOfStop: 0.35,
   minRewardRisk: 1,
 };
 
@@ -158,8 +167,17 @@ function reject(
 }
 
 export function sizePosition(request: SizingRequest): SizingResult {
-  const limits = { ...DEFAULT_SIZING_LIMITS, ...(request.limits ?? {}) };
   const { spec, side, entry, equity, freeMargin, usedMargin, leverage } = request;
+  // Cost ceilings are an ASSET-CLASS property, not a global constant: the same
+  // 20-point spread is ordinary on a crypto CFD and disqualifying on EURUSD.
+  // A caller may still override either ceiling explicitly.
+  const policy = costPolicyFor(spec);
+  const limits: SizingLimits = {
+    ...DEFAULT_SIZING_LIMITS,
+    maxCostFractionOfRisk: policy.maxCostFractionOfRisk,
+    maxSpreadFractionOfStop: policy.maxSpreadFractionOfStop,
+    ...(request.limits ?? {}),
+  };
 
   if (!(entry > 0) || !(equity > 0) || !(spec.point > 0)) {
     return reject("invalid_input", "Entry price, equity and symbol point must all be positive.");
@@ -214,13 +232,16 @@ export function sizePosition(request: SizingRequest): SizingResult {
     }
   }
 
-  // ── Spread sanity ──────────────────────────────────────────────────────────
-  // A 2-pip spread against a 4-pip stop means half the stop is cost. No model
-  // has an edge there, regardless of how good the signal looks.
+  // ── Spread sanity, judged against this symbol's asset class ───────────────
+  // A 2-pip spread against a 4-pip stop means half the stop is cost. But what
+  // is "half the stop" is not the same question on every instrument: crypto and
+  // single-stock CFDs quote structurally wider than majors, and holding them to
+  // an FX constant silently banned them. The ceiling comes from asset-costs.ts.
   if (spec.spreadPoints > 0 && spec.spreadPoints / riskPoints > limits.maxSpreadFractionOfStop) {
     return reject(
       "spread_too_wide",
-      `Spread ${spec.spreadPoints} pts is ${((spec.spreadPoints / riskPoints) * 100).toFixed(0)}% of the ${riskPoints.toFixed(0)}-pt stop (limit ${(limits.maxSpreadFractionOfStop * 100).toFixed(0)}%).`,
+      `Spread ${spec.spreadPoints} pts is ${((spec.spreadPoints / riskPoints) * 100).toFixed(0)}% of the ${riskPoints.toFixed(0)}-pt stop — ` +
+        `above the ${(limits.maxSpreadFractionOfStop * 100).toFixed(0)}% ceiling for ${spec.assetClass}.`,
       { pointValue, sl, slAdjusted, riskPoints },
     );
   }
@@ -273,7 +294,9 @@ export function sizePosition(request: SizingRequest): SizingResult {
   if (riskMoney > 0 && costMoney / riskMoney > limits.maxCostFractionOfRisk) {
     return reject(
       "cost_exceeds_edge",
-      `Round-trip cost ${costMoney.toFixed(2)} is ${((costMoney / riskMoney) * 100).toFixed(0)}% of the ${riskMoney.toFixed(2)} risked (limit ${(limits.maxCostFractionOfRisk * 100).toFixed(0)}%).`,
+      `Round-trip cost ${costMoney.toFixed(2)} (spread ${spec.spreadPoints} pts + commission) is ` +
+        `${((costMoney / riskMoney) * 100).toFixed(0)}% of the ${riskMoney.toFixed(2)} risked — ` +
+        `above the ${(limits.maxCostFractionOfRisk * 100).toFixed(0)}% ceiling for ${spec.assetClass}.`,
       { pointValue, sl, slAdjusted, riskPoints, costMoney, marginRequired, projectedMarginLevel },
     );
   }

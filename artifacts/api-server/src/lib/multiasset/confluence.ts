@@ -2,15 +2,31 @@
  * Multi-Asset Desk — multi-timeframe confluence scoring.
  *
  * Each timeframe in the mode's own analysis band is assessed independently and
- * combined with mode-specific weights: a scalper is judged on M1–M3, an
- * intraday book on M5–M30, a swing book on H1–W1.
+ * combined with mode-specific weights.
  *
- * Timeframes OUTSIDE the band are measured as bounded *context*, not scored.
- * Trading against a confidently-opposing higher timeframe costs a capped
- * number of points; it no longer blocks the trade. That change is deliberate:
- * requiring every timeframe to agree meant a scalp could only be taken when
- * the weekly candle happened to be pointing the same way, which is close to
- * never.
+ * THE BAND IS THE WHOLE MONITORING WINDOW (and it is exclusive)
+ *
+ *   scalp    → S10 … M3    ten seconds up to three minutes
+ *   intraday → M5 … M30    five minutes to half an hour
+ *   swing    → H1 … W1     one hour to the weekly candle
+ *
+ * Nothing outside a mode's band is scored, required or penalised. That is a
+ * deliberate change from the previous design, which scored the band but
+ * measured the frames *outside* it as "context" and deducted up to 12 points
+ * when a slower frame leaned the other way. Two things were wrong with that:
+ *
+ *   1. A scalp is not a slower decision with a penalty attached. Letting an
+ *      hourly candle demote a ten-second setup meant the mode was quietly
+ *      trading its own band *minus* an opinion it was never supposed to hold.
+ *   2. For swing the context frame was W1 — which is already inside the swing
+ *      band, so the weekly candle was scored AND penalised. The same frame
+ *      counted twice.
+ *
+ * If the band has no usable history (a terminal that has not seeded every
+ * frame yet), the score is computed from the NEAREST available frames instead
+ * of collapsing to zero, and the substitution is named in `warnings` and
+ * flagged on the result. A data gap must read as a data gap, not as a
+ * catastrophically bad market.
  *
  * The output is a 0–100 score, a grade, and — importantly — the per-factor
  * breakdown that the terminal renders so the user can see *why* the agent
@@ -20,7 +36,7 @@
 import { assessRegime, regimeBias, type RegimeAssessment } from "./regime";
 import { closes, clamp, lastSwing, linreg, rsi } from "./math";
 import { directionalPersistence, markovFromPrices, sampleConfidence } from "./markov";
-import type { Bar, Timeframe, TradeMode } from "./types";
+import { ALL_TIMEFRAMES, MODE_ANALYSIS_TIMEFRAMES, type Bar, type Timeframe, type TradeMode } from "./types";
 
 export interface TimeframeView {
   timeframe: Timeframe;
@@ -63,8 +79,15 @@ export interface ConfluenceResult {
    * legitimate trade with a smaller position, not a forbidden one.
    */
   higherTimeframeAligned: boolean;
-  /** Points deducted for trading against context timeframes. Bounded. */
+  /** Points deducted for trading against frames outside the band. Now always 0. */
   contextPenalty: number;
+  /**
+   * True when the mode's own band had no scorable history and the score was
+   * computed from the nearest available frames instead. Named in `warnings`.
+   */
+  substituted: boolean;
+  /** Frames actually weighted in the score, fastest first. */
+  scoredTimeframes: Timeframe[];
   factors: { label: string; detail: string; weight: number; aligned: boolean }[];
   warnings: string[];
 }
@@ -72,39 +95,41 @@ export interface ConfluenceResult {
 /**
  * Timeframe weights per style. They sum to 1 within each mode.
  *
- * The bands are the ones the desk actually trades:
- *
- *   scalp    → M1–M3.  A scalp is opened and closed on sub-3-minute
- *              structure; M5 is already the intraday entry frame.
+ *   scalp    → S10, S30, M1, M2, M3.  A scalp lives inside three minutes. The
+ *              sub-minute frames carry the most weight because they are the
+ *              structure the entry and the stop are actually placed against;
+ *              M3 is the slowest frame that may still influence it. M5 is NOT
+ *              part of a scalp — it is the intraday entry frame.
  *   intraday → M5–M30. Held for hours, not minutes.
  *   swing    → H1–W1.  Held for days, so the weekly candle is part of the
  *              analysis, not an afterthought.
- *
- * Timeframes outside a mode's band are not scored at all — they are measured
- * as bounded *context* (see MODE_CONTEXT_TIMEFRAMES).
  */
 export const MODE_WEIGHTS: Record<TradeMode, Partial<Record<Timeframe, number>>> = {
-  scalp: { M1: 0.32, M2: 0.36, M3: 0.32 },
+  scalp: { S10: 0.24, S30: 0.24, M1: 0.22, M2: 0.18, M3: 0.12 },
   intraday: { M5: 0.28, M15: 0.4, M30: 0.32 },
   swing: { H1: 0.24, H4: 0.3, D1: 0.28, W1: 0.18 },
 };
 
 /**
- * Timeframes that frame a trade without scoring it.
+ * Frames outside a mode's band. Intentionally empty for every mode.
  *
- * Context frames apply a bounded penalty when they confidently oppose the
- * direction — enough to make the desk prefer trading with the bigger picture,
- * never enough to block a setup single-handedly.
+ * Kept as a named constant — rather than deleted — because the *pipeline* for
+ * out-of-band frames is still exercised by the type and by the result shape,
+ * and because "no context frames" is a decision worth stating rather than an
+ * absence someone has to infer. See the module header for why.
  */
 export const MODE_CONTEXT_TIMEFRAMES: Record<TradeMode, readonly Timeframe[]> = {
-  scalp: ["M5", "M15", "H1"],
-  intraday: ["H1", "H4", "D1"],
-  swing: ["W1"],
+  scalp: [],
+  intraday: [],
+  swing: [],
 };
 
 /** Penalty per confidently opposing context timeframe, and the total cap. */
 const CONTEXT_PENALTY_PER_FRAME = 5;
 const CONTEXT_PENALTY_CAP = 12;
+
+/** Bars a frame needs before it may be scored. */
+export const MIN_BARS_PER_FRAME = 30;
 
 /**
  * Bars ahead a trade of each style is expected to need, counted on that mode's
@@ -225,6 +250,46 @@ function scoreView(view: TimeframeView, direction: "up" | "down"): number {
   return clamp(score, -1, 1);
 }
 
+/**
+ * Frames to score, in priority order.
+ *
+ * The mode's own band first. When the band cannot be scored at all — the EA has
+ * not seeded those frames yet, or (for S10/S30) the tick feed is not dense
+ * enough to build them honestly — the NEAREST frames by timeframe distance are
+ * used instead, so a missing frame degrades the score's precision rather than
+ * zeroing it. Using a substituted frame is always recorded.
+ *
+ * Order within the band is fastest-first (the band arrays are ordered that
+ * way), so the returned list is also the order the terminal shows.
+ */
+export function resolveScoringFrames(
+  mode: TradeMode,
+  series: Partial<Record<Timeframe, Bar[]>>,
+): { frames: Timeframe[]; substituted: boolean; excluded: Timeframe[] } {
+  const band = MODE_ANALYSIS_TIMEFRAMES[mode];
+  const usable = (timeframe: Timeframe) => {
+    const bars = series[timeframe];
+    return Boolean(bars && bars.length >= MIN_BARS_PER_FRAME);
+  };
+
+  const inBand = band.filter(usable);
+  if (inBand.length > 0) {
+    return { frames: [...inBand], substituted: false, excluded: band.filter((tf) => !inBand.includes(tf)) };
+  }
+
+  // Nothing in the band: borrow the nearest frames that do have history.
+  const anchor = ALL_TIMEFRAMES.indexOf(band[0] as Timeframe);
+  const borrowed = ALL_TIMEFRAMES
+    .map((timeframe, index) => ({ timeframe, distance: Math.abs(index - anchor) }))
+    .filter((entry) => usable(entry.timeframe))
+    .sort((a, b) => a.distance - b.distance)
+    .slice(0, Math.max(1, band.length))
+    .map((entry) => entry.timeframe)
+    .sort((a, b) => ALL_TIMEFRAMES.indexOf(a) - ALL_TIMEFRAMES.indexOf(b));
+
+  return { frames: borrowed, substituted: borrowed.length > 0, excluded: [...band] };
+}
+
 export function scoreConfluence(input: {
   symbol: string;
   mode: TradeMode;
@@ -236,22 +301,41 @@ export function scoreConfluence(input: {
   const weights = MODE_WEIGHTS[mode];
   const warnings: string[] = [];
 
+  const resolution = resolveScoringFrames(mode, series);
+  if (resolution.substituted) {
+    warnings.push(
+      `No frame in this mode's band (${MODE_ANALYSIS_TIMEFRAMES[mode].join(", ")}) had ${MIN_BARS_PER_FRAME}+ bars, ` +
+        `so the nearest available frames were scored instead: ${resolution.frames.join(", ")}. ` +
+        `This is a data-coverage gap on the terminal, not a property of the market.`,
+    );
+  }
+  for (const timeframe of resolution.excluded) {
+    const bars = series[timeframe];
+    if (bars) warnings.push(`${timeframe}: only ${bars.length} bars — excluded from scoring.`);
+    else warnings.push(`${timeframe}: no data — excluded from scoring.`);
+  }
+
   const views: TimeframeView[] = [];
   let totalWeight = 0;
-  for (const [timeframe, weight] of Object.entries(weights) as [Timeframe, number][]) {
+  for (const timeframe of resolution.frames) {
     const bars = series[timeframe];
-    if (!bars || bars.length < 30) {
-      if (bars) warnings.push(`${timeframe}: only ${bars.length} bars — excluded from scoring.`);
-      else warnings.push(`${timeframe}: no data — excluded from scoring.`);
-      continue;
-    }
+    if (!bars || bars.length < MIN_BARS_PER_FRAME) continue;
+    // Renormalise the mode's weights over the frames that are actually present,
+    // so a missing frame lowers precision rather than the whole score.
+    const weight = weights[timeframe] ?? 1 / resolution.frames.length;
     views.push(buildTimeframeView(timeframe, bars, mode, weight));
     totalWeight += weight;
   }
 
   if (views.length === 0 || totalWeight === 0) {
     return {
-      ...emptyResult(symbol, mode, views, warnings, "No timeframe in this mode's band had enough history to score."),
+      ...emptyResult(
+        symbol,
+        mode,
+        views,
+        warnings,
+        `${MODE_ANALYSIS_TIMEFRAMES[mode].join("/")} has no history at all yet — the terminal has not seeded this market.`,
+      ),
     };
   }
 
@@ -344,6 +428,8 @@ export function scoreConfluence(input: {
     views: allViews,
     higherTimeframeAligned,
     contextPenalty,
+    substituted: resolution.substituted,
+    scoredTimeframes: views.map((view) => view.timeframe),
     factors,
     warnings,
   };
@@ -366,6 +452,8 @@ function emptyResult(
     views,
     higherTimeframeAligned: false,
     contextPenalty: 0,
+    substituted: false,
+    scoredTimeframes: [],
     factors: [],
     warnings: [...warnings, reason],
   };

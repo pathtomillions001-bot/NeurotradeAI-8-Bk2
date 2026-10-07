@@ -133,6 +133,13 @@ app.use(
 );
 app.use(cookieParser());
 app.use(browserSession);
+// The MT5 bridge posts the terminal's own OHLC history — seven timeframes ×
+// ~300 bars × every watched symbol — on each heartbeat. That is routinely
+// several hundred kilobytes and silently 413s against the 100 kb default,
+// which would break the bridge for every user with more than one symbol.
+// Scoped to the one route that needs it so the rest of the API stays tight.
+app.use("/api/bridge/sync", express.json({ limit: "12mb" }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 // Never let an API request race a production schema migration during startup.

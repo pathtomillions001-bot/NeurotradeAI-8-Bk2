@@ -119,6 +119,24 @@ export interface ScanContext {
    *  caller (ai.ts) so the digit-probability agent never falls back to a
    *  hardcoded default. */
   recoveryBarrierOverride?: { DIGITOVER: number; DIGITUNDER: number };
+  /**
+   * Recovery-mode context for evidence-based admission.
+   *
+   * Absent ⇒ normal mode (the admission threshold is constant).
+   * Present with `active: true` ⇒ the engine is carrying open loss debt, and
+   * the admission threshold DECAYS with `elapsedMs` so a recovery trade is
+   * taken as soon as the evidence supports it rather than waiting for every
+   * independent condition to align simultaneously.
+   *
+   * Note this does NOT affect stake sizing — the recovery stake formula is
+   * unchanged and still driven by `unrecoveredAmount`.
+   */
+  recovery?: {
+    /** True when the account holds unrecovered loss debt. */
+    active: boolean;
+    /** Milliseconds since recovery began — drives the decayed threshold. */
+    elapsedMs: number;
+  };
 }
 
 // ── Full coordinator output ───────────────────────────────────────────────────

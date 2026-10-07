@@ -58,6 +58,19 @@ export interface RecoveryState {
   originPayoutMultiplier:   number;       // total-return multiplier of that original normal trade
   resetDate:                string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
   consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥3
+  /**
+   * Epoch ms when the CURRENT recovery episode began (0 = not in recovery).
+   *
+   * Used ONLY to age the evidence-admission threshold in master-decision: the
+   * bar starts demanding and decays toward a positive floor so a recovery trade
+   * is taken as soon as the analysis supports it rather than waiting for every
+   * independent condition to align. Persisted so a deploy/restart does not
+   * silently reset the clock and re-impose the strictest threshold.
+   *
+   * This has NO effect on stake sizing — the debt-driven recovery formula is
+   * unchanged.
+   */
+  recoveryStartedAt:        number;
 }
 
 /** Local calendar date in user's timezone in YYYY-MM-DD. Uses the tz offset stored in lib/tz so it agrees with the daily stats on the frontend. */
@@ -78,6 +91,7 @@ function freshState(): RecoveryState {
     originPayoutMultiplier:   1,
     resetDate:                todayKey(),
     consecutiveMatchLosses:   0,
+    recoveryStartedAt:        0,
   };
 }
 
@@ -165,6 +179,7 @@ function applyNewDay(): void {
       state.recoveryStep      = 1;
       state.streakLossCount         = 1;
       state.streakStartAmount       = carryDebt;
+      state.recoveryStartedAt       = Date.now();
       // Carry the aspirational target but re-apply the one-base-stake cap so a
       // pre-cap target can never survive the daily rollover into a bigger stake.
       state.targetProfit            = capTargetProfit(prevTargetProfit, prevBaseStake);
@@ -440,6 +455,8 @@ export function reduceRecoveryOutcome(
     if (!next.inRecovery) {
       next.inRecovery               = true;
       next.recoveryStep             = 1;
+      // Start (or restart) the recovery clock that ages the admission threshold.
+      next.recoveryStartedAt        = Date.now();
       next.baseStake                = next.baseStake > 0 ? next.baseStake : stakeUsed;
       next.unrecoveredAmount        = addMoney(stakeUsed);
       next.streakLossCount          = 1;
@@ -556,6 +573,7 @@ export function loadState(json: string): void {
         // Legacy per-family rows predate this feature — always treat as "not today".
         resetDate:                "",
         consecutiveMatchLosses:   0,
+        recoveryStartedAt:        0,
       });
       if (!inRecovery) replaceState(freshState());
       collapseIfDebtCleared();
@@ -588,6 +606,12 @@ export function loadState(json: string): void {
       resetDate:                typeof parsed.resetDate === "string" ? parsed.resetDate : "",
       // New field — default to 0 for rows saved before this feature existed
       consecutiveMatchLosses:   Number(parsed.consecutiveMatchLosses) || 0,
+      // Rows persisted before this field existed get "now" so a live recovery
+      // is not treated as having just started (which would re-impose the
+      // strictest threshold) nor as infinitely old.
+      recoveryStartedAt:        Number(parsed.recoveryStartedAt) > 0
+        ? Number(parsed.recoveryStartedAt)
+        : (parsed.inRecovery ? Date.now() : 0),
     });
   } catch {
     /* ignore malformed state — start fresh */

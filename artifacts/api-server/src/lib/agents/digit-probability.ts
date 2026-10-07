@@ -12,6 +12,11 @@
 import type { AgentOutput, ProductType, ScanContext } from "./types";
 import { scoreToSignal } from "./types";
 import { DIGIT_PAYOUTS, MATCH_PAYOUT, DIFF_PAYOUT } from "../payouts";
+import {
+  digitEdgePosterior,
+  markovDependenceTest,
+  type MarkovTestResult,
+} from "./evidence-math";
 
 // Re-export the canonical table for existing consumers (ai.ts and tests).
 // Values are total winning returns, including the original stake.
@@ -32,6 +37,18 @@ export interface BarrierOption {
   edge: number;
   tier: number;
   adjustedEvScore: number;
+  /**
+   * Exact posterior probability that the TRUE win rate exceeds this contract's
+   * payout breakeven — i.e. "how likely is it that this edge is real?".
+   *
+   * Computed from the Dirichlet-multinomial posterior via the Beta aggregation
+   * property (see evidence-math.ts). Unlike the raw `winProbability` estimate,
+   * this is sample-size aware: the same observed deviation yields a confident
+   * value at n=5,000 and a cautious one at n=50. Optional because contract
+   * types built outside the digit agent (MATCH/DIFF in the coordinator) do not
+   * carry digit counts; consumers must fall back to an EV-derived estimate.
+   */
+  edgeProbability?: number;
 }
 
 // ── Markov chain ───────────────────────────────────────────────────────────────
@@ -112,6 +129,7 @@ function chiSquareUniformP(digitCounts: number[]): number {
 // ── Digit frequency analysis ───────────────────────────────────────────────────
 
 export function analyzeDigits(digits: number[]): {
+  counts: number[];       // Raw observed count of each digit 0-9 (exact integers)
   frequency: number[];    // Frequency of each digit 0-9 (0-1)
   bayesianProb: number[]; // Smoothed Bayesian estimate
   evenProbability: number;
@@ -119,6 +137,8 @@ export function analyzeDigits(digits: number[]): {
   markov: MarkovMatrix;
   chiSquarePValue: number;
   isUniform: boolean;
+  /** G² test of first-order Markov dependence — see evidence-math.ts. */
+  markovTest: MarkovTestResult;
   hotDigits: number[];
   coldDigits: number[];
   lastDigit: number;
@@ -143,6 +163,12 @@ export function analyzeDigits(digits: number[]): {
   const chiSquarePValue = chiSquareUniformP(counts);
   const isUniform = chiSquarePValue > 0.05; // can't reject uniform
 
+  // Test whether the transition structure carries real information at all.
+  // `winProbForBarrier` sums Markov transition probabilities into a win-rate
+  // estimate; if this test says the matrix is indistinguishable from an i.i.d.
+  // draw, those sums are predictions derived from noise and must be discounted.
+  const markovTest = markovDependenceTest(markov.transitions);
+
   const avgFreq = 0.1;
   // Scale hot/cold thresholds with sample size: at low n the variance is huge
   // so we require a larger deviation from 10% to call a digit genuinely hot/cold.
@@ -164,8 +190,8 @@ export function analyzeDigits(digits: number[]): {
   }
 
   return {
-    frequency, bayesianProb, evenProbability, oddProbability,
-    markov, chiSquarePValue, isUniform,
+    counts, frequency, bayesianProb, evenProbability, oddProbability,
+    markov, chiSquarePValue, isUniform, markovTest,
     hotDigits, coldDigits,
     lastDigit, recentStreakDigit: streakDigit, recentStreakLength: streakLen,
   };
@@ -209,9 +235,33 @@ function winProbForBarrier(
   //   < 50 samples:  Bayesian 95%, Markov1  5%, Markov2  0%
   //   < 100 samples: Bayesian 80%, Markov1 15%, Markov2  5%
   //   ≥ 100 samples: Bayesian 65%, Markov1 25%, Markov2 10%
-  const m1w = sampleSize < 50 ? 0.05 : sampleSize < 100 ? 0.15 : 0.25;
-  const m2w = sampleSize < 50 ? 0.00 : sampleSize < 100 ? 0.05 : 0.10;
-  const bw  = 1 - m1w - m2w;
+  let m1w = sampleSize < 50 ? 0.05 : sampleSize < 100 ? 0.15 : 0.25;
+  let m2w = sampleSize < 50 ? 0.00 : sampleSize < 100 ? 0.05 : 0.10;
+
+  // ── Markov-significance shrinkage ──────────────────────────────────────────
+  // Sample size is not enough: a large sample of an INDEPENDENT process still
+  // produces a transition matrix full of meaningless structure. The G² test
+  // asks the question that matters — is the row-conditional distribution
+  // distinguishable from the marginal at all? If not, we are about to blend a
+  // win-rate estimate built from noise, so scale those weights down and hand
+  // the difference back to the Bayesian (unconditional) estimate.
+  //
+  // This is why the previous fixed weights were unsafe: 35% of the blended win
+  // probability could come from a transition matrix that no statistical test
+  // would distinguish from random.
+  const markovTest = analysis.markovTest;
+  const markovConfidence = !markovTest || markovTest.observations < 30
+    ? 0.2                                    // too few transitions to say anything
+    : markovTest.significant
+      ? 1                                    // transitions carry real information
+      : markovTest.pValue < 0.20
+        ? 0.5                                // marginal evidence — half credit
+        : 0.2;                               // indistinguishable from i.i.d.
+
+  m1w *= markovConfidence;
+  m2w *= markovConfidence;
+  m2w = Math.min(m2w, m1w);                  // 2nd-order can never outweigh 1st
+  const bw = 1 - m1w - m2w;
 
   return bayesianWinP * bw + markov1WinP * m1w + markov2WinP * m2w;
 }
@@ -259,7 +309,20 @@ function buildBarrierOptions(
       const tier = DIGIT_TIERS[contractType]?.[barrier] ?? 2;
       const adjustedEvScore = edge > 0 ? ev * 10 : ev;
 
-      options.push({ contractType, barrier, winProbability: winP, payout, expectedValue: ev, edge, tier, adjustedEvScore });
+      // Exact posterior for "is this edge real?" — computed from the RAW digit
+      // counts, not from the blended winP, so it is a genuine probability
+      // rather than a point estimate with no uncertainty attached.
+      const edgeProbability = digitEdgePosterior(
+        analysis.counts,
+        barrier,
+        contractType === "DIGITOVER" ? "over" : "under",
+        payout,
+      ).edgeProbability;
+
+      options.push({
+        contractType, barrier, winProbability: winP, payout,
+        expectedValue: ev, edge, tier, adjustedEvScore, edgeProbability,
+      });
     }
   }
 
@@ -509,6 +572,7 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
 
   const reasoning = [
     `${digits.length} digits. Chi-sq p=${analysis.chiSquarePValue.toFixed(3)} (${isUniform ? "uniform" : "skewed"}).`,
+    `Markov G²=${analysis.markovTest.g2.toFixed(1)} (df=${analysis.markovTest.df}, p=${analysis.markovTest.pValue.toFixed(3)}) — ${analysis.markovTest.significant ? "transitions informative" : "transitions indistinguishable from i.i.d."}.`,
     `Hot: [${analysis.hotDigits.join(",")}]. Cold: [${analysis.coldDigits.join(",")}].`,
     bestBarrier
       ? `Best barrier: ${bestBarrier.contractType} ${bestBarrier.barrier} | P(win)=${(bestBarrier.winProbability * 100).toFixed(1)}% | EV=${(bestBarrier.expectedValue * 100).toFixed(1)}%.`
@@ -536,6 +600,11 @@ export function runDigitProbabilityAgent(ctx: ScanContext): DigitProbabilityOutp
       evenProbability: analysis.evenProbability,
       chiSquarePValue: analysis.chiSquarePValue,
       matchDiffersAnalysis,
+      // Statistical-significance payload consumed by the evidence layer in
+      // master-decision.ts. `bestBarrier.edgeProbability` (exact Beta posterior)
+      // rides along inside bestBarrier.
+      markovTest: analysis.markovTest,
+      sampleSize: digits.length,
     },
     executionTimeMs: Date.now() - t0,
     barrierOptions,

@@ -8,6 +8,8 @@ import aiRouter from "./ai";
 import settingsRouter from "./settings";
 import speedAiRouter from "./speed-ai";
 import botsRouter from "./bots";
+import deskRouter from "./desk";
+import bridgeRouter from "./bridge";
 
 const router: IRouter = Router();
 
@@ -20,5 +22,8 @@ router.use("/ai", aiRouter);
 router.use("/settings", settingsRouter);
 router.use("/speed-ai", speedAiRouter);
 router.use("/bots", botsRouter);
+// Multi-Asset Desk: terminal-facing API and the MetaTrader 5 EA bridge.
+router.use("/desk", deskRouter);
+router.use("/bridge", bridgeRouter);
 
 export default router;

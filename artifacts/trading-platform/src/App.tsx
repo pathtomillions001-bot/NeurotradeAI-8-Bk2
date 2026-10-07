@@ -9,6 +9,7 @@ import LandingPage from "./pages/landing";
 
 import Dashboard from "./pages/dashboard";
 import Markets from "./pages/markets";
+import Terminal from "./pages/terminal";
 import MarketDetail from "./pages/market-detail";
 import Trades from "./pages/trades";
 import Analytics from "./pages/analytics";
@@ -232,6 +233,8 @@ function Router() {
       <Switch>
         <Route path="/" component={Dashboard} />
         <Route path="/markets" component={Markets} />
+        {/* Multi-Asset Desk: forex, metals, indices, commodities, crypto, futures. */}
+        <Route path="/terminal" component={Terminal} />
         <Route path="/markets/:symbol" component={MarketDetail} />
         <Route path="/bots" component={Bots} />
         <Route path="/bot-builder" component={BotBuilder} />

@@ -1,0 +1,284 @@
+# MT5 Live Desk v3 — real-time data, correct times, and a signal engine that trades
+
+Supersedes the v2 notes in [`mt5-live-desk-v2.md`](./mt5-live-desk-v2.md) for the six areas below.
+Everything v2 stood for still holds: the Desk renders **only** live terminal data, and a
+non-fresh quote blocks analysis, arming and execution.
+
+---
+
+## 1. Wrong and delayed prices
+
+Three separate defects produced the symptom "XAUUSD shows 5898.46 when the market is 4105.35".
+
+### 1a. Timestamps were in the broker's timezone, not UTC
+
+Every quote, candle and calendar event was sent as `time * 1000`, where `time` comes from
+`TimeTradeServer()`. On a broker whose server runs GMT+3, every timestamp the platform
+received was three hours in the future relative to true UTC. The server then computed
+"quote age" against its own wall clock, so a fresh tick could look hours old (or a stale
+tick fresh), and news times were wrong by exactly the server offset.
+
+**Fix.** The EA now derives its offset from MQL5's own GMT pivot and normalises everything
+before it leaves the terminal:
+
+```mql5
+int ServerUtcOffsetSeconds() {
+   long offset = (long)TimeTradeServer() - (long)TimeGMT();  // server minus GMT
+   return (int)MathMax(-86400, MathMin(86400, offset));       // clamped, so one bad
+}                                                             // sample cannot poison a week
+long ToUtcMs(const datetime value) { return ((long)value - ServerUtcOffsetSeconds()) * 1000; }
+```
+
+`QuotesJson`, `CandlesJson` and `NewsJson` all emit `ToUtcMs(...)`, and the terminal sends a
+`clock` object on every heartbeat so the server can cross-check rather than trust:
+
+```json
+"clock": { "serverUtcOffsetSeconds": 10800, "terminalUtcMs": 1791393454672, "label": "Broker-Demo" }
+```
+
+The server keeps `clockSkewMs = terminalUtcMs - serverNow`. Beyond a tolerance it warns in the
+UI and, critically, it **corrects every age it computes** by the skew — so a skewed terminal
+degrades to a warning, not to wrong data.
+
+### 1b. Cached ticks on symbols the EA had not touched
+
+`SymbolInfoTick` returns the last cached tick for a symbol that is not in Market Watch. For a
+renamed contract or a symbol the EA had not selected, that cache can be hours — or days — old,
+and it looks perfectly plausible.
+
+**Fix,** two-layered:
+
+- **In the EA:** `SymbolSelect(symbol, true)` before reading, so the terminal actually
+  subscribes; ticks older than `StaleAfterSec` are dropped at source and an `ageMs` field is
+  emitted with every quote.
+- **In the server:** `lib/multiasset/integrity.ts` cross-checks each quote against the symbol's
+  *own* recent candles. A quote is flagged `mismatch` only when **both** scales are wrong:
+
+  ```ts
+  const mismatch = deviationAtr > 25 && deviationPct > 25;   // AND, not OR
+  ```
+
+  Requiring both is the point. Gold moving 1.5% in a minute is a market event, not a corrupt
+  feed, and an OR rule flagged it. A 4105-vs-5898 disagreement is ~44% away — it trips both.
+
+A `mismatch` symbol is rendered in red, named in a banner, and **blocked from trading**.
+A wrong price is never displayed as if it were a good one.
+
+### 1c. Polling
+
+The Desk polled `/api/desk/instruments` every four seconds, so every price was at least one
+poll old and a symbol at the tail of the rotation could be several heartbeats behind.
+
+**Fix.** `GET /api/desk/stream` is a server-sent event stream; the server broadcasts a `desk`
+event the instant a terminal heartbeat lands. The client (`hooks/use-desk-stream.ts`) keeps
+polling as a *fallback* only, and the header shows `STREAM` or `POLL` so transport state is
+never invisible.
+
+Related: `SyncIntervalMs` 1000 → **500 ms**, `SymbolsPerHeartbeat` 24 → **12** (candles only
+now), and a new `SendAllQuotesEachBeat = true` input sends the full selection's quotes on every
+beat. Candles remain batched, because resending ten timeframes for 40 symbols every half second
+is pointless.
+
+---
+
+## 2. News/calendar times are Nairobi EAT
+
+Two problems, and fixing only the formatting would have left the bug in place.
+
+1. Calendar timestamps arrived in broker-server time (§1a), so the *value* was wrong.
+2. The frontend rendered with `toLocaleString()` and no `timeZone`, so the *display* used
+   whatever clock the browser happened to have.
+
+Now the terminal sends true UTC and the Desk renders in an explicit, user-selectable zone that
+**defaults to `Africa/Nairobi`** and never falls back to "whatever the device thinks". Each
+row also carries the zone abbreviation (`EAT`) next to the time, and the journal and every
+other timestamp use the same zone. `GET /api/desk/settings` accepts `{ timezone }`; the
+server validates against an allowlist and reflects the current value in `/desk/state`.
+
+The EA's forward calendar window also grew from 2 hours to 24 (`CalendarValueHistory(now - 15m,
+now + 24h)`), which is why the upcoming-events list used to sit empty for most of the session.
+
+---
+
+## 3. Filling the desktop gap below the calendar
+
+The right-hand column ended at the news calendar, leaving a large void on wide screens. It is
+now filled by two panes, both built from live broker data only:
+
+- **Realised performance** — equity curve sampled from terminal equity, P&L by symbol as a
+  diverging bar chart, and the statistics that actually decide whether an edge exists: win
+  rate, total R, average R, profit factor, max drawdown in R, worst losing streak, and the
+  recently-closed trade list with per-trade R multiples. Built *only* from closed positions —
+  a record, not a projection.
+- **`{symbol} · price action`** — candlestick chart of the selected instrument with a
+  timeframe switcher (M1 → W1) that draws the armed plan's trigger, stop and target directly on
+  the price. Inline SVG, no charting dependency, so it renders identically offline and in an
+  iframe.
+
+A **Performance** pane was also added to the left column under the watchlist.
+
+---
+
+## 4. Mobile: the "live market pulse"
+
+The pulse used a four-column strip designed for a desk-width screen. On a phone each column
+became a cramped box, and the price — the one thing you opened the desk to see — was rendered
+at the same size as the spread.
+
+The mobile layout is now a card: symbol and feed status in the header, bid and ask as two large
+figures, then spread / change / 24h range / tick age as pills, then a sparkline of recent
+closes, then any price-integrity warning.
+
+**Desktop is unchanged.** The two layouts are explicit (`sm:hidden` and `hidden sm:grid`)
+rather than one responsive compromise, so neither screen size is a degraded version of the
+other.
+
+---
+
+## 5. The agent was blocking almost every trade
+
+The dominant cause was the Markov gate: a single first-order model, reading only the sign of
+the last few bars, sitting on the decision path with veto power. When it said "no", the trade
+died there — regardless of what everything else said.
+
+### 5a. Markov is now evidence, not a gate
+
+`markov.ts` still runs, but as **one family in a weighted ensemble** (`evidence.ts`) alongside
+six others. No single family can veto.
+
+| Family (`FactorFamily`) | Rendered as | What it measures |
+|---|---|---|
+| `trend` | Kalman trend | Kalman-filtered slope, level and slope-vs-noise quality |
+| `momentum` | Momentum | RSI with an explicit fade warning when extended, efficiency ratio |
+| `meanReversion` | Mean reversion | Ornstein–Uhlenbeck z-score and half-life, **suppressed when Hurst ≥ 0.45** |
+| `breakout` | Breakout / range | Position within the recent range, ATR expansion vs the slow ATR |
+| `flow` | Volume flow | Money flow and order-flow imbalance from the bar's own volume profile |
+| `regime` | Regime memory | Hurst, variance ratio, Ljung–Box and permutation entropy together |
+| `markov` | Markov persistence | the original transition model — now one vote of seven |
+
+Each family returns `{ vote, strength, reliability }`. Reliability **shrinks the vote toward
+zero when the sample is short**, which is what stops a model fitted on 30 bars from swinging a
+real-money decision:
+
+```
+contribution = vote × strength × weight × (n / (n + shrinkage))
+```
+
+Two guards, both chosen to be *permissive by design*:
+
+- `MODE_MIN_AGREEING_FAMILIES = 3` of 7 — three independent confirmations, not seven.
+- Family weights differ per mode (a scalp weights microstructure heavily; a swing weights
+  trend and volatility), so a mode's irrelevant families cannot dominate it.
+
+### 5b. New statistics (`analytics.ts`)
+
+Hurst (R/S and structure-function), variance ratio, OU fit with half-life, skew, excess
+kurtosis, efficiency ratio, permutation entropy, money flow, range position, Kalman trend,
+GARCH(1,1), lag-1 autocorrelation, Ljung–Box, beta-posterior shrinkage, `normalCdf`. Covered by
+27 unit tests, including the cases that matter: a mirror-symmetric sample has zero skew, and
+autocorrelation must be measured on *returns*, not prices.
+
+### 5c. Costs are charged honestly
+
+Rejections quote expectancy *after* spread, commission and swap (`Expectancy after costs is
+−0.05R (model 0.16R, gross 0.24R)`). A trade that only looks good before costs is not a trade.
+
+### 5d. Risk capacity
+
+`maxOpenPositions` 4 → **12**, `maxPositionsPerSymbol` 1 → **3**. With three independent
+confirmations required, the binding constraint should be the portfolio, not a per-symbol cap of
+one.
+
+Measured on synthetic data (all three modes, trending / ranging / choppy):
+
+| Regime | Scalp | Day | Swing |
+|---|---|---|---|
+| Trend up | **ARMED** q94.4, E +0.59R | **ARMED** q94.9, E +3.92R | **ARMED** q87.2, E +3.94R |
+| Range | rejected q43.5 | rejected q37.7 | rejected q31.5 |
+| Chop | rejected E −0.51R | rejected E −0.05R | rejected E −0.27R |
+
+Good trades get through. Noise still does not.
+
+---
+
+## 6. Timeframe alignment is no longer a veto
+
+Previously a trade needed every timeframe it looked at to agree. One dissenting frame — often
+the slowest, which is the *least* relevant to a scalp — killed the setup.
+
+Now:
+
+- **Timeframes are split by role.** Each mode declares an analysis band; frames inside it are
+  weighted, frames outside it are **context only**.
+  - scalp → M1, M2, M3 (context: M5, M15, H1)
+  - day → M5, M15, M30 (context: H1, H4, D1)
+  - swing → H1, H4, D1, W1 (context: W1)
+
+  Context frames cost nothing when they are simply missing — the absence of a weekly candle is
+  not evidence against a trade.
+- **Dissent is a penalty, not a veto.** `CONTEXT_PENALTY_PER_FRAME = 5`, capped at
+  `CONTEXT_PENALTY_CAP = 12`. Dissent is recorded, shown as `−N`, and folded into the score. If
+  everything else is strong, the trade still goes.
+- `VETO_TIMEFRAMES` is deleted. Higher-timeframe opposition is surfaced as a **warning** in the
+  UI ("Carried cautions") instead of a rejection.
+
+Verified: with two and three timeframes inverted against the trend, all three modes still arm
+(quality 74–95 against thresholds of 60–62). Nothing in any rejection list mentions alignment.
+
+### The three modes differ in more than timeframe
+
+| | Scalp | Day | Swing |
+|---|---|---|---|
+| Analysis band | M1–M3 | M5–M30 | H1–W1 |
+| Horizon | ~25 min | ~6 h | ~48 h |
+| Stop (ATR ×) | 0.8 | 1.5 | 2.0 |
+| Plan TTL | 60 s | 10 min | 60 min |
+| Time stop | 15 bars M2 | 25 bars M15 | 25 bars H1 |
+| Break-even | at 1.8R | at 1.2R | at 1.2R |
+| Score threshold | 62 | 60 | 60 |
+| Evidence blend | 0.55 | 0.45 | 0.40 |
+| Default chart | M2 | M15 | H1 |
+
+Every plan carries `management` — break-even with a structure buffer, two partial exits (35% at
+1.5R, 25% at 3R), an ATR chandelier trail activating at 1.2R, one pyramid add at 1.5R capped at
+1.5R portfolio risk, a time stop, and spread/slippage/news guards.
+
+---
+
+## Upgrading the EA
+
+`artifacts/mt5-ea/NeurotradeBridge.mq5` is now **v3.00**. Re-download and re-attach it; v2 will
+still pair but will send server-relative timestamps and rotate symbol coverage.
+
+New and changed inputs:
+
+| Input | v2 | v3 |
+|---|---|---|
+| `SyncIntervalMs` | 1000 | 500 |
+| `SymbolsPerHeartbeat` | 24 | 12 (candles only) |
+| `SendAllQuotesEachBeat` | — | `true` (new) |
+
+Timeframe set grew from 7 to 10 with **M2, M3 and W1** (`#define TF_COUNT 10`). The Desk's
+scalp mode analyses M2 and M3, and swing mode analyses W1, so v2 left those modes working from
+a thinner set of frames than intended.
+
+---
+
+## Files
+
+| Area | Path |
+|---|---|
+| EA | `artifacts/mt5-ea/NeurotradeBridge.mq5` |
+| Routes | `artifacts/api-server/src/routes/desk.ts`, `.../bridge.ts` |
+| Integrity | `artifacts/api-server/src/lib/multiasset/integrity.ts` (new) |
+| Evidence ensemble | `artifacts/api-server/src/lib/multiasset/evidence.ts` (new) |
+| Statistics | `artifacts/api-server/src/lib/multiasset/analytics.ts` (new) |
+| Presentation | `artifacts/api-server/src/lib/multiasset/presenter.ts` (new) |
+| Frontend | `src/pages/terminal.tsx`, `src/components/terminal/panes.tsx`, `src/lib/desk.ts`, `src/hooks/use-desk-stream.ts` (new) |
+
+Tests: 222 passing (12 files under `src/lib/multiasset/`), including 53 new ones covering the
+statistics, the evidence ensemble and feed integrity. Run with:
+
+```
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx --test src/lib/multiasset/*.test.ts
+```

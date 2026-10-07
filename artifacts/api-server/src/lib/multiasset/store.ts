@@ -30,6 +30,56 @@ const MAX_BARS = 400;
 const MAX_JOURNAL = 200;
 /** Command ids remembered for duplicate suppression. */
 const MAX_SEEN_COMMANDS = 500;
+/** Equity samples retained for the Desk's equity curve. */
+const MAX_EQUITY_SAMPLES = 720;
+/** Closed trades retained per desk for the performance pane. */
+const MAX_CLOSED_TRADES = 300;
+
+/**
+ * A realised trade outcome, keyed by `symbol|mode`.
+ *
+ * The agent uses these as the Beta prior for its win-rate estimate. Without
+ * them every symbol is judged purely by simulation, which flatters the model
+ * and never learns that a particular broker symbol trades badly.
+ */
+export interface OutcomeRecord {
+  key: string;
+  symbol: string;
+  mode: TradeMode;
+  wins: number;
+  losses: number;
+  /** Sum of realised R multiples — the honest measure of edge, not win rate. */
+  totalR: number;
+  updatedAt: number;
+}
+
+export interface ClosedTrade {
+  ticket: number;
+  symbol: string;
+  side: "buy" | "sell";
+  volume: number;
+  openPrice: number;
+  profit: number;
+  swap: number;
+  commission: number;
+  /** Realised result in R when the initial risk is known. */
+  rMultiple: number | null;
+  openedAt: number;
+  closedAt: number;
+}
+
+export interface EquitySample {
+  t: number;
+  equity: number;
+  balance: number;
+}
+
+/** IANA timezone the Desk renders every timestamp in. */
+export const DEFAULT_DESK_TIMEZONE = "Africa/Nairobi";
+
+export function outcomeKey(symbol: string, mode: TradeMode): string {
+  return `${symbol}|${mode}`;
+}
 
 export interface JournalEntry {
   id: string;
@@ -79,6 +129,37 @@ export interface DeskState {
   policy: RiskPolicy;
   riskState: RiskState;
   journal: JournalEntry[];
+  /** Realised outcomes per `symbol|mode`, feeding the agent's Beta prior. */
+  outcomes: Map<string, OutcomeRecord>;
+  /** Closed positions, newest last — the Desk's realised-performance record. */
+  closedTrades: ClosedTrade[];
+  /** Sampled equity/balance, for the equity curve. */
+  equityHistory: EquitySample[];
+  /** IANA timezone for every timestamp the Desk renders. */
+  timezone: string;
+  /**
+   * Measured offset between the terminal's clock and the server's, in ms.
+   *
+   * A broker server running a few seconds fast or slow is normal; a terminal
+   * whose clock is minutes out would otherwise make every quote look either
+   * impossibly fresh or permanently stale, and the Desk would either trade on
+   * dead prices or refuse to trade at all.
+   */
+  clockSkewMs: number | null;
+  /**
+   * Quote staleness the terminal's last heartbeat implied, in ms.
+   * Surfaced so a "delayed data" complaint is diagnosable rather than guessed.
+   */
+  lastQuoteAgeMs: number | null;
+  /**
+   * symbol → mode of the most recently armed plan. Kept after the plan is
+   * consumed so a fill can still be attributed to the right trading style.
+   */
+  planModes: Map<string, TradeMode>;
+  /** Mode each open position belongs to, captured when it was first seen. */
+  positionModes: Map<number, TradeMode>;
+  /** Last time the equity curve was sampled, to keep the series bounded. */
+  lastEquitySampleAt: number;
 }
 
 const desks = new Map<string, DeskState>();
@@ -113,6 +194,15 @@ export function getDesk(sessionId: string): DeskState {
       policy: { ...DEFAULT_RISK_POLICY },
       riskState: createRiskState(),
       journal: [],
+      outcomes: new Map(),
+      closedTrades: [],
+      equityHistory: [],
+      timezone: DEFAULT_DESK_TIMEZONE,
+      clockSkewMs: null,
+      lastQuoteAgeMs: null,
+      planModes: new Map(),
+      positionModes: new Map(),
+      lastEquitySampleAt: 0,
     };
     desks.set(sessionId, desk);
   }
@@ -142,6 +232,15 @@ export function clearTerminalData(desk: DeskState): void {
   desk.inflight.clear();
   desk.watchlist = [];
   desk.autoTrade = false;
+  desk.positionModes.clear();
+  desk.planModes.clear();
+  desk.closedTrades = [];
+  desk.equityHistory = [];
+  desk.clockSkewMs = null;
+  desk.lastQuoteAgeMs = null;
+  // `outcomes` deliberately survives an unlink: it is the desk's own learned
+  // win-rate prior, and re-learning it from zero on every re-pair is how a
+  // broker symbol that trades badly keeps getting traded.
 }
 
 // ── Bridge token index ───────────────────────────────────────────────────────
@@ -275,6 +374,7 @@ export function armPlan(desk: DeskState, plan: ArmedPlan): void {
     }
   }
   desk.plans.set(plan.id, plan);
+  desk.planModes.set(plan.symbol, plan.mode);
   enqueueCommand(desk, { id: randomUUID(), type: "arm_plan", plan });
 }
 
@@ -303,6 +403,111 @@ export function applyAccount(desk: DeskState, incoming: AccountSnapshot): void {
   const dayStartEquity = incoming.dayStartEquity ?? previous?.dayStartEquity ?? incoming.equity;
   const peakEquity = Math.max(previous?.peakEquity ?? 0, incoming.equity, dayStartEquity);
   desk.account = { ...incoming, dayStartEquity, peakEquity };
+  sampleEquity(desk, incoming);
+}
+
+/**
+ * Append an equity sample at most once every 30 seconds.
+ *
+ * The EA heartbeats about once a second, so an unthrottled series would be
+ * thousands of points an hour and would bury the shape of the curve in noise.
+ */
+export function sampleEquity(desk: DeskState, account: AccountSnapshot, now = Date.now()): void {
+  if (now - desk.lastEquitySampleAt < 30_000 && desk.equityHistory.length > 0) return;
+  desk.lastEquitySampleAt = now;
+  desk.equityHistory.push({ t: now, equity: account.equity, balance: account.balance });
+  if (desk.equityHistory.length > MAX_EQUITY_SAMPLES) {
+    desk.equityHistory.splice(0, desk.equityHistory.length - MAX_EQUITY_SAMPLES);
+  }
+}
+
+/** Record a realised trade: one closed position, attributed to a mode. */
+export function recordClosedTrade(
+  desk: DeskState,
+  position: Position,
+  closedAt = Date.now(),
+): ClosedTrade {
+  const mode = desk.positionModes.get(position.ticket) ?? desk.mode;
+  const net = position.profit + position.swap + position.commission;
+  const rMultiple =
+    position.initialRiskMoney && position.initialRiskMoney > 0
+      ? net / position.initialRiskMoney
+      : null;
+
+  const trade: ClosedTrade = {
+    ticket: position.ticket,
+    symbol: position.symbol,
+    side: position.side,
+    volume: position.volume,
+    openPrice: position.openPrice,
+    profit: position.profit,
+    swap: position.swap,
+    commission: position.commission,
+    rMultiple,
+    openedAt: position.openTime,
+    closedAt,
+  };
+  desk.closedTrades.push(trade);
+  if (desk.closedTrades.length > MAX_CLOSED_TRADES) {
+    desk.closedTrades.splice(0, desk.closedTrades.length - MAX_CLOSED_TRADES);
+  }
+
+  const key = outcomeKey(position.symbol, mode);
+  const existing = desk.outcomes.get(key) ?? {
+    key,
+    symbol: position.symbol,
+    mode,
+    wins: 0,
+    losses: 0,
+    totalR: 0,
+    updatedAt: closedAt,
+  };
+  if (net > 0) existing.wins++;
+  else if (net < 0) existing.losses++;
+  // A scratch (net ≈ 0) counts as neither a win nor a loss but still moves R.
+  existing.totalR += rMultiple ?? 0;
+  existing.updatedAt = closedAt;
+  desk.outcomes.set(key, existing);
+  desk.positionModes.delete(position.ticket);
+
+  return trade;
+}
+
+/** Win/loss counts for a symbol+mode, for the agent's Bayesian prior. */
+export function outcomesFor(desk: DeskState, symbol: string, mode: TradeMode): { wins: number; losses: number } {
+  const record = desk.outcomes.get(outcomeKey(symbol, mode));
+  return { wins: record?.wins ?? 0, losses: record?.losses ?? 0 };
+}
+
+/**
+ * Drop quotes and derived state for symbols that are no longer selected.
+ *
+ * Without this the Desk keeps showing (and would happily analyse) the last
+ * price a deselected symbol ever printed — which is exactly how a stale
+ * XAUUSD quote ends up on screen looking live.
+ */
+export function pruneDeselectedSymbols(desk: DeskState): number {
+  const selected = new Set(desk.watchlist);
+  let removed = 0;
+  for (const symbol of [...desk.quotes.keys()]) {
+    if (selected.has(symbol)) continue;
+    desk.quotes.delete(symbol);
+    removed++;
+  }
+  for (const symbol of [...desk.specs.keys()]) {
+    if (selected.has(symbol)) continue;
+    desk.specs.delete(symbol);
+  }
+  for (const [key] of [...desk.candles.keys()]) {
+    const symbol = key.split("|")[0];
+    if (selected.has(symbol)) continue;
+    desk.candles.delete(key);
+  }
+  for (const [planId, plan] of [...desk.plans]) {
+    if (selected.has(plan.symbol)) continue;
+    desk.plans.delete(planId);
+  }
+  return removed;
 }
 
 export function startNewTradingDay(desk: DeskState): void {
@@ -329,6 +534,17 @@ export function reconcilePositions(
 
   const opened = incoming.filter((p) => !previous.has(p.ticket));
   const closed = desk.positions.filter((p) => !next.has(p.ticket));
+
+  // Attribute each new position to the mode of the plan that produced it, so
+  // the realised-outcome ledger (and therefore the agent's win-rate prior) is
+  // per style rather than lumped together.
+  for (const position of opened) {
+    const mode = desk.planModes.get(position.symbol) ?? null;
+    if (mode) desk.positionModes.set(position.ticket, mode);
+  }
+  for (const position of closed) {
+    recordClosedTrade(desk, position);
+  }
 
   desk.positions = incoming.map((position) => {
     const prior = previous.get(position.ticket);

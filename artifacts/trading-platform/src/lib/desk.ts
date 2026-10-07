@@ -25,11 +25,31 @@ export const ASSET_CLASS_LABELS: Record<AssetClass, string> = {
 };
 
 export type TradeMode = "scalp" | "intraday" | "swing";
+
+/** Nairobi / East Africa Time. The Desk renders every timestamp here by default. */
+export const DEFAULT_DESK_TIMEZONE = "Africa/Nairobi";
+
 export const TRADE_MODES: { id: TradeMode; label: string; blurb: string }[] = [
-  { id: "scalp", label: "Scalp", blurb: "M1–M15 emphasis · ~1 hour horizon" },
-  { id: "intraday", label: "Day", blurb: "M15–H4 emphasis · ~6 hour horizon" },
-  { id: "swing", label: "Swing", blurb: "H1–D1 emphasis · multi-day horizon" },
+  { id: "scalp", label: "Scalp", blurb: "M1–M3 emphasis · ~25 min horizon" },
+  { id: "intraday", label: "Day", blurb: "M5–M30 emphasis · ~6 hour horizon" },
+  { id: "swing", label: "Swing", blurb: "H1–W1 emphasis · multi-day horizon" },
 ];
+
+/**
+ * The timeframes each style is analysed on.
+ *
+ * Scalps are judged on 3-minute-and-below structure because they are opened
+ * and closed inside a minute; swing trades look from the hourly to the weekly.
+ * Timeframes outside a mode's band are context, never a requirement.
+ */
+export const MODE_ANALYSIS_TIMEFRAMES: Record<TradeMode, string[]> = {
+  scalp: ["M1", "M2", "M3"],
+  intraday: ["M5", "M15", "M30"],
+  swing: ["H1", "H4", "D1", "W1"],
+};
+
+/** Every timeframe the Desk charts, fastest to slowest. */
+export const DESK_TIMEFRAMES = ["M1", "M2", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1"] as const;
 
 export interface Market {
   symbol: string;
@@ -42,6 +62,17 @@ export interface Market {
   lastQuoteAt: number | null;
 }
 
+/**
+ * How trustworthy a symbol's data is right now.
+ *
+ * `mismatch` is the important addition: the quote has drifted away from the
+ * symbol's own candles, which almost always means a cached tick, a renamed
+ * broker symbol, or a contract the EA is not subscribed to. It is rendered
+ * loudly and it blocks trading — a plausible-looking wrong price is far more
+ * dangerous than an obvious gap.
+ */
+export type FeedStatus = "live" | "warming" | "stale" | "mismatch";
+
 export interface Instrument {
   symbol: string;
   description: string;
@@ -52,8 +83,124 @@ export interface Instrument {
   spreadPoints: number | null;
   changePct: number | null;
   watched: true;
-  dataStatus: "live" | "warming" | "stale";
+  dataStatus: FeedStatus;
   lastQuoteAt: number | null;
+  /** Milliseconds since the tick was taken. Drives the freshness indicator. */
+  quoteAgeMs: number | null;
+  /** Non-null when the quote disagrees with the symbol's own candles. */
+  priceWarning: string | null;
+  deviationPct: number | null;
+  sessionHigh: number | null;
+  sessionLow: number | null;
+  /** Recent closes for the compact sparkline. */
+  sparkline: number[];
+  contractSize: number | null;
+  point: number | null;
+}
+
+/** Diagnostics for "the data looks delayed". */
+export interface FeedDiagnostics {
+  clockSkewMs: number | null;
+  clockWarning: string | null;
+  lastQuoteAgeMs: number | null;
+  quoteFreshForMs: number;
+}
+
+export interface DeskTimezone {
+  id: string;
+  label: string;
+}
+
+export interface DeskPerformance {
+  source: "mt5" | "unlinked";
+  currency: string;
+  equityCurve: { t: number; equity: number; balance: number }[];
+  closedTrades: {
+    ticket: number;
+    symbol: string;
+    side: "buy" | "sell";
+    volume: number;
+    openPrice: number;
+    profit: number;
+    swap: number;
+    commission: number;
+    rMultiple: number | null;
+    openedAt: number;
+    closedAt: number;
+  }[];
+  bySymbol: {
+    symbol: string;
+    trades: number;
+    net: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    stats: {
+      trades: number;
+      wins: number;
+      losses: number;
+      winRate: number;
+      totalR: number;
+      avgR: number;
+      profitFactor: number;
+      sharpeLike: number;
+      maxLosingStreak: number;
+      maxDrawdownR: number;
+    };
+  }[];
+  overall: {
+    trades: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    totalR: number;
+    avgR: number;
+    profitFactor: number;
+    sharpeLike: number;
+    maxLosingStreak: number;
+    maxDrawdownR: number;
+  };
+  outcomes: { key: string; symbol: string; mode: TradeMode; wins: number; losses: number; totalR: number; updatedAt: number }[];
+  realisedPnl: number;
+  generatedAt: number;
+}
+
+export interface DeskSeries {
+  symbol: string;
+  source: "mt5";
+  series: Partial<Record<string, Bar[]>>;
+  spec: { digits: number; point: number; contractSize: number } | null;
+  quote: { bid: number; ask: number; ts: number } | null;
+  health: { status: FeedStatus; ageMs: number | null; detail: string | null };
+}
+
+/** A compact OHLC bar: [time, open, high, low, close, volume]. */
+export type Bar = [number, number, number, number, number, number];
+
+/** One family of the statistical evidence ensemble. */
+export interface EvidenceFactor {
+  family: string;
+  label: string;
+  vote: -1 | 0 | 1;
+  strength: number;
+  reliability: number;
+  weight: number;
+  contribution: number;
+  detail: string;
+}
+
+export interface EvidenceResult {
+  symbol: string;
+  mode: TradeMode;
+  timeframe: string;
+  direction: "up" | "down" | "none";
+  confidence: number;
+  raw: number;
+  factors: EvidenceFactor[];
+  agreeingFamilies: number;
+  totalFamilies: number;
+  dissentingFamilies: number;
+  diagnostics: Record<string, number>;
 }
 
 export interface Account {
@@ -130,9 +277,11 @@ export interface AgentDecision {
   confluence: {
     direction: "up" | "down" | "none";
     score: number;
+    baseScore: number;
     grade: string;
     higherTimeframeAligned: boolean;
-    views: TimeframeView[];
+    contextPenalty: number;
+    views: (TimeframeView & { role?: "analysis" | "context" })[];
     factors: { label: string; detail: string; weight: number; aligned: boolean }[];
     warnings: string[];
   };
@@ -158,7 +307,14 @@ export interface AgentDecision {
   } | null;
   risk: { allow: boolean; riskPct: number; scoreBump: number; reasons: string[]; breaches: string[] };
   news: NewsGate;
+  /** The statistical evidence ensemble that decided this. */
+  evidence: EvidenceResult | null;
+  /** Blended confluence/evidence score that was actually gated on. */
+  qualityScore: number;
+  qualityThreshold: number;
   rejections: string[];
+  /** Cautions recorded but not enforced. */
+  warnings: string[];
   summary: string;
 }
 
@@ -218,14 +374,18 @@ export interface DeskStateResponse {
   mode: TradeMode;
   autoTrade: boolean;
   watchlist: string[];
+  timezone: string;
+  timezones: DeskTimezone[];
   market: {
     catalogCount: number;
     selectedCount: number;
     liveSymbols: number;
     warmingSymbols: number;
     staleSymbols: number;
+    mismatchSymbols: number;
     quoteFreshForMs: number;
   };
+  feed: FeedDiagnostics;
   positions: Position[];
   plans: ArmedPlan[];
   policy: RiskPolicy;
@@ -248,7 +408,7 @@ export interface DeskStateResponse {
 
 export interface ScanRow {
   symbol: string;
-  status: "live" | "warming" | "stale";
+  status: FeedStatus;
   armed: boolean;
   direction: "up" | "down" | "none";
   score: number;
@@ -283,14 +443,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const deskApi = {
   state: () => request<DeskStateResponse>("/desk/state"),
   markets: () => request<{ source: "mt5" | "unlinked"; markets: Market[]; catalogCount: number }>("/desk/markets"),
-  instruments: () => request<{ source: "mt5" | "unlinked"; instruments: Instrument[] }>("/desk/instruments"),
+  instruments: () => request<{ source: "mt5" | "unlinked"; instruments: Instrument[]; feed: FeedDiagnostics }>("/desk/instruments"),
+  performance: () => request<DeskPerformance>("/desk/performance"),
+  series: (symbol: string) => request<DeskSeries>(`/desk/series?symbol=${encodeURIComponent(symbol)}`),
   analysis: (symbol: string, mode: TradeMode) => request<{ source: "mt5"; horizonMinutes: number; decision: AgentDecision }>(`/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`),
   scan: (mode: TradeMode) => request<{ mode: TradeMode; source: "mt5"; results: ScanRow[]; coverage: { selected: number; live: number; warming: number; stale: number }; scannedAt: number }>(`/desk/scan?mode=${mode}`),
   arm: (symbol: string, mode: TradeMode) => request<{ plan: ArmedPlan }>("/desk/arm", { method: "POST", body: JSON.stringify({ symbol, mode }) }),
   cancelPlan: (id: string) => request<{ ok: true }>(`/desk/plans/${id}`, { method: "DELETE" }),
   closePosition: (ticket: number, lots?: number) => request<{ ok: true }>(`/desk/positions/${ticket}/close`, { method: "POST", body: JSON.stringify(lots === undefined ? {} : { lots }) }),
   flatten: (reason: string) => request<{ ok: true }>("/desk/flatten", { method: "POST", body: JSON.stringify({ reason }) }),
-  settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
+  settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy; timezone: string; timezones: DeskTimezone[] }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
   resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
   projection: (params: { winProbability: number; rewardRisk: number; trades: number }) => request<{ assumptions: Record<string, number>; disciplined: ProjectionResult; martingale: ProjectionResult; note: string }>(`/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`),
   pairingCode: () => request<{ pairingCode: string; expiresInMs: number }>("/bridge/pairing-code", { method: "POST" }),
@@ -336,6 +498,47 @@ export function regimeColor(kind: string): string {
   if (kind.includes("down")) return "text-red-400";
   if (kind === "volatile") return "text-amber-400";
   return "text-zinc-400";
+}
+
+/**
+ * Render a timestamp in the desk's chosen timezone.
+ *
+ * The Desk defaults to Africa/Nairobi (EAT, UTC+3) because that is where it is
+ * operated from. Previously every time was rendered in the *browser's*
+ * timezone, which silently disagreed with the user's mental clock whenever
+ * they travelled or used a VPS — and made a correct news time look wrong.
+ */
+export function formatInZone(
+  ts: number,
+  timeZone: string,
+  options: Intl.DateTimeFormatOptions,
+): string {
+  try {
+    return new Intl.DateTimeFormat("en-GB", { ...options, timeZone }).format(new Date(ts));
+  } catch {
+    return new Intl.DateTimeFormat("en-GB", options).format(new Date(ts));
+  }
+}
+
+/** Short timezone label for the given instant, e.g. "EAT" for Nairobi. */
+export function zoneAbbreviation(ts: number, timeZone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "short" }).formatToParts(new Date(ts));
+    return parts.find((part) => part.type === "timeZoneName")?.value ?? timeZone;
+  } catch {
+    return timeZone;
+  }
+}
+
+/** Human-readable countdown: "in 4h 1m", "in 12m", "now", "18m ago". */
+export function countdown(target: number, now = Date.now()): string {
+  const diff = target - now;
+  const abs = Math.abs(diff);
+  const hours = Math.floor(abs / 3_600_000);
+  const minutes = Math.floor((abs % 3_600_000) / 60_000);
+  const label = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+  if (Math.abs(diff) < 60_000) return "now";
+  return diff > 0 ? `in ${label}` : `${label} ago`;
 }
 
 export function relativeTime(ts: number): string {

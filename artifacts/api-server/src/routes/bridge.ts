@@ -14,6 +14,13 @@ import { logger } from "../lib/logger";
 import { getBrowserSessionId } from "../lib/session";
 import { recordOutcome } from "../lib/multiasset/risk";
 import {
+  barTimestampUsable,
+  feedHealth,
+  quoteTimestampUsable,
+  updateClockSkew,
+} from "../lib/multiasset/integrity";
+import { broadcastSSE } from "../lib/sse";
+import {
   acknowledgeResult,
   applyAccount,
   candleKey,
@@ -22,6 +29,7 @@ import {
   expirePlans,
   getDesk,
   journal,
+  pruneDeselectedSymbols,
   reconcilePositions,
   requeueStaleCommands,
   revokeBridgeToken,
@@ -30,6 +38,7 @@ import {
   issueBridgeToken,
   type DeskState,
 } from "../lib/multiasset/store";
+import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
 import {
   ASSET_CLASSES,
   TIMEFRAMES,
@@ -43,6 +52,7 @@ import {
   type Position,
   type Quote,
   type SymbolSpec,
+  type SyncClock,
   type SyncResponse,
   type Timeframe,
 } from "../lib/multiasset/types";
@@ -281,7 +291,7 @@ function parseQuote(raw: unknown): Quote | null {
   return { symbol, bid, ask, spreadPoints: num(r.spreadPoints), ts: num(r.ts, Date.now()) };
 }
 
-function parseBars(raw: unknown): Bar[] {
+function parseBars(raw: unknown, timestampUsable?: (time: number) => boolean): Bar[] {
   if (!Array.isArray(raw)) return [];
   const out: Bar[] = [];
   for (const entry of raw) {
@@ -289,9 +299,26 @@ function parseBars(raw: unknown): Bar[] {
     const bar = entry.slice(0, 6).map((v) => num(v));
     while (bar.length < 6) bar.push(0);
     if (!(bar[0] > 0) || !(bar[4] > 0)) continue;
+    // Drop bars whose timestamp cannot be real. A broker clock reset or a
+    // timezone bug otherwise injects candles from the future or from years ago
+    // into the middle of a series, which corrupts every indicator downstream.
+    if (timestampUsable && !timestampUsable(bar[0])) continue;
     out.push(bar as Bar);
   }
   return out;
+}
+
+/** Parse the terminal's clock context. Tolerant: absent means "unknown". */
+function parseClock(raw: unknown): SyncClock | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const terminalUtcMs = num(r.terminalUtcMs, NaN);
+  if (!Number.isFinite(terminalUtcMs) || terminalUtcMs <= 0) return null;
+  return {
+    serverUtcOffsetSeconds: Math.round(num(r.serverUtcOffsetSeconds, 0)),
+    terminalUtcMs,
+    label: typeof r.label === "string" ? r.label.slice(0, 64) : undefined,
+  };
 }
 
 function parseResult(raw: unknown): CommandResult | null {
@@ -397,15 +424,50 @@ router.post("/sync", (req, res) => {
     }
   }
 
+  // ── Clock ────────────────────────────────────────────────────────────────
+  // The EA now converts terminal timestamps to UTC before sending them, but a
+  // terminal whose clock is wrong will still produce unusable timestamps.
+  // Measuring the offset here is what lets the desk tell "this quote is 3
+  // seconds old" from "this terminal thinks it is 1998".
+  const clock = parseClock(body.clock);
+  if (clock) updateClockSkew(desk, clock.terminalUtcMs, now);
+
   if (Array.isArray(body.quotes)) {
+    let accepted = 0;
+    let rejected = 0;
     for (const raw of body.quotes) {
       const quote = parseQuote(raw);
-      if (!quote) continue;
+      if (!quote) {
+        rejected++;
+        continue;
+      }
+      // A quote timestamped hours away from now cannot be a real tick. Keeping
+      // it would pin the symbol's freshness check permanently open or shut.
+      if (!quoteTimestampUsable(desk, quote, now)) {
+        rejected++;
+        continue;
+      }
       desk.quotes.set(quote.symbol, quote);
       const spec = desk.specs.get(quote.symbol);
       if (spec) spec.spreadPoints = quote.spreadPoints;
+      accepted++;
+    }
+    if (rejected > 0) {
+      // Loud, but only once per heartbeat — a permanently misclocked terminal
+      // is a support problem the user must be able to see.
+      logger.warn({ accepted, rejected, skewMs: desk.clockSkewMs }, "MT5 heartbeat quotes rejected on timestamp sanity");
+    }
+    if (accepted > 0) {
+      const ages = desk.watchlist
+        .map((symbol) => feedHealth(desk, symbol, now).ageMs)
+        .filter((age): age is number => typeof age === "number");
+      desk.lastQuoteAgeMs = ages.length > 0 ? Math.round(Math.max(...ages)) : null;
     }
   }
+
+  // Symbols the user has deselected must stop contributing quotes, specs and
+  // candles immediately, or their last price lingers on screen as if live.
+  pruneDeselectedSymbols(desk);
 
   if (Array.isArray(body.candles)) {
     for (const raw of body.candles) {
@@ -414,7 +476,7 @@ router.post("/sync", (req, res) => {
       const symbol = String(r.symbol ?? "");
       const timeframe = String(r.timeframe ?? "");
       if (!symbol || !(TIMEFRAMES as readonly string[]).includes(timeframe)) continue;
-      const bars = parseBars(r.bars);
+      const bars = parseBars(r.bars, (time) => barTimestampUsable(desk, time, now));
       if (bars.length > 0) upsertCandles(desk, { symbol, timeframe: timeframe as Timeframe, bars });
     }
   }
@@ -469,6 +531,17 @@ router.post("/sync", (req, res) => {
       return !series || series.bars.length < 60;
     }));
 
+  // ── Push the new prices to the browser immediately ───────────────────────
+  // The Desk used to be polled every 4 s, so a quote could be four seconds
+  // old before it was even rendered and up to a full rotation old on symbols
+  // the EA had not reached yet. The moment the terminal's heartbeat lands, the
+  // browser gets it.
+  try {
+    broadcastSSE("desk", deskSummary(desk, now), desk.sessionId);
+  } catch (err) {
+    logger.debug({ err }, "Desk stream broadcast failed");
+  }
+
   const response: SyncResponse = {
     serverTime: now,
     commands: drainOutbox(desk),
@@ -509,6 +582,8 @@ router.get("/status", (_req, res) => {
     selectedCount: desk.watchlist.length,
     calendarAvailable: desk.news.available,
     calendarAgeMs: desk.news.checkedAt ? Date.now() - desk.news.checkedAt : null,
+    clockSkewMs: desk.clockSkewMs,
+    lastQuoteAgeMs: desk.lastQuoteAgeMs,
   });
 });
 

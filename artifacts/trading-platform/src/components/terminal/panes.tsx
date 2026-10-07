@@ -22,12 +22,12 @@ import {
   Search,
   ShieldAlert,
   XCircle,
+  Zap,
 } from "lucide-react";
 import {
   ASSET_CLASSES,
   ASSET_CLASS_LABELS,
   DEFAULT_DESK_TIMEZONE,
-  DESK_TIMEFRAMES,
   countdown,
   formatInZone,
   formatMoney,
@@ -36,7 +36,6 @@ import {
   relativeTime,
   zoneAbbreviation,
   type AgentDecision,
-  type Bar,
   type EvidenceResult,
   type DeskPerformance,
   type DeskStateResponse,
@@ -48,6 +47,7 @@ import {
   type NewsFeed,
   type Position,
   type ScanRow,
+  type UpcomingNewsEvent,
 } from "@/lib/desk";
 
 export function Pane({
@@ -404,7 +404,57 @@ function QuoteMetric({ label, value }: { label: string; value: string }) {
 
 // ── Scanner ──────────────────────────────────────────────────────────────────
 
-export function ScannerPane({ rows, onSelect, selected }: { rows: ScanRow[]; onSelect: (symbol: string) => void; selected: string }) {
+/**
+ * Live scanner, with the automatic best-market pass reported at the top.
+ *
+ * When auto-trade is on the desk is not waiting for a click: it ranks every
+ * selected market and arms the best. This banner is where that decision is
+ * accounted for — including the passes that armed nothing, which name the
+ * closest miss so "why is it not trading?" is answered on screen.
+ */
+export function ScannerPane({
+  rows,
+  onSelect,
+  selected,
+  autoSelect,
+}: {
+  rows: ScanRow[];
+  onSelect: (symbol: string) => void;
+  selected: string;
+  autoSelect?: DeskStateResponse["autoSelect"] | null;
+}) {
+  const last = autoSelect?.last ?? null;
+  return (
+    <div>
+      {last && (
+        <div className={`border-b border-zinc-900 px-3 py-2 text-[10px] leading-snug ${last.chosen ? "text-emerald-200/90" : "text-zinc-400"}`} data-testid="auto-select-report">
+          <div className="flex items-center gap-1.5">
+            <Zap className={`h-3 w-3 shrink-0 ${last.chosen ? "text-emerald-400" : "text-zinc-600"}`} />
+            <span className="font-semibold uppercase tracking-wider text-[9px] text-zinc-500">Auto-select · {last.mode}</span>
+            <span className="ml-auto font-mono text-[9px] text-zinc-600">{relativeTime(last.at)}</span>
+          </div>
+          <p className="mt-1">{last.reason}</p>
+          {last.ranked.length > 0 && (
+            <div className="mt-1 flex flex-wrap gap-1">
+              {last.ranked.slice(0, 4).map((row) => (
+                <span
+                  key={row.symbol}
+                  className={`rounded border px-1 py-px font-mono text-[9px] ${row.armed ? "border-emerald-500/40 text-emerald-300" : "border-zinc-800 text-zinc-500"}`}
+                  title={`quality ${row.score} · grade ${row.grade}${row.expectancyR === null ? "" : ` · E ${row.expectancyR.toFixed(2)}R`}`}
+                >
+                  {row.symbol}{row.expectancyR === null ? "" : ` ${row.expectancyR >= 0 ? "+" : ""}${row.expectancyR.toFixed(2)}R`}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      <ScannerPaneRows rows={rows} onSelect={onSelect} selected={selected} />
+    </div>
+  );
+}
+
+function ScannerPaneRows({ rows, onSelect, selected }: { rows: ScanRow[]; onSelect: (symbol: string) => void; selected: string }) {
   if (rows.length === 0) return <p className="p-4 text-xs text-zinc-500">Select broker markets to start live coverage and scanning.</p>;
   return (
     <ul className="max-h-[32rem] divide-y divide-zinc-900 overflow-auto [scrollbar-width:thin]">
@@ -558,46 +608,73 @@ function Stat({ label, value }: { label: string; value: string }) { return <div 
 // ── Red-folder calendar ──────────────────────────────────────────────────────
 
 /**
- * Red-folder calendar.
+ * Red-folder calendar — the NEXT 24 HOURS.
  *
- * Every time here is rendered in the desk's configured timezone (Nairobi EAT
- * by default) and labelled with that zone's abbreviation, so a countdown can
- * never be silently interpreted in the wrong clock.
+ * The window is the next 24 hours of high-impact events, in the order they will
+ * happen, and it is decided by the server (`upcomingRedFolder`) so this pane,
+ * the agent's news gate and the journal all describe the same window. Until
+ * now the pane listed whatever the feed carried, capped at twelve rows, with a
+ * "-30 minutes" cutoff decided here in the browser — which is why the next
+ * red-folder release could be missing while a past one was still on screen.
  *
- * The zone is explicit rather than "local" because MT5 calendar times arrive
- * in the broker's trade-server timezone: without an explicit zone the same
- * event reads differently on a laptop, a phone and a VPS.
+ * Every time is rendered in the desk's configured timezone (Nairobi EAT by
+ * default) and labelled with that zone's abbreviation, so a countdown can never
+ * be silently interpreted in the wrong clock. MT5 calendar times arrive in the
+ * broker's trade-server timezone: without an explicit zone the same event reads
+ * differently on a laptop, a phone and a VPS.
  */
-export function NewsPane({ feed, timeZone = DEFAULT_DESK_TIMEZONE }: { feed: NewsFeed; timeZone?: string }) {
+export function NewsPane({
+  feed,
+  upcoming,
+  timeZone = DEFAULT_DESK_TIMEZONE,
+}: {
+  feed: NewsFeed;
+  upcoming?: UpcomingNewsEvent[];
+  timeZone?: string;
+}) {
   const now = Date.now();
-  const events = feed.events.filter((event) => event.time >= now - 30 * 60_000).slice(0, 12);
-  if (!feed.available) return <div className="flex gap-2 p-3 text-[11px] leading-relaxed text-amber-300"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{feed.detail || "MT5 economic calendar is unavailable. New entries are paused until it is available."}</span></div>;
+  const events = upcoming ?? [];
+  if (!feed.available) {
+    return (
+      <div className="flex gap-2 p-3 text-[11px] leading-relaxed text-amber-300">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>{feed.detail || "MT5 economic calendar is unavailable. New entries are paused until it is available."}</span>
+      </div>
+    );
+  }
   return (
     <div className="divide-y divide-zinc-900">
-      <p className="flex items-center gap-1 px-3 pt-2 text-[9px] uppercase tracking-wider text-zinc-600">
-        <Globe className="h-3 w-3" />
-        All times {zoneAbbreviation(now, timeZone)} · {timeZone.replace("_", " ")}
-      </p>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 text-[9px] uppercase tracking-wider text-zinc-600">
+        <span className="flex items-center gap-1"><Globe className="h-3 w-3" />Next 24 h · {events.length} red-folder {events.length === 1 ? "event" : "events"}</span>
+        <span className="text-zinc-700">·</span>
+        <span>{zoneAbbreviation(now, timeZone)} · {timeZone.replace("_", " ")}</span>
+      </div>
       {events.length === 0
-        ? <p className="p-4 text-xs text-zinc-500">No high-impact events in the current MT5 calendar window.</p>
+        ? <p className="p-4 text-xs text-zinc-500">No high-impact events in the next 24 hours. The gate stays armed — the calendar is refreshed by the terminal every minute.</p>
         : events.map((event) => <NewsRow key={event.id} event={event} timeZone={timeZone} />)}
-      <p className="flex items-center gap-1.5 px-3 py-2 text-[9px] text-zinc-600"><Clock3 className="h-3 w-3" />Calendar checked {feed.checkedAt ? relativeTime(feed.checkedAt) : "never"} · new entries fail closed if this feed goes stale.</p>
+      <p className="flex items-center gap-1.5 px-3 py-2 text-[9px] text-zinc-600">
+        <Clock3 className="h-3 w-3" />Calendar checked {feed.checkedAt ? relativeTime(feed.checkedAt) : "never"} · new entries fail closed if this feed goes stale.
+      </p>
     </div>
   );
 }
 
-function NewsRow({ event, timeZone }: { event: HighImpactNewsEvent; timeZone: string }) {
+function NewsRow({ event, timeZone }: { event: UpcomingNewsEvent; timeZone: string }) {
   const now = Date.now();
   const timing = countdown(event.time, now);
   const local = formatInZone(event.time, timeZone, { weekday: "short", hour: "2-digit", minute: "2-digit" });
-  const imminent = event.time - now < 30 * 60_000 && event.time >= now - 15 * 60_000;
+  // The blackout the news gate actually applies starts 30 minutes before a
+  // release (20 for a scalp, 20 for a swing). Showing it on the row means the
+  // user can see the window closing rather than discovering it in a rejection.
+  const imminent = event.time - now <= 30 * 60_000 && event.time >= now - 15 * 60_000;
   return (
-    <div className="flex gap-2 px-3 py-2">
+    <div className={`flex gap-2 px-3 py-2 ${event.next ? "bg-red-500/5" : ""}`}>
       <CalendarDays className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${imminent ? "text-red-400" : "text-red-400/70"}`} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <span className="rounded bg-red-500/15 px-1 text-[9px] font-bold text-red-300">{event.currency || "HIGH"}</span>
           <span className="truncate text-[11px] text-zinc-200">{event.name}</span>
+          {event.next && <span className="shrink-0 rounded border border-red-500/40 px-1 text-[8px] uppercase tracking-wider text-red-300">next</span>}
         </div>
         <p className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-[9px] text-zinc-500">
           <span className="font-mono text-zinc-400">{local}</span>
@@ -608,138 +685,6 @@ function NewsRow({ event, timeZone }: { event: HighImpactNewsEvent; timeZone: st
       </div>
     </div>
   );
-}
-
-// ── Price chart ──────────────────────────────────────────────────────────────
-
-/**
- * Candlestick chart of the selected asset, with the armed plan's levels.
- *
- * Fills the empty space the news calendar used to leave on wide screens with
- * the thing a trading desk most wants next to its risk numbers: the price it
- * is actually trading.
- *
- * Drawn as inline SVG rather than pulled from a charting library — the Desk's
- * data is the broker's own candles and it must render identically offline, in
- * an iframe, and on a phone without another network dependency.
- */
-export function PriceChartPane({
-  symbol,
-  series,
-  timeframe,
-  onTimeframeChange,
-  plan,
-  digits,
-  timeZone = DEFAULT_DESK_TIMEZONE,
-}: {
-  symbol: string;
-  series: Bar[] | null;
-  timeframe: string;
-  onTimeframeChange: (timeframe: string) => void;
-  plan: ArmedPlanView | null;
-  digits: number | null;
-  timeZone?: string;
-}) {
-  const bars = useMemo(() => (series ?? []).slice(-90), [series]);
-
-  if (!bars.length) {
-    return <p className="p-4 text-xs leading-relaxed text-zinc-500">Waiting for the terminal to stream {symbol} candles on this timeframe.</p>;
-  }
-
-  const highs = bars.map((bar) => bar[2]);
-  const lows = bars.map((bar) => bar[3]);
-  const rawHigh = Math.max(...highs);
-  const rawLow = Math.min(...lows);
-  const pad = (rawHigh - rawLow) * 0.08 || rawHigh * 0.001 || 1;
-  const top = rawHigh + pad;
-  const bottom = rawLow - pad;
-  const span = top - bottom || 1;
-
-  const width = 320;
-  const height = 150;
-  const candleWidth = Math.max(1.2, (width / bars.length) * 0.62);
-  const last = bars[bars.length - 1][4];
-  const first = bars[0][4];
-  const rising = last >= first;
-
-  const y = (price: number) => height - ((price - bottom) / span) * height;
-  const x = (index: number) => (index + 0.5) * (width / bars.length);
-
-  const levelY = (price: number) => (price >= bottom && price <= top ? y(price) : null);
-
-  return (
-    <div className="p-3">
-      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-baseline gap-2">
-          <span className="font-mono text-[11px] text-zinc-300">{symbol}</span>
-          <span className={`font-mono text-[13px] font-semibold ${rising ? "text-emerald-400" : "text-red-400"}`}>
-            {last.toFixed(digits ?? 2)}
-          </span>
-        </div>
-        <div className="flex flex-wrap gap-0.5">
-          {DESK_TIMEFRAMES.map((tf) => (
-            <button
-              key={tf}
-              type="button"
-              onClick={() => onTimeframeChange(tf)}
-              className={`rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${tf === timeframe ? "bg-emerald-600 text-white" : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"}`}
-            >
-              {tf}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      <svg viewBox={`0 0 ${width} ${height}`} className="h-40 w-full" preserveAspectRatio="none" role="img" aria-label={`${symbol} ${timeframe} candlestick chart`}>
-        {plan?.sl !== undefined && levelY(plan.sl) !== null && (
-          <line x1={0} x2={width} y1={levelY(plan.sl) as number} y2={levelY(plan.sl) as number} stroke="#f87171" strokeWidth={0.8} strokeDasharray="4 3" />
-        )}
-        {plan?.tp !== undefined && levelY(plan.tp) !== null && (
-          <line x1={0} x2={width} y1={levelY(plan.tp) as number} y2={levelY(plan.tp) as number} stroke="#34d399" strokeWidth={0.8} strokeDasharray="4 3" />
-        )}
-        {plan?.trigger !== undefined && levelY(plan.trigger) !== null && (
-          <line x1={0} x2={width} y1={levelY(plan.trigger) as number} y2={levelY(plan.trigger) as number} stroke="#a1a1aa" strokeWidth={0.8} strokeDasharray="2 3" />
-        )}
-
-        {bars.map((bar, index) => {
-          const open = bar[1];
-          const close = bar[4];
-          const up = close >= open;
-          const colour = up ? "#34d399" : "#fb7185";
-          const bodyTop = y(Math.max(open, close));
-          const bodyBottom = y(Math.min(open, close));
-          return (
-            <g key={bar[0]}>
-              <line x1={x(index)} x2={x(index)} y1={y(bar[2])} y2={y(bar[3])} stroke={colour} strokeWidth={0.7} />
-              <rect
-                x={x(index) - candleWidth / 2}
-                y={bodyTop}
-                width={candleWidth}
-                height={Math.max(0.8, bodyBottom - bodyTop)}
-                fill={colour}
-                opacity={0.9}
-              />
-            </g>
-          );
-        })}
-      </svg>
-
-      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[9px] text-zinc-600">
-        <span>{formatInZone(bars[0][0], timeZone, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
-        <span className="flex items-center gap-2">
-          {plan?.sl !== undefined && <span className="text-red-400/80">SL {plan.sl.toFixed(digits ?? 2)}</span>}
-          {plan?.tp !== undefined && <span className="text-emerald-400/80">TP {plan.tp.toFixed(digits ?? 2)}</span>}
-        </span>
-        <span>{formatInZone(bars[bars.length - 1][0], timeZone, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
-      </div>
-    </div>
-  );
-}
-
-export interface ArmedPlanView {
-  trigger?: number;
-  sl?: number;
-  tp?: number;
 }
 
 // ── Realised performance ─────────────────────────────────────────────────────

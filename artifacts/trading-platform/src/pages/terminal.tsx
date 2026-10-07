@@ -38,7 +38,6 @@ import {
   Pane,
   PerformancePane,
   PositionsPane,
-  PriceChartPane,
   RiskPane,
   ScannerPane,
   WatchlistPane,
@@ -47,7 +46,8 @@ import { BridgeDialog } from "@/components/terminal/bridge-dialog";
 import { useDeskStream } from "@/hooks/use-desk-stream";
 import {
   DEFAULT_DESK_TIMEZONE,
-  MODE_ANALYSIS_TIMEFRAMES,
+  MODE_ANALYSIS_LABEL,
+  TRADE_MODES,
   deskApi,
   formatMoney,
   type Instrument,
@@ -56,22 +56,11 @@ import {
 
 const REFRESH_MS = 5_000;
 
-/**
- * Default chart timeframe per mode — the middle of that mode's analysis band.
- * A scalp chart wants the 2-minute candle; a swing chart wants the daily.
- */
-const CHART_TIMEFRAME: Record<TradeMode, string> = {
-  scalp: "M2",
-  intraday: "M15",
-  swing: "H1",
-};
-
 export default function Terminal() {
   const queryClient = useQueryClient();
   const [symbol, setSymbol] = useState("");
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [chartTimeframe, setChartTimeframe] = useState<string>("M15");
 
   const state = useQuery({
     queryKey: ["desk-state"],
@@ -115,12 +104,6 @@ export default function Terminal() {
     enabled: terminalLive && Boolean(symbol),
     refetchInterval: 20_000,
   });
-  const series = useQuery({
-    queryKey: ["desk-series", symbol],
-    queryFn: () => deskApi.series(symbol),
-    enabled: Boolean(terminal) && Boolean(symbol),
-    refetchInterval: 15_000,
-  });
   const scan = useQuery({
     queryKey: ["desk-scan", mode, selectedMarkets],
     queryFn: () => deskApi.scan(mode),
@@ -137,9 +120,6 @@ export default function Terminal() {
     if (!selectedMarkets.includes(symbol)) setSymbol(selectedMarkets[0] as string);
   }, [selectedMarkets, symbol]);
 
-  // Keep the chart on a timeframe that suits the selected mode.
-  useEffect(() => setChartTimeframe(CHART_TIMEFRAME[mode]), [mode]);
-
   useEffect(() => setActionError(null), [symbol, mode]);
 
   const invalidateDesk = useCallback(() => {
@@ -149,7 +129,6 @@ export default function Terminal() {
     queryClient.invalidateQueries({ queryKey: ["desk-analysis"] });
     queryClient.invalidateQueries({ queryKey: ["desk-scan"] });
     queryClient.invalidateQueries({ queryKey: ["desk-performance"] });
-    queryClient.invalidateQueries({ queryKey: ["desk-series"] });
   }, [queryClient]);
 
   const settings = useMutation({
@@ -251,15 +230,18 @@ export default function Terminal() {
 
           <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
             <div className="flex overflow-hidden rounded border border-zinc-800">
-              {["scalp", "intraday", "swing"].map((entry) => (
+              {TRADE_MODES.map((entry) => (
                 <button
-                  key={entry}
+                  key={entry.id}
                   type="button"
                   disabled={!terminalLive || settings.isPending}
-                  onClick={() => settings.mutate({ mode: entry })}
-                  className={`px-2 py-1 text-[10px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === entry ? "bg-emerald-600 text-white" : "text-zinc-400 hover:bg-zinc-900"}`}
+                  onClick={() => settings.mutate({ mode: entry.id })}
+                  title={`${entry.label} — monitors ${entry.blurb}, and looks for the best of your selected markets in that band`}
+                  className={`px-2 py-1 text-[10px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === entry.id ? "bg-emerald-600 text-white" : "text-zinc-400 hover:bg-zinc-900"}`}
+                  data-testid={`mode-${entry.id}`}
                 >
-                  {entry === "intraday" ? "Day" : entry[0]?.toUpperCase() + entry.slice(1)}
+                  {entry.label}
+                  <span className={`ml-1 font-mono text-[9px] ${mode === entry.id ? "text-emerald-100/80" : "text-zinc-600"}`}>{MODE_ANALYSIS_LABEL[entry.id]}</span>
                 </button>
               ))}
             </div>
@@ -349,40 +331,11 @@ export default function Terminal() {
               <Pane title="Selected live coverage" right={<span className="font-mono text-[10px] text-zinc-600">{state.data?.market.liveSymbols ?? 0}/{state.data?.market.selectedCount ?? 0} fresh</span>}>
                 <WatchlistPane instruments={liveInstruments} selected={symbol} onSelect={setSymbol} />
               </Pane>
-              <Pane title="Performance" right={<span className="font-mono text-[10px] text-zinc-600">{performance.data?.overall.trades ?? 0} closed</span>}>
-                <PerformancePane
-                  performance={performance.data ?? null}
-                  currency={liveAccount?.currency ?? "USD"}
-                  timeZone={timeZone}
-                />
-              </Pane>
             </div>
 
             <div className="space-y-3 lg:col-span-5 xl:col-span-5">
               <Pane title="Live market pulse" right={selectedInstrument ? <span className="font-mono text-[10px] text-zinc-600">broker feed</span> : undefined}>
                 <LiveQuotePane instrument={selectedInstrument} />
-              </Pane>
-              <Pane
-                title={symbol ? `${symbol} · price action` : "Price action"}
-                right={<span className="font-mono text-[10px] text-zinc-600">{chartTimeframe} · {MODE_ANALYSIS_TIMEFRAMES[mode].join("/")}</span>}
-              >
-                <PriceChartPane
-                  symbol={symbol || "—"}
-                  series={series.data?.series?.[chartTimeframe] ?? null}
-                  timeframe={chartTimeframe}
-                  onTimeframeChange={setChartTimeframe}
-                  digits={selectedInstrument?.digits ?? series.data?.spec?.digits ?? null}
-                  timeZone={timeZone}
-                  plan={
-                    livePlans.find((plan) => plan.symbol === symbol)
-                      ? {
-                          trigger: livePlans.find((plan) => plan.symbol === symbol)!.trigger,
-                          sl: livePlans.find((plan) => plan.symbol === symbol)!.sl,
-                          tp: livePlans.find((plan) => plan.symbol === symbol)!.tp[0],
-                        }
-                      : null
-                  }
-                />
               </Pane>
               <Pane title={symbol ? `Agent assessment · ${symbol}` : "Agent assessment"} right={<span className="text-[9px] uppercase tracking-wider text-zinc-600">{mode}</span>}>
                 <AgentPane
@@ -398,7 +351,12 @@ export default function Terminal() {
                 right={<button type="button" disabled={!terminalLive} onClick={() => scan.refetch()} className="text-zinc-500 transition-colors hover:text-zinc-200 disabled:opacity-40" aria-label="Rescan selected markets"><RefreshCw className={`h-3.5 w-3.5 ${scan.isFetching ? "animate-spin" : ""}`} /></button>}
               >
                 {scan.data?.coverage && <p className="border-b border-zinc-900 px-3 py-2 text-[10px] text-zinc-600">{scan.data.coverage.live} fresh · {scan.data.coverage.warming} warming · {scan.data.coverage.stale} stale / {scan.data.coverage.selected} selected</p>}
-                <ScannerPane rows={scan.data?.results ?? []} onSelect={setSymbol} selected={symbol} />
+                <ScannerPane
+                  rows={scan.data?.results ?? []}
+                  onSelect={setSymbol}
+                  selected={symbol}
+                  autoSelect={state.data?.autoSelect ?? null}
+                />
               </Pane>
             </div>
 
@@ -414,7 +372,11 @@ export default function Terminal() {
                 title="Red-folder calendar"
                 right={<span className={`rounded border px-1 py-px text-[8px] uppercase ${state.data?.news.available ? "border-emerald-500/30 text-emerald-300" : "border-amber-500/40 text-amber-300"}`}>{state.data?.news.available ? "MT5 calendar" : "paused"}</span>}
               >
-                <NewsPane feed={state.data?.news ?? { available: false, checkedAt: 0, events: [] }} timeZone={timeZone} />
+                <NewsPane
+                  feed={state.data?.news ?? { available: false, checkedAt: 0, events: [] }}
+                  upcoming={state.data?.newsUpcoming ?? []}
+                  timeZone={timeZone}
+                />
               </Pane>
               {/* Fills the column the calendar used to leave short on desktop
                   with the two things a desk wants next to its risk numbers:
@@ -452,9 +414,6 @@ function EmptyDesk({ onConnect }: { onConnect: () => void }) {
         <InfoStep number="2" title="Pair securely">Add this platform origin to MT5’s WebRequest allowlist and paste the one-time pairing code. No MT5 password leaves your terminal.</InfoStep>
         <InfoStep number="3" title="Select broker markets">The EA discovers the complete broker catalogue. Choose any number of forex, crypto, indices, stocks, metals, futures or other supported symbols.</InfoStep>
       </div>
-      <p className="mt-5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3 text-[11px] leading-relaxed text-zinc-500">
-        <strong className="text-zinc-300">Upgrading from v2?</strong> Download the EA again after this release. v3 fixes timestamps being sent in the broker’s server timezone instead of UTC (which is why news showed the wrong time), streams every selected symbol’s tick on every heartbeat instead of rotating them, and adds the M2, M3 and W1 timeframes the scalp and swing modes analyse.
-      </p>
     </section>
   );
 }

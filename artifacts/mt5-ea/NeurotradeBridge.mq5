@@ -2,7 +2,44 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 2.00                                                     |
+//| Version 3.01                                                     |
+//|                                                                    |
+//| WHAT CHANGED IN v3.00                                             |
+//|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
+//|     MT5 reports ticks (MqlTick.time_msc), bars (CopyRates.time)   |
+//|     and economic-calendar events (MqlCalendarValue.time) in the   |
+//|     broker's TRADE SERVER timezone, not UTC. Sending those raw    |
+//|     values as epoch milliseconds shifts every timestamp by the    |
+//|     server's GMT offset — usually 2-3 hours. That is why news     |
+//|     showed the wrong time and why quotes read as impossibly       |
+//|     fresh or permanently stale. All three are now converted with  |
+//|     TimeTradeServer() - TimeGMT() before they leave the terminal.  |
+//|  2. QUOTES ARE SENT FOR EVERY SELECTED SYMBOL ON EVERY HEARTBEAT.  |
+//|     Ticks are tiny; rotating them in batches meant a symbol could |
+//|     go many seconds between updates while the Desk kept painting  |
+//|     its last known price as if it were live. Only candles — the   |
+//|     genuinely large payload — are still batched.                   |
+//|  3. STALE TICKS ARE DROPPED AT SOURCE.                            |
+//|     A symbol that Market Watch is not subscribed to returns a     |
+//|     cached tick, sometimes hours old. We now select the symbol,   |
+//|     read the tick, check its age and refuse to ship anything the  |
+//|     terminal itself considers old.                                 |
+//|  4. M2, M3 AND W1 TIMEFRAMES ADDED.                               |
+//|     Scalps are analysed on 3-minute-and-below structure (M1-M3),  |
+//|     swing trades from H1 to W1. The old fixed 7-timeframe set     |
+//|     could not express either.                                      |
+//|                                                                    |
+//| WHAT CHANGED IN v3.01                                             |
+//|  5. ONE ACCOUNT, ONE DESK.                                        |
+//|     The platform now refuses to pair an account that is already    |
+//|     connected in another browser: two Desks on one account would   |
+//|     stream the same balance, arm plans against it independently    |
+//|     and each could flatten positions the other believed it owned.  |
+//|     A refused pairing no longer burns the pairing code — the       |
+//|     reason is printed once and retried slowly, so the terminal     |
+//|     connects by itself as soon as the other Desk lets go. A        |
+//|     terminal whose account has since been taken over is told to    |
+//|     stop on its next heartbeat instead of sharing the balance.     |
 //|                                                                    |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
@@ -20,7 +57,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "2.00"
+#property version   "3.01"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -28,8 +65,9 @@
 //--- Connection and coverage ---------------------------------------------------
 input string ServerUrl                 = "";     // Platform origin only; do not append /api
 input string PairingCode               = "";     // One-time code from the Desk
-input int    SyncIntervalMs            = 1000;   // Heartbeat; 500-10000 ms
-input int    SymbolsPerHeartbeat       = 24;     // Rotating batch, not a selection cap
+input int    SyncIntervalMs            = 500;    // Heartbeat; 250-10000 ms (ticks push every beat)
+input int    SymbolsPerHeartbeat       = 12;     // CANDLE batch per beat, not a selection cap
+input bool   SendAllQuotesEachBeat     = true;   // Stream every selected symbol's tick every beat
 input int    HistoryBars               = 220;    // Initial bars per selected symbol/timeframe
 input int    DeltaBars                 = 4;      // Forming + recent bars after seed
 
@@ -47,9 +85,13 @@ input bool   VerboseLog                = true;
 #define MAX_SEEN_CMDS  512
 #define NEWS_REFRESH_SECONDS 60
 
-ENUM_TIMEFRAMES TF_LIST[7] = {PERIOD_M1, PERIOD_M5, PERIOD_M15, PERIOD_M30,
-                              PERIOD_H1, PERIOD_H4, PERIOD_D1};
-string TF_NAMES[7] = {"M1", "M5", "M15", "M30", "H1", "H4", "D1"};
+// M2/M3 exist so a scalp book can be analysed on 3-minute-and-below structure;
+// W1 so a swing book can see the weekly candle it is actually held against.
+#define TF_COUNT 10
+ENUM_TIMEFRAMES TF_LIST[TF_COUNT] = {PERIOD_M1, PERIOD_M2, PERIOD_M3, PERIOD_M5,
+                                     PERIOD_M15, PERIOD_M30, PERIOD_H1, PERIOD_H4,
+                                     PERIOD_D1, PERIOD_W1};
+string TF_NAMES[TF_COUNT] = {"M1", "M2", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1"};
 
 struct ArmedPlan
 {
@@ -88,6 +130,11 @@ bool      g_liveTradingEnabled = false;
 double    g_dayStartEquity = 0;
 int       g_dayStamp = -1;
 string    g_results = "";
+// Status and server-supplied `error` of the most recent HTTP call. Pairing
+// needs them to tell "this account is already connected elsewhere" (409) apart
+// from an ordinary network failure, which must keep retrying quickly.
+int       g_lastHttpStatus = 0;
+string    g_lastHttpError = "";
 
 // Dynamically sized: users may select any number of instruments. Data is sent
 // in rotating batches so an enormous selection does not create a giant request
@@ -193,7 +240,21 @@ void TryPair()
    body += "\"catalog\":" + CatalogJson() + "}";
 
    string response = "";
-   if(!HttpPost("/api/bridge/pair", body, response, false)) return;
+   if(!HttpPost("/api/bridge/pair", body, response, false))
+   {
+      // HTTP 409: this MT5 account is already connected to another Desk. The
+      // server keeps the pairing code alive precisely so we can keep retrying
+      // with the same value, so back off instead of hammering it every 5s and
+      // print the server's own explanation once, where the user will see it.
+      if(g_lastHttpStatus == 409)
+      {
+         g_nextPairAttempt = now + 60;
+         Print("NeurotradeBridge: PAIRING REFUSED — ", (g_lastHttpError == "" ? "this MT5 account is already connected in another browser." : g_lastHttpError));
+         Print("NeurotradeBridge: open the Desk that holds account ", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
+               "@", AccountInfoString(ACCOUNT_SERVER), " and unlink it, or wait a few minutes. Retrying in 60s with the same code.");
+      }
+      return;
+   }
 
    string token = JsonString(response, "bridgeToken");
    if(token == "")
@@ -213,6 +274,11 @@ bool HttpPost(const string path, const string body, string &response, const bool
 {
    string base = NormalisedServerUrl();
    if(base == "") return false;
+
+   // Clear before every attempt: a transport failure must never leave the
+   // previous call's status behind and be mistaken for a fresh refusal.
+   g_lastHttpStatus = 0;
+   g_lastHttpError = "";
 
    string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
    if(authenticated && g_token != "") headers += "Authorization: Bearer " + g_token + "\r\n";
@@ -237,6 +303,11 @@ bool HttpPost(const string path, const string body, string &response, const bool
    }
 
    response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   // Published for callers that need to distinguish a refusal (409) from a
+   // transport failure. MQL5 forbids default values on reference parameters,
+   // so this is the clean way to hand the status back to TryPair().
+   g_lastHttpStatus = status;
+   g_lastHttpError = JsonString(response, "error");
    if(status < 200 || status >= 300)
    {
       Print("NeurotradeBridge: HTTP ", status, " from ", path, " — ", response);
@@ -253,6 +324,49 @@ bool HttpPost(const string path, const string body, string &response, const bool
 }
 
 //+------------------------------------------------------------------+
+//| Timezone correction                                              |
+//|                                                                  |
+//| MetaTrader reports ticks (MqlTick.time_msc), bars                |
+//| (CopyRates().time) and calendar events (MqlCalendarValue.time)   |
+//| in the broker's TRADE SERVER timezone. Consumed as epoch         |
+//| milliseconds they are wrong by the server's GMT offset — usually |
+//| two or three hours — which is what made news show the wrong      |
+//| local time and made quotes look either impossibly fresh or       |
+//| permanently stale.                                               |
+//|                                                                  |
+//| The correction is measured live rather than hard-coded, so it    |
+//| survives brokers on any offset and follows DST automatically.    |
+//| In the strategy tester TimeGMT() equals the simulated server      |
+//| time, so the offset is 0 there and nothing changes.              |
+//+------------------------------------------------------------------+
+int ServerUtcOffsetSeconds()
+{
+   long offset = (long)TimeTradeServer() - (long)TimeGMT();
+   if(offset > 86400) offset = 86400;
+   if(offset < -86400) offset = -86400;
+   return (int)offset;
+}
+
+/** Trade-server datetime -> true UTC epoch, in milliseconds. */
+long ToUtcMs(const datetime serverTime)
+{
+   return ((long)serverTime - (long)ServerUtcOffsetSeconds()) * 1000;
+}
+
+/** Trade-server tick clock (already in ms) -> true UTC epoch, in ms. */
+long TickToUtcMs(const long tickMsc, const long fallbackServerSeconds)
+{
+   if(tickMsc > 0) return tickMsc - (long)ServerUtcOffsetSeconds() * 1000;
+   return ToUtcMs((datetime)fallbackServerSeconds);
+}
+
+/** The terminal's current time as a true UTC epoch, in ms. */
+long NowUtcMs()
+{
+   return ToUtcMs(NowServer());
+}
+
+//+------------------------------------------------------------------+
 //| Sync: terminal truth in, guarded work out                        |
 //+------------------------------------------------------------------+
 void Sync()
@@ -265,9 +379,19 @@ void Sync()
    g_seq++;
    string body = "{";
    body += "\"seq\":" + IntegerToString(g_seq) + ",";
+   // Tell the server how this terminal's clock relates to UTC. Combined with
+   // the UTC-normalised timestamps below it lets the Desk detect a skewed
+   // clock instead of trusting (or silently mis-trusting) every tick.
+   body += "\"clock\":{\"serverUtcOffsetSeconds\":" + IntegerToString(ServerUtcOffsetSeconds())
+         + ",\"terminalUtcMs\":" + IntegerToString(NowUtcMs())
+         + ",\"label\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\"},";
    body += "\"account\":" + AccountJson() + ",";
    body += "\"specs\":" + SpecsJson(batch) + ",";
-   body += "\"quotes\":" + QuotesJson(batch) + ",";
+   // Quotes cover the whole selection on every beat; candles stay batched.
+   if(SendAllQuotesEachBeat)
+      body += "\"quotes\":" + QuotesJson(g_symbols) + ",";
+   else
+      body += "\"quotes\":" + QuotesJson(batch) + ",";
    body += "\"candles\":" + CandlesJson(batch) + ",";
    body += "\"news\":" + NewsJson() + ",";
    body += "\"positions\":" + PositionsJson() + ",";
@@ -277,7 +401,20 @@ void Sync()
    string response = "";
    if(!HttpPost("/api/bridge/sync", body, response, true))
    {
-      if(NowServer() - g_lastOk > StaleAfterSec) g_tradingEnabled = false;
+      // HTTP 409: this account has been connected to another Desk. The token is
+      // still valid, so this is the only place the handover can be enforced —
+      // continuing would mean two Desks streaming, arming and flattening one
+      // balance. Drop the token and stop trading; the user must re-pair here.
+      if(g_lastHttpStatus == 409)
+      {
+         Print("NeurotradeBridge: DISCONNECTED — ", (g_lastHttpError == "" ? "this MT5 account is now connected in another browser." : g_lastHttpError));
+         Print("NeurotradeBridge: this terminal has stopped trading to avoid two desks managing one balance. ",
+               "Unlink it there, then enter a fresh pairing code here.");
+         g_token = "";
+         g_tradingEnabled = false;
+         g_nextPairAttempt = 0;
+      }
+      else if(NowServer() - g_lastOk > StaleAfterSec) g_tradingEnabled = false;
       return;
    }
 
@@ -399,7 +536,7 @@ void UpdateSubscriptions(const string &next[])
 
 void ResetSeeding()
 {
-   int count = ArraySize(g_symbols) * 7;
+   int count = ArraySize(g_symbols) * TF_COUNT;
    ArrayResize(g_seeded, count);
    for(int i = 0; i < count; i++) g_seeded[i] = false;
 }
@@ -413,7 +550,7 @@ int SymbolIndex(const string symbol)
 
 int SeedIndex(const int symbolIndex, const int timeframeIndex)
 {
-   return symbolIndex * 7 + timeframeIndex;
+   return symbolIndex * TF_COUNT + timeframeIndex;
 }
 
 bool IsSeeded(const int symbolIndex, const int timeframeIndex)
@@ -466,22 +603,47 @@ string SpecsJson(const string &symbols[])
    return json;
 }
 
+/**
+ * Live ticks for the user's selected symbols.
+ *
+ * v3.00: this is called with the FULL selection on every heartbeat, not with a
+ * rotating batch. A tick is a handful of bytes; rotating them meant a symbol
+ * could wait several beats for a refresh while the Desk kept displaying its
+ * last known price as though it were current. Candles are still batched —
+ * they are the only payload big enough to be worth it.
+ *
+ * Two correctness guards, both added because a well-formed number can still be
+ * the wrong number:
+ *   - the symbol is selected in Market Watch first, because a symbol the
+ *     terminal is not subscribed to returns a CACHED tick, sometimes hours old;
+ *   - the tick's age is checked against StaleAfterSec, and an old tick is
+ *     dropped here rather than shipped for the server to police.
+ */
 string QuotesJson(const string &symbols[])
 {
    string json = "[";
    bool first = true;
+   long nowUtc = NowUtcMs();
    for(int i = 0; i < ArraySize(symbols); i++)
    {
+      string s = symbols[i];
+      SymbolSelect(s, true);
       MqlTick tick;
-      if(!SymbolInfoTick(symbols[i], tick) || tick.bid <= 0 || tick.ask <= 0) continue;
+      if(!SymbolInfoTick(s, tick) || tick.bid <= 0 || tick.ask <= 0) continue;
+
+      long utcMs = TickToUtcMs(tick.time_msc, (long)tick.time);
+      long ageMs = nowUtc - utcMs;
+      if(ageMs < 0) ageMs = -ageMs;
+      if(ageMs > (long)StaleAfterSec * 1000) continue;
+
       if(!first) json += ",";
       first = false;
-      long tickMs = tick.time_msc > 0 ? tick.time_msc : (long)tick.time * 1000;
-      json += "{\"symbol\":\"" + JsonEscape(symbols[i]) + "\",";
+      json += "{\"symbol\":\"" + JsonEscape(s) + "\",";
       json += "\"bid\":" + DoubleToString(tick.bid, 10) + ",";
       json += "\"ask\":" + DoubleToString(tick.ask, 10) + ",";
-      json += "\"spreadPoints\":" + IntegerToString(SymbolInfoInteger(symbols[i], SYMBOL_SPREAD)) + ",";
-      json += "\"ts\":" + IntegerToString(tickMs) + "}";
+      json += "\"spreadPoints\":" + IntegerToString(SymbolInfoInteger(s, SYMBOL_SPREAD)) + ",";
+      json += "\"ageMs\":" + IntegerToString(ageMs) + ",";
+      json += "\"ts\":" + IntegerToString(utcMs) + "}";
    }
    json += "]";
    return json;
@@ -495,7 +657,7 @@ string CandlesJson(const string &symbols[])
    {
       int sourceIndex = SymbolIndex(symbols[s]);
       if(sourceIndex < 0) continue;
-      for(int t = 0; t < 7; t++)
+      for(int t = 0; t < TF_COUNT; t++)
       {
          int want = IsSeeded(sourceIndex, t) ? (int)MathMax(2, DeltaBars) : (int)MathMax(60, HistoryBars);
          MqlRates rates[];
@@ -509,7 +671,7 @@ string CandlesJson(const string &symbols[])
          for(int b = 0; b < copied; b++)
          {
             if(b > 0) json += ",";
-            json += "[" + IntegerToString((long)rates[b].time * 1000) + "," +
+            json += "[" + IntegerToString(ToUtcMs(rates[b].time)) + "," +
                     DoubleToString(rates[b].open, 10) + "," +
                     DoubleToString(rates[b].high, 10) + "," +
                     DoubleToString(rates[b].low, 10) + "," +
@@ -563,7 +725,7 @@ string PositionsJson()
       json += "\"side\":\"" + (type == POSITION_TYPE_BUY ? "buy" : "sell") + "\",";
       json += "\"volume\":" + DoubleToString(PositionGetDouble(POSITION_VOLUME), 4) + ",";
       json += "\"openPrice\":" + DoubleToString(PositionGetDouble(POSITION_PRICE_OPEN), 10) + ",";
-      json += "\"openTime\":" + IntegerToString((long)PositionGetInteger(POSITION_TIME) * 1000) + ",";
+      json += "\"openTime\":" + IntegerToString(ToUtcMs((datetime)PositionGetInteger(POSITION_TIME))) + ",";
       json += "\"sl\":" + DoubleToString(PositionGetDouble(POSITION_SL), 10) + ",";
       json += "\"tp\":" + DoubleToString(PositionGetDouble(POSITION_TP), 10) + ",";
       json += "\"profit\":" + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) + ",";
@@ -590,7 +752,9 @@ void RefreshCalendar(const bool force)
 
    MqlCalendarValue values[];
    ResetLastError();
-   int count = CalendarValueHistory(values, now - 15 * 60, now + 2 * 60 * 60);
+   // A day of forward visibility: the Desk renders an upcoming-events list,
+   // and a two-hour window left it empty for most of the session.
+   int count = CalendarValueHistory(values, now - 15 * 60, now + 24 * 60 * 60);
    if(count < 0)
    {
       g_calendarAvailable = false;
@@ -633,14 +797,16 @@ string NewsJson()
 {
    RefreshCalendar(false);
    string json = "{\"available\":" + (g_calendarAvailable ? "true" : "false") + ",";
-   json += "\"checkedAt\":" + IntegerToString((long)g_lastCalendarCheck * 1000) + ",";
+   // g_newsTimes stays in trade-server time so IsNewsBlackout() can compare it
+   // directly with NowServer(); only the wire format is converted to UTC.
+   json += "\"checkedAt\":" + IntegerToString(ToUtcMs(g_lastCalendarCheck)) + ",";
    json += "\"detail\":\"" + (g_calendarAvailable ? "MT5 economic calendar" : "MT5 economic calendar unavailable") + "\",";
    json += "\"events\":[";
    for(int i = 0; i < ArraySize(g_newsTimes); i++)
    {
       if(i > 0) json += ",";
-      json += "{\"id\":\"" + IntegerToString((long)g_newsTimes[i]) + "-" + JsonEscape(g_newsCurrencies[i]) + "-" + IntegerToString(i) + "\",";
-      json += "\"time\":" + IntegerToString((long)g_newsTimes[i] * 1000) + ",";
+      json += "{\"id\":\"" + IntegerToString(ToUtcMs(g_newsTimes[i])) + "-" + JsonEscape(g_newsCurrencies[i]) + "-" + IntegerToString(i) + "\",";
+      json += "\"time\":" + IntegerToString(ToUtcMs(g_newsTimes[i])) + ",";
       json += "\"currency\":\"" + JsonEscape(g_newsCurrencies[i]) + "\",";
       json += "\"country\":\"" + JsonEscape(g_newsCountries[i]) + "\",";
       json += "\"name\":\"" + JsonEscape(g_newsNames[i]) + "\",";

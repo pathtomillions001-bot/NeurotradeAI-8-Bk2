@@ -211,22 +211,32 @@ test("the drawdown-from-peak limit blocks new trades", () => {
 });
 
 test("the open-position cap is enforced", () => {
-  const positions: Position[] = Array.from({ length: 4 }, (_, i) => ({
+  // The default cap is deliberately generous (12) — the desk imposes no
+  // per-mode limit on how many setups may be taken. What matters is that the
+  // cap still exists and still refuses once it is reached.
+  const positions: Position[] = Array.from({ length: DEFAULT_RISK_POLICY.maxOpenPositions }, (_, i) => ({
     ticket: i + 1, symbol: `SYM${i}`, side: "buy", volume: 0.1, openPrice: 1,
     openTime: 0, sl: null, tp: null, profit: 0, swap: 0, commission: 0,
   }));
   const decision = check({ positions });
   assert.equal(decision.allow, false);
   assert.ok(decision.breaches.some((b) => /positions open/.test(b)));
+  // One fewer position and the same desk is allowed to trade again.
+  assert.equal(check({ positions: positions.slice(0, -1) }).allow, true);
 });
 
-test("a second position on the same symbol is blocked by default", () => {
-  const positions: Position[] = [{
-    ticket: 1, symbol: "EURUSD", side: "buy", volume: 0.1, openPrice: 1.08,
+test("the per-symbol position limit leaves room to add, then blocks", () => {
+  const limit = DEFAULT_RISK_POLICY.maxPositionsPerSymbol;
+  const positions: Position[] = Array.from({ length: limit }, (_, i) => ({
+    ticket: i + 1, symbol: "EURUSD", side: "buy", volume: 0.1, openPrice: 1.08,
     openTime: 0, sl: null, tp: null, profit: 0, swap: 0, commission: 0,
-  }];
+  }));
+  // At the per-symbol limit, the same symbol is refused...
   assert.equal(check({ positions }).allow, false);
+  // ...while a different symbol is still fine, and one fewer EURUSD position
+  // re-opens the symbol.
   assert.equal(check({ positions, symbol: "GBPUSD" }).allow, true);
+  assert.equal(check({ positions: positions.slice(0, -1) }).allow, true);
 });
 
 test("correlated exposure is capped across symbols, not just per trade", () => {

@@ -16,6 +16,7 @@ import {
   CalendarDays,
   CheckCircle2,
   Clock3,
+  Globe,
   Minus,
   Radio,
   Search,
@@ -25,13 +26,22 @@ import {
 import {
   ASSET_CLASSES,
   ASSET_CLASS_LABELS,
+  DEFAULT_DESK_TIMEZONE,
+  DESK_TIMEFRAMES,
+  countdown,
+  formatInZone,
   formatMoney,
   gradeColor,
   regimeColor,
   relativeTime,
+  zoneAbbreviation,
   type AgentDecision,
+  type Bar,
+  type EvidenceResult,
+  type DeskPerformance,
   type DeskStateResponse,
   type HighImpactNewsEvent,
+  type FeedStatus,
   type Instrument,
   type JournalEntry,
   type Market,
@@ -68,7 +78,7 @@ function DirectionIcon({ direction }: { direction: string }) {
   return <Minus className="h-3.5 w-3.5 shrink-0 text-zinc-600" />;
 }
 
-function statusClass(status: "live" | "warming" | "stale") {
+function statusClass(status: FeedStatus) {
   if (status === "live") return "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
   if (status === "warming") return "border-amber-500/40 bg-amber-500/10 text-amber-300";
   return "border-red-500/40 bg-red-500/10 text-red-300";
@@ -227,24 +237,164 @@ export function WatchlistPane({ instruments, selected, onSelect }: { instruments
   );
 }
 
+/**
+ * Live market pulse.
+ *
+ * Two layouts, deliberately:
+ *
+ *  - Desktop keeps the compact four-column strip. It sits inside a narrow
+ *    column next to two other panes, and a big number there would unbalance
+ *    the whole row.
+ *  - Mobile gets a card. On a phone the pane is full width, so the old strip
+ *    degenerated into four cramped boxes with the price — the one thing the
+ *    user opened the desk to see — no bigger than the spread. The mobile card
+ *    leads with the price, then the spread/change/range as pills, then a
+ *    sparkline of the last moves.
+ */
 export function LiveQuotePane({ instrument }: { instrument: Instrument | null }) {
   if (!instrument) return <p className="p-4 text-xs text-zinc-500">Choose a selected broker market to inspect its live quote and agent assessment.</p>;
   const stale = instrument.dataStatus !== "live";
+  const up = (instrument.changePct ?? 0) >= 0;
+  const spread = instrument.spreadPoints === null ? "—" : `${instrument.spreadPoints} pts`;
+  const riskPoints =
+    instrument.bid !== null && instrument.ask !== null && instrument.point
+      ? Math.round((instrument.ask - instrument.bid) / instrument.point)
+      : instrument.spreadPoints;
+
   return (
-    <div className="grid gap-2 p-3 sm:grid-cols-[1.25fr_repeat(3,minmax(0,1fr))]">
-      <div className="min-w-0 rounded-lg border border-zinc-800 bg-zinc-900/50 p-2.5">
-        <div className="flex items-center gap-2">
-          <Radio className={`h-4 w-4 ${stale ? "text-amber-400" : "text-emerald-400"}`} />
-          <span className="truncate font-mono text-sm font-semibold text-zinc-100">{instrument.symbol}</span>
-          <span className={`rounded border px-1.5 py-0.5 text-[9px] uppercase ${statusClass(instrument.dataStatus)}`}>{instrument.dataStatus}</span>
+    <>
+      {/* ── Mobile: a price-first card ─────────────────────────────────────── */}
+      <div className="p-3 sm:hidden">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="flex items-center gap-1.5">
+              <Radio className={`h-3.5 w-3.5 shrink-0 ${stale ? "text-amber-400" : "text-emerald-400"}`} />
+              <span className="truncate font-mono text-[15px] font-semibold leading-none text-zinc-100">{instrument.symbol}</span>
+            </div>
+            <p className="mt-1 truncate text-[10px] text-zinc-500">{instrument.description}</p>
+          </div>
+          <span className={`shrink-0 rounded border px-1.5 py-0.5 text-[9px] uppercase ${statusClass(instrument.dataStatus)}`}>
+            {instrument.dataStatus}
+          </span>
         </div>
-        <p className="mt-1 truncate text-[10px] text-zinc-500">{instrument.description}</p>
+
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2.5">
+            <dt className="text-[9px] uppercase tracking-wider text-zinc-500">Bid</dt>
+            <dd className="mt-0.5 font-mono text-[19px] font-semibold leading-tight text-emerald-300">
+              {formatQuote(instrument.bid, instrument.digits)}
+            </dd>
+          </div>
+          <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2.5">
+            <dt className="text-[9px] uppercase tracking-wider text-zinc-500">Ask</dt>
+            <dd className="mt-0.5 font-mono text-[19px] font-semibold leading-tight text-red-300">
+              {formatQuote(instrument.ask, instrument.digits)}
+            </dd>
+          </div>
+        </div>
+
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          <Pill label="Spread" value={spread} />
+          <Pill
+            label="Change"
+            value={instrument.changePct === null ? "—" : `${up ? "+" : ""}${instrument.changePct.toFixed(2)}%`}
+            tone={instrument.changePct === null ? undefined : up ? "good" : "bad"}
+          />
+          {instrument.sessionLow !== null && instrument.sessionHigh !== null && (
+            <Pill
+              label="24h range"
+              value={`${formatQuote(instrument.sessionLow, instrument.digits)} – ${formatQuote(instrument.sessionHigh, instrument.digits)}`}
+            />
+          )}
+          {instrument.quoteAgeMs !== null && (
+            <Pill
+              label="Tick age"
+              value={instrument.quoteAgeMs < 1000 ? "<1s" : `${(instrument.quoteAgeMs / 1000).toFixed(1)}s`}
+              tone={instrument.quoteAgeMs > 4000 ? "bad" : undefined}
+            />
+          )}
+        </div>
+
+        {instrument.sparkline.length > 1 && <Sparkline values={instrument.sparkline} up={up} className="mt-3 h-12" />}
+
+        {instrument.priceWarning && (
+          <p className="mt-2 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-[10px] leading-relaxed text-red-200">
+            {instrument.priceWarning}
+          </p>
+        )}
+        {stale && !instrument.priceWarning && (
+          <p className="mt-2 text-[10px] leading-relaxed text-amber-300">
+            This symbol is not fresh enough for analysis or execution.
+          </p>
+        )}
       </div>
-      <QuoteMetric label="Bid" value={formatQuote(instrument.bid, instrument.digits)} />
-      <QuoteMetric label="Ask" value={formatQuote(instrument.ask, instrument.digits)} />
-      <QuoteMetric label="Spread" value={instrument.spreadPoints === null ? "—" : `${instrument.spreadPoints} pts`} />
-      {stale && <p className="sm:col-span-4 text-[10px] leading-relaxed text-amber-300">This symbol is not fresh enough for analysis or execution. The EA will refresh it as it rotates selected markets.</p>}
+
+      {/* ── Desktop: unchanged compact strip ───────────────────────────────── */}
+      <div className="hidden sm:grid sm:grid-cols-[1.25fr_repeat(3,minmax(0,1fr))] gap-2 p-3">
+        <div className="min-w-0 rounded-lg border border-zinc-800 bg-zinc-900/50 p-2.5">
+          <div className="flex items-center gap-2">
+            <Radio className={`h-4 w-4 ${stale ? "text-amber-400" : "text-emerald-400"}`} />
+            <span className="truncate font-mono text-sm font-semibold text-zinc-100">{instrument.symbol}</span>
+            <span className={`rounded border px-1.5 py-0.5 text-[9px] uppercase ${statusClass(instrument.dataStatus)}`}>{instrument.dataStatus}</span>
+          </div>
+          <p className="mt-1 truncate text-[10px] text-zinc-500">{instrument.description}</p>
+        </div>
+        <QuoteMetric label="Bid" value={formatQuote(instrument.bid, instrument.digits)} />
+        <QuoteMetric label="Ask" value={formatQuote(instrument.ask, instrument.digits)} />
+        <QuoteMetric label="Spread" value={riskPoints === null ? "—" : `${riskPoints} pts`} />
+        {instrument.priceWarning && (
+          <p className="sm:col-span-4 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-[10px] leading-relaxed text-red-200">
+            {instrument.priceWarning}
+          </p>
+        )}
+        {stale && !instrument.priceWarning && (
+          <p className="sm:col-span-4 text-[10px] leading-relaxed text-amber-300">
+            This symbol is not fresh enough for analysis or execution.
+          </p>
+        )}
+      </div>
+    </>
+  );
+}
+
+function Pill({ label, value, tone }: { label: string; value: string; tone?: "good" | "bad" }) {
+  const colour = tone === "good" ? "text-emerald-300" : tone === "bad" ? "text-red-300" : "text-zinc-200";
+  return (
+    <div className="flex items-baseline gap-1 rounded-md border border-zinc-800 bg-zinc-900/50 px-2 py-1">
+      <dt className="text-[9px] uppercase tracking-wider text-zinc-600">{label}</dt>
+      <dd className={`font-mono text-[11px] ${colour}`}>{value}</dd>
     </div>
+  );
+}
+
+/** Minimal dependency-free sparkline. */
+export function Sparkline({
+  values,
+  up,
+  className = "h-10",
+}: {
+  values: number[];
+  up: boolean;
+  className?: string;
+}) {
+  if (values.length < 2) return null;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const width = 100;
+  const height = 30;
+  const points = values
+    .map((value, index) => {
+      const x = (index / (values.length - 1)) * width;
+      const y = height - ((value - min) / span) * height;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    })
+    .join(" ");
+  const stroke = up ? "#34d399" : "#fb7185";
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className={`w-full ${className}`} aria-hidden="true">
+      <polyline points={points} fill="none" stroke={stroke} strokeWidth={1.2} vectorEffect="non-scaling-stroke" />
+    </svg>
   );
 }
 
@@ -283,6 +433,54 @@ export function ScannerPane({ rows, onSelect, selected }: { rows: ScanRow[]; onS
 
 // ── Agent analysis ───────────────────────────────────────────────────────────
 
+/**
+ * The statistical evidence ensemble.
+ *
+ * Rendered as a vote, not a verdict: each family shows which way it points,
+ * how strongly, and how much data backs it. A family that disagrees is shown
+ * as disagreeing — it is not allowed to hide the trade.
+ */
+export function EvidenceBlock({ evidence }: { evidence: EvidenceResult }) {
+  const maxAbs = Math.max(0.001, ...evidence.factors.map((factor) => Math.abs(factor.contribution)));
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <p className="text-[9px] uppercase tracking-wider text-zinc-600">Evidence vote</p>
+        <p className="font-mono text-[9px] text-zinc-500">
+          {evidence.agreeingFamilies}/{evidence.totalFamilies} agree
+          {evidence.dissentingFamilies > 0 && <span className="text-amber-400/80"> · {evidence.dissentingFamilies} opposed</span>}
+          <span className="text-zinc-600"> · {evidence.timeframe}</span>
+        </p>
+      </div>
+      <ul className="space-y-1">
+        {evidence.factors.map((factor) => (
+          <li key={factor.family} className="flex items-center gap-1.5">
+            <span className="w-[74px] shrink-0 truncate text-[9px] text-zinc-400">{factor.label}</span>
+            <span className={`w-6 shrink-0 text-center text-[9px] font-bold ${factor.vote === 1 ? "text-emerald-400" : factor.vote === -1 ? "text-red-400" : "text-zinc-600"}`}>
+              {factor.vote === 1 ? "FOR" : factor.vote === -1 ? "VS" : "—"}
+            </span>
+            <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800">
+              <div
+                className={`absolute top-0 h-full ${factor.vote === 1 ? "bg-emerald-500/80" : factor.vote === -1 ? "bg-red-500/80" : "bg-zinc-600"}`}
+                style={{
+                  width: `${(Math.abs(factor.contribution) / maxAbs) * 50}%`,
+                  left: factor.vote === -1 ? `${50 - (Math.abs(factor.contribution) / maxAbs) * 50}%` : "50%",
+                  opacity: 0.45 + 0.55 * factor.reliability,
+                }}
+                title={`${factor.detail} · reliability ${(factor.reliability * 100).toFixed(0)}%`}
+              />
+              <div className="absolute left-1/2 top-0 h-full w-px bg-zinc-700" />
+            </div>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1.5 text-[9px] leading-relaxed text-zinc-600">
+        {evidence.factors[0]?.detail ?? "No statistical evidence available."}
+      </p>
+    </div>
+  );
+}
+
 export function AgentPane({ decision, horizonMinutes, onArm, arming, armError }: { decision: AgentDecision | null; horizonMinutes: number; onArm: () => void; arming: boolean; armError: string | null }) {
   if (!decision) return <p className="p-4 text-xs text-zinc-500">Select a market with a fresh live quote to run the agent.</p>;
   const { confluence, monteCarlo, sizing } = decision;
@@ -298,11 +496,16 @@ export function AgentPane({ decision, horizonMinutes, onArm, arming, armError }:
       <div className="flex items-start gap-2">
         <div className={`rounded border px-1.5 py-0.5 text-[11px] font-bold ${gradeColor(confluence.grade)}`}>{confluence.grade}</div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5"><DirectionIcon direction={confluence.direction} /><span className="text-[13px] font-semibold text-zinc-100">{confluence.direction === "none" ? "No bias" : confluence.direction === "up" ? "Long bias" : "Short bias"}</span><span className="font-mono text-[11px] text-zinc-500">{confluence.score.toFixed(0)}/100</span></div>
-          <p className="mt-0.5 text-[10px] text-zinc-500">Horizon ≈ {horizonMinutes} min{!confluence.higherTimeframeAligned && " · higher timeframe opposed"}</p>
+          <div className="flex items-center gap-1.5"><DirectionIcon direction={confluence.direction} /><span className="text-[13px] font-semibold text-zinc-100">{confluence.direction === "none" ? "No bias" : confluence.direction === "up" ? "Long bias" : "Short bias"}</span><span className="font-mono text-[11px] text-zinc-500">{decision.qualityScore.toFixed(0)}/{decision.qualityThreshold.toFixed(0)}</span></div>
+          <p className="mt-0.5 text-[10px] text-zinc-500">
+            Horizon ≈ {horizonMinutes} min · confluence {confluence.score.toFixed(0)}
+            {decision.evidence ? ` · evidence ${decision.evidence.confidence.toFixed(0)}` : ""}
+            {!confluence.higherTimeframeAligned && ` · higher timeframe opposed (−${confluence.contextPenalty.toFixed(0)})`}
+          </p>
         </div>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800"><div className={confluence.score >= 72 ? "h-full bg-emerald-500" : confluence.score >= 60 ? "h-full bg-amber-500" : "h-full bg-zinc-600"} style={{ width: `${Math.min(100, confluence.score)}%` }} /></div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800"><div className={decision.qualityScore >= decision.qualityThreshold + 10 ? "h-full bg-emerald-500" : decision.qualityScore >= decision.qualityThreshold ? "h-full bg-amber-500" : "h-full bg-zinc-600"} style={{ width: `${Math.min(100, decision.qualityScore)}%` }} /></div>
+      {decision.evidence && <EvidenceBlock evidence={decision.evidence} />}
       {monteCarlo && <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Metric label="Win" value={`${(monteCarlo.winProbability * 100).toFixed(0)}%`} /><Metric label="Net E" value={`${monteCarlo.expectancyR >= 0 ? "+" : ""}${monteCarlo.expectancyR.toFixed(2)}R`} tone={monteCarlo.expectancyR > 0 ? "good" : "bad"} /><Metric label="R:R" value={monteCarlo.rewardRisk.toFixed(1)} /><Metric label="Bars" value={monteCarlo.meanBarsToResolve.toFixed(0)} /></dl>}
       <div>
         <p className="mb-1 text-[9px] uppercase tracking-wider text-zinc-600">Timeframe agreement</p>
@@ -311,6 +514,12 @@ export function AgentPane({ decision, horizonMinutes, onArm, arming, armError }:
         </div>
       </div>
       {sizing && <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-2"><p className="mb-1 text-[9px] uppercase tracking-wider text-zinc-600">Position sizing</p><p className="font-mono text-[10px] leading-relaxed text-zinc-300">{sizing.explanation}</p></div>}
+      {decision.warnings.length > 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2">
+          <p className="mb-1 flex items-center gap-1 text-[9px] uppercase tracking-wider text-amber-400/80"><AlertTriangle className="h-3 w-3" />Carried cautions</p>
+          <ul className="space-y-1">{decision.warnings.map((warning) => <li key={warning} className="flex gap-1 text-[10px] leading-snug text-amber-200/80"><span className="text-amber-700">•</span>{warning}</li>)}</ul>
+        </div>
+      )}
       {decision.armed && decision.plan ? (
         <div className="space-y-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-2.5"><div className="flex items-center gap-1.5 text-[11px] font-semibold text-emerald-300"><CheckCircle2 className="h-3.5 w-3.5" />A+ live setup — ready to arm</div><div className="grid grid-cols-3 gap-1 text-[10px] font-mono text-zinc-400"><span>Trigger {decision.plan.trigger.toFixed(5)}</span><span className="text-red-400">SL {decision.plan.sl.toFixed(5)}</span><span className="text-emerald-400">TP {decision.plan.tp[0]?.toFixed(5)}</span></div><button type="button" onClick={onArm} disabled={arming} className="w-full rounded bg-emerald-600 py-2 text-[11px] font-semibold text-white transition-colors hover:bg-emerald-500 disabled:opacity-50" data-testid="arm-plan">{arming ? "Arming…" : `Arm ${decision.plan.side.toUpperCase()} ${decision.plan.lots} lots`}</button>{armError && <p className="flex gap-1 text-[10px] leading-snug text-amber-400"><AlertTriangle className="mt-px h-3 w-3 shrink-0" />{armError}</p>}</div>
       ) : (
@@ -348,26 +557,372 @@ function Stat({ label, value }: { label: string; value: string }) { return <div 
 
 // ── Red-folder calendar ──────────────────────────────────────────────────────
 
-export function NewsPane({ feed }: { feed: NewsFeed }) {
+/**
+ * Red-folder calendar.
+ *
+ * Every time here is rendered in the desk's configured timezone (Nairobi EAT
+ * by default) and labelled with that zone's abbreviation, so a countdown can
+ * never be silently interpreted in the wrong clock.
+ *
+ * The zone is explicit rather than "local" because MT5 calendar times arrive
+ * in the broker's trade-server timezone: without an explicit zone the same
+ * event reads differently on a laptop, a phone and a VPS.
+ */
+export function NewsPane({ feed, timeZone = DEFAULT_DESK_TIMEZONE }: { feed: NewsFeed; timeZone?: string }) {
   const now = Date.now();
   const events = feed.events.filter((event) => event.time >= now - 30 * 60_000).slice(0, 12);
   if (!feed.available) return <div className="flex gap-2 p-3 text-[11px] leading-relaxed text-amber-300"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" /><span>{feed.detail || "MT5 economic calendar is unavailable. New entries are paused until it is available."}</span></div>;
-  return <div className="divide-y divide-zinc-900">{events.length === 0 ? <p className="p-4 text-xs text-zinc-500">No high-impact events in the current MT5 calendar window.</p> : events.map((event) => <NewsRow key={event.id} event={event} />)}<p className="flex items-center gap-1.5 px-3 py-2 text-[9px] text-zinc-600"><Clock3 className="h-3 w-3" />Calendar checked {feed.checkedAt ? relativeTime(feed.checkedAt) : "never"} · new entries fail closed if this feed goes stale.</p></div>;
+  return (
+    <div className="divide-y divide-zinc-900">
+      <p className="flex items-center gap-1 px-3 pt-2 text-[9px] uppercase tracking-wider text-zinc-600">
+        <Globe className="h-3 w-3" />
+        All times {zoneAbbreviation(now, timeZone)} · {timeZone.replace("_", " ")}
+      </p>
+      {events.length === 0
+        ? <p className="p-4 text-xs text-zinc-500">No high-impact events in the current MT5 calendar window.</p>
+        : events.map((event) => <NewsRow key={event.id} event={event} timeZone={timeZone} />)}
+      <p className="flex items-center gap-1.5 px-3 py-2 text-[9px] text-zinc-600"><Clock3 className="h-3 w-3" />Calendar checked {feed.checkedAt ? relativeTime(feed.checkedAt) : "never"} · new entries fail closed if this feed goes stale.</p>
+    </div>
+  );
 }
 
-function NewsRow({ event }: { event: HighImpactNewsEvent }) {
-  const at = new Date(event.time);
-  const minutes = Math.round((event.time - Date.now()) / 60_000);
-  const timing = minutes > 0 ? `in ${minutes}m` : minutes < 0 ? `${Math.abs(minutes)}m ago` : "now";
-  return <div className="flex gap-2 px-3 py-2"><CalendarDays className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" /><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5"><span className="rounded bg-red-500/15 px-1 text-[9px] font-bold text-red-300">{event.currency || "HIGH"}</span><span className="truncate text-[11px] text-zinc-200">{event.name}</span></div><p className="mt-0.5 text-[9px] text-zinc-600">{at.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })} · {timing}</p></div></div>;
+function NewsRow({ event, timeZone }: { event: HighImpactNewsEvent; timeZone: string }) {
+  const now = Date.now();
+  const timing = countdown(event.time, now);
+  const local = formatInZone(event.time, timeZone, { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  const imminent = event.time - now < 30 * 60_000 && event.time >= now - 15 * 60_000;
+  return (
+    <div className="flex gap-2 px-3 py-2">
+      <CalendarDays className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${imminent ? "text-red-400" : "text-red-400/70"}`} />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <span className="rounded bg-red-500/15 px-1 text-[9px] font-bold text-red-300">{event.currency || "HIGH"}</span>
+          <span className="truncate text-[11px] text-zinc-200">{event.name}</span>
+        </div>
+        <p className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-[9px] text-zinc-500">
+          <span className="font-mono text-zinc-400">{local}</span>
+          <span className="text-zinc-600">{zoneAbbreviation(event.time, timeZone)}</span>
+          <span className="text-zinc-600">·</span>
+          <span className={imminent ? "font-medium text-amber-300" : "text-zinc-500"}>{timing}</span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── Price chart ──────────────────────────────────────────────────────────────
+
+/**
+ * Candlestick chart of the selected asset, with the armed plan's levels.
+ *
+ * Fills the empty space the news calendar used to leave on wide screens with
+ * the thing a trading desk most wants next to its risk numbers: the price it
+ * is actually trading.
+ *
+ * Drawn as inline SVG rather than pulled from a charting library — the Desk's
+ * data is the broker's own candles and it must render identically offline, in
+ * an iframe, and on a phone without another network dependency.
+ */
+export function PriceChartPane({
+  symbol,
+  series,
+  timeframe,
+  onTimeframeChange,
+  plan,
+  digits,
+  timeZone = DEFAULT_DESK_TIMEZONE,
+}: {
+  symbol: string;
+  series: Bar[] | null;
+  timeframe: string;
+  onTimeframeChange: (timeframe: string) => void;
+  plan: ArmedPlanView | null;
+  digits: number | null;
+  timeZone?: string;
+}) {
+  const bars = useMemo(() => (series ?? []).slice(-90), [series]);
+
+  if (!bars.length) {
+    return <p className="p-4 text-xs leading-relaxed text-zinc-500">Waiting for the terminal to stream {symbol} candles on this timeframe.</p>;
+  }
+
+  const highs = bars.map((bar) => bar[2]);
+  const lows = bars.map((bar) => bar[3]);
+  const rawHigh = Math.max(...highs);
+  const rawLow = Math.min(...lows);
+  const pad = (rawHigh - rawLow) * 0.08 || rawHigh * 0.001 || 1;
+  const top = rawHigh + pad;
+  const bottom = rawLow - pad;
+  const span = top - bottom || 1;
+
+  const width = 320;
+  const height = 150;
+  const candleWidth = Math.max(1.2, (width / bars.length) * 0.62);
+  const last = bars[bars.length - 1][4];
+  const first = bars[0][4];
+  const rising = last >= first;
+
+  const y = (price: number) => height - ((price - bottom) / span) * height;
+  const x = (index: number) => (index + 0.5) * (width / bars.length);
+
+  const levelY = (price: number) => (price >= bottom && price <= top ? y(price) : null);
+
+  return (
+    <div className="p-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-baseline gap-2">
+          <span className="font-mono text-[11px] text-zinc-300">{symbol}</span>
+          <span className={`font-mono text-[13px] font-semibold ${rising ? "text-emerald-400" : "text-red-400"}`}>
+            {last.toFixed(digits ?? 2)}
+          </span>
+        </div>
+        <div className="flex flex-wrap gap-0.5">
+          {DESK_TIMEFRAMES.map((tf) => (
+            <button
+              key={tf}
+              type="button"
+              onClick={() => onTimeframeChange(tf)}
+              className={`rounded px-1.5 py-0.5 text-[9px] font-medium transition-colors ${tf === timeframe ? "bg-emerald-600 text-white" : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"}`}
+            >
+              {tf}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <svg viewBox={`0 0 ${width} ${height}`} className="h-40 w-full" preserveAspectRatio="none" role="img" aria-label={`${symbol} ${timeframe} candlestick chart`}>
+        {plan?.sl !== undefined && levelY(plan.sl) !== null && (
+          <line x1={0} x2={width} y1={levelY(plan.sl) as number} y2={levelY(plan.sl) as number} stroke="#f87171" strokeWidth={0.8} strokeDasharray="4 3" />
+        )}
+        {plan?.tp !== undefined && levelY(plan.tp) !== null && (
+          <line x1={0} x2={width} y1={levelY(plan.tp) as number} y2={levelY(plan.tp) as number} stroke="#34d399" strokeWidth={0.8} strokeDasharray="4 3" />
+        )}
+        {plan?.trigger !== undefined && levelY(plan.trigger) !== null && (
+          <line x1={0} x2={width} y1={levelY(plan.trigger) as number} y2={levelY(plan.trigger) as number} stroke="#a1a1aa" strokeWidth={0.8} strokeDasharray="2 3" />
+        )}
+
+        {bars.map((bar, index) => {
+          const open = bar[1];
+          const close = bar[4];
+          const up = close >= open;
+          const colour = up ? "#34d399" : "#fb7185";
+          const bodyTop = y(Math.max(open, close));
+          const bodyBottom = y(Math.min(open, close));
+          return (
+            <g key={bar[0]}>
+              <line x1={x(index)} x2={x(index)} y1={y(bar[2])} y2={y(bar[3])} stroke={colour} strokeWidth={0.7} />
+              <rect
+                x={x(index) - candleWidth / 2}
+                y={bodyTop}
+                width={candleWidth}
+                height={Math.max(0.8, bodyBottom - bodyTop)}
+                fill={colour}
+                opacity={0.9}
+              />
+            </g>
+          );
+        })}
+      </svg>
+
+      <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[9px] text-zinc-600">
+        <span>{formatInZone(bars[0][0], timeZone, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+        <span className="flex items-center gap-2">
+          {plan?.sl !== undefined && <span className="text-red-400/80">SL {plan.sl.toFixed(digits ?? 2)}</span>}
+          {plan?.tp !== undefined && <span className="text-emerald-400/80">TP {plan.tp.toFixed(digits ?? 2)}</span>}
+        </span>
+        <span>{formatInZone(bars[bars.length - 1][0], timeZone, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
+      </div>
+    </div>
+  );
+}
+
+export interface ArmedPlanView {
+  trigger?: number;
+  sl?: number;
+  tp?: number;
+}
+
+// ── Realised performance ─────────────────────────────────────────────────────
+
+/**
+ * What the desk has actually done: equity curve, P&L by symbol, and the R-based
+ * statistics that matter.
+ *
+ * Built only from closed broker positions and sampled equity — never from a
+ * projection. It answers the question a trading desk asks at the end of a
+ * session, which is the question a risk panel cannot answer on its own: is the
+ * edge real, and where is it coming from?
+ */
+export function PerformancePane({
+  performance,
+  currency,
+  timeZone = DEFAULT_DESK_TIMEZONE,
+}: {
+  performance: DeskPerformance | null;
+  currency: string;
+  timeZone?: string;
+}) {
+  if (!performance) return <p className="p-4 text-xs text-zinc-500">Pair MT5 to start recording realised performance.</p>;
+
+  const { overall, bySymbol, equityCurve, closedTrades } = performance;
+  if (overall.trades === 0 && equityCurve.length === 0) {
+    return (
+      <p className="p-4 text-xs leading-relaxed text-zinc-500">
+        No closed trades yet. Every position the terminal closes will appear here — P&amp;L by symbol, the equity curve, and win rate in R.
+      </p>
+    );
+  }
+
+  const best = bySymbol[0];
+  const worst = bySymbol[bySymbol.length - 1];
+  const absMax = Math.max(1, ...bySymbol.map((entry) => Math.abs(entry.net)));
+
+  return (
+    <div className="space-y-3 p-3">
+      {equityCurve.length > 1 && (
+        <div>
+          <p className="mb-1 text-[9px] uppercase tracking-wider text-zinc-600">Equity curve</p>
+          <EquityCurve samples={equityCurve} />
+        </div>
+      )}
+
+      <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <PerfStat label="Closed trades" value={String(overall.trades)} />
+        <PerfStat label="Win rate" value={`${(overall.winRate * 100).toFixed(0)}%`} tone={overall.winRate >= 0.5 ? "good" : "bad"} />
+        <PerfStat label="Total R" value={`${overall.totalR >= 0 ? "+" : ""}${overall.totalR.toFixed(2)}R`} tone={overall.totalR >= 0 ? "good" : "bad"} />
+        <PerfStat
+          label="Profit factor"
+          value={Number.isFinite(overall.profitFactor) ? overall.profitFactor.toFixed(2) : "∞"}
+          tone={overall.profitFactor >= 1 ? "good" : "bad"}
+        />
+        <PerfStat label="Avg R" value={`${overall.avgR >= 0 ? "+" : ""}${overall.avgR.toFixed(2)}R`} tone={overall.avgR >= 0 ? "good" : "bad"} />
+        <PerfStat label="Max DD (R)" value={overall.maxDrawdownR.toFixed(2)} tone={overall.maxDrawdownR > 5 ? "bad" : undefined} />
+        <PerfStat label="Worst streak" value={String(overall.maxLosingStreak)} tone={overall.maxLosingStreak >= 4 ? "bad" : undefined} />
+        <PerfStat label="Realised today" value={formatMoney(performance.realisedPnl, currency)} tone={performance.realisedPnl >= 0 ? "good" : "bad"} />
+      </dl>
+
+      {bySymbol.length > 0 && (
+        <div>
+          <p className="mb-1.5 text-[9px] uppercase tracking-wider text-zinc-600">P&amp;L by symbol</p>
+          <ul className="space-y-1.5">
+            {bySymbol.slice(0, 8).map((entry) => (
+              <li key={entry.symbol} className="flex items-center gap-2">
+                <span className="w-16 shrink-0 truncate font-mono text-[10px] text-zinc-300">{entry.symbol}</span>
+                <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-800">
+                  <div
+                    className={`absolute top-0 h-full ${entry.net >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
+                    style={{
+                      width: `${(Math.abs(entry.net) / absMax) * 50}%`,
+                      left: entry.net >= 0 ? "50%" : `${50 - (Math.abs(entry.net) / absMax) * 50}%`,
+                    }}
+                  />
+                  <div className="absolute left-1/2 top-0 h-full w-px bg-zinc-700" />
+                </div>
+                <span className={`w-16 shrink-0 text-right font-mono text-[10px] ${entry.net >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                  {entry.net >= 0 ? "+" : "−"}{Math.abs(entry.net).toFixed(2)}
+                </span>
+                <span className="w-10 shrink-0 text-right font-mono text-[9px] text-zinc-600">{entry.trades}t</span>
+              </li>
+            ))}
+          </ul>
+          {(best || worst) && (
+            <p className="mt-2 text-[9px] leading-relaxed text-zinc-600">
+              {best && <>Best: <span className="text-emerald-400">{best.symbol}</span> {formatMoney(best.net, currency)} across {best.trades} trade{best.trades === 1 ? "" : "s"}.</>}
+              {worst && worst.net < 0 && <> Worst: <span className="text-red-400">{worst.symbol}</span> {formatMoney(worst.net, currency)}.</>}
+            </p>
+          )}
+        </div>
+      )}
+
+      {closedTrades.length > 0 && (
+        <div>
+          <p className="mb-1.5 text-[9px] uppercase tracking-wider text-zinc-600">Recently closed</p>
+          <ul className="divide-y divide-zinc-900 overflow-hidden rounded-md border border-zinc-900">
+            {closedTrades.slice(0, 6).map((trade) => {
+              const net = trade.profit + trade.swap + trade.commission;
+              return (
+                <li key={trade.ticket} className="flex items-center gap-2 px-2 py-1.5 text-[10px]">
+                  <DirectionIcon direction={trade.side} />
+                  <span className="w-16 shrink-0 truncate font-mono text-zinc-300">{trade.symbol}</span>
+                  <span className="w-12 shrink-0 font-mono text-zinc-600">{trade.volume}</span>
+                  <span className={`ml-auto font-mono ${net >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                    {net >= 0 ? "+" : "−"}{Math.abs(net).toFixed(2)}
+                  </span>
+                  <span className={`w-12 shrink-0 text-right font-mono ${(trade.rMultiple ?? 0) >= 0 ? "text-zinc-400" : "text-zinc-500"}`}>
+                    {trade.rMultiple === null ? "—" : `${trade.rMultiple >= 0 ? "+" : ""}${trade.rMultiple.toFixed(2)}R`}
+                  </span>
+                  <span className="w-14 shrink-0 text-right text-[9px] text-zinc-600">
+                    {formatInZone(trade.closedAt, timeZone, { hour: "2-digit", minute: "2-digit" })}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EquityCurve({ samples }: { samples: { t: number; equity: number; balance: number }[] }) {
+  const values = samples.map((sample) => sample.equity);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const width = 320;
+  const height = 60;
+  const points = values
+    .map((value, index) => `${(index / (values.length - 1)) * width},${height - ((value - min) / span) * height}`)
+    .join(" ");
+  const first = values[0];
+  const last = values[values.length - 1];
+  const colour = last >= first ? "#34d399" : "#fb7185";
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/40 p-2">
+      <svg viewBox={`0 0 ${width} ${height}`} preserveAspectRatio="none" className="h-16 w-full" aria-hidden="true">
+        <polyline points={points} fill="none" stroke={colour} strokeWidth={1.3} vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="mt-1 flex justify-between font-mono text-[9px] text-zinc-600">
+        <span>{first.toFixed(2)}</span>
+        <span className={last >= first ? "text-emerald-400" : "text-red-400"}>{last.toFixed(2)}</span>
+      </div>
+    </div>
+  );
+}
+
+function PerfStat({ label, value, tone }: { label: string; value: string; tone?: "good" | "bad" }) {
+  const colour = tone === "good" ? "text-emerald-400" : tone === "bad" ? "text-red-400" : "text-zinc-200";
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-2 py-1.5">
+      <dt className="truncate text-[9px] uppercase tracking-wider text-zinc-600">{label}</dt>
+      <dd className={`font-mono text-[12px] ${colour}`}>{value}</dd>
+    </div>
+  );
 }
 
 // ── Journal ──────────────────────────────────────────────────────────────────
 
 const JOURNAL_COLOURS: Record<JournalEntry["kind"], string> = { signal: "text-emerald-400", no_trade: "text-zinc-500", execution: "text-sky-400", risk: "text-amber-400", bridge: "text-violet-400" };
 
-export function JournalPane({ entries }: { entries: JournalEntry[] }) {
+export function JournalPane({ entries, timeZone = DEFAULT_DESK_TIMEZONE }: { entries: JournalEntry[]; timeZone?: string }) {
   const [filter, setFilter] = useState<"all" | JournalEntry["kind"]>("all");
   const visible = filter === "all" ? entries : entries.filter((entry) => entry.kind === filter);
-  return <div><div className="flex gap-1 overflow-x-auto border-b border-zinc-900 px-2 py-1.5">{(["all", "signal", "execution", "risk"] as const).map((kind) => <button key={kind} type="button" onClick={() => setFilter(kind)} className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider transition-colors ${filter === kind ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}>{kind}</button>)}</div><ul className="max-h-72 divide-y divide-zinc-900 overflow-auto [scrollbar-width:thin]">{visible.length === 0 && <li className="p-4 text-xs text-zinc-500">Nothing logged yet.</li>}{visible.map((entry) => <li key={entry.id} className="flex gap-2 px-3 py-2"><span className="w-14 shrink-0 pt-px font-mono text-[9px] text-zinc-600">{relativeTime(entry.ts)}</span><span className={`text-[10px] leading-snug ${JOURNAL_COLOURS[entry.kind]}`}>{entry.message}</span></li>)}</ul></div>;
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 border-b border-zinc-900 px-3 py-1.5">
+        <div className="flex gap-1 overflow-x-auto">{(["all", "signal", "execution", "risk"] as const).map((kind) => <button key={kind} type="button" onClick={() => setFilter(kind)} className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider transition-colors ${filter === kind ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}>{kind}</button>)}</div>
+        <span className="shrink-0 font-mono text-[9px] text-zinc-600">{zoneAbbreviation(Date.now(), timeZone)}</span>
+      </div>
+      <ul className="max-h-72 divide-y divide-zinc-900 overflow-auto [scrollbar-width:thin]">
+        {visible.length === 0 && <li className="p-4 text-xs text-zinc-500">Nothing logged yet.</li>}
+        {visible.map((entry) => (
+          <li key={entry.id} className="flex gap-2 px-3 py-2">
+            <span className="w-16 shrink-0 pt-px font-mono text-[9px] text-zinc-600">{formatInZone(entry.ts, timeZone, { hour: "2-digit", minute: "2-digit" })}</span>
+            <span className={`text-[10px] leading-snug ${JOURNAL_COLOURS[entry.kind]}`}>{entry.message}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }

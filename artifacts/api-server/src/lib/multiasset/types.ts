@@ -42,28 +42,66 @@ export interface MarketCatalogEntry {
   tradeable: boolean;
 }
 
-export type Timeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
+/**
+ * Desk timeframes.
+ *
+ * Ordered from fastest to slowest. M2/M3 exist because a scalp book is
+ * analysed on 3-minute-and-below structure — M1 alone is too noisy to place a
+ * stop against, and M5 is already the intraday entry frame. W1 gives swing
+ * trades the weekly context they are actually held for.
+ */
+export type Timeframe =
+  | "M1"
+  | "M2"
+  | "M3"
+  | "M5"
+  | "M15"
+  | "M30"
+  | "H1"
+  | "H4"
+  | "D1"
+  | "W1";
 
 export const TIMEFRAMES: readonly Timeframe[] = [
   "M1",
+  "M2",
+  "M3",
   "M5",
   "M15",
   "M30",
   "H1",
   "H4",
   "D1",
+  "W1",
 ] as const;
 
 /** Minutes per timeframe — used for horizons and time stops. */
 export const TIMEFRAME_MINUTES: Record<Timeframe, number> = {
   M1: 1,
+  M2: 2,
+  M3: 3,
   M5: 5,
   M15: 15,
   M30: 30,
   H1: 60,
   H4: 240,
   D1: 1440,
+  W1: 10_080,
 };
+
+/**
+ * The set of timeframes each trading style is actually analysed on.
+ *
+ * A scalp is judged on 3-minute-and-below structure; intraday on M5–M30;
+ * swing from H1 to W1. Timeframes outside a mode's band are *context*, never
+ * a requirement: a scalp is not disqualified because the weekly candle is
+ * pointing the other way (see confluence.ts → CONTEXT_TIMEFRAMES).
+ */
+export const MODE_ANALYSIS_TIMEFRAMES: Record<TradeMode, readonly Timeframe[]> = {
+  scalp: ["M1", "M2", "M3"],
+  intraday: ["M5", "M15", "M30"],
+  swing: ["H1", "H4", "D1", "W1"],
+} as const;
 
 /**
  * The broker's own contract specification, reported by the EA for actively
@@ -106,8 +144,19 @@ export interface Quote {
   bid: number;
   ask: number;
   spreadPoints: number;
-  /** Broker-terminal timestamp, in epoch milliseconds. */
+  /**
+   * Tick timestamp as a TRUE UTC epoch in milliseconds.
+   *
+   * MetaTrader reports `MqlTick.time_msc`, `CopyRates().time` and the economic
+   * calendar in the broker's *trade server* timezone, not UTC. Treating those
+   * values as epoch milliseconds shifts every timestamp by the server's GMT
+   * offset (commonly ±2–3 h), which silently corrupts quote-freshness checks,
+   * bar ordering and every news countdown. The EA normalises to UTC before
+   * sending; the server re-validates against its own clock.
+   */
   ts: number;
+  /** Tick age in ms at the moment the EA sampled it. 0 when unavailable. */
+  ageMs?: number;
 }
 
 /** [timestamp(ms), open, high, low, close, volume] — compact on the wire. */
@@ -303,9 +352,29 @@ export interface CommandResult {
 
 // ── Sync envelopes ───────────────────────────────────────────────────────────
 
+/**
+ * The terminal's clock relationship, shipped on every heartbeat.
+ *
+ * `MqlTick.time_msc` is broker-server time, so the EA converts terminal
+ * timestamps to UTC with `TimeTradeServer() − TimeGMT()`. Shipping that offset
+ * (and the terminal's own UTC-epoch reading) lets the server detect a skewed
+ * or drifting clock instead of trusting it — a terminal whose clock is wrong
+ * produces quotes that look either impossibly fresh or permanently stale.
+ */
+export interface SyncClock {
+  /** Seconds the trade server is ahead of UTC. Equals TimeTradeServer() − TimeGMT(). */
+  serverUtcOffsetSeconds: number;
+  /** The terminal's own reading of the current UTC time, in epoch ms. */
+  terminalUtcMs: number;
+  /** Human-readable broker timezone label, when the terminal exposes one. */
+  label?: string;
+}
+
 export interface SyncRequest {
   seq: number;
   account: AccountSnapshot;
+  /** Terminal clock context. Absent from older EAs, which are then skew-checked. */
+  clock?: SyncClock;
   /** Full broker catalogue, normally supplied at pairing and optionally later. */
   catalog?: MarketCatalogEntry[];
   specs?: SymbolSpec[];

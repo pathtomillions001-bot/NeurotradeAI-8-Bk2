@@ -20,13 +20,16 @@
 import { randomUUID } from "node:crypto";
 import { atr, clamp, closes, hashSeed, lastSwing, logReturns } from "./math";
 import { scoreConfluence, MODE_HORIZON_BARS, MODE_SCORE_THRESHOLD, type ConfluenceResult } from "./confluence";
+import { buildEvidence, MODE_MIN_AGREEING_FAMILIES, type EvidenceResult } from "./evidence";
 import { markovFromPrices, directionalPersistence, sampleConfidence } from "./markov";
+import { betaPosterior, blendProbability, garchVolatility } from "./analytics";
 import { assessRegime, isRegimeTradeable } from "./regime";
 import { bestTarget, simulateTrade, type MonteCarloResult } from "./montecarlo";
 import { evaluateRisk, type RiskDecision, type RiskPolicy, type RiskState } from "./risk";
 import { kellyFraction, pointValuePerLot, priceToPoints, sizePosition, type SizingResult } from "./sizing";
 import { assessNewsGate, type NewsGate } from "./news";
 import {
+  MODE_ANALYSIS_TIMEFRAMES,
   TIMEFRAME_MINUTES,
   type AccountSnapshot,
   type ArmedPlan,
@@ -56,8 +59,20 @@ export interface AgentInput {
   now?: number;
   /** Minimum expectancy (in R, after costs) required to arm. */
   minEdgeR?: number;
-  /** Minimum Markov persistence of the favourable state over the horizon. */
+  /**
+   * Minimum Markov persistence of the favourable state over the horizon.
+   * Defaults to 0 (advisory only) — see DEFAULT_MIN_PERSISTENCE.
+   */
   minPersistence?: number;
+  /**
+   * Realised win/loss counts for this symbol and mode, used as the Beta prior
+   * when blending the simulated win probability with what actually happens on
+   * this desk. Absent means "no history yet", which leans entirely on the
+   * simulation.
+   */
+  outcomes?: { wins: number; losses: number };
+  /** Force the evidence ensemble's direction instead of inferring it. */
+  direction?: "up" | "down";
 }
 
 export interface AgentDecision {
@@ -66,6 +81,11 @@ export interface AgentDecision {
   armed: boolean;
   plan: ArmedPlan | null;
   confluence: ConfluenceResult;
+  /** The statistical evidence ensemble. Present whenever bars were available. */
+  evidence: EvidenceResult | null;
+  /** Blended confluence/evidence quality score actually gated on. */
+  qualityScore: number;
+  qualityThreshold: number;
   monteCarlo: MonteCarloResult | null;
   sizing: SizingResult | null;
   risk: RiskDecision;
@@ -73,40 +93,91 @@ export interface AgentDecision {
   news: NewsGate;
   /** Every gate that failed, in evaluation order. Shown verbatim in the UI. */
   rejections: string[];
+  /** Non-blocking cautions that were recorded but did not stop the trade. */
+  warnings: string[];
   /** Short machine-readable summary for the signal log. */
   summary: string;
   evaluatedAt: number;
 }
 
-/** Entry timeframe used for stop placement and horizons, per style. */
+/**
+ * Entry timeframe used for stop placement and horizons, per style.
+ *
+ * These sit inside each mode's analysis band by construction:
+ *   scalp → M2 (3-minute-and-below structure)
+ *   intraday → M15 (the middle of M5–M30)
+ *   swing → H1 (the fast end of H1–W1, where a swing stop belongs)
+ */
 const ENTRY_TIMEFRAME: Record<TradeMode, Timeframe> = {
-  scalp: "M5",
+  scalp: "M2",
   intraday: "M15",
   swing: "H1",
 };
 
-/** ATR multiple for the initial structural stop, per style. */
+/**
+ * ATR multiple for the initial structural stop, per style.
+ *
+ * A scalp's stop must be reachable in minutes or the trade is not a scalp, so
+ * it is the tightest; a swing stop has to survive a full session of noise.
+ */
 const STOP_ATR_MULT: Record<TradeMode, number> = {
-  scalp: 1.1,
+  scalp: 0.8,
   intraday: 1.5,
   swing: 2.0,
 };
 
-/** How long an armed plan stays valid, per style. */
+/**
+ * How long an armed plan stays valid, per style.
+ *
+ * A scalp that has not filled in 60 seconds is no longer the setup that was
+ * analysed — the micro-structure it depended on has already moved on.
+ */
 const PLAN_TTL_MS: Record<TradeMode, number> = {
-  scalp: 90_000,
+  scalp: 60_000,
   intraday: 10 * 60_000,
   swing: 60 * 60_000,
 };
 
-export const DEFAULT_MIN_EDGE_R = 0.15;
-export const DEFAULT_MIN_PERSISTENCE = 0.55;
+/**
+ * How much of the final quality score comes from the evidence ensemble rather
+ * than from multi-timeframe confluence. The two measure different things —
+ * confluence measures agreement across horizons, the ensemble measures the
+ * balance of independent statistical evidence on the entry timeframe — so
+ * neither alone should decide.
+ */
+const MODE_EVIDENCE_BLEND: Record<TradeMode, number> = {
+  scalp: 0.55,
+  intraday: 0.45,
+  swing: 0.4,
+};
 
+export const DEFAULT_MIN_EDGE_R = 0.15;
+
+/**
+ * Markov persistence floor.
+ *
+ * ZERO BY DEFAULT — and that is the point. This used to be 0.55 and acted as a
+ * hard veto, which meant a five-state chain fitted to a couple of hundred bars
+ * could (and constantly did) overrule every other estimator in the pipeline.
+ * Persistence is now one weighted vote among seven in evidence.ts; its
+ * uncertainty is handled by shrinking its influence, not by letting it block.
+ *
+ * A caller that explicitly raises this value still gets the hard floor — that
+ * is how the offline research harness isolates price logic from regime logic.
+ */
+export const DEFAULT_MIN_PERSISTENCE = 0;
+
+/** Below this, persistence is surfaced as a caution rather than a failure. */
+const PERSISTENCE_ADVISORY = 0.45;
+
+/** Fallback order within a mode's band, then outward to slower frames. */
 function firstAvailable(
   series: Partial<Record<Timeframe, Bar[]>>,
   preferred: Timeframe,
+  mode: TradeMode,
 ): { timeframe: Timeframe; bars: Bar[] } | null {
-  const order: Timeframe[] = [preferred, "M5", "M15", "M1", "M30", "H1", "H4", "D1"];
+  const band = MODE_ANALYSIS_TIMEFRAMES[mode].filter((tf) => tf !== preferred);
+  const order: Timeframe[] = [preferred, ...band, "M5", "M15", "M1", "M30", "H1", "H4", "D1"];
   for (const tf of order) {
     const bars = series[tf];
     if (bars && bars.length >= 30) return { timeframe: tf, bars };
@@ -233,6 +304,48 @@ export function evaluate(input: AgentInput): AgentDecision {
   const minEdgeR = input.minEdgeR ?? DEFAULT_MIN_EDGE_R;
   const minPersistence = input.minPersistence ?? DEFAULT_MIN_PERSISTENCE;
   const rejections: string[] = [];
+  const warnings: string[] = [];
+
+  /**
+   * Build a no-trade decision.
+   *
+   * Declared as a hoisted function so the early exits can use it before the
+   * evidence ensemble exists. `ev`/`score` are only resolved when supplied,
+   * which keeps the pre-ensemble paths from touching values that are not
+   * initialised yet.
+   */
+  function fail(
+    extra: string[] = [],
+    ev?: EvidenceResult | null,
+    score?: number,
+  ): AgentDecision {
+    const usedEvidence = ev ?? null;
+    const blend = MODE_EVIDENCE_BLEND[input.mode];
+    const usedScore =
+      score ??
+      (usedEvidence && usedEvidence.direction !== "none"
+        ? (1 - blend) * confluence.score + blend * usedEvidence.confidence
+        : confluence.score);
+    const usedThreshold = MODE_SCORE_THRESHOLD[input.mode] + risk.scoreBump;
+    return {
+      symbol: input.symbol,
+      mode: input.mode,
+      armed: false,
+      plan: null,
+      confluence,
+      evidence: usedEvidence,
+      qualityScore: usedScore,
+      qualityThreshold: usedThreshold,
+      monteCarlo: null,
+      sizing: null,
+      risk,
+      news,
+      rejections: [...rejections, ...extra],
+      warnings,
+      summary: `${input.symbol} ${input.mode}: no trade (quality ${usedScore.toFixed(0)}/${usedThreshold.toFixed(0)}).`,
+      evaluatedAt: now,
+    };
+  }
 
   // ── 1. Risk governor first ────────────────────────────────────────────────
   // Running it before the analysis avoids burning CPU on a symbol that is
@@ -262,50 +375,72 @@ export function evaluate(input: AgentInput): AgentDecision {
     : assessNewsGate(input.spec, input.news, input.mode, now);
   if (news.blocked && news.reason) rejections.push(news.reason);
 
-  // ── 3. Confluence ─────────────────────────────────────────────────────────
+  // ── 3. Multi-timeframe confluence ─────────────────────────────────────────
   const confluence = scoreConfluence({
     symbol: input.symbol,
     mode: input.mode,
     series: input.series,
+    direction: input.direction,
   });
 
-  const threshold = MODE_SCORE_THRESHOLD[input.mode] + risk.scoreBump;
-
-  const fail = (extra: string[] = []): AgentDecision => ({
+  // ── 3b. Entry timeframe, evidence ensemble ────────────────────────────────
+  // The ensemble needs the entry series, so resolve it before scoring.
+  const entrySeries = firstAvailable(input.series, ENTRY_TIMEFRAME[input.mode], input.mode);
+  if (!entrySeries) {
+    return fail(["No timeframe in this mode's analysis band has the 30+ bars needed to place a stop."]);
+  }
+  const horizon = MODE_HORIZON_BARS[input.mode];
+  const direction = confluence.direction === "none" ? undefined : confluence.direction;
+  const evidence = buildEvidence({
     symbol: input.symbol,
     mode: input.mode,
-    armed: false,
-    plan: null,
-    confluence,
-    monteCarlo: null,
-    sizing: null,
-    risk,
-    news,
-    rejections: [...rejections, ...extra],
-    summary: `${input.symbol} ${input.mode}: no trade (score ${confluence.score.toFixed(0)}/${threshold.toFixed(0)}).`,
-    evaluatedAt: now,
+    timeframe: entrySeries.timeframe,
+    bars: entrySeries.bars,
+    horizon,
+    direction,
   });
 
-  if (confluence.direction === "none") {
-    return fail(["No directional bias across the scored timeframes."]);
+  // Blend the two quality views. When the ensemble could not form a direction
+  // we fall back to confluence alone rather than scoring zero evidence twice.
+  const blendWeight = MODE_EVIDENCE_BLEND[input.mode];
+  const evidenceUsable = evidence.direction !== "none";
+  const effectiveDirection = confluence.direction !== "none" ? confluence.direction : evidence.direction;
+  const qualityScore = evidenceUsable
+    ? (1 - blendWeight) * confluence.score + blendWeight * evidence.confidence
+    : confluence.score;
+  const threshold = MODE_SCORE_THRESHOLD[input.mode] + risk.scoreBump;
+
+  if (effectiveDirection === "none") {
+    return fail(["No directional bias from either the timeframe band or the evidence ensemble."]);
   }
-  if (confluence.score < threshold) {
-    // One decimal place: rounding both sides to integers produced the
-    // nonsensical "Confluence 68 is below the 68 required".
+
+  // ── 3c. Quality gate ──────────────────────────────────────────────────────
+  // Two independent conditions, neither of them a single-model veto:
+  //   1. the blended score must clear the bar;
+  //   2. enough *independent* families must agree — not all of them.
+  if (qualityScore < threshold) {
     rejections.push(
-      `Confluence ${confluence.score.toFixed(1)} is below the ${threshold.toFixed(1)} required for a ${input.mode} entry.`,
+      `Quality ${qualityScore.toFixed(1)} is below the ${threshold.toFixed(1)} required for a ${input.mode} entry ` +
+        `(confluence ${confluence.score.toFixed(1)}, evidence ${evidenceUsable ? evidence.confidence.toFixed(1) : "n/a"}).`,
     );
   }
+
+  if (evidenceUsable && evidence.agreeingFamilies < MODE_MIN_AGREEING_FAMILIES[input.mode]) {
+    rejections.push(
+      `Only ${evidence.agreeingFamilies} of ${evidence.totalFamilies} evidence families agree on ${effectiveDirection}; ` +
+        `${MODE_MIN_AGREEING_FAMILIES[input.mode]} independent confirmations are required.`,
+    );
+  }
+
+  // Higher-timeframe context is a WARNING now, never a block.
   if (!confluence.higherTimeframeAligned) {
-    rejections.push("A higher timeframe opposes this direction.");
+    warnings.push(
+      `Trading against context (${confluence.contextPenalty.toFixed(0)} point penalty applied): ` +
+        `${confluence.warnings.filter((w) => w.includes("opposing")).join(" ") || "a higher timeframe leans the other way"}.`,
+    );
   }
 
-  // ── 3. Entry timeframe, regime, stop ──────────────────────────────────────
-  const entrySeries = firstAvailable(input.series, ENTRY_TIMEFRAME[input.mode]);
-  if (!entrySeries) {
-    return fail(["No timeframe has the 30+ bars needed to place a stop."]);
-  }
-
+  // ── 3d. Regime and stop ───────────────────────────────────────────────────
   const regime = assessRegime(entrySeries.bars);
   if (!isRegimeTradeable(regime.kind, input.mode)) {
     rejections.push(
@@ -313,7 +448,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     );
   }
 
-  const side = confluence.direction === "up" ? "buy" : "sell";
+  const side = effectiveDirection === "up" ? "buy" : "sell";
   // Enter at the price we would actually pay, not the mid.
   const entry = side === "buy" ? input.quote.ask : input.quote.bid;
   if (!(entry > 0)) return fail(["No live quote for this symbol."]);
@@ -323,16 +458,20 @@ export function evaluate(input: AgentInput): AgentDecision {
     return fail(["Stop placement produced a zero-distance stop (flat market)."]);
   }
 
-  // ── 4. Markov persistence ─────────────────────────────────────────────────
+  // ── 4. Markov persistence — one vote, not a veto ──────────────────────────
   const price = closes(entrySeries.bars);
   const model = markovFromPrices(price);
-  const horizon = MODE_HORIZON_BARS[input.mode];
-  const persistence = directionalPersistence(model, confluence.direction, horizon);
+  const persistence = directionalPersistence(model, effectiveDirection, horizon);
   const modelConfidence = sampleConfidence(model);
 
   if (persistence < minPersistence) {
     rejections.push(
       `Markov persistence of the favourable state is ${(persistence * 100).toFixed(0)}% over ${horizon} bars, below the ${(minPersistence * 100).toFixed(0)}% floor.`,
+    );
+  } else if (persistence < PERSISTENCE_ADVISORY) {
+    // Surfaced, not enforced: the ensemble already priced this in.
+    warnings.push(
+      `Markov persistence is only ${(persistence * 100).toFixed(0)}% over ${horizon} bars — carried by ${evidence.agreeingFamilies} other agreeing families.`,
     );
   }
 
@@ -350,6 +489,16 @@ export function evaluate(input: AgentInput): AgentDecision {
     (input.spec.spreadPoints + commissionPoints + slippageAllowancePoints) * input.spec.point;
 
   const seed = hashSeed(`${input.symbol}|${input.mode}|${entrySeries.timeframe}|${entrySeries.bars.length}`);
+
+  // Volatility for the simulation: the regime's own step volatility, widened
+  // toward the GARCH one-step-ahead estimate. Volatility clusters, and a
+  // target searched on a calm day's sigma is a target that gets run over.
+  const garchSigma = garchVolatility(returns);
+  const simulationVolatility = Math.max(
+    regime.stepVolatility,
+    garchSigma > 0 ? Math.min(garchSigma, regime.stepVolatility * 2.5) : regime.stepVolatility,
+  );
+
   const search = bestTarget({
     entry,
     sl: stop.sl,
@@ -357,7 +506,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     // Blend the measured drift with the Markov view, scaled by how much data
     // backs the model. With little history the simulation leans on raw drift.
     drift: regime.drift * (0.5 + 0.5 * modelConfidence),
-    volatility: regime.stepVolatility,
+    volatility: simulationVolatility,
     horizon,
     returns,
     costPrice,
@@ -368,9 +517,37 @@ export function evaluate(input: AgentInput): AgentDecision {
   if (!search) return fail(["Monte Carlo could not evaluate this setup."]);
   const monteCarlo = search.result;
 
-  if (monteCarlo.expectancyR < minEdgeR) {
+  // ── 5b. Bayesian blend of simulated and realised win probability ──────────
+  // The simulation assumes the model is right. The desk's own history is the
+  // only evidence about whether it is right *on this symbol*, so the two are
+  // combined with a Beta–Binomial posterior that only earns influence once
+  // there are enough trades to mean something.
+  const posterior = input.outcomes
+    ? blendProbability(
+        monteCarlo.winProbability,
+        betaPosterior(input.outcomes.wins, input.outcomes.losses),
+        0.35,
+      )
+    : { probability: monteCarlo.winProbability, source: "model" };
+  const blendedWinProbability = posterior.probability;
+  if (posterior.source === "model+realised") {
+    warnings.push(
+      `Win probability blended with realised history (${input.outcomes?.wins ?? 0}W/${input.outcomes?.losses ?? 0}L): ` +
+        `model ${(monteCarlo.winProbability * 100).toFixed(0)}% → ${(blendedWinProbability * 100).toFixed(0)}%.`,
+    );
+  }
+
+  // Expectancy recomputed on the blended probability: this is the number the
+  // edge gate actually enforces, so a symbol that under-delivers live stops
+  // passing on a simulation that flatters it.
+  const effectiveExpectancyR =
+    blendedWinProbability * monteCarlo.rewardRisk -
+    (1 - blendedWinProbability) +
+    (monteCarlo.expectancyR - monteCarlo.grossExpectancyR);
+
+  if (effectiveExpectancyR < minEdgeR) {
     rejections.push(
-      `Expectancy after costs is ${monteCarlo.expectancyR.toFixed(2)}R (gross ${monteCarlo.grossExpectancyR.toFixed(2)}R), below the ${minEdgeR}R minimum.`,
+      `Expectancy after costs is ${effectiveExpectancyR.toFixed(2)}R (model ${monteCarlo.expectancyR.toFixed(2)}R, gross ${monteCarlo.grossExpectancyR.toFixed(2)}R), below the ${minEdgeR}R minimum.`,
     );
   }
 
@@ -385,7 +562,11 @@ export function evaluate(input: AgentInput): AgentDecision {
   // ── 7. Edge-aware sizing ──────────────────────────────────────────────────
   // Risk scales with measured edge (fractional Kelly) and with how confident
   // the regime call is — never with recent losses.
-  const kelly = kellyFraction(monteCarlo.winProbability, monteCarlo.rewardRisk, 0.25);
+  //
+  // Kelly is driven by the BLENDED win probability: a strategy that looks
+  // great in simulation but has been losing on this desk must shrink, and one
+  // that has been delivering may grow — within the policy ceiling.
+  const kelly = kellyFraction(blendedWinProbability, monteCarlo.rewardRisk, 0.25);
   const edgeScale = clamp(kelly * 10, 0.35, 1.5);
   const riskPct = clamp(
     risk.riskPct * edgeScale * clamp(0.6 + 0.4 * regime.confidence, 0.6, 1),
@@ -432,14 +613,18 @@ export function evaluate(input: AgentInput): AgentDecision {
       armed: false,
       plan: null,
       confluence,
+      evidence,
+      qualityScore,
+      qualityThreshold: threshold,
       monteCarlo,
       sizing,
       risk,
       news,
       rejections,
+      warnings,
       summary:
         `${input.symbol} ${input.mode}: no trade — ${rejections[0] ?? "gate failed"} ` +
-        `(score ${confluence.score.toFixed(0)}, E ${monteCarlo.expectancyR.toFixed(2)}R).`,
+        `(quality ${qualityScore.toFixed(0)}/${threshold.toFixed(0)}, E ${effectiveExpectancyR.toFixed(2)}R).`,
       evaluatedAt: now,
     };
   }
@@ -452,7 +637,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     tp: search.tp,
     side,
     drift: regime.drift,
-    volatility: regime.stepVolatility,
+    volatility: simulationVolatility,
     horizon,
     returns,
     paths: 1500,
@@ -489,18 +674,27 @@ export function evaluate(input: AgentInput): AgentDecision {
     createdAt: now,
     management,
     rationale: {
-      confluenceScore: Number(confluence.score.toFixed(1)),
+      confluenceScore: Number(qualityScore.toFixed(1)),
       grade: confluence.grade,
       regime: `${entrySeries.timeframe} ${regime.kind}`,
-      winProbability: Number(monteCarlo.winProbability.toFixed(3)),
-      expectancyR: Number(monteCarlo.expectancyR.toFixed(3)),
+      winProbability: Number(blendedWinProbability.toFixed(3)),
+      expectancyR: Number(effectiveExpectancyR.toFixed(3)),
       rewardRisk: Number(monteCarlo.rewardRisk.toFixed(2)),
       markovPersistence: Number(persistence.toFixed(3)),
       factors: [
+        // The evidence ensemble first: it is the part of the decision with the
+        // most independent statistical content, and the part the user most
+        // often needs to audit when a trade surprises them.
+        ...evidence.factors.map((factor) => ({
+          label: factor.label,
+          detail: `${factor.vote === 1 ? "agrees" : factor.vote === -1 ? "opposes" : "neutral"} · ${factor.detail}`,
+          weight: Number((factor.weight * (0.35 + 0.65 * factor.reliability)).toFixed(3)),
+          aligned: factor.vote === 1,
+        })),
         ...confluence.factors,
         {
           label: "Monte Carlo",
-          detail: `${(monteCarlo.winProbability * 100).toFixed(0)}% win over ${horizon} bars at ${monteCarlo.rewardRisk.toFixed(1)}R, E=${monteCarlo.expectancyR.toFixed(2)}R after costs`,
+          detail: `${(blendedWinProbability * 100).toFixed(0)}% win (${posterior.source}) over ${horizon} bars at ${monteCarlo.rewardRisk.toFixed(1)}R, E=${effectiveExpectancyR.toFixed(2)}R after costs`,
           weight: 1,
           aligned: true,
         },
@@ -515,6 +709,7 @@ export function evaluate(input: AgentInput): AgentDecision {
         ...confluence.warnings,
         ...risk.reasons,
         ...(news.reason ? [news.reason] : []),
+        ...warnings,
       ],
     },
   };
@@ -525,15 +720,20 @@ export function evaluate(input: AgentInput): AgentDecision {
     armed: true,
     plan,
     confluence,
+    evidence,
+    qualityScore,
+    qualityThreshold: threshold,
     monteCarlo,
     sizing,
     risk,
     news,
     rejections: [],
+    warnings,
     summary:
       `${input.symbol} ${input.mode}: ${side.toUpperCase()} ${sizing.lots} lots armed — ` +
-      `score ${confluence.score.toFixed(0)} (${confluence.grade}), ` +
-      `${(monteCarlo.winProbability * 100).toFixed(0)}% win, E ${monteCarlo.expectancyR.toFixed(2)}R, ` +
+      `quality ${qualityScore.toFixed(0)} (${confluence.grade}), ` +
+      `${evidence.agreeingFamilies}/${evidence.totalFamilies} families agree, ` +
+      `${(blendedWinProbability * 100).toFixed(0)}% win, E ${effectiveExpectancyR.toFixed(2)}R, ` +
       `risk ${sizing.riskMoney.toFixed(2)}.`,
     evaluatedAt: now,
   };

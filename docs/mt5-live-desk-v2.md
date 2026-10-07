@@ -1,5 +1,9 @@
 # MT5 Live Desk v2
 
+> **Superseded in part by [mt5-live-desk-v3.md](./mt5-live-desk-v3.md)**, which fixes
+> timestamps sent in broker-server time, adds a server-sent price stream, switches the Desk to
+> Nairobi time, and replaces the Markov veto with a seven-family evidence ensemble.
+
 The Multi-Asset Desk is now a **live-terminal-only** workspace. It does not render a replay balance, synthetic quote, mock scanner result, embedded chart, or paper account while MT5 is unlinked.
 
 ## What changed

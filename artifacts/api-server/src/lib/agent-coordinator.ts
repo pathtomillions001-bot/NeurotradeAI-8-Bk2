@@ -449,12 +449,27 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
     optimizedDuration,
   });
 
-  // Override shouldTrade with 13-agent consensus (stronger signal)
-  const fusionShouldTrade = fusionResult.shouldTrade;
-  output.shouldTrade = fusionShouldTrade;
+  // ── Admission authority: master-decision (EVIDENCE-BASED) ────────────────────
+  //
+  // This used to read `output.shouldTrade = fusionResult.shouldTrade`, which
+  // silently discarded the master decision entirely and made the conjunction of
+  // confidence-fusion's hard gates the real admission test. Since those gates
+  // all key off the loss streak — and an account in recovery is by definition
+  // on a losing streak — the conjunction rarely opened, which is why recovery
+  // trades could wait 30+ minutes.
+  //
+  // Now master-decision's weighted-evidence score decides (it already accounts
+  // for EV, timing, regime, drift, streak, Markov significance and data
+  // quality as bounded terms), and confidence-fusion contributes only its
+  // genuine CAPITAL-SAFETY blocks — an ineligible market, a hard risk stop, or
+  // a position-limit breach can still veto anything.
+  const fusionSafetyBlocked = fusionResult.blockers.some((b) =>
+    b.includes("ineligible") || b.includes("hard risk") || b.includes("position limit"),
+  );
+  output.shouldTrade = output.shouldTrade && !fusionSafetyBlocked;
   output.agents = allAgentOutputs;
 
-  if (!fusionShouldTrade && fusionResult.blockers.length > 0) {
+  if (!output.shouldTrade && fusionSafetyBlocked && fusionResult.blockers.length > 0) {
     output.rejectReason = fusionResult.blockers[0];
     output.reasoning = explainAgent.explanation.rationale;
   }

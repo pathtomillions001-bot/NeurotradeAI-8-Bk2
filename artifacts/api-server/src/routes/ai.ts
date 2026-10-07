@@ -3,7 +3,6 @@ import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { and, sql, desc, eq } from "drizzle-orm";
 import { tickManager, DERIV_MARKETS, AUTOMATED_DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
-import { runRecoveryConsensus, getBestConsensus } from "../lib/agents/recovery-consensus";
 import { resolveRecoveryPayout } from "../lib/recovery-payout";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
@@ -330,6 +329,19 @@ function buildScanContext(
 ): ScanContext {
   const prices = tickManager.getTicks(market.symbol, 100);
   const digits = market.digitEnabled ? tickManager.getDigits(market.symbol, 300) : [];
+
+  // Recovery context for the evidence-based admission threshold. Read from the
+  // single global recovery state so every market scanned in this iteration sees
+  // the same elapsed time. Absent ⇒ normal mode (constant threshold).
+  const recoveryState = recoveryEngine.getState();
+  const recoveryStartedAt = Number(recoveryState.recoveryStartedAt) || 0;
+  const recovery = recoveryState.inRecovery
+    ? {
+        active: true,
+        elapsedMs: recoveryStartedAt > 0 ? Math.max(0, Date.now() - recoveryStartedAt) : 0,
+      }
+    : { active: false, elapsedMs: 0 };
+
   return {
     symbol:      market.symbol,
     displayName: market.displayName,
@@ -341,6 +353,7 @@ function buildScanContext(
     daily,
     token,
     currency,
+    recovery,
   };
 }
 
@@ -693,306 +706,35 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
     const eoTypes  = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
     const mdTypes  = preferredContractTypes.filter(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
 
-    // ── Recovery Fast Path ────────────────────────────────────────────────────────────
-    // When in recovery mode, skip the full 8-agent tournament entirely. Instead, run a
-    // fast 3-window consensus check (50 / 100 / 150 ticks) on ALL eligible markets in
-    // parallel. Execute the recovery trade the instant ALL THREE windows agree — this
-    // eliminates the 30+ min delays caused by quality floors, regime gates, and multi-
-    // family tournament scoring in the normal path.
+    // ── Unified path: recovery uses the SAME pipeline as normal trades ───────
+    // The former "recovery fast path" (a bespoke 3-window consensus scan that
+    // bypassed the coordinator entirely) has been REMOVED. Recovery trades now
+    // go through exactly the same analysis, timing and execution as normal
+    // trades:
     //
-    // Contract types: only the user's enabled recovery types (no switching).
-    // Markets: the same contractCompatibleMarkets as the normal path (no switching).
-    // Barriers: user's recoveryOverDigit / recoveryUnderDigit (no overrides).
-    if (recoveryEngine.isInRecovery()) {
-      // ── Open-trade guard ──────────────────────────────────────────────────────────
-      const recovOpenTrades = await db.select().from(tradesTable).where(and(eq(tradesTable.sessionId, sessionId), eq(tradesTable.status, "open")));
-      if (recovOpenTrades.length > 0) {
-        const nowMs = Date.now();
-        const stale = recovOpenTrades.filter(t => nowMs - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
-        if (stale.length > 0) {
-          await Promise.all(stale.map(t =>
-            db.update(tradesTable).set({
-              status: "error", profit: "0", payout: "0", closedAt: new Date(),
-              agentReasoning: `${t.agentReasoning ?? ""} [AUTO-RECOVERED: stale open trade]`,
-            }).where(eq(tradesTable.id, t.id)).catch(() => {}),
-          ));
-        }
-        const fresh = recovOpenTrades.filter(t => nowMs - new Date(t.createdAt).getTime() <= STALE_OPEN_MS);
-        if (fresh.length > 0) { scheduleNext(engine, false); return; }
-      }
+    //   - same 4-group parallel tournament over `contractCompatibleMarkets`
+    //   - same 13-agent coordinator (feature engineering → EV → risk → timing
+    //     → fusion → master decision)
+    //   - same master-decision admission, now EVIDENCE-BASED rather than a
+    //     chain of independent hard gates
+    //
+    // What differs in recovery is carried entirely by existing, unchanged
+    // mechanisms plus one new one:
+    //   - barriers:  ScanContext.recoveryBarrierOverride (already wired)
+    //   - stake:     recoveryEngine.getDynamicRecoveryStake (UNCHANGED — the
+    //                debt-driven formula and Split/Instant/Auto/Manual modes are
+    //                untouched; only the candidate selection changed)
+    //   - admission: the evidence threshold decays with time-in-recovery
+    //                (see ScanContext.recovery + master-decision) so the engine
+    //                takes the first candidate whose evidence clears the bar
+    //                instead of waiting for every independent gate to align.
+    //
+    // The 30+ minute waits came from the conjunction of independent vetoes,
+    // not from the analysis being slow: the coordinator scan itself runs in
+    // parallel across markets with a 4s timeout. Replacing votes with weighted
+    // evidence removes the conjunction without removing the analysis.
 
-      // ── Journal-settle delay ──────────────────────────────────────────────────────
-      if (engine.lastTradeCompletedAt && (Date.now() - engine.lastTradeCompletedAt.getTime()) < 12_000) {
-        scheduleNext(engine, false, 3000);
-        return;
-      }
 
-      // ── Per-symbol cooldown check on all markets ──────────────────────────────────
-      // (cooledDownSymbols already populated above from engine.recentTradesBySymbol)
-
-      // ── Build recovery contract type list ─────────────────────────────────────────
-      // MATCH/DIFF strategy: DIGITMATCH in early recovery (high payout recovers debt fast),
-      // DIGITDIFF after 3 consecutive MATCH losses (near-certain partial recovery).
-      const consecutiveMatchLosses = recoveryEngine.getState().consecutiveMatchLosses;
-      const recoveryTypes: string[] = [...ouTypes, ...eoTypes, ...dirTypes];
-      if (mdTypes.length > 0) {
-        if (mdTypes.includes("DIGITMATCH") && consecutiveMatchLosses < 3) {
-          recoveryTypes.push("DIGITMATCH");
-        } else if (mdTypes.includes("DIGITDIFF")) {
-          recoveryTypes.push("DIGITDIFF");
-        } else {
-          recoveryTypes.push(...mdTypes);
-        }
-      }
-
-      if (recoveryTypes.length === 0) {
-        logger.warn("Recovery: no recovery contract types configured — falling back to normal scan");
-        // Fall through to normal tournament
-      } else {
-        // ── 3-window consensus scan across all eligible markets ───────────────────
-        broadcastEngineSSE(engine, "scan_started", { groups: ["Recovery"], ts: Date.now() });
-
-        const consensusInputs = await Promise.all(
-          contractCompatibleMarkets.map(async (m) => {
-            const marketTypes = recoveryTypes.filter(ct => !ct.startsWith("DIGIT") || m.digitEnabled);
-            if (marketTypes.length === 0) return { symbol: m.symbol, market: m, results: [] };
-            const digits = m.digitEnabled ? tickManager.getDigits(m.symbol, 150) : [];
-            const prices = tickManager.getTicks(m.symbol, 150);
-            const results = runRecoveryConsensus(
-              digits, prices, marketTypes,
-              tradingSettings.recoveryOverDigit, tradingSettings.recoveryUnderDigit,
-            );
-            return { symbol: m.symbol, market: m, results };
-          }),
-        );
-
-        const winner = getBestConsensus(consensusInputs);
-
-        if (!winner) {
-          logger.info({ marketsScanned: contractCompatibleMarkets.length, types: recoveryTypes },
-            "Recovery: 3-window consensus not yet reached — rescanning in 3s");
-          broadcastEngineSSE(engine, "scan_complete", {
-            symbol: null, quality: 0, confidence: 0, agentScores: engine.lastAgentScores,
-            marketsScanned: contractCompatibleMarkets.length, shouldTrade: false,
-            rejectReason: "recovery_no_consensus", sessionLossCount: engine.sessionLossCount,
-            consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-          });
-          scheduleNext(engine, false, 3000);
-          return;
-        }
-
-        const { symbol: recovSymbol, market: recovMarket, result: cons } = winner;
-
-        // Per-symbol cooldown safety net (symbols already filtered in contractCompatibleMarkets,
-        // but guard against the rare mid-scan race where the cooldown was just reached)
-        const recovSymHist = engine.recentTradesBySymbol.get(recovSymbol) ?? [];
-        if (recovSymHist.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS).length >= MAX_TRADES_SAME_SYMBOL) {
-          logger.info({ symbol: recovSymbol }, "Recovery: symbol just hit cooldown — rescanning");
-          scheduleNext(engine, false, 500);
-          return;
-        }
-
-        const recovContractType = cons.contractType;
-        const recovBarrier      = cons.barrier;
-        const recovWinP         = cons.avgWinProbability;
-        const recovDirection    = recovContractType === "CALL" ? "up"
-          : recovContractType === "PUT" ? "down" : "hold";
-        const rawDur = tradingSettings.tradeDurationSec ?? 5;
-        const recovDuration = (recovContractType === "DIGITEVEN" || recovContractType === "DIGITODD")
-          ? Math.max(5, rawDur)
-          : (recovContractType === "DIGITMATCH" || recovContractType === "DIGITDIFF")
-            ? Math.max(1, Math.min(5, rawDur))
-            : rawDur;
-
-        // Price the exact candidate immediately before sizing it. Live proposal
-        // wins; the canonical user-provided payout schedule is the fallback.
-        const recovPayoutQuote = await resolveRecoveryPayout({
-          symbol: recovSymbol,
-          contractType: recovContractType,
-          barrier: recovBarrier,
-          duration: recovDuration,
-          durationUnit: "t",
-          currency: account?.currency ?? "USD",
-        });
-        const recovPayoutMult = recovPayoutQuote.payoutMultiplier;
-
-        // Recovery stake — sizes from remaining debt plus an optional original
-        // target profit (sizing only) and this candidate's net live payout.
-        const riskBaseAmount = tradingSettings.riskAmountType === "percentage"
-          ? balance * tradingSettings.riskAmountValue / 100
-          : tradingSettings.riskAmountValue;
-        const recovStakeRaw = recoveryEngine.getDynamicRecoveryStake(
-          Math.max(0.35, Math.min(riskBaseAmount, tradingSettings.maxTradeStake)),
-          tradingSettings.maxTradeStake, balance, recovPayoutMult, recovWinP,
-          tradingSettings.riskProfile, tradingSettings.recoveryMultiplier,
-          tradingSettings.recoveryMethod, tradingSettings.maxRecoverySteps,
-          tradingSettings.recoveryAutoMode,
-        );
-        // The recovery engine already rounds upward to cents; do not round back
-        // down here or an "exact" instant stake can finish a cent short.
-        const recovStake = Math.max(0.35, Math.min(recovStakeRaw, tradingSettings.maxTradeStake));
-
-        const recovBarrierToStore = recovContractType.includes("DIGIT") ? (recovBarrier ?? null) : null;
-
-        logger.info({
-          symbol: recovSymbol, contractType: recovContractType, barrier: recovBarrier,
-          stake: recovStake, winP: (recovWinP * 100).toFixed(1) + "%",
-          payout: recovPayoutMult, payoutSource: recovPayoutQuote.source, reason: cons.reason,
-        }, "Recovery: 3-window consensus reached — executing recovery trade");
-
-        broadcastEngineSSE(engine, "scan_complete", {
-          symbol: recovSymbol,
-          quality: Math.min(99, Math.round(cons.avgStrength * 200 + 60)),
-          confidence: Math.round(recovWinP * 100),
-          agentScores: engine.lastAgentScores,
-          marketsScanned: contractCompatibleMarkets.length,
-          shouldTrade: true, rejectReason: null, sessionLossCount: engine.sessionLossCount,
-          consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-        });
-
-        engine.currentMarket = recovSymbol;
-
-        // ── Execute recovery trade (paper or live) ────────────────────────────────
-        const estimatedRecovPayout = recovStake * recovPayoutMult;
-        let rWon: boolean, rProfit: number, rEntryPrice: number, rExitPrice: number, rActualPayout: number;
-
-        if (paperTradeMode || !token) {
-          rWon = Math.random() < recovWinP;
-          rProfit = rWon ? estimatedRecovPayout - recovStake : -recovStake;
-          rActualPayout = rWon ? estimatedRecovPayout : 0;
-          rEntryPrice = rExitPrice = tickManager.getLatestPrice(recovSymbol) ?? 100;
-
-          recordTradeOutcome(recovSymbol, recovContractType, recovBarrier ?? null, rWon, rProfit, recovStake);
-          recoveryEngine.recordOutcome(
-            rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3,
-            recovContractType, recovPayoutMult,
-          );
-          if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
-
-          await db.insert(tradesTable).values({
-            sessionId,
-            symbol: recovSymbol, displayName: recovMarket.displayName,
-            contractType: recovContractType, barrier: recovBarrierToStore,
-            stake: String(recovStake), direction: recovDirection,
-            status: rWon ? "won" : "lost",
-            payout: String(rActualPayout), profit: String(rProfit),
-            entryPrice: String(rEntryPrice), exitPrice: String(rExitPrice),
-            aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
-            isAutonomous: true,
-            agentReasoning: `[PAPER RECOVERY] 3-window consensus: ${cons.reason}`,
-            duration: recovDuration, durationUnit: "t", closedAt: new Date(),
-          });
-        } else {
-          const [openTrade] = await db.insert(tradesTable).values({
-            sessionId,
-            symbol: recovSymbol, displayName: recovMarket.displayName,
-            contractType: recovContractType, barrier: recovBarrierToStore,
-            stake: String(recovStake), direction: recovDirection, status: "open",
-            aiConfidence: String(Math.round(recovWinP * 100)), aiRiskScore: "65",
-            isAutonomous: true,
-            agentReasoning: `[RECOVERY] 3-window consensus: ${cons.reason}`,
-            duration: recovDuration, durationUnit: "t",
-          }).returning();
-
-          broadcastEngineSSE(engine, "trade_started", {
-            id: openTrade.id, symbol: recovSymbol, contract: recovContractType,
-            barrier: recovBarrierToStore, stake: recovStake, duration: recovDuration,
-            confidence: Math.round(recovWinP * 100),
-          });
-
-          try {
-            if (!isAutomatedMarket(recovSymbol)) {
-              throw new Error(`${recovMarket.displayName} is blocked from autonomous recovery execution`);
-            }
-            const liveRes = await executeLiveTrade(token, {
-              symbol: recovSymbol, contractType: recovContractType,
-              stake: Math.round(recovStake * 100) / 100,
-              duration: recovDuration, durationUnit: "t",
-              currency: account?.currency ?? "USD",
-              accountId: derivAccountId!,
-              barrier: recovContractType.includes("DIGIT") ? (recovBarrier ?? undefined) : undefined,
-            });
-            rEntryPrice = liveRes.buyPrice;
-            const contractRes = await waitForContractResult(token, derivAccountId!, liveRes.contractId, (recovDuration + 30) * 1000);
-            rWon = contractRes.won;
-            rProfit = contractRes.profit;
-            rActualPayout = rWon ? recovStake + rProfit : 0;
-            rEntryPrice = contractRes.entrySpot || liveRes.buyPrice;
-            rExitPrice  = contractRes.exitSpot  || rEntryPrice;
-            await syncLiveBalance(sessionId, token, derivAccountId!);
-          } catch (liveErr) {
-            const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-            logger.warn({ errMsg, symbol: recovSymbol }, "Recovery live trade failed — marking as error");
-            try {
-              await db.update(tradesTable).set({
-                status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                agentReasoning: `[RECOVERY] ${cons.reason} [FAILED: ${errMsg}]`,
-              }).where(eq(tradesTable.id, openTrade.id));
-            } catch { /* ignore */ }
-            broadcastEngineSSE(engine, "trade_completed", {
-              id: openTrade.id, symbol: recovSymbol, won: false, profit: "0",
-              contract: recovContractType, error: errMsg,
-            });
-            engine.lastTradeCompletedAt = new Date();
-            const slErr = engine.recentTradesBySymbol.get(recovSymbol) ?? [];
-            slErr.push(new Date());
-            engine.recentTradesBySymbol.set(recovSymbol, slErr.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
-            scheduleNext(engine, true);
-            return;
-          }
-
-          recordTradeOutcome(recovSymbol, recovContractType, recovBarrier ?? null, rWon, rProfit, recovStake);
-          recoveryEngine.recordOutcome(
-            rWon, rProfit, recovStake, settings?.maxRecoverySteps ?? 3,
-            recovContractType, recovPayoutMult,
-          );
-          if (rWon) clearLossPattern(recovSymbol); else recordLossForPattern(recovSymbol, recovContractType, "");
-
-          await db.update(tradesTable).set({
-            status: rWon ? "won" : "lost",
-            payout: String(rActualPayout), profit: String(rProfit),
-            entryPrice: String(rEntryPrice), exitPrice: String(rExitPrice),
-            closedAt: new Date(),
-          }).where(eq(tradesTable.id, openTrade.id));
-        }
-
-        // ── Post-recovery bookkeeping ──────────────────────────────────────────────
-        const rNow = new Date();
-        const rSymLog = engine.recentTradesBySymbol.get(recovSymbol) ?? [];
-        rSymLog.push(rNow);
-        engine.recentTradesBySymbol.set(recovSymbol, rSymLog.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
-        engine.lastTradeCompletedAt = rNow;
-        engine.sessionLossCount = recoveryEngine.getState().streakLossCount;
-        engine.tradesExecutedToday++;
-        engine.lastTradeTime = rNow;
-
-        broadcastEngineSSE(engine, "trade_completed", {
-          symbol: recovSymbol, won: rWon!, profit: rProfit!.toFixed(2),
-          contract: recovContractType, barrier: recovBarrierToStore, stake: recovStake,
-          live: !!token && !paperTradeMode, paper: paperTradeMode,
-        });
-        if (!paperTradeMode && token) journalManager.forceRefresh();
-
-        logger.info({
-          symbol: recovSymbol, won: rWon!, profit: rProfit!.toFixed(2),
-          stake: recovStake, contract: recovContractType,
-        }, "Recovery trade executed");
-
-        if (!rWon! && engine.running) {
-          const freshS = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
-          const hardLimit   = freshS[0]?.consecutiveLossLimit ?? 3;
-          const cooldownMin = freshS[0]?.cooldownMinutes ?? 30;
-          if (engine.sessionLossCount >= hardLimit) {
-            stopEngine(engine, `${engine.sessionLossCount} consecutive losses — limit ${hardLimit} reached, cooling down ${cooldownMin}m`, cooldownMin);
-            return;
-          }
-        }
-
-        scheduleNext(engine, true);
-        return;
-        // ── End of recovery fast path ──────────────────────────────────────────────
-      }
-    }
 
     const getGroupIndex = (sym: string): number => {
       if (sym.startsWith("1HZ")) return 0; // Volatility 1s (5 markets)
@@ -1341,14 +1083,16 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
     // have borderline confidence — the engine is reaching for a marginal trade
     // rather than a genuinely strong setup. Waiting costs nothing; a bad trade costs real money.
     //
-    // During active recovery the floor is relaxed to 50: the master-decision EV,
-    // timing, and risk gates already guard execution quality. Keeping the normal
-    // 60-pt floor in recovery mode causes the engine to repeatedly skip the very
-    // trades it needs to execute to cover the accumulated debt — defeating the purpose
-    // of the recovery system entirely.
+    // During active recovery the floor is REMOVED entirely (0). Master decision
+    // now performs evidence-based admission with a time-decayed threshold, so a
+    // second, static quality floor layered on top would be exactly the kind of
+    // redundant independent veto this change removes — it stalled recovery on
+    // the very trades the mode exists to place. In recovery the evidence score
+    // IS the quality gate, and it is strictly more informative than a fixed
+    // cut-off because it accounts for whether the edge is statistically real.
     const isOverUnderTrade = output.recommendation?.product === "DIGITOVER" ||
       output.recommendation?.product === "DIGITUNDER";
-    const qualityFloor = isOverUnderTrade ? 0 : (inRecoveryNow ? 50 : 60);
+    const qualityFloor = isOverUnderTrade ? 0 : (inRecoveryNow ? 0 : 60);
     if (output.qualityScore < qualityFloor) {
       logger.info({ symbol: bestMarket.symbol, quality: output.qualityScore, inRecovery: inRecoveryNow },
         `Quality floor not met (< ${qualityFloor}) — holding off this scan cycle`);
@@ -1387,24 +1131,15 @@ async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
         ? Math.max(1, Math.min(5, rawDuration))           // 1–5t: duration optimizer chooses; never >5 (extra exposure)
         : rawDuration;
 
-    // ── Fix 7: Regime gate on digit recovery trades ───────────────────────────
-    // Digit contracts (OVER/UNDER/EVEN/ODD/MATCH/DIFF) assume the terminal digit
-    // is drawn from a roughly uniform distribution. In a trending regime this
-    // assumption breaks — directional price momentum skews which digits appear at
-    // expiry. Executing digit recovery trades in a trend compounds debt rather
-    // than recovering it. Hold and rescan in 8s when regime may have normalised.
-    if (recoveryEngine.isInRecovery() &&
-        effectiveContractType.startsWith("DIGIT") &&
-        effectiveContractType !== "DIGITOVER" &&
-        effectiveContractType !== "DIGITUNDER") {
-      const regime = output.regime;
-      if (regime === "trending_up" || regime === "trending_down") {
-        logger.info({ symbol: bestMarket.symbol, regime, contractType: effectiveContractType },
-          "Recovery: digit trade blocked in trending regime — rescanning in 8s");
-        scheduleNext(engine, false, 8000);
-        return;
-      }
-    }
+    // ── Regime handling — now evidence, not a veto ────────────────────────────
+    // Digit contracts assume an approximately uniform terminal digit, and a
+    // trending regime skews which digits appear at expiry, so a trend genuinely
+    // IS adverse evidence for a digit trade. That penalty is now applied inside
+    // master-decision's `regimeEvidenceScore` as a bounded, weighted term
+    // instead of an 8-second hard block: a strong enough edge can still take the
+    // trade, and a weak one is rejected on its merits rather than on regime
+    // alone. The former behaviour stalled recovery here indefinitely in
+    // trending markets.
 
     // ── Recovery Mode stake override ─────────────────────────────────────────
     // Single global recovery state — ANY tracked contract type uses the exact

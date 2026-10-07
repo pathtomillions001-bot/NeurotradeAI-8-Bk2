@@ -91,11 +91,15 @@ export function runConfidenceFusionAgent(
   if (input.portfolioManagerScore < 20) {
     blockers.push("Portfolio manager: position limit reached");
   }
-  // Recovery intelligence hard-gate: at ≥4 consecutive losses the recovery agent
-  // drops to score 15, triggering this explicit block (weighted averaging alone
-  // is not enough — we need a guaranteed veto to protect capital during severe streaks).
+  // Consecutive losses are handled as a BOUNDED, weighted evidence term in
+  // master-decision (`streak`), which is damped in recovery because it is
+  // partly tautological there. The former hard veto here — triggered at ≥4
+  // consecutive losses — is intentionally removed: it duplicated that evidence
+  // with an independent step function, so a genuine edge could never outvote it.
   if (input.recoveryIntelligenceScore < 20) {
-    blockers.push("Recovery intelligence: consecutive loss limit — mandatory pause before next trade");
+    enhancers.push(
+      `Severe loss streak (${sessionLosses}) — noted as evidence, not a veto`,
+    );
   }
 
   // Structural loss pattern gate: if ≥2 of the last 4 losses on this symbol
@@ -211,22 +215,33 @@ export function runConfidenceFusionAgent(
   }
 
   // ── 8. Final decision ─────────────────────────────────────────────────────────
-  const hardBlocked = blockers.some(b =>
+  // ADMISSION AUTHORITY LIVES IN master-decision.ts.
+  //
+  // This module used to be the effective decision-maker: the coordinator
+  // overwrote the master decision with `fusionResult.shouldTrade`, so the
+  // conjunction of (consensus threshold + loss-streak boost + EV gate + timing
+  // gate + structural-pattern gate) was the real admission test. Every one of
+  // those is a step function, and in recovery they all trip together — the
+  // account is in recovery *because* it has been losing, so `sessionLosses >= 2`
+  // is the normal case, which simultaneously made timing a hard gate and pushed
+  // the EV bar to strictly-positive. That conjunction is the mechanism behind
+  // recovery trades waiting 30+ minutes for conditions that may never align.
+  //
+  // The fusion now reports its consensus score, threshold, EV and timing
+  // assessments as SIGNALS (they still drive the weighted score, the UI and the
+  // reasoning strings) but converts only GENUINE CAPITAL-SAFETY conditions into
+  // a veto. Master decision's evidence score decides everything else, including
+  // whether a poor timing or a loss streak should outweigh a strong edge.
+  const safetyBlocked = blockers.some(b =>
     b.includes("ineligible") || b.includes("hard risk") || b.includes("position limit")
   );
 
   const overallConfidence = agentWeightedScore;
   const meetsThreshold = isOverUnder || overallConfidence >= effectiveThreshold;
 
-  // During a loss streak (≥2 consecutive losses) timing becomes a hard gate, not advisory.
-  // In normal conditions timing is advisory so the engine keeps trading; during recovery
-  // we want the most favourable entry, so we block poor-timing setups.
-  const timingRequired = sessionLosses >= 2 && !isOverUnder;
-  const timingPass = !timingRequired || timingGated;
-
-  const shouldTrade = !hardBlocked && meetsThreshold && evGated && timingPass && !!recommendedContractType;
-  const recommendedAction: FusionResult["recommendedAction"] = hardBlocked ? "skip"
-    : !meetsThreshold ? "wait" : shouldTrade ? "buy" : "wait";
+  const shouldTrade = !safetyBlocked && !!recommendedContractType;
+  const recommendedAction: FusionResult["recommendedAction"] = safetyBlocked ? "skip"
+    : shouldTrade ? "buy" : "wait";
 
   const score = overallConfidence;
 

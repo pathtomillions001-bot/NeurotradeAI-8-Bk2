@@ -43,6 +43,121 @@ import type { RiskDecision } from "./risk-manager";
 import type { TimingResult } from "./execution-timing";
 import type { StrategyStats } from "./performance-feedback";
 import type { RegimeOutput } from "./market-regime";
+import {
+  combineEvidence,
+  MAX_TERM_LOG_ODDS,
+  probabilityToLogOdds,
+  requiredEvidence,
+  type EvidenceTerm,
+  type MarkovTestResult,
+} from "./evidence-math";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EVIDENCE-BASED ADMISSION
+// ══════════════════════════════════════════════════════════════════════════════
+//
+// The admission decision is a single log-odds score:
+//
+//     L = Σ wᵢ · log-odds(observationᵢ)      admit when L ≥ L_req(mode, t)
+//
+// This replaces the former chain of independent hard gates (timing ∧ consensus
+// ∧ drift). Those gates were step functions, and because the conditions they
+// tested are correlated (a trending market degrades timing AND lengthens loss
+// streaks AND eventually trips drift), the joint probability of all of them
+// passing at once collapses. That is the mechanism behind 30+ minute waits for
+// a recovery trade that may never come.
+//
+// Properties this buys:
+//   - Substitutable: a strong statistical edge carries a weak timing score.
+//   - Finite: every term is clamped, so nothing vetoes forever.
+//   - Continuous: marginally-poor conditions lower the score instead of
+//     blocking outright.
+//
+// SAFETY: the weights below satisfy a provable invariant (asserted in
+// evidence-math.test.ts) — a maximally BAD edge term (−MAX_TERM_LOG_ODDS) can
+// never be outvoted by every secondary term being maximally GOOD, because
+//   edgeWeight × (−2) + (1 − edgeWeight) × (+2) = 2 − 4·edgeWeight < 0  ⇔  w > 0.5
+// With edge weight 0.55 the worst case fuses to −0.2, so no threshold ≥ 0 can
+// admit a trade with no real statistical edge. Conversely a maximally GOOD edge
+// survives maximally BAD secondary signals (+0.2), which is the substitutability
+// property that AND-gates could not express.
+const EVIDENCE_WEIGHTS = {
+  /** Statistical edge (exact Beta posterior, or EV-derived fallback). Dominant. */
+  edge: 0.55,
+  /** Entry timing quality. Advisory, never a veto. */
+  timing: 0.12,
+  /** Market regime suitability for the chosen contract type. */
+  regime: 0.10,
+  /** Recent win rate vs long-term — strategy drift. */
+  drift: 0.08,
+  /** Consecutive-loss streak. */
+  streak: 0.06,
+  /** Whether Markov transitions carry real information (G² test). */
+  markov: 0.05,
+  /** Sample sufficiency behind the estimates. */
+  dataQuality: 0.04,
+} as const;
+
+/**
+ * In recovery mode, drift and streak are partially TAUTOLOGICAL: the account is
+ * in recovery precisely because it has been losing. Counting that as independent
+ * evidence against the recovery trade is circular — it would penalise the very
+ * trade the mode exists to place. They are damped (not zeroed) so a genuine
+ * structural breakdown still registers, without dominating the decision.
+ */
+const RECOVERY_TAUTOLOGY_DAMPING = 0.4;
+
+/** Normal mode: constant threshold, no time decay (behaviour unchanged in spirit). */
+const NORMAL_EVIDENCE_THRESHOLD = 0.35;
+
+/**
+ * Recovery mode: the bar starts demanding and decays exponentially, so the
+ * engine takes the first candidate whose evidence genuinely clears the bar
+ * rather than waiting for an improbable conjunction of independent conditions.
+ */
+const RECOVERY_EVIDENCE_START = 0.30;
+/**
+ * Asymptotic floor. MUST stay > 0: admission must always require positive
+ * evidence, otherwise "wait long enough" degenerates into "trade a coin flip",
+ * which converts a slow recovery into an efficient loss of capital.
+ */
+const RECOVERY_EVIDENCE_FLOOR = 0.03;
+/** Time constant — the remaining gap to the floor shrinks by 1/e every 2 min. */
+const RECOVERY_EVIDENCE_TAU_MS = 120_000;
+
+/** Maps EV to a bounded pseudo-probability when no digit posterior is available. */
+const EV_TO_EDGE_LOGISTIC_SCALE = 8;
+
+/**
+ * Regime suitability as a signed [-1, +1] score.
+ *
+ * Digit contracts assume the terminal digit is ~uniform; directional momentum
+ * skews which digits appear at expiry, so trending regimes are hostile to them.
+ * Direction contracts want momentum, with CALL/PUT picking the matching side.
+ */
+function regimeEvidenceScore(regime: string, product: string | undefined): number {
+  const isDirection = ["CALL", "PUT", "RISE", "FALL"].includes(product ?? "");
+  const isUp = product === "CALL" || product === "RISE";
+
+  if (isDirection) {
+    switch (regime) {
+      case "trending_up":   return isUp ? 1 : -1;
+      case "trending_down": return isUp ? -1 : 1;
+      case "sideways":      return 0;
+      case "choppy":        return -0.5;
+      case "volatile":      return -1;
+      default:              return 0;
+    }
+  }
+  switch (regime) {
+    case "sideways":      return 1;    // ideal for digit contracts
+    case "choppy":        return 0.5;
+    case "trending_up":   return -1;   // momentum skews the terminal digit
+    case "trending_down": return -1;
+    case "volatile":      return -0.5;
+    default:              return 0;
+  }
+}
 
 // ── Agent weights ─────────────────────────────────────────────────────────────
 const AGENT_WEIGHTS: Record<string, number> = {
@@ -248,67 +363,162 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
   }
   // requirePositiveEv is now advisory only (logged as a warning, not a blocker)
 
-  // ── Gate 3: Timing — NOW A HARD GATE ─────────────────────────────────────
-  // Direction trades: blocked when timingScore < 52. Entering at the wrong momentum
-  // phase or during velocity spikes is a primary source of avoidable losses on
-  // Rise/Fall contracts; raising from 48 → 52 requires meaningfully better entry
-  // conditions to reduce consecutive-loss exposure.
-  // Digit trades: blocked when timingScore < 45. Less velocity-sensitive but still
-  // needs stable tick conditions for digit predictions to be reliable.
-  // Both: always veto on extreme z-score outlier tick to avoid chasing spikes.
-  if (!isOverUnder) {
-    const timingHardThreshold = isDirProduct ? 52 : 45;
-    if (!timingResult.notOnExtreme) {
-      rejectReasons.push(`Outlier tick — waiting for normalisation (z=${timingResult.waitReason ?? "extreme"})`);
-    } else if (timingResult.timingScore < timingHardThreshold) {
-      rejectReasons.push(`Timing gate: score ${timingResult.timingScore}/100 below ${timingHardThreshold} — suboptimal entry conditions`);
-    }
-  }
+  // ══════════════════════════════════════════════════════════════════════════
+  // EVIDENCE ACCUMULATION (replaces the former hard gates 3, 4 and 5)
+  // ══════════════════════════════════════════════════════════════════════════
+  // Each former gate contributes a BOUNDED, WEIGHTED log-odds term instead of
+  // an independent veto. Nothing here can block on its own, and nothing here
+  // can be blocked indefinitely — see EVIDENCE_WEIGHTS for the safety proof.
+  const recoveryActive = ctx.recovery?.active === true;
+  const recoveryElapsedMs = Number.isFinite(ctx.recovery?.elapsedMs)
+    ? (ctx.recovery!.elapsedMs as number)
+    : 0;
 
-  // ── Gate 4: Weighted consensus score ─────────────────────────────────────
-  // Use the ACTUAL user-configured threshold — the old Math.min(..., 50) cap was
-  // silently ignoring any setting above 50, which defeated the purpose of the control.
-  // During a loss streak, raise the bar aggressively — each consecutive loss adds
-  // 5 points (max +30), demanding much stronger multi-agent consensus before trading.
+  // Damping for the terms that are partly tautological while in recovery.
+  const tautologyScale = recoveryActive ? RECOVERY_TAUTOLOGY_DAMPING : 1;
+
+  const activeProduct = bestEV?.product ?? candidateProduct;
+  const evidenceTerms: EvidenceTerm[] = [];
+
+  // ── Term: statistical edge (dominant) ────────────────────────────────────
+  // Prefer the EXACT posterior from the digit agent — P(true win rate exceeds
+  // this contract's payout breakeven), computed from raw digit counts via the
+  // Dirichlet–Beta aggregation property. It is sample-size aware, which is what
+  // the old flat `deviation > 0.005` rule was not.
   //
-  // EXCEPTION — recovery-mode trades: the streak boost must NOT apply when the engine
-  // is executing a recovery trade (DIGITMATCH for high-payout coverage, or DIGITOVER/
-  // DIGITUNDER at the user's recovery barriers). The boost raises the threshold at
-  // exactly the moment these trades need to fire, making recovery nearly impossible.
-  // These contract types already have their own EV and timing gates; blocking recovery
-  // further with a consensus boost defeats the purpose of the recovery system.
-  if (!isOverUnder) {
-    const sessionLosses = ctx.daily.consecutiveLosses;
-    // Re-derive recovery-barrier classification here so Gate 4 doesn't depend on the
-    // Gate 2 local variables (those are inside a separate block scope).
-    const recOverBarrier  = ctx.settings.recoveryOverDigit  ?? 3;
-    const recUnderBarrier = ctx.settings.recoveryUnderDigit ?? 6;
-    const isRecoveryTrade = candidateProduct === "DIGITMATCH" ||
-      (bestEV?.product === "DIGITOVER"  && bestEV?.barrier === recOverBarrier) ||
-      (bestEV?.product === "DIGITUNDER" && bestEV?.barrier === recUnderBarrier);
-    const lossStreakBoost = isRecoveryTrade ? 0 : Math.min(sessionLosses * 5, 30);
-    const minScore = (settings.minConfidenceThreshold ?? 50) + lossStreakBoost;
-    if (weightedScore < minScore) {
-      const streakNote = (!isRecoveryTrade && sessionLosses >= 2) ? ` (incl. +${lossStreakBoost}pt loss-streak guard)` : "";
-      rejectReasons.push(`Consensus score ${weightedScore.toFixed(0)} below threshold ${minScore}${streakNote}`);
-    }
-  }
+  // Contract families with no digit counts (CALL/PUT, MATCH/DIFF built in the
+  // coordinator) fall back to a bounded logistic of EV.
+  const digitAgent = agents["digitDistribution"] ?? agents["digitProbability"];
+  const barrierData = digitAgent?.data?.["bestBarrier"] as
+    | { contractType?: string; barrier?: number; edgeProbability?: number }
+    | undefined;
+  const posteriorMatchesChosen =
+    (bestEV?.product === "DIGITOVER" || bestEV?.product === "DIGITUNDER") &&
+    barrierData?.contractType === bestEV?.product &&
+    barrierData?.barrier === bestEV?.barrier;
+  const posteriorEdge = posteriorMatchesChosen ? barrierData?.edgeProbability : undefined;
+  const evEdgeProb = bestEV
+    ? 1 / (1 + Math.exp(-bestEV.expectedValue * EV_TO_EDGE_LOGISTIC_SCALE))
+    : 0.5;
+  const edgeProb = Number.isFinite(posteriorEdge as number)
+    ? Math.max(0, Math.min(1, posteriorEdge as number))
+    : evEdgeProb;
 
-  // ── Gate 5: Strategy drift — semi-hard gate ───────────────────────────────
-  // Mild drift (recent WR ≥ 40%): advisory warning only — engine keeps trading.
-  // Severe drift (recent WR < 40%, ≥20 trades): hard block — this setup is
-  // demonstrably broken and continuing will compound losses, not recover them.
-  if (
-    !isOverUnder &&
-    strategyStats.isDrifting &&
-    strategyStats.hasEnoughData &&
-    strategyStats.recentWinRate < 0.40 &&
-    strategyStats.totalTrades >= 20
-  ) {
+  evidenceTerms.push({
+    id: "edge",
+    weight: EVIDENCE_WEIGHTS.edge,
+    logOdds: probabilityToLogOdds(edgeProb),
+    detail: Number.isFinite(posteriorEdge as number)
+      ? `Beta posterior P(edge real)=${(edgeProb * 100).toFixed(1)}%`
+      : `EV-derived P(edge)=${(edgeProb * 100).toFixed(1)}% (EV ${((bestEV?.expectedValue ?? 0) * 100).toFixed(1)}%)`,
+  });
+
+  // ── Term: execution timing ────────────────────────────────────────────────
+  // Was a hard gate at 52 (direction) / 45 (digit). Now a bounded contribution:
+  // a poor score lowers the total but a strong edge can still carry it.
+  const timingNormalised = Math.max(-1, Math.min(1, (timingResult.timingScore - 50) / 50));
+  evidenceTerms.push({
+    id: "timing",
+    weight: EVIDENCE_WEIGHTS.timing,
+    logOdds: timingNormalised * MAX_TERM_LOG_ODDS,
+    detail: `timing ${timingResult.timingScore}/100${timingResult.notOnExtreme ? "" : " (outlier tick)"}`,
+  });
+
+  // ── Term: market regime ───────────────────────────────────────────────────
+  // Was a hard block on digit trades in trending regimes ("Fix 7"). Now a
+  // signed contribution — hostile regimes cost score instead of stalling.
+  const regimeScore = regimeEvidenceScore(regimeOutput.regime, activeProduct);
+  evidenceTerms.push({
+    id: "regime",
+    weight: EVIDENCE_WEIGHTS.regime,
+    logOdds: regimeScore * MAX_TERM_LOG_ODDS,
+    detail: `${regimeOutput.regime.replace("_", " ")} regime`,
+  });
+
+  // ── Term: strategy drift ──────────────────────────────────────────────────
+  // Was a hard block when recent WR < 40% over ≥ 20 trades. The old behaviour
+  // measured drift only AFTER the fact and then refused to trade — which in
+  // recovery is self-reinforcing. Now it is bounded evidence.
+  const driftLogOdds = strategyStats.hasEnoughData
+    ? probabilityToLogOdds(strategyStats.recentWinRate)
+    : 0;
+  evidenceTerms.push({
+    id: "drift",
+    weight: EVIDENCE_WEIGHTS.drift * tautologyScale,
+    logOdds: driftLogOdds,
+    detail: strategyStats.hasEnoughData
+      ? `recent WR ${(strategyStats.recentWinRate * 100).toFixed(1)}%`
+      : "insufficient history",
+  });
+
+  // ── Term: loss streak ─────────────────────────────────────────────────────
+  // Was an effective hard veto: at ≥ 4 consecutive losses the recovery
+  // intelligence agent scored 15, which the confidence-fusion hard-gate then
+  // converted into a mandatory pause. Bounded here, and damped in recovery.
+  const streakTerm = -Math.min(ctx.daily.consecutiveLosses, 5) * 0.35;
+  evidenceTerms.push({
+    id: "streak",
+    weight: EVIDENCE_WEIGHTS.streak * tautologyScale,
+    logOdds: streakTerm,
+    detail: `${ctx.daily.consecutiveLosses} consecutive loss${ctx.daily.consecutiveLosses === 1 ? "" : "es"}`,
+  });
+
+  // ── Term: Markov information content ──────────────────────────────────────
+  // The barrier builder blends Markov transition probabilities into its win-rate
+  // estimate. The G² test tells us whether those transitions carry information
+  // at all; when they do not, the prediction is built on noise.
+  const markovTest = digitAgent?.data?.["markovTest"] as MarkovTestResult | undefined;
+  const markovLogOdds = !markovTest || markovTest.observations < 30
+    ? 0
+    : markovTest.significant
+      ? 0.9
+      : -0.3;
+  evidenceTerms.push({
+    id: "markov",
+    weight: EVIDENCE_WEIGHTS.markov,
+    logOdds: markovLogOdds,
+    detail: !markovTest || markovTest.observations < 30
+      ? "insufficient transitions"
+      : markovTest.significant
+        ? `Markov informative (G²=${markovTest.g2.toFixed(0)}, p=${markovTest.pValue.toFixed(3)})`
+        : `Markov ≈ i.i.d. (p=${markovTest.pValue.toFixed(3)})`,
+  });
+
+  // ── Term: data quality ────────────────────────────────────────────────────
+  const sampleSizeTerm = Number(digitAgent?.data?.["sampleSize"] ?? 0);
+  const sufficiency = Math.max(0, Math.min(1, sampleSizeTerm / 200));
+  evidenceTerms.push({
+    id: "dataQuality",
+    weight: EVIDENCE_WEIGHTS.dataQuality,
+    logOdds: sufficiency * 2 - 1,
+    detail: `${sampleSizeTerm} samples`,
+  });
+
+  const evidence = combineEvidence(evidenceTerms);
+
+  // ── Admission threshold ───────────────────────────────────────────────────
+  // Normal mode: constant. Recovery mode: decays toward a strictly positive
+  // floor, so the engine takes the first candidate whose evidence clears the
+  // (relaxing) bar instead of waiting for every condition to align at once.
+  const evidenceThreshold = recoveryActive
+    ? requiredEvidence({
+        elapsedMs: recoveryElapsedMs,
+        startThreshold: RECOVERY_EVIDENCE_START,
+        floorThreshold: RECOVERY_EVIDENCE_FLOOR,
+        tauMs: RECOVERY_EVIDENCE_TAU_MS,
+      })
+    : NORMAL_EVIDENCE_THRESHOLD;
+
+  const evidenceSufficient = evidence.total >= evidenceThreshold;
+
+  if (!evidenceSufficient) {
+    // Name the weakest term so the skip is diagnosable from the UI/logs.
+    const weakest = [...evidence.contributions].sort((a, b) => a.contribution - b.contribution)[0];
     rejectReasons.push(
-      `Severe drift gate: recent WR ${(strategyStats.recentWinRate * 100).toFixed(1)}% ` +
-      `vs long-term ${(strategyStats.longTermWinRate * 100).toFixed(1)}% ` +
-      `over ${strategyStats.totalTrades} trades — blocked until WR recovers above 40%`
+      `Evidence ${evidence.total.toFixed(3)} below ${recoveryActive ? "recovery " : ""}threshold ` +
+        `${evidenceThreshold.toFixed(3)}` +
+        (weakest ? ` — weakest term: ${weakest.id} (${weakest.contribution.toFixed(3)}: ${weakest.detail ?? ""})` : "") +
+        (recoveryActive ? ` [recovery ${(recoveryElapsedMs / 1000).toFixed(0)}s in]` : ""),
     );
   }
 
@@ -401,14 +611,21 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
     warnings.push("Near-breakeven EV — direction model consensus justified this trade");
   }
 
+  const evidenceSummary = evidence.contributions
+    .map((c) => `${c.id}=${c.contribution.toFixed(2)}`)
+    .join(" ");
+
   const reasonParts = [
+    `Evidence: ${evidence.total.toFixed(3)} vs threshold ${evidenceThreshold.toFixed(3)}` +
+      (recoveryActive ? ` (recovery, ${(recoveryElapsedMs / 1000).toFixed(0)}s in).` : "."),
     `Quality: ${qualityScore}/100.`,
     `Consensus: ${weightedScore.toFixed(0)}/100.`,
     bestEV ? `Best EV: ${(bestEV.expectedValue * 100).toFixed(1)}% (${bestEV.product}).` : "No positive EV.",
     `Regime: ${regimeOutput.regime.replace("_", " ")}.`,
     `Risk: ${riskDecision.riskLevel}.`,
     `Duration: ${tradeDuration}t.`,
-    shouldTrade ? "✓ All gates passed — executing." : `✗ SKIP: ${rejectReasons[0]}`,
+    `Terms: ${evidenceSummary}.`,
+    shouldTrade ? "✓ Evidence sufficient — executing." : `✗ SKIP: ${rejectReasons[0]}`,
   ];
 
   const reasoning = reasonParts.join(" ");
@@ -428,6 +645,13 @@ export function makeFinalDecision(inputs: MasterDecisionInputs): {
       weightedScore,
       qualityScore,
       optimizedDuration,
+      evidence: {
+        total: evidence.total,
+        threshold: evidenceThreshold,
+        recovery: recoveryActive,
+        recoveryElapsedMs,
+        contributions: evidence.contributions,
+      },
     },
     executionTimeMs: Date.now() - t0,
   };

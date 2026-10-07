@@ -15,6 +15,8 @@ import type {
   BridgeCommand,
   CandleSeries,
   CommandResult,
+  MarketCatalogEntry,
+  NewsCalendarSnapshot,
   Position,
   Quote,
   SymbolSpec,
@@ -52,6 +54,10 @@ export interface DeskState {
     lastSeq: number;
   } | null;
   account: AccountSnapshot | null;
+  /** Last validated live MT5 economic-calendar snapshot. */
+  newsCalendar: NewsCalendarSnapshot;
+  /** All tradeable symbols reported by this broker, grouped by MT5 metadata. */
+  universe: Map<string, MarketCatalogEntry>;
   specs: Map<string, SymbolSpec>;
   quotes: Map<string, Quote>;
   /** `${symbol}|${timeframe}` → bars. */
@@ -70,21 +76,12 @@ export interface DeskState {
   policy: RiskPolicy;
   riskState: RiskState;
   journal: JournalEntry[];
-  /** Deterministic simulator state, used when no terminal is linked. */
-  simulated: boolean;
 }
 
 const desks = new Map<string, DeskState>();
 
-export const DEFAULT_WATCHLIST = [
-  "EURUSD",
-  "GBPUSD",
-  "USDJPY",
-  "XAUUSD",
-  "US30",
-  "NAS100",
-  "BTCUSD",
-] as const;
+/** No instruments are enabled until a user selects them from the broker catalog. */
+export const DEFAULT_WATCHLIST: readonly string[] = [];
 
 export function getDesk(sessionId: string): DeskState {
   let desk = desks.get(sessionId);
@@ -93,6 +90,15 @@ export function getDesk(sessionId: string): DeskState {
       sessionId,
       terminal: null,
       account: null,
+      newsCalendar: {
+        status: "unknown",
+        fetchedAt: null,
+        coverageStart: null,
+        coverageEnd: null,
+        error: null,
+        events: [],
+      },
+      universe: new Map(),
       specs: new Map(),
       quotes: new Map(),
       candles: new Map(),
@@ -107,7 +113,6 @@ export function getDesk(sessionId: string): DeskState {
       policy: { ...DEFAULT_RISK_POLICY },
       riskState: createRiskState(),
       journal: [],
-      simulated: true,
     };
     desks.set(sessionId, desk);
   }

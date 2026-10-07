@@ -4,11 +4,9 @@
  * Everything the Bloomberg-style terminal needs: instruments, quotes, candles,
  * agent analysis, armed plans, positions and the live risk budget.
  *
- * Until a MetaTrader 5 terminal is paired the desk answers from the
- * deterministic replay feed (lib/multiasset/simulator.ts) so the UI is fully
- * functional — and every response says which source it came from, because a
- * trading screen that cannot tell you whether its prices are real is worse
- * than no screen at all.
+ * This API is live-only. Until a MetaTrader 5 terminal is paired, it returns
+ * an empty broker catalog and no account/market values. Stale or missing ticks
+ * are never replaced with a replay price.
  */
 
 import { Router, type IRouter } from "express";
@@ -16,8 +14,16 @@ import { randomUUID } from "node:crypto";
 import { getBrowserSessionId } from "../lib/session";
 import { logger } from "../lib/logger";
 import { evaluate, horizonMinutes } from "../lib/multiasset/agent";
-import { equityCurveSimulation } from "../lib/multiasset/montecarlo";
 import { aggregateExposure } from "../lib/multiasset/sizing";
+import {
+  NEWS_BLACKOUT_AFTER_MS,
+  NEWS_BLACKOUT_BEFORE_MS,
+  NEWS_CALENDAR_MAX_AGE_MS,
+  getNewsCalendarStatus,
+  isNewsCalendarReady,
+  newsGuardFromSnapshot,
+  relevantNewsEvents,
+} from "../lib/multiasset/news";
 import {
   DEFAULT_RISK_POLICY,
   confirmRegimeChange,
@@ -36,13 +42,6 @@ import {
   type DeskState,
 } from "../lib/multiasset/store";
 import {
-  simulatedAccount,
-  simulatedCandles,
-  simulatedQuote,
-  simulatedSpec,
-  simulatedSymbols,
-} from "../lib/multiasset/simulator";
-import {
   TIMEFRAMES,
   type Bar,
   type Quote,
@@ -59,49 +58,105 @@ function isTimeframe(value: unknown): value is Timeframe {
   return typeof value === "string" && (TIMEFRAMES as readonly string[]).includes(value);
 }
 
-/**
- * Resolve a symbol's spec, quote and series from the live terminal when one is
- * paired and from the replay feed otherwise.
- *
- * Centralised so no route can accidentally mix a live spec with simulated
- * prices — sizing computed from one broker's spec against another feed's
- * prices would be wrong in a way that is very hard to notice.
- */
+/** Quotes and terminal heartbeats older than this are not actionable. */
+export const LIVE_DATA_MAX_AGE_MS = 30_000;
+const MIN_ANALYSIS_BARS = 60;
+
+function isFreshTimestamp(timestamp: number, now = Date.now()): boolean {
+  return Number.isFinite(timestamp) && timestamp <= now + 5_000 && now - timestamp <= LIVE_DATA_MAX_AGE_MS;
+}
+
+function liveFeedError(desk: DeskState, now = Date.now()): string | null {
+  if (!desk.terminal) return "Link a MetaTrader 5 terminal to load broker data.";
+  if (now - desk.terminal.lastSyncAt > LIVE_DATA_MAX_AGE_MS) {
+    return "MT5 connection is stale. Reconnect the terminal before using market data or execution.";
+  }
+  if (!desk.account) return "Waiting for the first real account snapshot from MT5.";
+  return null;
+}
+
+/** Only resolves broker-reported data with a current account heartbeat and quote. */
 function resolveSymbol(
   desk: DeskState,
   symbol: string,
-): { spec: SymbolSpec; quote: Quote; series: Partial<Record<Timeframe, Bar[]>>; live: boolean } | null {
-  if (!desk.simulated) {
-    const spec = desk.specs.get(symbol);
-    const quote = desk.quotes.get(symbol);
-    if (!spec || !quote) return null;
-    return { spec, quote, series: seriesFor(desk, symbol), live: true };
-  }
-
-  const spec = simulatedSpec(symbol);
-  const quote = simulatedQuote(symbol);
-  if (!spec || !quote) return null;
-
-  const series: Partial<Record<Timeframe, Bar[]>> = {};
-  for (const timeframe of TIMEFRAMES) {
-    const candles = simulatedCandles(symbol, timeframe);
-    if (candles) series[timeframe] = candles.bars;
-  }
-  return { spec, quote, series, live: false };
-}
-
-function accountFor(desk: DeskState) {
-  return desk.account ?? simulatedAccount();
+  now = Date.now(),
+): { spec: SymbolSpec; quote: Quote; series: Partial<Record<Timeframe, Bar[]>> } | null {
+  if (liveFeedError(desk, now)) return null;
+  const spec = desk.specs.get(symbol);
+  const quote = desk.quotes.get(symbol);
+  if (!spec || !quote || !isFreshTimestamp(quote.ts, now)) return null;
+  return { spec, quote, series: seriesFor(desk, symbol) };
 }
 
 function specMap(desk: DeskState): Map<string, SymbolSpec> {
-  if (!desk.simulated) return desk.specs;
-  const map = new Map<string, SymbolSpec>();
-  for (const symbol of simulatedSymbols()) {
-    const spec = simulatedSpec(symbol);
-    if (spec) map.set(symbol, spec);
+  return desk.specs;
+}
+
+function dataErrorForSymbol(desk: DeskState, symbol: string, now = Date.now()): string | null {
+  const feedError = liveFeedError(desk, now);
+  if (feedError) return feedError;
+  if (!desk.universe.has(symbol)) return `${symbol} is not listed by the linked MT5 broker.`;
+  if (!desk.watchlist.includes(symbol)) return `Add ${symbol} to the live watchlist before analysing it.`;
+  const spec = desk.specs.get(symbol);
+  const quote = desk.quotes.get(symbol);
+  if (!spec || !quote) return `Waiting for MT5 to subscribe to ${symbol} and send its live quote.`;
+  if (!isFreshTimestamp(quote.ts, now)) return `The latest MT5 quote for ${symbol} is stale; no trade will be evaluated.`;
+  const series = seriesFor(desk, symbol);
+  const missing = TIMEFRAMES.find((timeframe) => (series[timeframe]?.length ?? 0) < MIN_ANALYSIS_BARS);
+  if (missing) {
+    const bars = series[missing]?.length ?? 0;
+    return `Loading live ${missing} history for ${symbol} (${bars}/${MIN_ANALYSIS_BARS} bars).`;
   }
-  return map;
+  return null;
+}
+
+function analysisReady(desk: DeskState, symbol: string, now = Date.now()): boolean {
+  return dataErrorForSymbol(desk, symbol, now) === null;
+}
+
+function newsStateForDesk(desk: DeskState, now: number) {
+  const status = getNewsCalendarStatus(desk.newsCalendar, now);
+  const ready = status === "ready";
+  const selectedSymbols = desk.watchlist;
+  const events = ready
+    ? desk.newsCalendar.events
+        .filter((event) => event.ts >= now - NEWS_BLACKOUT_AFTER_MS && event.ts <= now + 48 * 60 * 60_000)
+        .map((event) => {
+          const affectedSymbols = selectedSymbols.filter((symbol) =>
+            relevantNewsEvents([event], desk.specs.get(symbol)).length > 0,
+          );
+          if (selectedSymbols.length > 0 && affectedSymbols.length === 0) return null;
+          const blackoutStart = event.ts - NEWS_BLACKOUT_BEFORE_MS;
+          const blackoutEnd = event.ts + NEWS_BLACKOUT_AFTER_MS;
+          return {
+            ...event,
+            affectedSymbols,
+            blackoutStart,
+            blackoutEnd,
+            minutesUntil: Math.round((event.ts - now) / 60_000),
+            inBlackout: now >= blackoutStart && now <= blackoutEnd,
+          };
+        })
+        .filter((event): event is NonNullable<typeof event> => event !== null)
+        .slice(0, 100)
+    : [];
+  return {
+    status,
+    ready,
+    fetchedAt: desk.newsCalendar.fetchedAt,
+    ageMs: desk.newsCalendar.fetchedAt === null ? null : Math.max(0, now - desk.newsCalendar.fetchedAt),
+    error: ready
+      ? null
+      : desk.newsCalendar.error ?? (status === "stale"
+        ? "The last MT5 calendar snapshot is stale or does not cover the required window."
+        : status === "unknown"
+          ? "Waiting for a verified MT5 economic-calendar snapshot."
+          : "MT5 economic calendar is unavailable."),
+    blackoutBeforeMs: NEWS_BLACKOUT_BEFORE_MS,
+    blackoutAfterMs: NEWS_BLACKOUT_AFTER_MS,
+    staleAfterMs: NEWS_CALENDAR_MAX_AGE_MS,
+    events,
+  };
 }
 
 // ── Desk overview ────────────────────────────────────────────────────────────
@@ -111,12 +166,17 @@ router.get("/state", (req, res) => {
   const desk = getDesk(getBrowserSessionId());
   expirePlans(desk);
 
-  const account = accountFor(desk);
+  const account = desk.account;
   const specs = specMap(desk);
-  const budget = remainingDailyBudget(account, desk.policy);
+  const now = Date.now();
+  const feedError = liveFeedError(desk, now);
 
   res.json({
-    source: desk.simulated ? "replay" : "mt5",
+    source: desk.terminal ? "mt5" : "unlinked",
+    feedReady: feedError === null,
+    feedError,
+    news: newsStateForDesk(desk, now),
+    catalogCount: desk.universe.size,
     terminal: desk.terminal
       ? {
           accountId: desk.terminal.accountId,
@@ -127,7 +187,7 @@ router.get("/state", (req, res) => {
           lastSyncAt: desk.terminal.lastSyncAt,
           // A terminal that stopped syncing must be visibly stale, not
           // silently shown as connected.
-          stale: Date.now() - desk.terminal.lastSyncAt > 30_000,
+          stale: !isFreshTimestamp(desk.terminal.lastSyncAt, now),
         }
       : null,
     account,
@@ -139,41 +199,44 @@ router.get("/state", (req, res) => {
     policy: desk.policy,
     risk: {
       state: desk.riskState,
-      budget,
-      exposure: aggregateExposure(desk.positions, specs, account.equity),
+      budget: account ? remainingDailyBudget(account, desk.policy) : null,
+      exposure: account ? aggregateExposure(desk.positions, specs, account.equity) : [],
     },
     journal: desk.journal.slice(0, 50),
     serverTime: Date.now(),
   });
 });
 
-/** GET /api/desk/instruments — the tradeable universe with live quotes. */
+/** GET /api/desk/instruments — the linked broker catalog, with live quotes when subscribed. */
 router.get("/instruments", (req, res) => {
   const desk = getDesk(getBrowserSessionId());
-  const symbols = desk.simulated ? simulatedSymbols() : [...desk.specs.keys()];
-
-  const instruments = symbols
-    .map((symbol) => {
-      const resolved = resolveSymbol(desk, symbol);
-      if (!resolved) return null;
-      const m5 = resolved.series.M5 ?? [];
+  const now = Date.now();
+  const feedReady = liveFeedError(desk, now) === null;
+  const instruments = [...desk.universe.values()]
+    .map((entry) => {
+      const spec = desk.specs.get(entry.symbol);
+      const quote = desk.quotes.get(entry.symbol);
+      const m5 = seriesFor(desk, entry.symbol).M5 ?? [];
       const first = m5.length > 0 ? m5[0][4] : null;
       const last = m5.length > 0 ? m5[m5.length - 1][4] : null;
+      const dataFresh = !!quote && feedReady && isFreshTimestamp(quote.ts, now);
       return {
-        symbol,
-        assetClass: resolved.spec.assetClass,
-        digits: resolved.spec.digits,
-        bid: resolved.quote.bid,
-        ask: resolved.quote.ask,
-        spreadPoints: resolved.quote.spreadPoints,
-        // Session change over the M5 window we hold — enough for a quote board.
-        changePct: first && last ? ((last - first) / first) * 100 : 0,
-        watched: desk.watchlist.includes(symbol),
+        ...entry,
+        digits: spec?.digits ?? 5,
+        bid: quote?.bid ?? null,
+        ask: quote?.ask ?? null,
+        spreadPoints: quote?.spreadPoints ?? null,
+        changePct: first && last ? ((last - first) / first) * 100 : null,
+        watched: desk.watchlist.includes(entry.symbol),
+        subscribed: !!spec,
+        dataFresh,
+        quoteTs: quote?.ts ?? null,
+        quoteAgeMs: quote ? Math.max(0, now - quote.ts) : null,
       };
     })
-    .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
+    .sort((a, b) => a.assetClass.localeCompare(b.assetClass) || a.symbol.localeCompare(b.symbol));
 
-  res.json({ source: desk.simulated ? "replay" : "mt5", instruments });
+  res.json({ source: desk.terminal ? "mt5" : "unlinked", feedReady, instruments });
 });
 
 /** GET /api/desk/candles?symbol=&timeframe= */
@@ -187,14 +250,16 @@ router.get("/candles", (req, res) => {
     return res.status(400).json({ error: `timeframe must be one of ${TIMEFRAMES.join(", ")}` });
   }
 
+  const feedError = liveFeedError(desk);
+  if (feedError) return res.status(409).json({ error: feedError });
   const resolved = resolveSymbol(desk, symbol);
-  if (!resolved) return res.status(404).json({ error: `No data for ${symbol}` });
+  if (!resolved) return res.status(409).json({ error: dataErrorForSymbol(desk, symbol) ?? `Waiting for live data for ${symbol}.` });
 
   const bars = resolved.series[timeframe] ?? [];
   return res.json({
     symbol,
     timeframe,
-    source: resolved.live ? "mt5" : "replay",
+    source: "mt5",
     spec: resolved.spec,
     quote: resolved.quote,
     bars,
@@ -219,25 +284,27 @@ router.get("/analysis", (req, res) => {
     return res.status(400).json({ error: `mode must be one of ${VALID_MODES.join(", ")}` });
   }
 
+  const dataError = dataErrorForSymbol(desk, symbol);
+  if (dataError) return res.status(409).json({ error: dataError, source: desk.terminal ? "mt5" : "unlinked" });
   const resolved = resolveSymbol(desk, symbol);
-  if (!resolved) return res.status(404).json({ error: `No data for ${symbol}` });
+  if (!resolved || !desk.account) return res.status(409).json({ error: `Waiting for live MT5 data for ${symbol}.` });
 
-  const account = accountFor(desk);
   const decision = evaluate({
     symbol,
     mode,
     spec: resolved.spec,
     quote: resolved.quote,
     series: resolved.series,
-    account,
+    account: desk.account,
     positions: desk.positions,
     specs: specMap(desk),
     riskState: desk.riskState,
     policy: desk.policy,
+    news: newsGuardFromSnapshot(desk.newsCalendar),
   });
 
   return res.json({
-    source: resolved.live ? "mt5" : "replay",
+    source: "mt5",
     horizonMinutes: horizonMinutes(mode),
     decision: {
       ...decision,
@@ -269,11 +336,25 @@ router.get("/scan", (req, res) => {
     return res.status(400).json({ error: `mode must be one of ${VALID_MODES.join(", ")}` });
   }
 
-  const account = accountFor(desk);
+  const feedError = liveFeedError(desk);
+  if (feedError || !desk.account) {
+    return res.json({
+      mode,
+      source: desk.terminal ? "mt5" : "unlinked",
+      results: [],
+      waitingSymbols: desk.watchlist,
+      unavailableReason: feedError ?? "Waiting for the real MT5 account snapshot.",
+      scannedAt: Date.now(),
+    });
+  }
+
+  const account = desk.account;
   const specs = specMap(desk);
+  const waitingSymbols = desk.watchlist.filter((symbol) => !analysisReady(desk, symbol));
 
   const results = desk.watchlist
     .map((symbol) => {
+      if (!analysisReady(desk, symbol)) return null;
       const resolved = resolveSymbol(desk, symbol);
       if (!resolved) return null;
       const decision = evaluate({
@@ -287,6 +368,7 @@ router.get("/scan", (req, res) => {
         specs,
         riskState: desk.riskState,
         policy: desk.policy,
+        news: newsGuardFromSnapshot(desk.newsCalendar),
       });
       return {
         symbol,
@@ -308,7 +390,7 @@ router.get("/scan", (req, res) => {
     // Armed setups first, then by score — the ranking a desk actually wants.
     .sort((a, b) => Number(b.armed) - Number(a.armed) || b.score - a.score);
 
-  return res.json({ mode, source: desk.simulated ? "replay" : "mt5", results, scannedAt: Date.now() });
+  return res.json({ mode, source: "mt5", results, waitingSymbols, scannedAt: Date.now() });
 });
 
 // ── Arming ───────────────────────────────────────────────────────────────────
@@ -330,8 +412,13 @@ router.post("/arm", (req, res) => {
     return res.status(400).json({ error: `mode must be one of ${VALID_MODES.join(", ")}` });
   }
 
+  const dataError = dataErrorForSymbol(desk, symbol);
+  if (dataError) return res.status(409).json({ error: dataError });
+  if (!desk.autoTrade) {
+    return res.status(409).json({ error: "Enable execution after reviewing the live account and risk settings before arming a plan." });
+  }
   const resolved = resolveSymbol(desk, symbol);
-  if (!resolved) return res.status(404).json({ error: `No data for ${symbol}` });
+  if (!resolved || !desk.account) return res.status(409).json({ error: `Waiting for live MT5 data for ${symbol}.` });
 
   const decision = evaluate({
     symbol,
@@ -339,11 +426,12 @@ router.post("/arm", (req, res) => {
     spec: resolved.spec,
     quote: resolved.quote,
     series: resolved.series,
-    account: accountFor(desk),
+    account: desk.account,
     positions: desk.positions,
     specs: specMap(desk),
     riskState: desk.riskState,
     policy: desk.policy,
+    news: newsGuardFromSnapshot(desk.newsCalendar),
   });
 
   if (!decision.armed || !decision.plan) {
@@ -432,25 +520,39 @@ router.post("/settings", (req, res) => {
     desk.mode = body.mode;
   }
 
-  if (body.autoTrade !== undefined) {
-    const enable = Boolean(body.autoTrade);
-    // Auto-trading a real account requires the explicit live flag as well;
-    // defaulting to "on" for a funded account is not a defensible default.
-    if (enable && desk.account?.isLive && !desk.policy.liveTradingEnabled) {
-      return res.status(409).json({
-        error: "Enable live trading explicitly before auto-trading a real account.",
-      });
-    }
-    desk.autoTrade = enable;
-    journal(desk, "risk", null, `Auto-trade ${enable ? "enabled" : "disabled"}.`);
+  if (Array.isArray(body.watchlist)) {
+    const available = new Set(desk.universe.keys());
+    const next = [...new Set((body.watchlist as unknown[])
+      .map((value: unknown) => String(value).trim())
+      .filter((symbol: string) => available.has(symbol)))];
+    // Empty selection is valid: it immediately unsubscribes every unneeded feed.
+    desk.watchlist = next;
   }
 
-  if (Array.isArray(body.watchlist)) {
-    const available = new Set(desk.simulated ? simulatedSymbols() : [...desk.specs.keys()]);
-    const next: string[] = (body.watchlist as unknown[])
-      .map((s: unknown) => String(s))
-      .filter((s: string) => available.size === 0 || available.has(s));
-    if (next.length > 0) desk.watchlist = [...new Set(next)].slice(0, 20);
+  if (body.autoTrade !== undefined) {
+    const enable = Boolean(body.autoTrade);
+    if (enable) {
+      const feedError = liveFeedError(desk);
+      if (feedError) return res.status(409).json({ error: feedError });
+      if (!isNewsCalendarReady(desk.newsCalendar)) {
+        return res.status(409).json({ error: "Confirm a fresh, complete MT5 high-impact economic calendar before enabling execution. New entries remain blocked while news data is stale or unavailable." });
+      }
+      if (!desk.watchlist.length) {
+        return res.status(409).json({ error: "Select at least one broker instrument before enabling execution." });
+      }
+      if (!desk.watchlist.some((symbol) => analysisReady(desk, symbol))) {
+        return res.status(409).json({ error: "Wait for fresh quotes and live history on a selected instrument before enabling execution." });
+      }
+      // Auto-trading a real account requires the explicit live flag as well;
+      // defaulting to "on" for a funded account is not a defensible default.
+      if (desk.account?.isLive && !desk.policy.liveTradingEnabled) {
+        return res.status(409).json({
+          error: "Enable live trading explicitly before auto-trading a real account.",
+        });
+      }
+    }
+    desk.autoTrade = enable;
+    journal(desk, "risk", null, `Execution ${enable ? "enabled" : "disabled"}.`);
   }
 
   if (body.policy && typeof body.policy === "object") {
@@ -512,51 +614,6 @@ router.post("/risk/new-day", (_req, res) => {
   return res.json({ state: desk.riskState, account: desk.account });
 });
 
-/**
- * GET /api/desk/risk/projection
- *
- * Simulates the equity curve under the desk's current settings, and under a
- * martingale progression for comparison. This is deliberately prominent: it
- * is the evidence behind the refusal to implement loss-chasing stakes.
- */
-router.get("/risk/projection", (req, res) => {
-  const desk = getDesk(getBrowserSessionId());
-  const winProbability = clampNumber(Number(req.query.winProbability ?? 0.55), 0.05, 0.95);
-  const rewardRisk = clampNumber(Number(req.query.rewardRisk ?? 1.6), 0.1, 10);
-  const trades = Math.round(clampNumber(Number(req.query.trades ?? 300), 20, 5000));
-
-  const disciplined = equityCurveSimulation({
-    winProbability,
-    rewardRisk,
-    riskPct: desk.policy.baseRiskPct,
-    trades,
-    lossMultiplier: 1,
-    maxRiskPct: desk.policy.maxRiskPct,
-  });
-
-  const martingale = equityCurveSimulation({
-    winProbability,
-    rewardRisk,
-    riskPct: desk.policy.baseRiskPct,
-    trades,
-    lossMultiplier: 2,
-    maxRiskPct: 100,
-  });
-
-  return res.json({
-    assumptions: { winProbability, rewardRisk, trades, riskPct: desk.policy.baseRiskPct },
-    disciplined,
-    martingale,
-    note:
-      "Both runs use the same win rate and reward:risk. The only difference is that " +
-      "the martingale column doubles stake after every loss. Compare the ruin probabilities.",
-  });
-});
-
-function clampNumber(value: number, lo: number, hi: number): number {
-  if (!Number.isFinite(value)) return lo;
-  return Math.max(lo, Math.min(hi, value));
-}
 
 export default router;
 export { DEFAULT_RISK_POLICY };

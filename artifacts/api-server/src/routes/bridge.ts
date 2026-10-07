@@ -20,10 +20,19 @@
  */
 
 import { Router, type IRouter, type Request } from "express";
-import { randomUUID } from "node:crypto";
+import { randomInt, randomUUID } from "node:crypto";
 import { logger } from "../lib/logger";
 import { getBrowserSessionId } from "../lib/session";
-import { recordOutcome } from "../lib/multiasset/risk";
+import { createRiskState, recordOutcome } from "../lib/multiasset/risk";
+import { inferAssetClass, normalizeAssetClass } from "../lib/multiasset/catalog";
+import {
+  NEWS_BLACKOUT_AFTER_MS,
+  NEWS_BLACKOUT_BEFORE_MS,
+  NEWS_CALENDAR_MAX_AGE_MS,
+  assessNewsEntry,
+  isNewsCalendarReady,
+  newsGuardFromSnapshot,
+} from "../lib/multiasset/news";
 import {
   acknowledgeResult,
   applyAccount,
@@ -43,8 +52,12 @@ import {
 import {
   TIMEFRAMES,
   type AccountSnapshot,
+  type AssetClass,
   type Bar,
   type CommandResult,
+  type HighImpactNewsEvent,
+  type MarketCatalogEntry,
+  type NewsCalendarSnapshot,
   type Position,
   type Quote,
   type SymbolSpec,
@@ -65,6 +78,57 @@ interface PendingPairing {
 
 const pendingPairings = new Map<string, PendingPairing>();
 
+function clearLiveDeskData(desk: DeskState): void {
+  desk.account = null;
+  desk.newsCalendar = {
+    status: "unknown",
+    fetchedAt: null,
+    coverageStart: null,
+    coverageEnd: null,
+    error: null,
+    events: [],
+  };
+  desk.universe.clear();
+  desk.specs.clear();
+  desk.quotes.clear();
+  desk.candles.clear();
+  desk.positions = [];
+  desk.watchlist = [];
+  desk.plans.clear();
+  desk.outbox = [];
+  desk.inflight.clear();
+  desk.autoTrade = false;
+  desk.riskState = createRiskState();
+}
+
+/** Replace the broker's full MT5 catalog snapshot, never merge stale symbols. */
+function replaceBrokerUniverse(desk: DeskState, entries: MarketCatalogEntry[]): void {
+  const next = new Map(entries.map((entry) => [entry.symbol, entry] as const));
+  // A transient empty terminal catalog should not erase a previously valid
+  // broker universe. Empty is accepted while pairing/initializing the first one.
+  if (next.size === 0 && desk.universe.size > 0) return;
+
+  const removed = new Set([...desk.universe.keys()].filter((symbol) => !next.has(symbol)));
+  desk.universe.clear();
+  for (const [symbol, entry] of next) desk.universe.set(symbol, entry);
+  if (removed.size === 0) return;
+
+  desk.watchlist = desk.watchlist.filter((symbol) => !removed.has(symbol));
+  for (const [id, plan] of desk.plans) {
+    if (!removed.has(plan.symbol)) continue;
+    desk.outbox.push({ id: randomUUID(), type: "cancel_plan", planId: plan.id });
+    desk.plans.delete(id);
+  }
+  for (const symbol of removed) {
+    desk.specs.delete(symbol);
+    desk.quotes.delete(symbol);
+    for (const key of desk.candles.keys()) {
+      if (key.startsWith(`${symbol}|`)) desk.candles.delete(key);
+    }
+  }
+  journal(desk, "bridge", null, `Broker catalog refreshed; ${removed.size} unavailable symbol(s) removed from the desk.`);
+}
+
 function prunePairings(now = Date.now()): void {
   for (const [code, pairing] of pendingPairings) {
     if (now - pairing.createdAt > PAIRING_TTL_MS) pendingPairings.delete(code);
@@ -74,12 +138,8 @@ function prunePairings(now = Date.now()): void {
 /** Unambiguous alphabet: no O/0 or I/1, because the user retypes this by hand. */
 function makePairingCode(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-  let out = "";
-  for (let i = 0; i < 8; i++) {
-    if (i === 4) out += "-";
-    out += alphabet[Math.floor(Math.random() * alphabet.length)];
-  }
-  return out;
+  const chars = Array.from({ length: 8 }, () => alphabet[randomInt(alphabet.length)]);
+  return `${chars.slice(0, 4).join("")}-${chars.slice(4).join("")}`;
 }
 
 // ── Pairing ──────────────────────────────────────────────────────────────────
@@ -128,6 +188,7 @@ router.post("/pair", (req, res) => {
 
   const desk = getDesk(pairing.sessionId);
   if (desk.terminal) revokeBridgeToken(desk.terminal.bridgeToken);
+  clearLiveDeskData(desk);
 
   const bridgeToken = issueBridgeToken(pairing.sessionId);
   desk.terminal = {
@@ -140,12 +201,6 @@ router.post("/pair", (req, res) => {
     lastSyncAt: Date.now(),
     lastSeq: 0,
   };
-  // Live data takes over from the replay feed the moment a terminal pairs.
-  desk.simulated = false;
-  desk.specs.clear();
-  desk.quotes.clear();
-  desk.candles.clear();
-
   journal(desk, "bridge", null, `MetaTrader 5 terminal paired: ${login}@${server}.`);
   logger.info({ login, server }, "MT5 bridge paired");
 
@@ -164,12 +219,8 @@ router.post("/unpair", (_req, res) => {
 
   revokeBridgeToken(desk.terminal.bridgeToken);
   desk.terminal = null;
-  desk.simulated = true;
-  desk.positions = [];
-  desk.plans.clear();
-  desk.outbox = [];
-  desk.inflight.clear();
-  journal(desk, "bridge", null, "MetaTrader 5 terminal unlinked.");
+  clearLiveDeskData(desk);
+  journal(desk, "bridge", null, "MetaTrader 5 terminal unlinked. Live account and market data cleared.");
 
   return res.json({ ok: true });
 });
@@ -207,9 +258,16 @@ export function parseSpec(raw: unknown): SymbolSpec | null {
   if (!symbol || !(point > 0)) return null;
 
   const tickSize = num(r.tickSize, point);
+  const assetClass = normalizeAssetClass(r.assetClass) ?? inferAssetClass({
+    symbol,
+    path: typeof r.path === "string" ? r.path : "",
+    description: typeof r.description === "string" ? r.description : "",
+    baseCurrency: typeof r.baseCurrency === "string" ? r.baseCurrency : "",
+    calculationMode: typeof r.calculationMode === "string" ? r.calculationMode : "",
+  });
   return {
     symbol,
-    assetClass: (typeof r.assetClass === "string" ? r.assetClass : "other") as SymbolSpec["assetClass"],
+    assetClass,
     point,
     digits: Math.round(num(r.digits, 5)),
     tickSize: tickSize > 0 ? tickSize : point,
@@ -228,6 +286,17 @@ export function parseSpec(raw: unknown): SymbolSpec | null {
     baseCurrency: typeof r.baseCurrency === "string" ? r.baseCurrency : undefined,
     quoteCurrency: typeof r.quoteCurrency === "string" ? r.quoteCurrency : undefined,
   };
+}
+
+export function parseCatalogEntry(raw: unknown): MarketCatalogEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const symbol = String(r.symbol ?? "").trim();
+  if (!symbol) return null;
+  const path = typeof r.path === "string" ? r.path : "";
+  const description = typeof r.description === "string" ? r.description : "";
+  const assetClass = normalizeAssetClass(r.assetClass) ?? inferAssetClass({ symbol, path, description });
+  return { symbol, assetClass, path, description };
 }
 
 export function parseAccount(raw: unknown): AccountSnapshot | null {
@@ -319,6 +388,92 @@ function parseResult(raw: unknown): CommandResult | null {
   };
 }
 
+function unavailableNewsSnapshot(error: string, now = Date.now()): NewsCalendarSnapshot {
+  return {
+    status: "unavailable",
+    fetchedAt: now,
+    coverageStart: null,
+    coverageEnd: null,
+    error,
+    events: [],
+  };
+}
+
+function parseNewsCalendar(raw: unknown, now = Date.now()): NewsCalendarSnapshot {
+  if (!raw || typeof raw !== "object") {
+    return unavailableNewsSnapshot("The linked MT5 bridge did not provide an economic-calendar snapshot.", now);
+  }
+  const r = raw as Record<string, unknown>;
+  if (r.source !== "mt5") {
+    return unavailableNewsSnapshot("The economic-calendar source was not the linked MT5 terminal.", now);
+  }
+  if (r.available !== true) {
+    const error = typeof r.error === "string" && r.error.trim()
+      ? r.error.trim().slice(0, 240)
+      : "MT5 reports its economic calendar unavailable.";
+    return unavailableNewsSnapshot(error, now);
+  }
+
+  const fetchedAt = num(r.fetchedAt, NaN);
+  const coverageStart = num(r.coverageStart, NaN);
+  const coverageEnd = num(r.coverageEnd, NaN);
+  if (
+    !Number.isFinite(fetchedAt) || fetchedAt <= 0 ||
+    !Number.isFinite(coverageStart) || coverageStart <= 0 ||
+    !Number.isFinite(coverageEnd) || coverageEnd <= coverageStart ||
+    !Array.isArray(r.events)
+  ) {
+    return unavailableNewsSnapshot("MT5 returned an incomplete economic-calendar snapshot.", now);
+  }
+  if (r.events.length > 1000) {
+    return unavailableNewsSnapshot("MT5 calendar event count exceeded the safe processing limit.", now);
+  }
+
+  const events: HighImpactNewsEvent[] = [];
+  const seen = new Set<string>();
+  for (const rawEvent of r.events) {
+    if (!rawEvent || typeof rawEvent !== "object") {
+      return unavailableNewsSnapshot("MT5 returned a malformed high-impact calendar event.", now);
+    }
+    const event = rawEvent as Record<string, unknown>;
+    const id = String(event.id ?? "").trim().slice(0, 120);
+    const currency = String(event.currency ?? "").trim().toUpperCase();
+    const title = String(event.title ?? "").trim().slice(0, 200);
+    const ts = num(event.ts, NaN);
+    if (
+      !id || (currency !== "*" && !/^[A-Z]{3}$/.test(currency)) ||
+      event.impact !== "high" || !Number.isFinite(ts) || ts <= 0 ||
+      ts < coverageStart - 60_000 || ts > coverageEnd + 60_000
+    ) {
+      return unavailableNewsSnapshot("MT5 returned an invalid or unclassified calendar event.", now);
+    }
+    const key = `${id}|${ts}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    events.push({ id, currency, title, impact: "high", ts });
+  }
+
+  return {
+    status: "ready",
+    fetchedAt,
+    coverageStart,
+    coverageEnd,
+    error: null,
+    events: events.sort((a, b) => a.ts - b.ts || a.currency.localeCompare(b.currency)),
+  };
+}
+
+function cancelNewsUnsafePlans(desk: DeskState, now: number): void {
+  const guard = newsGuardFromSnapshot(desk.newsCalendar, now);
+  for (const [id, plan] of desk.plans) {
+    const gate = assessNewsEntry(guard, desk.specs.get(plan.symbol), now);
+    if (gate.allowed) continue;
+    desk.plans.delete(id);
+    desk.outbox.push({ id: randomUUID(), type: "cancel_plan", planId: plan.id });
+    journal(desk, "risk", plan.symbol, `Armed plan cancelled by the fail-safe news gate: ${gate.reason}`);
+  }
+}
+
 // ── Sync ─────────────────────────────────────────────────────────────────────
 
 /**
@@ -347,11 +502,24 @@ router.post("/sync", (req, res) => {
   desk.terminal.lastSeq = seq;
   desk.terminal.lastSyncAt = now;
 
+  // The economic calendar must be present on every heartbeat. A missing or
+  // malformed feed (including an older EA version) immediately fails closed.
+  desk.newsCalendar = parseNewsCalendar(body.newsCalendar, now);
+
   // ── Account ────────────────────────────────────────────────────────────────
   const account = parseAccount(body.account);
   if (account) applyAccount(desk, account);
 
-  // ── Specs / quotes / candles ───────────────────────────────────────────────
+  // ── Broker catalog and live market data ────────────────────────────────────
+  // The EA sends symbol metadata only; quotes, contract specs and candles are
+  // streamed for the user's selected watchlist, not guessed from a static list.
+  if (Array.isArray(body.universe)) {
+    const entries = body.universe
+      .map((raw: unknown) => parseCatalogEntry(raw))
+      .filter((entry: MarketCatalogEntry | null): entry is MarketCatalogEntry => entry !== null);
+    replaceBrokerUniverse(desk, entries);
+  }
+
   if (Array.isArray(body.specs)) {
     for (const raw of body.specs) {
       const spec = parseSpec(raw);
@@ -453,6 +621,7 @@ router.post("/sync", (req, res) => {
   if (expired.length > 0) {
     journal(desk, "signal", null, `${expired.length} armed plan(s) expired untriggered.`);
   }
+  cancelNewsUnsafePlans(desk, now);
   requeueStaleCommands(desk);
 
   // Ask for a full re-seed whenever a symbol this terminal actually carries is
@@ -462,7 +631,12 @@ router.post("/sync", (req, res) => {
   // a user watching seven symbols on a terminal that only offers three would
   // otherwise re-seed full history on every single heartbeat, forever.
   const reported = new Set(desk.specs.keys());
-  const needsHistory = desk.watchlist
+  const activeSymbols = [...new Set([
+    ...desk.watchlist,
+    ...desk.positions.map((position) => position.symbol),
+    ...[...desk.plans.values()].map((plan) => plan.symbol),
+  ])].filter((symbol) => desk.universe.has(symbol));
+  const needsHistory = activeSymbols
     .filter((symbol) => reported.has(symbol))
     .some((symbol) =>
       TIMEFRAMES.some((timeframe) => {
@@ -475,13 +649,24 @@ router.post("/sync", (req, res) => {
     serverTime: now,
     commands: drainOutbox(desk),
     needsHistory,
-    subscriptions: { symbols: desk.watchlist, timeframes: [...TIMEFRAMES] },
+    needsUniverse: desk.universe.size === 0,
+    subscriptions: { symbols: activeSymbols, timeframes: [...TIMEFRAMES] },
+    newsCalendar: {
+      ready: isNewsCalendarReady(desk.newsCalendar, now),
+      fetchedAt: desk.newsCalendar.fetchedAt,
+      staleAfterMs: NEWS_CALENDAR_MAX_AGE_MS,
+      blackoutBeforeMs: NEWS_BLACKOUT_BEFORE_MS,
+      blackoutAfterMs: NEWS_BLACKOUT_AFTER_MS,
+      events: isNewsCalendarReady(desk.newsCalendar, now)
+        ? desk.newsCalendar.events.map(({ id, currency, ts }) => ({ id, currency, ts }))
+        : [],
+    },
     limits: {
       maxDailyLossPct: desk.policy.maxDailyLossPct,
       maxOpenPositions: desk.policy.maxOpenPositions,
       // A halted desk, or one whose owner switched auto-trade off, must stop
       // the EA from acting on anything still in its memory.
-      tradingEnabled: desk.autoTrade && !desk.riskState.haltedUntilNextSession,
+      tradingEnabled: desk.autoTrade && !desk.riskState.haltedUntilNextSession && isNewsCalendarReady(desk.newsCalendar, now),
       liveTradingEnabled: desk.policy.liveTradingEnabled,
       staleAfterMs: 30_000,
       flatOnDisconnect: false,
@@ -516,4 +701,7 @@ export default router;
 export { makePairingCode, pendingPairings };
 export const __testing = {
   randomCommandId: randomUUID,
+  replaceBrokerUniverse,
+  parseNewsCalendar,
+  cancelNewsUnsafePlans,
 };

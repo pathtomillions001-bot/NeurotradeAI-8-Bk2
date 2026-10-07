@@ -24,6 +24,7 @@ import { markovFromPrices, directionalPersistence, sampleConfidence } from "./ma
 import { assessRegime, isRegimeTradeable } from "./regime";
 import { bestTarget, simulateTrade, type MonteCarloResult } from "./montecarlo";
 import { evaluateRisk, type RiskDecision, type RiskPolicy, type RiskState } from "./risk";
+import { assessNewsEntry, type NewsGuardInput } from "./news";
 import { kellyFraction, pointValuePerLot, priceToPoints, sizePosition, type SizingResult } from "./sizing";
 import {
   TIMEFRAME_MINUTES,
@@ -48,6 +49,8 @@ export interface AgentInput {
   positions: Position[];
   specs: Map<string, SymbolSpec>;
   riskState: RiskState;
+  /** Supplied by desk request paths; omitted only by isolated strategy unit tests. */
+  news?: NewsGuardInput;
   policy?: Partial<RiskPolicy>;
   now?: number;
   /** Minimum expectancy (in R, after costs) required to arm. */
@@ -216,7 +219,8 @@ export function buildManagementPlan(input: {
     },
     guards: {
       maxSpreadPoints: Math.max(spec.spreadPoints * 2.5, 10),
-      newsBlackoutMin: mode === "scalp" ? 10 : 15,
+      // Metadata mirrors the pre-event side of the enforced global 30m / 15m blackout.
+      newsBlackoutMin: 30,
       flatBeforeSessionClose: mode !== "swing",
     },
   };
@@ -266,6 +270,13 @@ export function evaluate(input: AgentInput): AgentDecision {
     summary: `${input.symbol} ${input.mode}: no trade (score ${confluence.score.toFixed(0)}/${threshold.toFixed(0)}).`,
     evaluatedAt: now,
   });
+
+  // The desk always supplies a calendar assessment. Isolated numerical tests
+  // intentionally omit it so they can test strategy math without a bridge.
+  if (input.news) {
+    const newsGate = assessNewsEntry(input.news, input.spec, now);
+    if (!newsGate.allowed) return fail([newsGate.reason ?? "High-impact news gate rejected this entry."]);
+  }
 
   if (confluence.direction === "none") {
     return fail(["No directional bias across the scored timeframes."]);

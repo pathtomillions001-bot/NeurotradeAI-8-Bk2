@@ -24,15 +24,23 @@ export const TRADE_MODES: { id: TradeMode; label: string; blurb: string }[] = [
 
 export type Bar = [number, number, number, number, number, number];
 
+export type AssetClass = "forex" | "metals" | "indices" | "commodities" | "crypto" | "futures" | "stocks" | "other";
+
 export interface Instrument {
   symbol: string;
-  assetClass: string;
+  assetClass: AssetClass;
+  path?: string;
+  description?: string;
   digits: number;
-  bid: number;
-  ask: number;
-  spreadPoints: number;
-  changePct: number;
+  bid: number | null;
+  ask: number | null;
+  spreadPoints: number | null;
+  changePct: number | null;
   watched: boolean;
+  subscribed: boolean;
+  dataFresh: boolean;
+  quoteTs: number | null;
+  quoteAgeMs: number | null;
 }
 
 export interface Position {
@@ -153,8 +161,37 @@ export interface JournalEntry {
   message: string;
 }
 
+export interface DeskNewsEvent {
+  id: string;
+  currency: string;
+  title: string;
+  impact: "high";
+  ts: number;
+  affectedSymbols: string[];
+  blackoutStart: number;
+  blackoutEnd: number;
+  minutesUntil: number;
+  inBlackout: boolean;
+}
+
+export interface DeskNewsState {
+  status: "unknown" | "ready" | "stale" | "unavailable";
+  ready: boolean;
+  fetchedAt: number | null;
+  ageMs: number | null;
+  error: string | null;
+  blackoutBeforeMs: number;
+  blackoutAfterMs: number;
+  staleAfterMs: number;
+  events: DeskNewsEvent[];
+}
+
 export interface DeskStateResponse {
-  source: "replay" | "mt5";
+  source: "unlinked" | "mt5";
+  feedReady: boolean;
+  feedError: string | null;
+  news: DeskNewsState;
+  catalogCount: number;
   terminal: {
     accountId: string;
     login: number;
@@ -176,7 +213,7 @@ export interface DeskStateResponse {
     isLive: boolean;
     dayStartEquity?: number;
     peakEquity?: number;
-  };
+  } | null;
   mode: TradeMode;
   autoTrade: boolean;
   watchlist: string[];
@@ -192,7 +229,7 @@ export interface DeskStateResponse {
       haltedUntilNextSession: boolean;
       haltReason: string | null;
     };
-    budget: { usedPct: number; remainingMoney: number; limitMoney: number };
+    budget: { usedPct: number; remainingMoney: number; limitMoney: number } | null;
     exposure: { key: string; riskMoney: number; riskPct: number }[];
   };
   journal: JournalEntry[];
@@ -240,7 +277,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const deskApi = {
   state: () => request<DeskStateResponse>("/desk/state"),
-  instruments: () => request<{ source: string; instruments: Instrument[] }>("/desk/instruments"),
+  instruments: () => request<{ source: "unlinked" | "mt5"; feedReady: boolean; instruments: Instrument[] }>("/desk/instruments"),
   candles: (symbol: string, timeframe: Timeframe) =>
     request<{ symbol: string; timeframe: Timeframe; source: string; bars: Bar[]; spec: { digits: number } }>(
       `/desk/candles?symbol=${encodeURIComponent(symbol)}&timeframe=${timeframe}`,
@@ -250,7 +287,13 @@ export const deskApi = {
       `/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`,
     ),
   scan: (mode: TradeMode) =>
-    request<{ mode: TradeMode; source: string; results: ScanRow[] }>(`/desk/scan?mode=${mode}`),
+    request<{
+      mode: TradeMode;
+      source: "unlinked" | "mt5";
+      results: ScanRow[];
+      waitingSymbols?: string[];
+      unavailableReason?: string;
+    }>(`/desk/scan?mode=${mode}`),
   arm: (symbol: string, mode: TradeMode) =>
     request<{ plan: ArmedPlan }>("/desk/arm", {
       method: "POST",
@@ -271,15 +314,6 @@ export const deskApi = {
     ),
   resumeSymbol: (symbol: string) =>
     request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
-  projection: (params: { winProbability: number; rewardRisk: number; trades: number }) =>
-    request<{
-      assumptions: Record<string, number>;
-      disciplined: ProjectionResult;
-      martingale: ProjectionResult;
-      note: string;
-    }>(
-      `/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`,
-    ),
   pairingCode: () =>
     request<{ pairingCode: string; expiresInMs: number }>("/bridge/pairing-code", { method: "POST" }),
   bridgeStatus: () =>
@@ -293,13 +327,6 @@ export const deskApi = {
     }>("/bridge/status"),
   unpair: () => request<{ ok: true }>("/bridge/unpair", { method: "POST" }),
 };
-
-export interface ProjectionResult {
-  medianReturnPct: number;
-  meanMaxDrawdownPct: number;
-  worstDrawdownPct: number;
-  ruinProbability: number;
-}
 
 // ── Formatting ───────────────────────────────────────────────────────────────
 

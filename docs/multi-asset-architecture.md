@@ -169,9 +169,14 @@ The governor therefore **de-escalates**:
 
 Plus hard circuit breakers, enforced **in both server and EA**: daily loss
 limit (default 3 % of start-of-day equity), max drawdown from peak (default
-10 %), max open positions, max correlated exposure, max spread, news blackout.
-If the server is unreachable, the EA manages open positions and **opens
-nothing new** — the fail-safe direction.
+10 %), max open positions, max correlated exposure, max spread, and a red-folder
+news blackout. The EA reads high-impact events from MT5's built-in economic
+calendar and reports a timestamped UTC snapshot to the API. New entries are
+blocked from 30 minutes before until 15 minutes after a relevant release;
+missing, stale, incomplete, or unclassifiable calendar data blocks entries and
+cancels armed plans. The terminal surfaces the feed state and relevant events.
+If the server is unreachable, the EA manages open positions and **opens nothing
+new** — the fail-safe direction.
 
 "Recovery" in this system means *controlled re-entry after the regime is
 re-confirmed*, at normal or reduced size. It never means a larger stake.
@@ -193,7 +198,7 @@ locally on each tick.
   "pyramid":   { "maxAdds": 2, "addAtR": 1.5, "sizeRatio": 0.5,
                  "requireBaseAtBreakeven": true, "portfolioRiskCapR": 1.5 },
   "timeStop":  { "noProgressBars": 20, "timeframe": "M5" },
-  "guards":    { "maxSpreadPoints": 18, "newsBlackoutMin": 15, "flatBeforeSessionClose": true }
+  "guards":    { "maxSpreadPoints": 18, "newsBlackoutMin": 30, "flatBeforeSessionClose": true }
 }
 ```
 
@@ -250,6 +255,10 @@ account id, never a credential.
   "seq": 10422,
   "account": { "balance": 5000, "equity": 5043.2, "margin": 120.5,
                "freeMargin": 4922.7, "marginLevel": 4184.4, "currency": "USD" },
+  "newsCalendar": { "source": "mt5", "available": true, "fetchedAt": …,
+                    "coverageStart": …, "coverageEnd": …,
+                    "events": [ { "id": "event-id-time", "currency": "USD",
+                                  "title": "US CPI", "impact": "high", "ts": … } ] },
   "specs":   [ { "symbol": "EURUSD", "point": 0.00001, "digits": 5, … } ],
   "quotes":  [ { "symbol": "EURUSD", "bid": 1.08431, "ask": 1.08444, "spreadPoints": 13, "ts": … } ],
   "candles": [ { "symbol": "EURUSD", "timeframe": "M5", "bars": [ [ts,o,h,l,c,v], … ] } ],
@@ -263,7 +272,11 @@ account id, never a credential.
   "commands": [ { "id": "uuid", "type": "arm_plan" | "cancel_plan" | "open" | "close" |
                                 "close_partial" | "modify" | "flatten_all" | "set_management", … } ],
   "subscriptions": { "symbols": ["EURUSD","XAUUSD"], "timeframes": ["M1","M5","M15","H1","H4","D1"] },
-  "limits": { "maxDailyLossPct": 3, "maxOpenPositions": 4, "tradingEnabled": true, "liveTradingEnabled": false }
+  "newsCalendar": { "ready": true, "fetchedAt": …, "staleAfterMs": 600000,
+                    "blackoutBeforeMs": 1800000, "blackoutAfterMs": 900000,
+                    "events": [ { "id": "event-id-time", "currency": "USD", "ts": … } ] },
+  "limits": { "maxDailyLossPct": 3, "maxOpenPositions": 4,
+               "tradingEnabled": true, "liveTradingEnabled": false }
 }
 ```
 
@@ -286,7 +299,7 @@ account id, never a credential.
 docs/multi-asset-architecture.md             ← this file
 artifacts/api-server/src/lib/multiasset/
   types.ts  math.ts  markov.ts  regime.ts  montecarlo.ts
-  confluence.ts  sizing.ts  risk.ts  agent.ts  store.ts  simulator.ts
+  confluence.ts  sizing.ts  risk.ts  news.ts  agent.ts  store.ts
 artifacts/api-server/src/routes/
   desk.ts     ← terminal-facing API
   bridge.ts   ← EA-facing API

@@ -15,6 +15,7 @@ import { buildManagementPlan, evaluate, horizonMinutes, structuralStop } from ".
 import { createRiskState, recordOutcome, type RiskState } from "./risk";
 import { makeRng } from "./math";
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type Quote, type SymbolSpec, type Timeframe } from "./types";
+import type { NewsGuardInput } from "./news";
 
 // ── Market builders ──────────────────────────────────────────────────────────
 
@@ -112,6 +113,7 @@ function run(overrides: {
   mode?: "scalp" | "intraday" | "swing";
   minEdgeR?: number;
   minPersistence?: number;
+  news?: NewsGuardInput;
 } = {}) {
   const series = overrides.series ?? allTimeframes((s) => trendUp(220, 1.08, 0.0006, 0.0002, s));
   const useSpec = overrides.spec ?? spec;
@@ -127,6 +129,7 @@ function run(overrides: {
     riskState: overrides.riskState ?? createRiskState(),
     minEdgeR: overrides.minEdgeR,
     minPersistence: overrides.minPersistence,
+    news: overrides.news,
     now: 1_700_000_000_000,
   });
 }
@@ -183,6 +186,37 @@ test("a clean aligned trend arms a plan", () => {
   assert.equal(decision.armed, true, decision.rejections.join(" | "));
   assert.ok(decision.plan);
   assert.equal(decision.rejections.length, 0);
+});
+
+test("the agent fails closed when the MT5 high-impact calendar is unavailable", () => {
+  const decision = run({
+    news: {
+      ready: false,
+      error: "calendar stale",
+      events: [],
+      blackoutBeforeMs: 30 * 60_000,
+      blackoutAfterMs: 15 * 60_000,
+    },
+  });
+  assert.equal(decision.armed, false);
+  assert.match(decision.rejections.join(" "), /calendar is unavailable, stale, or lacks coverage/i);
+});
+
+test("the agent blocks matching high-impact news but allows an unrelated currency event", () => {
+  const now = 1_700_000_000_000;
+  const makeNews = (currency: string): NewsGuardInput => ({
+    ready: true,
+    error: null,
+    events: [{ id: `event-${currency}`, currency, title: "Scheduled release", impact: "high", ts: now }],
+    blackoutBeforeMs: 30 * 60_000,
+    blackoutAfterMs: 15 * 60_000,
+  });
+  const blocked = run({ news: makeNews("USD") });
+  assert.equal(blocked.armed, false);
+  assert.match(blocked.rejections.join(" "), /USD high-impact news blackout/i);
+
+  const unrelated = run({ news: makeNews("JPY") });
+  assert.equal(unrelated.armed, true, unrelated.rejections.join(" | "));
 });
 
 // ── Plan integrity — the properties that must hold for every armed plan ──────

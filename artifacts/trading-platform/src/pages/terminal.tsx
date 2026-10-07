@@ -1,17 +1,4 @@
-/**
- * Multi-Asset Desk — the terminal.
- *
- * A dense, multi-pane trading screen for forex, metals, indices, commodities,
- * crypto and futures CFDs, executed on the user's own MetaTrader 5 account
- * through the EA bridge.
- *
- * Design rules:
- *  • Every number is traceable. The agent shows its reasoning, the sizing
- *    engine shows its arithmetic, and a refusal shows the gate that failed.
- *  • The data source is always on screen. A trading UI that cannot tell you
- *    whether its prices are live is worse than no UI.
- *  • The kill switch is never more than one click away.
- */
+/** Live-only, responsive Multi-Asset Desk for a user's linked MT5 broker. */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -24,404 +11,342 @@ import {
   Unplug,
   Zap,
 } from "lucide-react";
-import { CandleChart } from "@/components/terminal/candle-chart";
-import { TradingViewPanel } from "@/components/terminal/tradingview-panel";
 import {
   AgentPane,
+  HighImpactNewsPane,
   JournalPane,
+  LiveWatchlistPane,
+  MarketUniversePane,
   Pane,
+  PlansPane,
   PositionsPane,
   RiskPane,
   ScannerPane,
-  WatchlistPane,
 } from "@/components/terminal/panes";
 import { BridgeDialog } from "@/components/terminal/bridge-dialog";
 import {
-  TIMEFRAMES,
   TRADE_MODES,
   deskApi,
   formatMoney,
-  type Timeframe,
+  type AssetClass,
   type TradeMode,
 } from "@/lib/desk";
 
-const REFRESH_MS = 4000;
+const STATE_REFRESH_MS = 4000;
+const INSTRUMENT_REFRESH_MS = 5000;
+const SCAN_REFRESH_MS = 12_000;
 
 export default function Terminal() {
   const queryClient = useQueryClient();
-  const [symbol, setSymbol] = useState("EURUSD");
-  const [timeframe, setTimeframe] = useState<Timeframe>("M15");
-  const [chartTab, setChartTab] = useState<"desk" | "tradingview">("desk");
   const [bridgeOpen, setBridgeOpen] = useState(false);
+  const [selectedSymbol, setSelectedSymbol] = useState("");
+  const [selectedClass, setSelectedClass] = useState<AssetClass | "all">("all");
+  const [marketSearch, setMarketSearch] = useState("");
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [armError, setArmError] = useState<string | null>(null);
-
-  // ── Data ───────────────────────────────────────────────────────────────────
 
   const state = useQuery({
     queryKey: ["desk-state"],
     queryFn: deskApi.state,
-    refetchInterval: REFRESH_MS,
+    refetchInterval: STATE_REFRESH_MS,
   });
-
-  const mode: TradeMode = state.data?.mode ?? "intraday";
-
   const instruments = useQuery({
     queryKey: ["desk-instruments"],
     queryFn: deskApi.instruments,
-    refetchInterval: REFRESH_MS,
+    refetchInterval: INSTRUMENT_REFRESH_MS,
   });
 
-  const candles = useQuery({
-    queryKey: ["desk-candles", symbol, timeframe],
-    queryFn: () => deskApi.candles(symbol, timeframe),
-    refetchInterval: REFRESH_MS,
-  });
+  const mode: TradeMode = state.data?.mode ?? "intraday";
+  const feedReady = state.data?.feedReady === true && !(state.error instanceof Error);
+  const newsReady = Boolean(
+    state.data?.news.ready &&
+    state.data.news.fetchedAt !== null &&
+    Date.now() - state.data.news.fetchedAt <= state.data.news.staleAfterMs &&
+    state.data.news.fetchedAt <= Date.now() + 30_000 &&
+    !(state.error instanceof Error),
+  );
+  const liveLinked = state.data?.source === "mt5";
+  const watchlist = state.data?.watchlist ?? [];
+  const watchedInstruments = useMemo(
+    () => (instruments.data?.instruments ?? []).filter((instrument) => instrument.watched),
+    [instruments.data?.instruments],
+  );
 
+  // The server owns the durable watchlist. Mirror it locally for immediate
+  // checkbox feedback, then keep the selected analysis symbol on that list.
+  useEffect(() => {
+    setSelectedSymbols(watchlist);
+  }, [watchlist.join("\u0000")]);
+
+  useEffect(() => {
+    if (selectedSymbol && watchlist.includes(selectedSymbol)) return;
+    setSelectedSymbol(watchlist[0] ?? "");
+  }, [selectedSymbol, watchlist.join("\u0000")]);
+
+  const analysisEnabled = Boolean(feedReady && selectedSymbol && watchlist.includes(selectedSymbol));
   const analysis = useQuery({
-    queryKey: ["desk-analysis", symbol, mode],
-    queryFn: () => deskApi.analysis(symbol, mode),
-    refetchInterval: REFRESH_MS * 2,
+    queryKey: ["desk-analysis", selectedSymbol, mode],
+    queryFn: () => deskApi.analysis(selectedSymbol, mode),
+    enabled: analysisEnabled,
+    refetchInterval: analysisEnabled ? STATE_REFRESH_MS * 2 : false,
   });
-
+  const scanEnabled = Boolean(feedReady && watchlist.length > 0);
   const scan = useQuery({
-    queryKey: ["desk-scan", mode],
+    queryKey: ["desk-scan", watchlist.join("\u0000"), mode],
     queryFn: () => deskApi.scan(mode),
-    // The scan runs the full agent over every watchlist symbol, so it is the
-    // expensive call: refresh it more slowly than the quote board.
-    refetchInterval: REFRESH_MS * 3,
+    enabled: scanEnabled,
+    // Full multi-symbol analysis is intentionally slower than quote refresh.
+    refetchInterval: scanEnabled ? SCAN_REFRESH_MS : false,
   });
-
-  // Clear a stale arming error whenever the user looks at something else.
-  useEffect(() => setArmError(null), [symbol, mode]);
 
   const invalidateDesk = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ["desk-state"] });
-    queryClient.invalidateQueries({ queryKey: ["desk-analysis"] });
-    queryClient.invalidateQueries({ queryKey: ["desk-scan"] });
+    void queryClient.invalidateQueries({ queryKey: ["desk-state"] });
+    void queryClient.invalidateQueries({ queryKey: ["desk-instruments"] });
+    void queryClient.invalidateQueries({ queryKey: ["desk-analysis"] });
+    void queryClient.invalidateQueries({ queryKey: ["desk-scan"] });
   }, [queryClient]);
 
-  // ── Mutations ──────────────────────────────────────────────────────────────
-
+  const settings = useMutation({
+    mutationFn: (patch: Record<string, unknown>) => deskApi.settings(patch),
+    onSuccess: () => {
+      setActionError(null);
+      invalidateDesk();
+    },
+    onError: (error: Error) => setActionError(error.message),
+  });
   const arm = useMutation({
-    mutationFn: () => deskApi.arm(symbol, mode),
+    mutationFn: () => deskApi.arm(selectedSymbol, mode),
     onSuccess: () => {
       setArmError(null);
       invalidateDesk();
     },
     onError: (error: Error) => setArmError(error.message),
   });
-
-  const settings = useMutation({
-    mutationFn: (patch: Record<string, unknown>) => deskApi.settings(patch),
-    onSuccess: invalidateDesk,
-  });
-
   const flatten = useMutation({
-    mutationFn: () => deskApi.flatten("Manual kill switch"),
+    mutationFn: () => deskApi.flatten("Manual desk flatten"),
     onSuccess: invalidateDesk,
+    onError: (error: Error) => setActionError(error.message),
   });
-
   const closePosition = useMutation({
     mutationFn: (ticket: number) => deskApi.closePosition(ticket),
     onSuccess: invalidateDesk,
+    onError: (error: Error) => setActionError(error.message),
   });
-
-  const resumeSymbol = useMutation({
-    mutationFn: (s: string) => deskApi.resumeSymbol(s),
-    onSuccess: invalidateDesk,
-  });
-
   const cancelPlan = useMutation({
     mutationFn: (id: string) => deskApi.cancelPlan(id),
     onSuccess: invalidateDesk,
+    onError: (error: Error) => setActionError(error.message),
+  });
+  const resumeSymbol = useMutation({
+    mutationFn: (symbol: string) => deskApi.resumeSymbol(symbol),
+    onSuccess: invalidateDesk,
+    onError: (error: Error) => setActionError(error.message),
   });
 
-  // ── Derived ────────────────────────────────────────────────────────────────
+  const changeWatchlist = (symbol: string, add: boolean) => {
+    const next = add
+      ? [...new Set([...selectedSymbols, symbol])]
+      : selectedSymbols.filter((entry) => entry !== symbol);
+    setSelectedSymbols(next);
+    if (add) setSelectedSymbol(symbol);
+    else if (selectedSymbol === symbol) setSelectedSymbol(next[0] ?? "");
+    settings.mutate({ watchlist: next });
+  };
 
+  const account = state.data?.account ?? null;
+  const terminal = state.data?.terminal ?? null;
   const decision = analysis.data?.decision ?? null;
-  const digits = candles.data?.spec?.digits ?? 5;
+  const emptyMessage = !state.data
+    ? state.error instanceof Error ? state.error.message : "Loading live desk status…"
+    : !feedReady
+      ? state.data.feedError ?? "Waiting for a live MT5 connection."
+      : !selectedSymbol
+        ? "Choose a broker instrument and add it to the live watchlist to analyse it."
+        : analysis.isLoading
+          ? `Loading live broker history for ${selectedSymbol}…`
+          : analysis.error instanceof Error
+            ? analysis.error.message
+            : "Waiting for live analysis.";
 
-  /** Plan levels drawn on the chart: trigger, stop, target, invalidation. */
-  const levels = useMemo(() => {
-    const plan = decision?.plan;
-    if (!plan) return [];
-    return [
-      { price: plan.trigger, label: "TRG", color: "#38bdf8" },
-      { price: plan.sl, label: "SL", color: "#ef4444" },
-      { price: plan.tp[0], label: "TP", color: "#10b981" },
-      { price: plan.invalidate, label: "INV", color: "#71717a" },
-    ];
-  }, [decision]);
-
-  const live = state.data?.source === "mt5";
-  const terminalStale = state.data?.terminal?.stale ?? false;
-  const account = state.data?.account;
+  const statusLabel = !liveLinked
+    ? "MT5 NOT LINKED"
+    : feedReady
+      ? "MT5 · LIVE"
+      : terminal?.stale
+        ? "MT5 · STALE"
+        : "MT5 · CONNECTING";
+  const statusClass = !liveLinked
+    ? "border-zinc-700 bg-zinc-900 text-zinc-400"
+    : feedReady
+      ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
+      : terminal?.stale
+        ? "border-red-500/40 bg-red-500/10 text-red-300"
+        : "border-amber-500/40 bg-amber-500/10 text-amber-300";
 
   return (
-    <div className="flex flex-col h-[calc(100vh-4rem)] min-h-0 gap-1.5 p-1.5 bg-zinc-950 text-zinc-200">
-      {/* ── Top bar ─────────────────────────────────────────────────────── */}
-      <header className="flex flex-wrap items-center gap-2 px-2.5 py-1.5 rounded-md border border-zinc-800 bg-zinc-950/80 shrink-0">
-        <div className="flex items-center gap-1.5">
-          <Activity className="w-4 h-4 text-emerald-400" />
-          <h1 className="text-[12px] font-semibold tracking-wide">MULTI-ASSET DESK</h1>
-        </div>
-
-        {/* Data source — never hidden */}
-        <span
-          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wider border ${
-            live && !terminalStale
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-              : live && terminalStale
-                ? "border-red-500/40 bg-red-500/10 text-red-300"
-                : "border-amber-500/40 bg-amber-500/10 text-amber-300"
-          }`}
-          data-testid="data-source"
-          title={
-            live
-              ? "Prices and execution come from your MetaTrader 5 terminal"
-              : "No terminal linked — the desk is running on a deterministic replay feed"
-          }
-        >
-          {live ? (terminalStale ? "MT5 · STALE" : "MT5 · LIVE") : "REPLAY FEED"}
-        </span>
-
-        {account && (
-          <div className="flex items-center gap-2.5 font-mono text-[11px] text-zinc-400">
-            <span>
-              Eq <span className="text-zinc-100">{formatMoney(account.equity, account.currency)}</span>
+    <div className="min-h-full bg-[#070a10] px-3 py-4 text-zinc-200 sm:px-4 lg:px-5">
+      <div className="mx-auto w-full max-w-[1800px] space-y-3">
+        <header className="rounded-xl border border-zinc-800 bg-zinc-950/80 p-3 sm:p-4">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <div className="flex min-w-0 items-center gap-2">
+              <Activity className="h-5 w-5 shrink-0 text-cyan-400" />
+              <div className="min-w-0">
+                <h1 className="text-sm font-bold tracking-wide text-zinc-100">MULTI-ASSET TERMINAL</h1>
+                <p className="text-[10px] text-zinc-500">Broker-discovered markets · live MT5 quotes only</p>
+              </div>
+            </div>
+            <span className={`rounded-full border px-2.5 py-1 text-[9px] font-semibold tracking-wider ${statusClass}`} data-testid="data-source">
+              {statusLabel}
             </span>
-            <span className="text-zinc-700">|</span>
-            <span>
-              Bal <span className="text-zinc-300">{formatMoney(account.balance, account.currency)}</span>
-            </span>
-            {account.isLive && (
-              <span className="px-1 rounded bg-red-500/15 text-red-300 text-[9px] uppercase tracking-wider">
-                Real money
-              </span>
+            {account && (
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10px] text-zinc-400">
+                <span>Equity <b className="text-zinc-100">{formatMoney(account.equity, account.currency)}</b></span>
+                <span>Balance <b className="text-zinc-300">{formatMoney(account.balance, account.currency)}</b></span>
+                {account.isLive && <span className="rounded bg-red-500/15 px-1.5 py-0.5 font-sans text-[9px] uppercase text-red-300">Real account</span>}
+              </div>
             )}
-          </div>
-        )}
-
-        <div className="flex-1" />
-
-        {/* Mode */}
-        <div className="flex rounded border border-zinc-800 overflow-hidden">
-          {TRADE_MODES.map((m) => (
+            <div className="flex-1" />
+            <div className="flex max-w-full items-center gap-1 overflow-x-auto rounded-lg border border-zinc-800 p-1">
+              {TRADE_MODES.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  title={item.blurb}
+                  onClick={() => settings.mutate({ mode: item.id })}
+                  disabled={settings.isPending}
+                  className={`shrink-0 rounded-md px-2.5 py-1.5 text-[10px] font-medium transition-colors disabled:opacity-50 ${mode === item.id ? "bg-cyan-500/15 text-cyan-200" : "text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300"}`}
+                  data-testid={`mode-${item.id}`}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
             <button
-              key={m.id}
               type="button"
-              title={m.blurb}
-              onClick={() => settings.mutate({ mode: m.id })}
-              className={`px-2 py-0.5 text-[10px] font-medium transition-colors ${
-                mode === m.id ? "bg-emerald-600 text-white" : "text-zinc-400 hover:bg-zinc-900"
-              }`}
-              data-testid={`mode-${m.id}`}
+              onClick={() => settings.mutate({ autoTrade: !state.data?.autoTrade })}
+              disabled={settings.isPending || (!state.data?.autoTrade && (!feedReady || !watchlist.length || !newsReady))}
+              className={`flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-[10px] font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${state.data?.autoTrade ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" : "border-zinc-700 text-zinc-300 hover:bg-zinc-900"}`}
+              data-testid="auto-trade-toggle"
+              title="Execution requires a healthy live MT5 feed, selected markets, and a fresh complete MT5 economic calendar."
             >
-              {m.label}
+              <Zap className="h-3.5 w-3.5" />
+              Execution {state.data?.autoTrade ? "ON" : "OFF"}
             </button>
-          ))}
-        </div>
+            <button
+              type="button"
+              onClick={() => setBridgeOpen(true)}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-2 text-[10px] text-zinc-200 transition-colors hover:border-cyan-500/40 hover:bg-zinc-900"
+              data-testid="open-bridge"
+            >
+              {liveLinked ? <Link2 className="h-3.5 w-3.5 text-emerald-400" /> : <Unplug className="h-3.5 w-3.5" />}
+              {liveLinked ? `MT5 ${terminal?.login ?? ""}` : "Link MT5"}
+            </button>
+            <button
+              type="button"
+              onClick={() => flatten.mutate()}
+              disabled={!liveLinked || flatten.isPending}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-[10px] font-semibold text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Cancel armed plans and request the EA to close managed positions."
+              data-testid="kill-switch"
+            >
+              <Power className="h-3.5 w-3.5" />
+              FLATTEN
+            </button>
+          </div>
 
-        {/* Auto-trade */}
-        <button
-          type="button"
-          onClick={() => settings.mutate({ autoTrade: !state.data?.autoTrade })}
-          className={`flex items-center gap-1 px-2 py-0.5 rounded border text-[10px] font-medium transition-colors ${
-            state.data?.autoTrade
-              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300"
-              : "border-zinc-700 text-zinc-400 hover:bg-zinc-900"
-          }`}
-          data-testid="auto-trade-toggle"
-        >
-          <Zap className="w-3 h-3" />
-          Auto {state.data?.autoTrade ? "ON" : "OFF"}
-        </button>
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-[10px]">
+            <span className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-1.5 text-zinc-400">
+              Broker catalog <b className="ml-1 text-zinc-200">{instruments.data?.instruments.length ?? state.data?.catalogCount ?? 0}</b>
+            </span>
+            <span className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-1.5 text-zinc-400">
+              Selected markets <b className="ml-1 text-zinc-200">{watchlist.length}</b>
+            </span>
+            <span className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-1.5 text-zinc-400">
+              Open positions <b className="ml-1 text-zinc-200">{state.data?.positions.length ?? "—"}</b>
+            </span>
+            <span className="rounded-md border border-zinc-800 bg-zinc-900/50 px-2.5 py-1.5 text-zinc-400">
+              Armed plans <b className="ml-1 text-zinc-200">{state.data?.plans.length ?? "—"}</b>
+            </span>
+            {terminal && <span className="min-w-0 truncate text-zinc-600">{terminal.server} · last heartbeat {terminal.stale ? "stale" : "current"}</span>}
+            <button type="button" onClick={() => { void state.refetch(); void instruments.refetch(); void scan.refetch(); }} className="ml-auto flex items-center gap-1 rounded px-2 py-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200" aria-label="Refresh desk">
+              <RefreshCw className={`h-3.5 w-3.5 ${state.isFetching || instruments.isFetching ? "animate-spin" : ""}`} />
+              Refresh
+            </button>
+          </div>
 
-        {/* Bridge */}
-        <button
-          type="button"
-          onClick={() => setBridgeOpen(true)}
-          className="flex items-center gap-1 px-2 py-0.5 rounded border border-zinc-700 text-[10px] text-zinc-300 hover:bg-zinc-900 transition-colors"
-          data-testid="open-bridge"
-        >
-          {live ? <Link2 className="w-3 h-3 text-emerald-400" /> : <Unplug className="w-3 h-3" />}
-          {live ? `MT5 ${state.data?.terminal?.login ?? ""}` : "Link MT5"}
-        </button>
+          {state.data?.risk.state.haltedUntilNextSession && (
+            <div className="mt-3 flex items-center gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+              <ShieldAlert className="h-4 w-4 shrink-0" />{state.data.risk.state.haltReason}
+            </div>
+          )}
+          {!feedReady && (
+            <div className="mt-3 rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] leading-relaxed text-amber-200/80">
+              {state.data?.feedError ?? (state.isLoading ? "Connecting to the desk service…" : "Desk status is not available. Check the API connection.")}
+            </div>
+          )}
+          {(actionError || state.error instanceof Error) && (
+            <div className="mt-3 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-[11px] text-red-300">
+              {actionError ?? (state.error as Error).message}
+              {actionError && <button type="button" onClick={() => setActionError(null)} className="ml-2 underline">Dismiss</button>}
+            </div>
+          )}
+        </header>
 
-        {/* Kill switch */}
-        <button
-          type="button"
-          onClick={() => flatten.mutate()}
-          disabled={flatten.isPending}
-          className="flex items-center gap-1 px-2 py-0.5 rounded border border-red-500/50 bg-red-500/10 text-[10px] font-semibold text-red-300 hover:bg-red-500/20 transition-colors"
-          title="Cancel every armed plan, close every position and disable auto-trade"
-          data-testid="kill-switch"
-        >
-          <Power className="w-3 h-3" />
-          FLATTEN
-        </button>
-      </header>
-
-      {/* ── Halt banner ─────────────────────────────────────────────────── */}
-      {state.data?.risk.state.haltedUntilNextSession && (
-        <div className="flex items-center gap-2 px-3 py-1.5 rounded-md border border-red-500/40 bg-red-500/10 text-red-300 text-[11px] shrink-0">
-          <ShieldAlert className="w-4 h-4 shrink-0" />
-          {state.data.risk.state.haltReason}
-        </div>
-      )}
-
-      {/* ── Main grid ───────────────────────────────────────────────────── */}
-      <div className="flex-1 min-h-0 grid grid-cols-12 grid-rows-2 gap-1.5">
-        {/* Left column */}
-        <div className="col-span-12 lg:col-span-2 row-span-2 grid grid-rows-2 gap-1.5 min-h-0">
+        <div className="grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2 2xl:grid-cols-12">
           <Pane
-            title="Watchlist"
-            right={
-              <span className="text-[9px] font-mono text-zinc-600">
-                {instruments.data?.instruments.length ?? 0}
-              </span>
-            }
+            title="Broker market universe"
+            right={<span className="text-[10px] text-zinc-600">{watchlist.length} selected</span>}
+            className="md:col-span-2 2xl:col-span-5"
           >
-            <WatchlistPane
+            <MarketUniversePane
               instruments={instruments.data?.instruments ?? []}
-              selected={symbol}
-              onSelect={setSymbol}
+              selectedClass={selectedClass}
+              onClassChange={setSelectedClass}
+              search={marketSearch}
+              onSearch={setMarketSearch}
+              onToggle={changeWatchlist}
+              watchlistCount={watchlist.length}
+              busy={settings.isPending}
             />
           </Pane>
 
           <Pane
-            title="Scanner"
+            title="Live watchlist"
+            right={<span className="text-[10px] text-zinc-600">MT5 quotes · selected symbols only</span>}
+            className="md:col-span-2 2xl:col-span-7"
+          >
+            <LiveWatchlistPane instruments={watchedInstruments} selected={selectedSymbol} onSelect={setSelectedSymbol} />
+          </Pane>
+
+          <Pane
+            title="Multi-market scanner"
             right={
               <button
                 type="button"
-                onClick={() => scan.refetch()}
-                className="text-zinc-600 hover:text-zinc-300 transition-colors"
-                aria-label="Rescan"
+                onClick={() => void scan.refetch()}
+                disabled={!scanEnabled || scan.isFetching}
+                aria-label="Rescan selected markets"
+                className="rounded p-1 text-zinc-600 transition-colors hover:text-zinc-200 disabled:opacity-40"
               >
-                <RefreshCw className={`w-3 h-3 ${scan.isFetching ? "animate-spin" : ""}`} />
+                <RefreshCw className={`h-3.5 w-3.5 ${scan.isFetching ? "animate-spin" : ""}`} />
               </button>
             }
+            className="md:col-span-2 2xl:col-span-7"
           >
-            <ScannerPane rows={scan.data?.results ?? []} onSelect={setSymbol} selected={symbol} />
-          </Pane>
-        </div>
-
-        {/* Centre column */}
-        <div className="col-span-12 lg:col-span-7 row-span-2 grid grid-rows-[1.35fr_1fr] gap-1.5 min-h-0">
-          <Pane
-            title={`${symbol} · ${timeframe}`}
-            right={
-              <div className="flex items-center gap-1.5">
-                <div className="flex rounded border border-zinc-800 overflow-hidden">
-                  {(["desk", "tradingview"] as const).map((tab) => (
-                    <button
-                      key={tab}
-                      type="button"
-                      onClick={() => setChartTab(tab)}
-                      className={`px-1.5 py-0.5 text-[9px] uppercase tracking-wider transition-colors ${
-                        chartTab === tab ? "bg-zinc-800 text-zinc-100" : "text-zinc-600 hover:text-zinc-400"
-                      }`}
-                    >
-                      {tab === "desk" ? "Desk" : "TV"}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex gap-0.5">
-                  {TIMEFRAMES.map((tf) => (
-                    <button
-                      key={tf}
-                      type="button"
-                      onClick={() => setTimeframe(tf)}
-                      className={`px-1 py-0.5 rounded text-[9px] font-mono transition-colors ${
-                        timeframe === tf
-                          ? "bg-emerald-600 text-white"
-                          : "text-zinc-500 hover:text-zinc-300"
-                      }`}
-                      data-testid={`tf-${tf}`}
-                    >
-                      {tf}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            }
-          >
-            <div className="p-1">
-              {chartTab === "desk" ? (
-                <CandleChart bars={candles.data?.bars ?? []} digits={digits} levels={levels} height={320} />
-              ) : (
-                <TradingViewPanel symbol={symbol} timeframe={timeframe} height={320} />
-              )}
-            </div>
+            <ScannerPane
+              rows={scan.data?.results ?? []}
+              waitingSymbols={scan.data?.waitingSymbols ?? []}
+              unavailableReason={scan.data?.unavailableReason ?? (!feedReady ? state.data?.feedError ?? undefined : undefined)}
+              onSelect={setSelectedSymbol}
+              selected={selectedSymbol}
+            />
           </Pane>
 
-          <div className="grid grid-cols-2 gap-1.5 min-h-0">
-            <Pane
-              title="Positions"
-              right={
-                <span className="text-[9px] font-mono text-zinc-600">
-                  {state.data?.positions.length ?? 0} open
-                </span>
-              }
-            >
-              <PositionsPane
-                positions={state.data?.positions ?? []}
-                currency={account?.currency ?? "USD"}
-                onClose={(ticket) => closePosition.mutate(ticket)}
-              />
-            </Pane>
-
-            <Pane
-              title="Armed plans"
-              right={
-                <span className="text-[9px] font-mono text-zinc-600">
-                  {state.data?.plans.length ?? 0}
-                </span>
-              }
-            >
-              {(state.data?.plans.length ?? 0) === 0 ? (
-                <p className="p-3 text-[11px] text-zinc-500">
-                  No plans armed. The agent arms a plan only when every gate passes.
-                </p>
-              ) : (
-                <ul className="divide-y divide-zinc-900">
-                  {state.data?.plans.map((plan) => (
-                    <li key={plan.id} className="px-2 py-1.5 text-[10px] font-mono">
-                      <div className="flex items-center gap-1.5">
-                        <span
-                          className={plan.side === "buy" ? "text-emerald-400" : "text-red-400"}
-                        >
-                          {plan.side.toUpperCase()}
-                        </span>
-                        <span className="text-zinc-200">{plan.symbol}</span>
-                        <span className="text-zinc-500">{plan.lots} lots</span>
-                        <button
-                          type="button"
-                          onClick={() => cancelPlan.mutate(plan.id)}
-                          className="ml-auto text-zinc-600 hover:text-red-400 transition-colors"
-                        >
-                          cancel
-                        </button>
-                      </div>
-                      <div className="text-zinc-600 mt-0.5">
-                        trg {plan.trigger} · sl {plan.sl} · tp {plan.tp[0]} · expires in{" "}
-                        {Math.max(0, Math.round((plan.expiresAt - Date.now()) / 1000))}s
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </Pane>
-          </div>
-        </div>
-
-        {/* Right column */}
-        <div className="col-span-12 lg:col-span-3 row-span-2 grid grid-rows-[1.4fr_1fr_1fr] gap-1.5 min-h-0">
           <Pane
-            title={`Agent · ${symbol}`}
-            right={
-              <span className="text-[9px] uppercase tracking-wider text-zinc-600">{mode}</span>
-            }
+            title={selectedSymbol ? `Live analysis · ${selectedSymbol}` : "Live analysis"}
+            right={<span className="text-[9px] uppercase tracking-wider text-zinc-600">{mode}</span>}
+            className="md:col-span-2 2xl:col-span-5"
           >
             <AgentPane
               decision={decision}
@@ -429,18 +354,46 @@ export default function Terminal() {
               onArm={() => arm.mutate()}
               arming={arm.isPending}
               armError={armError}
+              executionEnabled={feedReady && state.data?.autoTrade === true && newsReady}
+              emptyMessage={emptyMessage}
             />
           </Pane>
 
-          <Pane title="Risk">
-            {state.data ? (
-              <RiskPane state={state.data} onResume={(s) => resumeSymbol.mutate(s)} />
-            ) : (
-              <p className="p-3 text-[11px] text-zinc-500">Loading…</p>
-            )}
+          <Pane
+            title="Open positions"
+            right={<span className="font-mono text-[10px] text-zinc-600">{state.data?.positions.length ?? 0}</span>}
+            className="md:col-span-2 2xl:col-span-8"
+          >
+            <PositionsPane
+              positions={state.data?.positions ?? []}
+              currency={account?.currency ?? ""}
+              onClose={(ticket) => closePosition.mutate(ticket)}
+            />
           </Pane>
 
-          <Pane title="Journal">
+          <Pane
+            title="Armed plans"
+            right={<span className="font-mono text-[10px] text-zinc-600">{state.data?.plans.length ?? 0}</span>}
+            className="md:col-span-2 2xl:col-span-4"
+          >
+            <PlansPane plans={state.data?.plans ?? []} onCancel={(id) => cancelPlan.mutate(id)} />
+          </Pane>
+
+          <Pane title="Account & risk" className="md:col-span-1 2xl:col-span-4">
+            {state.data ? <RiskPane state={state.data} onResume={(symbol) => resumeSymbol.mutate(symbol)} /> : <p className="p-4 text-xs text-zinc-500">Waiting for desk status…</p>}
+          </Pane>
+
+          <Pane
+            title="High-impact news"
+            right={<span className="text-[9px] uppercase tracking-wider text-zinc-600">MT5 calendar</span>}
+            className="md:col-span-1 2xl:col-span-4"
+          >
+            {state.data
+              ? <HighImpactNewsPane news={state.data.news} />
+              : <p className="p-4 text-xs text-zinc-500">Waiting for MT5 calendar status…</p>}
+          </Pane>
+
+          <Pane title="Desk activity" className="md:col-span-2 2xl:col-span-4">
             <JournalPane entries={state.data?.journal ?? []} />
           </Pane>
         </div>
@@ -449,7 +402,7 @@ export default function Terminal() {
       <BridgeDialog
         open={bridgeOpen}
         onClose={() => setBridgeOpen(false)}
-        linked={live}
+        linked={liveLinked}
         onChanged={invalidateDesk}
       />
     </div>

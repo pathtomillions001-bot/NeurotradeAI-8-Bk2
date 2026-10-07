@@ -41,29 +41,35 @@
 //
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "1.00"
+#property version   "1.10"
 #property strict
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
 
 //--- inputs ---------------------------------------------------------
-input string ServerUrl        = "https://your-app.example.com"; // Platform origin (must be in the WebRequest allowlist)
-input string PairingCode      = "";          // One-time code from the Desk page
-input string SymbolsCsv       = "EURUSD,GBPUSD,USDJPY,XAUUSD,US30,NAS100,BTCUSD";
-input int    SyncIntervalMs   = 1000;        // Server heartbeat interval
-input int    HistoryBars      = 320;         // Bars sent on the first sync (seeds the server)
-input int    DeltaBars        = 4;           // Bars sent per heartbeat thereafter
-input int    MagicNumber      = 7781001;     // Identifies this EA's orders
-input bool   AllowLiveAccount = false;       // Extra local guard for real-money accounts
-input double MaxDailyLossPct  = 3.0;         // Local circuit breaker (mirrors the server)
-input int    StaleAfterSec    = 30;          // No contact -> manage-only
-input bool   VerboseLog       = true;
+input string ServerUrl             = "";   // Exact site origin, e.g. https://app.example.com (no /api path)
+input string PairingCode           = "";   // One-time code from the Desk page
+input int    SyncIntervalMs        = 1000;  // HTTP heartbeat interval
+input int    TimerPollMs           = 250;   // Local plan/position checks between heartbeats
+input int    HistoryBars           = 320;   // History requested per symbol/timeframe
+input int    DeltaBars             = 4;     // Bars sent on subsequent heartbeats
+input int    CandleSymbolsPerSync  = 2;     // Bounded history batch; no watchlist symbol cap
+input int    CatalogRefreshSec     = 300;   // Refresh broker's complete symbol catalog
+input int    NewsRefreshSec        = 300;   // Refresh MT5's built-in high-impact economic calendar
+input int    MagicNumber            = 7781001; // Identifies this EA's orders
+input bool   AllowLiveAccount       = false; // Extra local guard for real-money accounts
+input double MaxDailyLossPct        = 3.0;   // Local circuit breaker (mirrors the server)
+input int    StaleAfterSec          = 30;    // No contact -> manage-only
+input bool   VerboseLog             = true;
 
 //--- constants ------------------------------------------------------
-#define MAX_PLANS      16
 #define MAX_SEEN_CMDS  256
-#define MAX_SYMBOLS    32
+#define MAX_NEWS_EVENTS 1000
+#define TIMEFRAME_COUNT 7
+#define PAIR_RETRY_MS 10000
+#define NEWS_DEFAULT_BEFORE_MS 1800000
+#define NEWS_DEFAULT_AFTER_MS 900000
 
 ENUM_TIMEFRAMES TF_LIST[7] = {PERIOD_M1, PERIOD_M5, PERIOD_M15,
                               PERIOD_M30, PERIOD_H1, PERIOD_H4, PERIOD_D1};
@@ -94,28 +100,56 @@ struct ArmedPlan
    bool     active;
 };
 
-ArmedPlan g_plans[MAX_PLANS];
-string    g_seenCmds[MAX_SEEN_CMDS];
-int       g_seenCount = 0;
+struct SymbolState
+{
+   string symbol;
+   bool   seeded[TIMEFRAME_COUNT];
+};
+
+struct NewsEventState
+{
+   string id;
+   string currency;
+   long   ts;
+};
+
+ArmedPlan   g_plans[];
+SymbolState g_symbols[];
+string      g_seenCmds[MAX_SEEN_CMDS];
+int         g_seenCount = 0;
 
 string    g_token      = "";
 long      g_seq        = 0;
 datetime  g_lastOk     = 0;
+ulong     g_lastSyncMs = 0;
+ulong     g_nextPairAttemptMs = 0;
+ulong     g_catalogBuiltAtMs = 0;
+bool      g_catalogDirty = true;
+bool      g_serverNeedsUniverse = true;
+bool      g_serverNeedsHistory = false;
+bool      g_loggedEmptyPairCode = false;
+bool      g_loggedMissingUrl = false;
 bool      g_tradingEnabled     = false;
 bool      g_liveTradingEnabled = false;
 double    g_dayStartEquity     = 0;
 int       g_dayStamp           = 0;
-string    g_symbols[MAX_SYMBOLS];
-int       g_symbolCount = 0;
+int       g_candleCursor       = 0;
+string    g_catalogJson        = "[]";
+string    g_newsCalendarJson   = "";
+ulong     g_lastNewsFetchMs    = 0;
+bool      g_newsReady          = false;
+long      g_newsFetchedAt      = 0;
+long      g_newsStaleAfterMs   = 600000;
+long      g_newsBeforeMs       = NEWS_DEFAULT_BEFORE_MS;
+long      g_newsAfterMs        = NEWS_DEFAULT_AFTER_MS;
+NewsEventState g_newsEvents[];
 
 // Results pending delivery to the server.
 string    g_results = "";
 
-// History is seeded once per symbol/timeframe, then only the newest bars are
-// sent. Shipping 320 bars × 7 timeframes × every symbol on a 1 s heartbeat is
-// megabytes per second of mostly unchanged data; the server merges by
-// timestamp, so a small overlapping tail keeps it in sync for free.
-bool      g_seeded[MAX_SYMBOLS][7];
+// Each selected symbol tracks history readiness separately. The server's
+// subscription list has no artificial 32-symbol ceiling; candle history is
+// uploaded in bounded rotating batches to keep bridge requests small.
 
 CTrade        trade;
 CPositionInfo posinfo;
@@ -127,21 +161,27 @@ int OnInit()
    trade.SetAsyncMode(false);
    trade.SetDeviationInPoints(10);
 
-   SplitSymbols(SymbolsCsv);
-   for(int i = 0; i < g_symbolCount; i++)
-      SymbolSelect(g_symbols[i], true);
-
-   ResetSeeding();
+   ArrayResize(g_plans, 0);
+   ArrayResize(g_symbols, 0);
+   ArrayResize(g_newsEvents, 0);
+   g_newsReady = false;
+   g_newsCalendarJson = "";
+   g_lastNewsFetchMs = 0;
+   g_catalogDirty = true;
+   g_serverNeedsUniverse = true;
    ResetDayBaseline();
 
-   if(!Pair())
+   int pollMs = (int)MathMax(100, TimerPollMs);
+   if(!EventSetMillisecondTimer(pollMs))
    {
-      Print("NeurotradeBridge: pairing failed. Check ServerUrl, the WebRequest allowlist and the pairing code.");
-      return(INIT_FAILED);
+      Print("NeurotradeBridge: millisecond timer unavailable; falling back to a 1 second timer.");
+      EventSetTimer(1);
    }
 
-   EventSetMillisecondTimer(SyncIntervalMs);
-   Print("NeurotradeBridge: linked. Watching ", g_symbolCount, " symbols.");
+   // Do not fail EA initialization because the pairing code is blank, expired,
+   // or the network is temporarily unavailable. INIT_FAILED removes the EA
+   // from the chart, which was the reason users saw no attached connection.
+   Print("NeurotradeBridge: attached. Waiting for a valid ServerUrl, WebRequest allowlist and pairing code.");
    return(INIT_SUCCEEDED);
 }
 
@@ -166,7 +206,26 @@ void OnTick()
 void OnTimer()
 {
    RollDayBaselineIfNeeded();
-   Sync();
+   // Timer work also services positions on symbols other than the chart symbol.
+   // OnTick remains the immediate path for the chart's own feed.
+   ManageOpenPositions();
+   EvaluatePlans();
+
+   ulong nowMs = GetTickCount64();
+   if(g_token == "")
+   {
+      if(nowMs >= g_nextPairAttemptMs)
+      {
+         if(Pair())
+            Log("Pairing complete; starting live account and market sync.");
+         g_nextPairAttemptMs = GetTickCount64() + (ulong)PAIR_RETRY_MS;
+      }
+      return;
+   }
+
+   int interval = (int)MathMax(250, SyncIntervalMs);
+   if(nowMs - g_lastSyncMs >= (ulong)interval)
+      Sync();
 }
 
 //+------------------------------------------------------------------+
@@ -176,7 +235,7 @@ void EvaluatePlans()
 {
    long now = (long)TimeGMT() * 1000;
 
-   for(int i = 0; i < MAX_PLANS; i++)
+   for(int i = 0; i < ArraySize(g_plans); i++)
    {
       if(!g_plans[i].active) continue;
 
@@ -190,6 +249,14 @@ void EvaluatePlans()
       }
 
       string sym = g_plans[i].symbol;
+      string newsReason = NewsBlockReason(sym);
+      if(newsReason != "")
+      {
+         Log("Plan " + g_plans[i].id + " cancelled locally: " + newsReason);
+         g_plans[i].active = false;
+         continue;
+      }
+
       MqlTick tick;
       if(!SymbolInfoTick(sym, tick)) continue;
 
@@ -353,17 +420,158 @@ void ManageOpenPositions()
    }
 }
 
+string NewsCalendarUnavailableJson(const string error, const datetime utcNow)
+{
+   long fetchedAt = utcNow > 0 ? (long)utcNow * 1000 : (long)TimeGMT() * 1000;
+   return "{\"source\":\"mt5\",\"available\":false,\"fetchedAt\":" + IntegerToString(fetchedAt) +
+          ",\"coverageStart\":0,\"coverageEnd\":0,\"error\":\"" + JsonEscape(error) + "\",\"events\":[]}";
+}
+
+void BuildNewsCalendarSnapshot()
+{
+   g_lastNewsFetchMs = GetTickCount64();
+   datetime utcNow = TimeGMT();
+   datetime serverNow = TimeTradeServer();
+   if(utcNow <= 0 || serverNow <= 0)
+   {
+      g_newsCalendarJson = NewsCalendarUnavailableJson("MT5 server/UTC clock is not available.", utcNow);
+      return;
+   }
+
+   // CalendarValueHistory uses trade-server time. Convert its event timestamps
+   // to UTC for the API and browser; the local EA guard uses TimeGMT as well.
+   long serverOffsetSec = (long)serverNow - (long)utcNow;
+   datetime coverageStart = utcNow - 60 * 60;
+   datetime coverageEnd = utcNow + 48 * 60 * 60;
+   datetime queryFrom = serverNow - 60 * 60;
+   datetime queryTo = serverNow + 48 * 60 * 60;
+
+   MqlCalendarValue values[];
+   ResetLastError();
+   int valueCount = CalendarValueHistory(values, queryFrom, queryTo);
+   int calendarError = GetLastError();
+   if(valueCount < 0)
+   {
+      g_newsCalendarJson = NewsCalendarUnavailableJson(
+         "CalendarValueHistory failed (MT5 error " + IntegerToString(calendarError) + ").", utcNow);
+      Log("MT5 economic calendar unavailable; new entries are blocked.");
+      return;
+   }
+
+   string eventJson = "[";
+   string seenKeys[];
+   int eventCount = 0;
+   bool complete = true;
+   string failure = "";
+
+   for(int i = 0; i < valueCount; i++)
+   {
+      MqlCalendarEvent calendarEvent;
+      if(!CalendarEventById(values[i].event_id, calendarEvent))
+      {
+         complete = false;
+         failure = "MT5 could not classify an economic-calendar event.";
+         break;
+      }
+      if(calendarEvent.importance != CALENDAR_IMPORTANCE_HIGH) continue;
+      if(calendarEvent.time_mode != CALENDAR_TIMEMODE_DATETIME)
+      {
+         complete = false;
+         failure = "A high-impact MT5 event has no confirmed release time.";
+         break;
+      }
+
+      if(values[i].time <= 0)
+      {
+         complete = false;
+         failure = "A high-impact MT5 event has no reliable scheduled time.";
+         break;
+      }
+      datetime eventUtc = values[i].time - serverOffsetSec;
+      if(eventUtc < coverageStart || eventUtc > coverageEnd) continue;
+
+      MqlCalendarCountry country;
+      string currency = "*";
+      if(CalendarCountryById(calendarEvent.country_id, country))
+      {
+         currency = country.currency;
+         StringToUpper(currency);
+         bool validCurrency = (StringLen(currency) == 3);
+         for(int c = 0; c < StringLen(currency); c++)
+         {
+            ushort ch = StringGetCharacter(currency, c);
+            if(ch < 'A' || ch > 'Z') validCurrency = false;
+         }
+         if(!validCurrency) currency = "*";
+      }
+
+      string eventKey = IntegerToString((long)values[i].event_id) + "-" + IntegerToString((long)eventUtc);
+      bool duplicate = false;
+      for(int k = 0; k < ArraySize(seenKeys); k++)
+      {
+         if(seenKeys[k] == eventKey) { duplicate = true; break; }
+      }
+      if(duplicate) continue;
+      if(eventCount >= MAX_NEWS_EVENTS)
+      {
+         complete = false;
+         failure = "MT5 high-impact calendar exceeded the safe event limit.";
+         break;
+      }
+      int seenCount = ArraySize(seenKeys);
+      if(ArrayResize(seenKeys, seenCount + 1) != seenCount + 1)
+      {
+         complete = false;
+         failure = "MT5 calendar snapshot could not be allocated completely.";
+         break;
+      }
+      seenKeys[seenCount] = eventKey;
+
+      if(eventCount > 0) eventJson += ",";
+      eventJson += "{\"id\":\"" + JsonEscape(eventKey) + "\",\"currency\":\"" + currency +
+                   "\",\"title\":\"" + JsonEscape(calendarEvent.name) + "\",\"impact\":\"high\",\"ts\":" +
+                   IntegerToString((long)eventUtc * 1000) + "}";
+      eventCount++;
+   }
+
+   if(!complete)
+   {
+      g_newsCalendarJson = NewsCalendarUnavailableJson(failure, utcNow);
+      Log("MT5 economic calendar incomplete; new entries are blocked: " + failure);
+      return;
+   }
+
+   eventJson += "]";
+   g_newsCalendarJson = "{\"source\":\"mt5\",\"available\":true,\"fetchedAt\":" + IntegerToString((long)utcNow * 1000) +
+                       ",\"coverageStart\":" + IntegerToString((long)coverageStart * 1000) +
+                       ",\"coverageEnd\":" + IntegerToString((long)coverageEnd * 1000) +
+                       ",\"error\":null,\"events\":" + eventJson + "}";
+}
+
 //+------------------------------------------------------------------+
 //| Server sync                                                      |
 //+------------------------------------------------------------------+
 void Sync()
 {
    if(g_token == "") return;
+   g_lastSyncMs = GetTickCount64();
+
+   ulong nowMs = GetTickCount64();
+   ulong refreshMs = (ulong)MathMax(60, CatalogRefreshSec) * 1000;
+   bool sendUniverse = g_catalogDirty || g_serverNeedsUniverse || g_catalogJson == "[]" ||
+                       nowMs - g_catalogBuiltAtMs >= refreshMs;
+   if(sendUniverse) BuildBrokerCatalog();
+
+   ulong newsRefreshMs = (ulong)MathMax(60, NewsRefreshSec) * 1000;
+   if(g_newsCalendarJson == "" || nowMs - g_lastNewsFetchMs >= newsRefreshMs)
+      BuildNewsCalendarSnapshot();
 
    g_seq++;
    string body = "{";
    body += "\"seq\":" + IntegerToString(g_seq) + ",";
    body += "\"account\":" + AccountJson() + ",";
+   body += "\"newsCalendar\":" + g_newsCalendarJson + ",";
+   if(sendUniverse) body += "\"universe\":" + g_catalogJson + ",";
    body += "\"specs\":" + SpecsJson() + ",";
    body += "\"quotes\":" + QuotesJson() + ",";
    body += "\"candles\":" + CandlesJson() + ",";
@@ -374,8 +582,14 @@ void Sync()
    string response = "";
    if(!HttpPost("/api/bridge/sync", body, response, true))
    {
-      // Stale connection: stop opening anything new, keep managing what is
-      // already on. Silence must never mean "carry on trading blind".
+      // An expired/revoked token must never leave the EA in a fake "connected"
+      // state. A new short-lived code can be entered in the EA properties.
+      if(StringFind(response, "Invalid or revoked bridge token") >= 0)
+      {
+         g_token = "";
+         g_tradingEnabled = false;
+         g_nextPairAttemptMs = GetTickCount64() + (ulong)PAIR_RETRY_MS;
+      }
       if(TimeCurrent() - g_lastOk > StaleAfterSec)
          g_tradingEnabled = false;
       return;
@@ -383,10 +597,6 @@ void Sync()
 
    g_lastOk  = TimeCurrent();
    g_results = "";          // delivered
-
-   // The server tells us when it has no history for us — after a restart or a
-   // re-pair — and we re-seed rather than leaving it analysing four bars.
-   if(JsonBool(response, "needsHistory") == 1) ResetSeeding();
    ApplyServerResponse(response);
 }
 
@@ -394,6 +604,10 @@ void ApplyServerResponse(const string json)
 {
    g_tradingEnabled     = (JsonBool(json, "tradingEnabled")     == 1);
    g_liveTradingEnabled = (JsonBool(json, "liveTradingEnabled") == 1);
+   g_serverNeedsUniverse = (JsonBool(json, "needsUniverse") == 1);
+   g_serverNeedsHistory = (JsonBool(json, "needsHistory") == 1);
+   UpdateNewsCalendarFromResponse(json);
+   UpdateSubscriptionsFromResponse(json);
 
    // Commands arrive as a JSON array; walk it object by object.
    int cursor = StringFind(json, "\"commands\"");
@@ -444,21 +658,6 @@ void HandleCommand(const string obj)
 
 void ArmPlanFromJson(const string obj, const string cmdId)
 {
-   if(!g_tradingEnabled)
-   {
-      AddResult(cmdId, "skipped", 0, 0, 0, "trading disabled by the server");
-      return;
-   }
-
-   int slot = -1;
-   for(int i = 0; i < MAX_PLANS; i++)
-      if(!g_plans[i].active) { slot = i; break; }
-   if(slot < 0)
-   {
-      AddResult(cmdId, "rejected", 0, 0, 0, "no free plan slot");
-      return;
-   }
-
    // Everything below reads from the nested plan object, never the command
    // wrapper — see JsonObject() for why that distinction matters.
    string plan = JsonObject(obj, "plan");
@@ -469,16 +668,49 @@ void ArmPlanFromJson(const string obj, const string cmdId)
    }
 
    string sym = JsonString(plan, "symbol");
+   if(sym == "")
+   {
+      AddResult(cmdId, "rejected", 0, 0, 0, "arm plan has no symbol");
+      return;
+   }
+   string newsReason = NewsBlockReason(sym);
+   if(newsReason != "")
+   {
+      AddResult(cmdId, "skipped", 0, 0, 0, newsReason);
+      return;
+   }
+   if(!g_tradingEnabled)
+   {
+      AddResult(cmdId, "skipped", 0, 0, 0, "trading disabled by the server");
+      return;
+   }
    if(!TradingAllowed(sym))
    {
       AddResult(cmdId, "skipped", 0, 0, 0, "local guard blocked this symbol");
       return;
    }
 
-   // One plan per symbol: a second would race the first and could double the
-   // intended exposure.
-   for(int i = 0; i < MAX_PLANS; i++)
-      if(g_plans[i].active && g_plans[i].symbol == sym) g_plans[i].active = false;
+   // One plan per symbol, but no arbitrary total-plan ceiling across markets.
+   int slot = -1;
+   for(int i = 0; i < ArraySize(g_plans); i++)
+   {
+      if(g_plans[i].active && g_plans[i].symbol == sym)
+      {
+         g_plans[i].active = false;
+         slot = i;
+      }
+      else if(slot < 0 && !g_plans[i].active)
+         slot = i;
+   }
+   if(slot < 0)
+   {
+      slot = ArraySize(g_plans);
+      if(ArrayResize(g_plans, slot + 1) != slot + 1)
+      {
+         AddResult(cmdId, "rejected", 0, 0, 0, "could not allocate plan state");
+         return;
+      }
+   }
 
    g_plans[slot].id                = JsonString(plan, "id");
    g_plans[slot].symbol            = sym;
@@ -515,7 +747,7 @@ void ArmPlanFromJson(const string obj, const string cmdId)
 
 void CancelPlan(const string planId, const string cmdId)
 {
-   for(int i = 0; i < MAX_PLANS; i++)
+   for(int i = 0; i < ArraySize(g_plans); i++)
       if(g_plans[i].active && g_plans[i].id == planId) g_plans[i].active = false;
    AddResult(cmdId, "done", 0, 0, 0, "");
 }
@@ -553,7 +785,7 @@ void ModifyPosition(const string obj, const string cmdId)
 
 void FlattenAll(const string reason)
 {
-   for(int i = 0; i < MAX_PLANS; i++) g_plans[i].active = false;
+   for(int i = 0; i < ArraySize(g_plans); i++) g_plans[i].active = false;
 
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
@@ -564,11 +796,65 @@ void FlattenAll(const string reason)
    Log("FLATTEN ALL: " + reason);
 }
 
+bool IsNewsCurrencyCode(string value)
+{
+   StringToUpper(value);
+   if(StringLen(value) != 3) return false;
+   for(int i = 0; i < StringLen(value); i++)
+   {
+      ushort ch = StringGetCharacter(value, i);
+      if(ch < 'A' || ch > 'Z') return false;
+   }
+   return true;
+}
+
+bool NewsEventAffectsSymbol(const string sym, const string currency)
+{
+   if(currency == "*") return true;
+   string base = SymbolInfoString(sym, SYMBOL_CURRENCY_BASE);
+   string quote = SymbolInfoString(sym, SYMBOL_CURRENCY_PROFIT);
+   StringToUpper(base);
+   StringToUpper(quote);
+   bool hasCurrency = false;
+   if(IsNewsCurrencyCode(base)) hasCurrency = true;
+   if(IsNewsCurrencyCode(quote)) hasCurrency = true;
+   if(!hasCurrency) return true; // Unknown broker mapping: fail closed.
+   return (IsNewsCurrencyCode(base) && base == currency) ||
+          (IsNewsCurrencyCode(quote) && quote == currency);
+}
+
+string NewsBlockReason(const string sym)
+{
+   long now = (long)TimeGMT() * 1000;
+   if(!g_newsReady || now <= 0 || g_newsFetchedAt <= 0 ||
+      g_newsFetchedAt > now + 30000 || now - g_newsFetchedAt > g_newsStaleAfterMs)
+   {
+      g_newsReady = false;
+      ArrayResize(g_newsEvents, 0);
+      return "MT5 high-impact calendar is unavailable or stale; new entries are blocked";
+   }
+
+   for(int i = 0; i < ArraySize(g_newsEvents); i++)
+   {
+      if(!NewsEventAffectsSymbol(sym, g_newsEvents[i].currency)) continue;
+      long start = g_newsEvents[i].ts - g_newsBeforeMs;
+      long end = g_newsEvents[i].ts + g_newsAfterMs;
+      if(now >= start && now <= end)
+      {
+         datetime utc = (datetime)(g_newsEvents[i].ts / 1000);
+         return g_newsEvents[i].currency + " high-impact news blackout is active (scheduled " +
+                TimeToString(utc, TIME_DATE | TIME_MINUTES) + " UTC)";
+      }
+   }
+   return "";
+}
+
 //+------------------------------------------------------------------+
 //| Guards                                                           |
 //+------------------------------------------------------------------+
 bool TradingAllowed(const string sym)
 {
+   if(NewsBlockReason(sym) != "") return false;
    if(!g_tradingEnabled) return false;
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return false;
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return false;
@@ -594,9 +880,16 @@ bool DailyLossBreached()
 
 void ResetSeeding()
 {
-   for(int i = 0; i < MAX_SYMBOLS; i++)
-      for(int t = 0; t < 7; t++)
-         g_seeded[i][t] = false;
+   for(int i = 0; i < ArraySize(g_symbols); i++)
+      for(int t = 0; t < TIMEFRAME_COUNT; t++)
+         g_symbols[i].seeded[t] = false;
+}
+
+int FindSymbolState(const string symbol)
+{
+   for(int i = 0; i < ArraySize(g_symbols); i++)
+      if(g_symbols[i].symbol == symbol) return i;
+   return -1;
 }
 
 void ResetDayBaseline()
@@ -647,7 +940,7 @@ double AtrValue(const string sym, ENUM_TIMEFRAMES tf, int period)
 
 bool FindPlanForSymbol(const string sym, ArmedPlan &out)
 {
-   for(int i = 0; i < MAX_PLANS; i++)
+   for(int i = 0; i < ArraySize(g_plans); i++)
       if(g_plans[i].symbol == sym) { out = g_plans[i]; return true; }
    return false;
 }
@@ -697,7 +990,7 @@ string AccountJson()
    json += "\"margin\":"     + DoubleToString(margin, 2) + ",";
    json += "\"freeMargin\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_FREE), 2) + ",";
    json += "\"marginLevel\":" + DoubleToString(AccountInfoDouble(ACCOUNT_MARGIN_LEVEL), 2) + ",";
-   json += "\"currency\":\"" + AccountInfoString(ACCOUNT_CURRENCY) + "\",";
+   json += "\"currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\",";
    json += "\"leverage\":"   + IntegerToString(AccountInfoInteger(ACCOUNT_LEVERAGE)) + ",";
    json += "\"mode\":\""     + (netting ? "netting" : "hedging") + "\",";
    json += "\"isLive\":"     + (isLive ? "true" : "false");
@@ -708,22 +1001,23 @@ string AccountJson()
 string SpecsJson()
 {
    string json = "[";
-   for(int i = 0; i < g_symbolCount; i++)
+   for(int i = 0; i < ArraySize(g_symbols); i++)
    {
-      string s = g_symbols[i];
+      string s = g_symbols[i].symbol;
       if(i > 0) json += ",";
       json += "{";
-      json += "\"symbol\":\"" + s + "\",";
+      json += "\"symbol\":\"" + JsonEscape(s) + "\",";
+      json += "\"assetClass\":\"" + AssetClassForSymbol(s) + "\",";
       json += "\"point\":"        + DoubleToString(SymbolInfoDouble(s, SYMBOL_POINT), 10) + ",";
       json += "\"digits\":"       + IntegerToString(SymbolInfoInteger(s, SYMBOL_DIGITS)) + ",";
       json += "\"tickSize\":"     + DoubleToString(SymbolInfoDouble(s, SYMBOL_TRADE_TICK_SIZE), 10) + ",";
       // The LOSS-side tick value, in the account currency: size against the
       // worse of the two, and let MT5 do the FX conversion for us.
       json += "\"tickValue\":"    + DoubleToString(SymbolInfoDouble(s, SYMBOL_TRADE_TICK_VALUE_LOSS), 8) + ",";
-      json += "\"contractSize\":" + DoubleToString(SymbolInfoDouble(s, SYMBOL_TRADE_CONTRACT_SIZE), 4) + ",";
-      json += "\"volumeMin\":"    + DoubleToString(SymbolInfoDouble(s, SYMBOL_VOLUME_MIN), 4) + ",";
-      json += "\"volumeMax\":"    + DoubleToString(SymbolInfoDouble(s, SYMBOL_VOLUME_MAX), 4) + ",";
-      json += "\"volumeStep\":"   + DoubleToString(SymbolInfoDouble(s, SYMBOL_VOLUME_STEP), 4) + ",";
+      json += "\"contractSize\":" + DoubleToString(SymbolInfoDouble(s, SYMBOL_TRADE_CONTRACT_SIZE), 8) + ",";
+      json += "\"volumeMin\":"    + DoubleToString(SymbolInfoDouble(s, SYMBOL_VOLUME_MIN), 8) + ",";
+      json += "\"volumeMax\":"    + DoubleToString(SymbolInfoDouble(s, SYMBOL_VOLUME_MAX), 8) + ",";
+      json += "\"volumeStep\":"   + DoubleToString(SymbolInfoDouble(s, SYMBOL_VOLUME_STEP), 8) + ",";
       json += "\"stopsLevel\":"   + IntegerToString(SymbolInfoInteger(s, SYMBOL_TRADE_STOPS_LEVEL)) + ",";
       json += "\"freezeLevel\":"  + IntegerToString(SymbolInfoInteger(s, SYMBOL_TRADE_FREEZE_LEVEL)) + ",";
       json += "\"marginInitial\":" + DoubleToString(SymbolInfoDouble(s, SYMBOL_MARGIN_INITIAL), 4) + ",";
@@ -731,8 +1025,8 @@ string SpecsJson()
       json += "\"swapShort\":"    + DoubleToString(SymbolInfoDouble(s, SYMBOL_SWAP_SHORT), 4) + ",";
       json += "\"commissionPerLot\":0,";
       json += "\"spreadPoints\":" + IntegerToString(SymbolInfoInteger(s, SYMBOL_SPREAD)) + ",";
-      json += "\"baseCurrency\":\""  + SymbolInfoString(s, SYMBOL_CURRENCY_BASE)   + "\",";
-      json += "\"quoteCurrency\":\"" + SymbolInfoString(s, SYMBOL_CURRENCY_PROFIT) + "\"";
+      json += "\"baseCurrency\":\""  + JsonEscape(SymbolInfoString(s, SYMBOL_CURRENCY_BASE))   + "\",";
+      json += "\"quoteCurrency\":\"" + JsonEscape(SymbolInfoString(s, SYMBOL_CURRENCY_PROFIT)) + "\"";
       json += "}";
    }
    json += "]";
@@ -743,16 +1037,17 @@ string QuotesJson()
 {
    string json = "[";
    bool first = true;
-   for(int i = 0; i < g_symbolCount; i++)
+   for(int i = 0; i < ArraySize(g_symbols); i++)
    {
       MqlTick tick;
-      if(!SymbolInfoTick(g_symbols[i], tick)) continue;
+      if(!SymbolInfoTick(g_symbols[i].symbol, tick)) continue;
+      int digits = (int)SymbolInfoInteger(g_symbols[i].symbol, SYMBOL_DIGITS);
       if(!first) json += ",";
       first = false;
-      json += "{\"symbol\":\"" + g_symbols[i] + "\",";
-      json += "\"bid\":" + DoubleToString(tick.bid, 8) + ",";
-      json += "\"ask\":" + DoubleToString(tick.ask, 8) + ",";
-      json += "\"spreadPoints\":" + IntegerToString(SymbolInfoInteger(g_symbols[i], SYMBOL_SPREAD)) + ",";
+      json += "{\"symbol\":\"" + JsonEscape(g_symbols[i].symbol) + "\",";
+      json += "\"bid\":" + DoubleToString(tick.bid, digits) + ",";
+      json += "\"ask\":" + DoubleToString(tick.ask, digits) + ",";
+      json += "\"spreadPoints\":" + IntegerToString(SymbolInfoInteger(g_symbols[i].symbol, SYMBOL_SPREAD)) + ",";
       json += "\"ts\":" + IntegerToString((long)tick.time * 1000) + "}";
    }
    json += "]";
@@ -763,37 +1058,62 @@ string CandlesJson()
 {
    string json = "[";
    bool first = true;
+   int total = ArraySize(g_symbols);
+   if(total <= 0) return "[]";
 
-   for(int s = 0; s < g_symbolCount; s++)
+   int batch = (int)MathMax(1, CandleSymbolsPerSync);
+   if(batch > total) batch = total;
+   int start = g_candleCursor % total;
+
+   // Full history is rotated through selected symbols so a large watchlist
+   // never creates an oversized 12 MB sync request.
+   for(int offset = 0; offset < batch; offset++)
    {
-      for(int t = 0; t < 7; t++)
+      int s = (start + offset) % total;
+      for(int t = 0; t < TIMEFRAME_COUNT; t++)
       {
-         int want = g_seeded[s][t] ? MathMax(2, DeltaBars) : HistoryBars;
+         bool seeding = !g_symbols[s].seeded[t];
+         int want = seeding ? (int)MathMax(60, MathMin(400, HistoryBars)) : (int)MathMax(2, MathMin(10, DeltaBars));
 
          MqlRates rates[];
          ArraySetAsSeries(rates, false);          // chronological, oldest first
-         int copied = CopyRates(g_symbols[s], TF_LIST[t], 0, want, rates);
+         int copied = CopyRates(g_symbols[s].symbol, TF_LIST[t], 0, want, rates);
          if(copied <= 0) continue;
-         g_seeded[s][t] = true;
+         int digits = (int)SymbolInfoInteger(g_symbols[s].symbol, SYMBOL_DIGITS);
+         if(seeding && copied >= 60) g_symbols[s].seeded[t] = true;
 
          if(!first) json += ",";
          first = false;
-         json += "{\"symbol\":\"" + g_symbols[s] + "\",\"timeframe\":\"" + TF_NAMES[t] + "\",\"bars\":[";
+         json += "{\"symbol\":\"" + JsonEscape(g_symbols[s].symbol) + "\",\"timeframe\":\"" + TF_NAMES[t] + "\",\"bars\":[";
          for(int b = 0; b < copied; b++)
          {
             if(b > 0) json += ",";
             json += "[" + IntegerToString((long)rates[b].time * 1000) + "," +
-                    DoubleToString(rates[b].open, 8)  + "," +
-                    DoubleToString(rates[b].high, 8)  + "," +
-                    DoubleToString(rates[b].low, 8)   + "," +
-                    DoubleToString(rates[b].close, 8) + "," +
+                    DoubleToString(rates[b].open, digits)  + "," +
+                    DoubleToString(rates[b].high, digits)  + "," +
+                    DoubleToString(rates[b].low, digits)   + "," +
+                    DoubleToString(rates[b].close, digits) + "," +
                     IntegerToString(rates[b].tick_volume) + "]";
          }
          json += "]}";
       }
    }
+
+   g_candleCursor = (start + batch) % total;
    json += "]";
    return json;
+}
+
+double PositionCommission(const ulong identifier)
+{
+   double commission = 0;
+   if(!HistorySelectByPosition(identifier)) return commission;
+   for(int i = 0; i < HistoryDealsTotal(); i++)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal != 0) commission += HistoryDealGetDouble(deal, DEAL_COMMISSION);
+   }
+   return commission;
 }
 
 string PositionsJson()
@@ -804,19 +1124,22 @@ string PositionsJson()
    {
       if(!posinfo.SelectByIndex(i)) continue;
       if(posinfo.Magic() != MagicNumber) continue;
+      string symbol = posinfo.Symbol();
+      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+      ulong positionId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
       if(!first) json += ",";
       first = false;
       json += "{\"ticket\":"   + IntegerToString(posinfo.Ticket()) + ",";
-      json += "\"symbol\":\""  + posinfo.Symbol() + "\",";
+      json += "\"symbol\":\""  + JsonEscape(symbol) + "\",";
       json += "\"side\":\""    + (posinfo.PositionType() == POSITION_TYPE_BUY ? "buy" : "sell") + "\",";
-      json += "\"volume\":"    + DoubleToString(posinfo.Volume(), 2) + ",";
-      json += "\"openPrice\":" + DoubleToString(posinfo.PriceOpen(), 8) + ",";
+      json += "\"volume\":"    + DoubleToString(posinfo.Volume(), 8) + ",";
+      json += "\"openPrice\":" + DoubleToString(posinfo.PriceOpen(), digits) + ",";
       json += "\"openTime\":"  + IntegerToString((long)posinfo.Time() * 1000) + ",";
-      json += "\"sl\":"        + DoubleToString(posinfo.StopLoss(), 8) + ",";
-      json += "\"tp\":"        + DoubleToString(posinfo.TakeProfit(), 8) + ",";
+      json += "\"sl\":"        + DoubleToString(posinfo.StopLoss(), digits) + ",";
+      json += "\"tp\":"        + DoubleToString(posinfo.TakeProfit(), digits) + ",";
       json += "\"profit\":"    + DoubleToString(posinfo.Profit(), 2) + ",";
       json += "\"swap\":"      + DoubleToString(posinfo.Swap(), 2) + ",";
-      json += "\"commission\":" + DoubleToString(posinfo.Commission(), 2) + "}";
+      json += "\"commission\":" + DoubleToString(PositionCommission(positionId), 2) + "}";
    }
    json += "]";
    return json;
@@ -829,11 +1152,14 @@ bool Pair()
 {
    if(PairingCode == "")
    {
-      Print("NeurotradeBridge: set the PairingCode input from the Desk page.");
+      if(!g_loggedEmptyPairCode)
+         Print("NeurotradeBridge: set PairingCode from the Desk page to link this MT5 account.");
+      g_loggedEmptyPairCode = true;
       return false;
    }
+   g_loggedEmptyPairCode = false;
 
-   string body = "{\"pairingCode\":\"" + PairingCode + "\",\"terminal\":{";
+   string body = "{\"pairingCode\":\"" + JsonEscape(PairingCode) + "\",\"terminal\":{";
    body += "\"login\":"    + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
    body += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER))  + "\",";
    body += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
@@ -849,26 +1175,73 @@ bool Pair()
       return false;
    }
    g_lastOk = TimeCurrent();
+   g_lastSyncMs = 0;
+   g_serverNeedsHistory = false;
+   g_serverNeedsUniverse = true;
+   g_catalogDirty = true;
+   g_newsReady = false;
+   g_newsFetchedAt = 0;
+   g_newsCalendarJson = "";
+   g_lastNewsFetchMs = 0;
+   ArrayResize(g_newsEvents, 0);
+   g_candleCursor = 0;
+   ResetSeeding();
    return true;
 }
 
 //+------------------------------------------------------------------+
 //| HTTP                                                             |
 //+------------------------------------------------------------------+
+string BridgeOrigin()
+{
+   string origin = ServerUrl;
+   StringTrimLeft(origin);
+   StringTrimRight(origin);
+   while(StringLen(origin) > 0 && StringSubstr(origin, StringLen(origin) - 1, 1) == "/")
+      origin = StringSubstr(origin, 0, StringLen(origin) - 1);
+   return origin;
+}
+
 bool HttpPost(const string path, const string body, string &response, bool authenticated)
 {
+   string origin = BridgeOrigin();
+   if(origin == "")
+   {
+      response = "ServerUrl is empty";
+      if(!g_loggedMissingUrl)
+      {
+         Print("NeurotradeBridge: set ServerUrl to the exact HTTPS origin shown in the Desk pairing dialog.");
+         g_loggedMissingUrl = true;
+      }
+      return false;
+   }
+   if(StringFind(origin, "https://") != 0 && StringFind(origin, "http://") != 0)
+   {
+      response = "ServerUrl must begin with http:// or https://";
+      Print("NeurotradeBridge: ServerUrl must include http:// or https:// and must not include /api.");
+      return false;
+   }
+   int schemeEnd = StringFind(origin, "://") + 3;
+   if(StringFind(origin, "/", schemeEnd) >= 0 || StringFind(origin, "?") >= 0)
+   {
+      response = "ServerUrl must be an origin without a path or query";
+      Print("NeurotradeBridge: use only the site origin in ServerUrl (no /terminal, /api or query string).");
+      return false;
+   }
+
    string headers = "Content-Type: application/json\r\n";
    if(authenticated) headers += "Authorization: Bearer " + g_token + "\r\n";
 
    char post[], result[];
-   StringToCharArray(body, post, 0, StringLen(body), CP_UTF8);
-   // StringToCharArray appends a terminating zero; sending it corrupts the
-   // JSON body for strict parsers.
-   ArrayResize(post, ArraySize(post) - 1);
+   StringToCharArray(body, post, 0, WHOLE_ARRAY, CP_UTF8);
+   // UTF-8 broker descriptions can use more bytes than StringLen(body).
+   // Copy the whole string, then remove its terminating zero for strict JSON parsers.
+   if(ArraySize(post) > 0 && post[ArraySize(post) - 1] == 0)
+      ArrayResize(post, ArraySize(post) - 1);
 
    string resultHeaders = "";
    ResetLastError();
-   int status = WebRequest("POST", ServerUrl + path, headers, 8000, post, result, resultHeaders);
+   int status = WebRequest("POST", origin + path, headers, 8000, post, result, resultHeaders);
 
    if(status == -1)
    {
@@ -987,20 +1360,255 @@ string JsonEscape(const string text)
    StringReplace(out, "\"", "\\\"");
    StringReplace(out, "\n", " ");
    StringReplace(out, "\r", " ");
+   StringReplace(out, "\t", " ");
    return out;
 }
 
-void SplitSymbols(const string csv)
+string AssetClassForSymbol(const string symbol)
 {
-   string parts[];
-   int count = StringSplit(csv, ',', parts);
-   g_symbolCount = 0;
-   for(int i = 0; i < count && g_symbolCount < MAX_SYMBOLS; i++)
+   string name = symbol;
+   string path = SymbolInfoString(symbol, SYMBOL_PATH);
+   string description = SymbolInfoString(symbol, SYMBOL_DESCRIPTION);
+   string base = SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE);
+   StringToUpper(name);
+   StringToUpper(path);
+   StringToUpper(description);
+   StringToUpper(base);
+
+   long calculationMode = SymbolInfoInteger(symbol, SYMBOL_TRADE_CALC_MODE);
+   if(base == "XAU" || base == "XAG" || base == "XPT" || base == "XPD" ||
+      StringFind(name, "XAU") >= 0 || StringFind(name, "XAG") >= 0 ||
+      StringFind(name, "GOLD") >= 0 || StringFind(path, "METAL") >= 0 ||
+      StringFind(description, "GOLD") >= 0 || StringFind(description, "SILVER") >= 0)
+      return "metals";
+
+   if(StringFind(path, "CRYPTO") >= 0 || StringFind(description, "CRYPTO") >= 0 ||
+      StringFind(name, "BTC") == 0 || StringFind(name, "ETH") == 0 ||
+      StringFind(name, "XRP") == 0 || StringFind(name, "LTC") == 0 ||
+      StringFind(name, "DOGE") == 0 || StringFind(name, "SOL") == 0)
+      return "crypto";
+
+   if(calculationMode == SYMBOL_CALC_MODE_EXCH_STOCKS ||
+      StringFind(path, "STOCK") >= 0 || StringFind(path, "EQUITY") >= 0 ||
+      StringFind(description, "SHARE") >= 0)
+      return "stocks";
+
+   if(calculationMode == SYMBOL_CALC_MODE_FUTURES ||
+      calculationMode == SYMBOL_CALC_MODE_EXCH_FUTURES ||
+      StringFind(path, "FUTURE") >= 0 || StringFind(description, "FUTURE") >= 0)
+      return "futures";
+
+   if(calculationMode == SYMBOL_CALC_MODE_CFDINDEX || StringFind(path, "INDEX") >= 0 ||
+      StringFind(description, "INDEX") >= 0)
+      return "indices";
+
+   if(StringFind(path, "COMMOD") >= 0 || StringFind(name, "OIL") >= 0 ||
+      StringFind(name, "WTI") >= 0 || StringFind(name, "BRENT") >= 0 ||
+      StringFind(name, "NGAS") >= 0 || StringFind(description, "COMMOD") >= 0)
+      return "commodities";
+
+   if(calculationMode == SYMBOL_CALC_MODE_FOREX ||
+      calculationMode == SYMBOL_CALC_MODE_FOREX_NO_LEVERAGE)
+      return "forex";
+
+   return "other";
+}
+
+void BuildBrokerCatalog()
+{
+   string json = "[";
+   bool first = true;
+   int total = SymbolsTotal(false);
+   for(int i = 0; i < total; i++)
    {
-      string s = parts[i];
-      StringTrimLeft(s);
-      StringTrimRight(s);
-      if(s != "") g_symbols[g_symbolCount++] = s;
+      string symbol = SymbolName(i, false);
+      if(symbol == "") continue;
+      string path = SymbolInfoString(symbol, SYMBOL_PATH);
+      string description = SymbolInfoString(symbol, SYMBOL_DESCRIPTION);
+      if(!first) json += ",";
+      first = false;
+      json += "{\"symbol\":\"" + JsonEscape(symbol) + "\",";
+      json += "\"assetClass\":\"" + AssetClassForSymbol(symbol) + "\",";
+      json += "\"path\":\"" + JsonEscape(path) + "\",";
+      json += "\"description\":\"" + JsonEscape(description) + "\"}";
+   }
+   json += "]";
+   g_catalogJson = json;
+   g_catalogBuiltAtMs = GetTickCount64();
+   g_catalogDirty = false;
+}
+
+int JsonStringArray(const string json, const string key, string &values[])
+{
+   ArrayResize(values, 0);
+   string needle = "\"" + key + "\":[";
+   int start = StringFind(json, needle);
+   if(start < 0) return -1;
+   int cursor = start + StringLen(needle);
+
+   while(cursor < StringLen(json))
+   {
+      ushort ch = StringGetCharacter(json, cursor);
+      if(ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t' || ch == ',')
+      {
+         cursor++;
+         continue;
+      }
+      if(ch == ']') break;
+      if(ch != '"') return -1;
+      cursor++;
+      string value = "";
+      bool closed = false;
+      while(cursor < StringLen(json))
+      {
+         ch = StringGetCharacter(json, cursor++);
+         if(ch == '"')
+         {
+            closed = true;
+            break;
+         }
+         if(ch == '\\' && cursor < StringLen(json))
+         {
+            ch = StringGetCharacter(json, cursor++);
+            if(ch == '"' || ch == '\\' || ch == '/') value += ShortToString(ch);
+            else if(ch == 'n') value += "\n";
+            else if(ch == 'r') value += "\r";
+            else if(ch == 't') value += "\t";
+            else value += ShortToString(ch);
+         }
+         else value += ShortToString(ch);
+      }
+      if(!closed) return -1;
+      int count = ArraySize(values);
+      ArrayResize(values, count + 1);
+      values[count] = value;
+   }
+   return ArraySize(values);
+}
+
+void UpdateNewsCalendarFromResponse(const string json)
+{
+   string calendar = JsonObject(json, "newsCalendar");
+   ArrayResize(g_newsEvents, 0);
+   g_newsReady = false;
+   if(calendar == "") return;
+
+   g_newsFetchedAt = (long)JsonNumber(calendar, "fetchedAt");
+   long staleAfter = (long)JsonNumber(calendar, "staleAfterMs");
+   long before = (long)JsonNumber(calendar, "blackoutBeforeMs");
+   long after = (long)JsonNumber(calendar, "blackoutAfterMs");
+   if(staleAfter > 0) g_newsStaleAfterMs = staleAfter;
+   if(before > 0) g_newsBeforeMs = before;
+   if(after > 0) g_newsAfterMs = after;
+   if(JsonBool(calendar, "ready") != 1) return;
+
+   string needle = "\"events\":[";
+   int arrayStart = StringFind(calendar, needle);
+   if(arrayStart < 0) return;
+   int cursor = arrayStart + StringLen(needle);
+   int depth = 0;
+   int objectStart = -1;
+   bool malformed = false;
+   while(cursor < StringLen(calendar))
+   {
+      ushort ch = StringGetCharacter(calendar, cursor++);
+      if(ch == '{')
+      {
+         if(depth == 0) objectStart = cursor - 1;
+         depth++;
+      }
+      else if(ch == '}')
+      {
+         depth--;
+         if(depth < 0) { malformed = true; break; }
+         if(depth == 0 && objectStart >= 0)
+         {
+            string eventJson = StringSubstr(calendar, objectStart, cursor - objectStart);
+            string eventId = JsonString(eventJson, "id");
+            string currency = JsonString(eventJson, "currency");
+            long ts = (long)JsonNumber(eventJson, "ts");
+            StringToUpper(currency);
+            bool validCurrency = (currency == "*" || StringLen(currency) == 3);
+            if(currency != "*")
+            {
+               for(int c = 0; c < StringLen(currency); c++)
+               {
+                  ushort code = StringGetCharacter(currency, c);
+                  if(code < 'A' || code > 'Z') validCurrency = false;
+               }
+            }
+            if(eventId == "" || !validCurrency || ts <= 0 || ArraySize(g_newsEvents) >= MAX_NEWS_EVENTS)
+            {
+               malformed = true;
+               break;
+            }
+            int count = ArraySize(g_newsEvents);
+            if(ArrayResize(g_newsEvents, count + 1) != count + 1)
+            {
+               malformed = true;
+               break;
+            }
+            g_newsEvents[count].id = eventId;
+            g_newsEvents[count].currency = currency;
+            g_newsEvents[count].ts = ts;
+            objectStart = -1;
+         }
+      }
+      else if(ch == ']' && depth == 0)
+         break;
+   }
+
+   long now = (long)TimeGMT() * 1000;
+   bool fresh = g_newsFetchedAt > 0 && g_newsFetchedAt <= now + 30000 &&
+                now - g_newsFetchedAt <= g_newsStaleAfterMs;
+   if(malformed || !fresh)
+   {
+      ArrayResize(g_newsEvents, 0);
+      return;
+   }
+   g_newsReady = true;
+}
+
+void UpdateSubscriptionsFromResponse(const string json)
+{
+   string requested[];
+   int requestedCount = JsonStringArray(json, "symbols", requested);
+   if(requestedCount < 0) return;
+
+   SymbolState next[];
+   ArrayResize(next, 0);
+   for(int i = 0; i < requestedCount; i++)
+   {
+      string symbol = requested[i];
+      if(symbol == "") continue;
+      bool duplicate = false;
+      for(int j = 0; j < ArraySize(next); j++)
+         if(next[j].symbol == symbol) { duplicate = true; break; }
+      if(duplicate || !SymbolSelect(symbol, true)) continue;
+
+      int oldIndex = FindSymbolState(symbol);
+      int newIndex = ArraySize(next);
+      ArrayResize(next, newIndex + 1);
+      next[newIndex].symbol = symbol;
+      for(int t = 0; t < TIMEFRAME_COUNT; t++)
+         next[newIndex].seeded[t] = (oldIndex >= 0 ? g_symbols[oldIndex].seeded[t] : false);
+   }
+
+   for(int i = 0; i < ArraySize(g_symbols); i++)
+   {
+      bool retained = false;
+      for(int j = 0; j < ArraySize(next); j++)
+         if(next[j].symbol == g_symbols[i].symbol) { retained = true; break; }
+      if(!retained && g_symbols[i].symbol != _Symbol)
+         SymbolSelect(g_symbols[i].symbol, false);
+   }
+
+   ArrayResize(g_symbols, ArraySize(next));
+   for(int i = 0; i < ArraySize(next); i++)
+   {
+      g_symbols[i].symbol = next[i].symbol;
+      for(int t = 0; t < TIMEFRAME_COUNT; t++)
+         g_symbols[i].seeded[t] = next[i].seeded[t];
    }
 }
 

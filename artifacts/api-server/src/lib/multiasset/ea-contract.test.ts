@@ -58,6 +58,37 @@ function jsonBool(json: string, key: string): number {
   return json.slice(start + needle.length, start + needle.length + 4) === "true" ? 1 : 0;
 }
 
+/** Port of the EA's dynamic subscription-list reader. */
+function jsonStringArray(json: string, key: string): string[] {
+  const needle = `"${key}":[`;
+  const start = json.indexOf(needle);
+  if (start < 0) return [];
+  let cursor = start + needle.length;
+  const values: string[] = [];
+  while (cursor < json.length) {
+    while (/[\s,]/.test(json[cursor] ?? "")) cursor++;
+    if (json[cursor] === "]") break;
+    if (json[cursor] !== '"') return [];
+    cursor++;
+    let value = "";
+    let closed = false;
+    while (cursor < json.length) {
+      const ch = json[cursor++];
+      if (ch === '"') {
+        closed = true;
+        break;
+      }
+      if (ch === "\\" && cursor < json.length) {
+        const escaped = json[cursor++];
+        value += ({ '"': '"', "\\": "\\", "/": "/", n: "\\n", r: "\\r", t: "\\t" } as Record<string, string>)[escaped ?? ""] ?? escaped;
+      } else value += ch;
+    }
+    if (!closed) return [];
+    values.push(value);
+  }
+  return values;
+}
+
 function jsonObject(json: string, key: string): string {
   const needle = `"${key}":{`;
   let start = json.indexOf(needle);
@@ -94,6 +125,30 @@ function splitCommands(json: string): string[] {
       if (depth === 0 && objStart >= 0) {
         out.push(json.slice(objStart, i + 1));
         objStart = -1;
+      }
+    } else if (ch === "]" && depth === 0) break;
+  }
+  return out;
+}
+
+/** Port of UpdateNewsCalendarFromResponse's flat event-object splitter. */
+function jsonObjectArray(json: string, key: string): string[] {
+  const needle = `"${key}":[`;
+  const start = json.indexOf(needle);
+  if (start < 0) return [];
+  const out: string[] = [];
+  let depth = 0;
+  let objectStart = -1;
+  for (let i = start + needle.length; i < json.length; i++) {
+    const ch = json[i];
+    if (ch === "{") {
+      if (depth === 0) objectStart = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && objectStart >= 0) {
+        out.push(json.slice(objectStart, i + 1));
+        objectStart = -1;
       }
     } else if (ch === "]" && depth === 0) break;
   }
@@ -146,7 +201,16 @@ function sampleResponse(commands: BridgeCommand[]): SyncResponse {
     serverTime: 1791371596872,
     commands,
     needsHistory: false,
+    needsUniverse: false,
     subscriptions: { symbols: ["EURUSD"], timeframes: ["M1", "M5", "M15"] },
+    newsCalendar: {
+      ready: true,
+      fetchedAt: 1791371596872,
+      staleAfterMs: 600_000,
+      blackoutBeforeMs: 1_800_000,
+      blackoutAfterMs: 900_000,
+      events: [{ id: "event-123", currency: "USD", ts: 1791376996872 }],
+    },
     limits: {
       maxDailyLossPct: 3,
       maxOpenPositions: 4,
@@ -226,6 +290,28 @@ test("a plan with no trail is read as trailing disabled, not as mult=0", () => {
   assert.equal(trail, "");
 });
 
+test("EA receives the current calendar status and exact event time/currency for its local blackout veto", () => {
+  const response = sampleResponse([]);
+  const raw = JSON.stringify(response);
+  const calendar = jsonObject(raw, "newsCalendar");
+  assert.notEqual(calendar, "");
+  assert.equal(jsonBool(calendar, "ready"), 1);
+  assert.equal(jsonNumber(calendar, "staleAfterMs"), 600_000);
+  assert.equal(jsonNumber(calendar, "blackoutBeforeMs"), 1_800_000);
+  assert.equal(jsonNumber(calendar, "blackoutAfterMs"), 900_000);
+  assert.equal(jsonNumber(calendar, "fetchedAt"), 1791371596872);
+
+  const events = jsonObjectArray(calendar, "events");
+  assert.equal(events.length, 1);
+  assert.equal(jsonString(events[0] as string, "id"), "event-123");
+  assert.equal(jsonString(events[0] as string, "currency"), "USD");
+  assert.equal(jsonNumber(events[0] as string, "ts"), 1791376996872);
+
+  response.newsCalendar.ready = false;
+  const unavailable = jsonObject(JSON.stringify(response), "newsCalendar");
+  assert.equal(jsonBool(unavailable, "ready"), 0, "a missing/stale feed must tell the EA to refuse new entries");
+});
+
 test("EA reads the limit flags it gates trading on", () => {
   const raw = JSON.stringify(sampleResponse([]));
   assert.equal(jsonBool(raw, "tradingEnabled"), 1);
@@ -235,6 +321,16 @@ test("EA reads the limit flags it gates trading on", () => {
   // An absent key must read as -1 (unknown), never as 0/false, so the EA can
   // tell "server said no" apart from "server never said".
   assert.equal(jsonBool(raw, "noSuchFlag"), -1);
+});
+
+test("EA follows the server's dynamic broker subscriptions and universe request", () => {
+  const raw = JSON.stringify({
+    ...sampleResponse([]),
+    needsUniverse: true,
+    subscriptions: { symbols: ["EURUSD.a", "BTCUSD", "US30"], timeframes: ["M1", "M5"] },
+  });
+  assert.equal(jsonBool(raw, "needsUniverse"), 1);
+  assert.deepEqual(jsonStringArray(raw, "symbols"), ["EURUSD.a", "BTCUSD", "US30"]);
 });
 
 test("the command splitter handles several commands and nested braces", () => {

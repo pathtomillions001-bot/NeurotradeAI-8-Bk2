@@ -32,7 +32,7 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
   // cost the running bot a whole trade opportunity on 1s-tick markets.
   const isBotBuilder = useIsBotBuilderActive();
   const { data: engineStatus } = useGetAiEngineStatus({
-    query: { refetchInterval: isBotBuilder ? false : 2000 },
+    query: { enabled: location !== "/terminal", refetchInterval: isBotBuilder || location === "/terminal" ? false : 2000 },
   } as { query: any });
   const toggleEngine = useToggleAutonomousEngine();
   // Show the server's reason when a toggle is refused (e.g. NeuroAI FAB session active).
@@ -75,7 +75,7 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
         {/* Account switcher — shown when 2+ accounts are linked */}
         <AccountSwitcher />
 
-        {engineStatus && (
+        {engineStatus && location !== "/terminal" && (
           <div className={`p-3 rounded-lg border ${engineStatus.mode === "autonomous" ? "bg-primary/5 border-primary/30" : "bg-secondary border-border"}`}>
             <div className="flex items-center justify-between mb-2">
               <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Engine Mode</Label>
@@ -97,13 +97,11 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
 
 export function Layout({ children }: { children: ReactNode }) {
   const [location] = useLocation();
-  // The builder draws its own Run/Stop cluster in the same top-right corner,
-  // so the floating NeuroAI button would sit on top of it on that page.
-  const showSpeedAiFab = location !== "/bot-builder";
-  // Same collision: the always-on "Active Engine / No bot running" chip is
-  // pinned top-right on desktop — exactly where the embedded Deriv builder
-  // puts its Run/Stop button — so it is hidden on the Bot Builder page.
-  const showLiveBotIndicatorDesktop = location !== "/bot-builder";
+  // These global floating controls cover dense interactive surfaces (the
+  // embedded builder and the responsive multi-asset terminal), so those pages
+  // keep their own controls unobstructed.
+  const showSpeedAiFab = location !== "/bot-builder" && location !== "/terminal";
+  const showLiveBotIndicatorDesktop = location !== "/bot-builder" && location !== "/terminal";
   const [mobileOpen, setMobileOpen] = useState(false);
   // The single source of truth for "which bot is live right now" — polled
   // every 5s + SSE, so a bot that starts in the background appears within
@@ -111,7 +109,7 @@ export function Layout({ children }: { children: ReactNode }) {
   // On /bot-builder the interval pauses (builder's main-thread budget — see
   // use-bot-builder-active.ts); SSE updates keep the chip correct meanwhile.
   const isBotBuilder = useIsBotBuilderActive();
-  const liveBots = useLiveBots(isBotBuilder ? false : 5_000);
+  const liveBots = useLiveBots(isBotBuilder || location === "/terminal" ? false : 5_000);
 
   // Boot the Deriv bot builder in the background the moment the app shell is
   // up: the (large) builder bundle downloads and initializes while the user is
@@ -204,9 +202,11 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           <span className="font-bold text-base tracking-tight">NeuroTrade</span>
         </div>
-        <div className="ml-auto flex items-center gap-2">
-          <LiveBotIndicator compact live={liveBots} />
-        </div>
+        {location !== "/terminal" && (
+          <div className="ml-auto flex items-center gap-2">
+            <LiveBotIndicator compact live={liveBots} />
+          </div>
+        )}
       </header>
 
       {/* Active-engine indicator — desktop, fixed to the top-right of every

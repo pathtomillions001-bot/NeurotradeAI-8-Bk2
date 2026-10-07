@@ -18,6 +18,32 @@ export type AssetClass =
   | "stocks"
   | "other";
 
+/** A symbol discovered from the linked broker's MT5 catalog. */
+export interface MarketCatalogEntry {
+  symbol: string;
+  assetClass: AssetClass;
+  path?: string;
+  description?: string;
+}
+
+/** High-impact (“red folder”) event reported by the live MT5 economic calendar. */
+export interface HighImpactNewsEvent {
+  id: string;
+  currency: string;
+  title: string;
+  impact: "high";
+  ts: number;
+}
+
+export interface NewsCalendarSnapshot {
+  status: "unknown" | "ready" | "unavailable";
+  fetchedAt: number | null;
+  coverageStart: number | null;
+  coverageEnd: number | null;
+  error: string | null;
+  events: HighImpactNewsEvent[];
+}
+
 export type Timeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
 
 export const TIMEFRAMES: readonly Timeframe[] = [
@@ -276,11 +302,22 @@ export interface CommandResult {
 export interface SyncRequest {
   seq: number;
   account: AccountSnapshot;
+  universe?: MarketCatalogEntry[];
   specs?: SymbolSpec[];
   quotes?: Quote[];
   candles?: CandleSeries[];
   positions?: Position[];
   results?: CommandResult[];
+  /** Broker-terminal economic calendar; only MT5 high-impact events are accepted. */
+  newsCalendar?: {
+    source: "mt5";
+    available: boolean;
+    fetchedAt: number;
+    coverageStart: number;
+    coverageEnd: number;
+    error?: string | null;
+    events: HighImpactNewsEvent[];
+  };
 }
 
 export interface SyncResponse {
@@ -293,7 +330,18 @@ export interface SyncResponse {
    * server would be left analysing a four-bar window forever.
    */
   needsHistory: boolean;
+  /** Ask the EA to resend the broker symbol catalog after a server restart. */
+  needsUniverse: boolean;
   subscriptions: { symbols: string[]; timeframes: Timeframe[] };
+  newsCalendar: {
+    ready: boolean;
+    fetchedAt: number | null;
+    staleAfterMs: number;
+    blackoutBeforeMs: number;
+    blackoutAfterMs: number;
+    /** The EA needs only the currency/time/id for its local entry veto. */
+    events: Array<Pick<HighImpactNewsEvent, "id" | "currency" | "ts">>;
+  };
   limits: {
     maxDailyLossPct: number;
     maxOpenPositions: number;

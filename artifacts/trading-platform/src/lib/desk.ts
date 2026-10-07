@@ -467,6 +467,16 @@ export const deskApi = {
     selectedCount: number;
     calendarAvailable?: boolean;
     calendarAgeMs?: number | null;
+    clockSkewMs?: number | null;
+    lastQuoteAgeMs?: number | null;
+    /**
+     * Why the EA's last pairing attempt was refused, or null.
+     *
+     * The EA performs the pairing, not the browser, so without this the setup
+     * dialog would sit on "waiting for the terminal" while the only explanation
+     * sat in the MT5 Experts log.
+     */
+    lastPairingError?: string | null;
   }>("/bridge/status"),
   unpair: () => request<{ ok: true }>("/bridge/unpair", { method: "POST" }),
 };

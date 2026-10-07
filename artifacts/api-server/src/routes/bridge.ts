@@ -21,6 +21,13 @@ import {
 } from "../lib/multiasset/integrity";
 import { broadcastSSE } from "../lib/sse";
 import {
+  accountKeyFor,
+  describeConflict,
+  releaseClaimsForSession,
+  touchClaim,
+  tryClaimAccount,
+} from "../lib/multiasset/claims";
+import {
   acknowledgeResult,
   applyAccount,
   candleKey,
@@ -99,24 +106,56 @@ router.post("/pairing-code", (_req, res) => {
   res.json({ pairingCode: code, expiresInMs: PAIRING_TTL_MS });
 });
 
-/** Exchange the one-time screen code for a terminal-scoped bearer token. */
-router.post("/pair", (req, res) => {
+/**
+ * Exchange the one-time screen code for a terminal-scoped bearer token.
+ *
+ * A broker account may only be held by one Desk at a time. Two Desks on one
+ * account would both stream it, both arm plans against it and either could
+ * flatten positions the other believed it owned — one balance counted against
+ * two independent sets of risk limits. The claim is taken here, atomically,
+ * before any token exists.
+ */
+router.post("/pair", async (req, res) => {
   prunePairings();
   const code = String(req.body?.pairingCode ?? "").trim().toUpperCase();
   const terminal = req.body?.terminal ?? {};
   const pairing = pendingPairings.get(code);
   if (!pairing) return res.status(401).json({ error: "Unknown or expired pairing code." });
-  pendingPairings.delete(code); // pairing codes are single use
 
   const login = Number(terminal.login ?? 0);
   const server = String(terminal.server ?? "unknown");
   if (!Number.isFinite(login) || login <= 0) {
+    pendingPairings.delete(code);
     return res.status(400).json({ error: "terminal.login is required." });
   }
 
   const desk = getDesk(pairing.sessionId);
+
+  // ── Global uniqueness check ──────────────────────────────────────────────
+  const claim = await tryClaimAccount({
+    login,
+    server,
+    company: String(terminal.company ?? ""),
+    sessionId: pairing.sessionId,
+  });
+  if (!claim.ok) {
+    // The code deliberately survives a refusal. The EA retries every few
+    // seconds with the same value, so keeping it alive means the user sees one
+    // clear explanation instead of "unknown or expired code", and the terminal
+    // connects by itself the moment the other Desk lets go.
+    const message = describeConflict(claim.holder.login || login, claim.holder.server || server);
+    desk.lastPairingError = { message, login, server, at: Date.now() };
+    journal(desk, "bridge", null, `Pairing refused — ${message}`);
+    logger.warn({ login, server, heldBySession: claim.holder.sessionId }, "MT5 pairing refused: account already claimed");
+    return res.status(409).json({ error: message, code: "account_already_connected" });
+  }
+
+  // Redeemed: this code can never be used again.
+  pendingPairings.delete(code);
+
   if (desk.terminal) revokeBridgeToken(desk.terminal.bridgeToken);
   clearTerminalData(desk);
+  desk.lastPairingError = null;
 
   const bridgeToken = issueBridgeToken(pairing.sessionId);
   desk.terminal = {
@@ -143,7 +182,7 @@ router.post("/pair", (req, res) => {
     desk,
     "bridge",
     null,
-    `MetaTrader 5 terminal paired: ${login}@${server}. ${catalogCount} broker markets discovered.`,
+    `MetaTrader 5 terminal paired: ${login}@${server}. ${catalogCount} broker markets discovered. This account is now reserved for this Desk.`,
   );
   logger.info({ login, server, catalogCount }, "MT5 bridge paired");
 
@@ -155,15 +194,25 @@ router.post("/pair", (req, res) => {
   });
 });
 
-/** Revoke the bearer token and remove every terminal-derived value. */
-router.post("/unpair", (_req, res) => {
+/**
+ * Revoke the bearer token, release the global account claim and remove every
+ * terminal-derived value.
+ *
+ * Releasing the claim is what lets the same account be connected somewhere
+ * else afterwards; without it the account would stay reserved for a Desk that
+ * is no longer using it.
+ */
+router.post("/unpair", async (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
   if (!desk.terminal) return res.status(404).json({ error: "No terminal is linked." });
 
   revokeBridgeToken(desk.terminal.bridgeToken);
+  await releaseClaimsForSession(desk.sessionId);
+  const { login, server } = desk.terminal;
   desk.terminal = null;
+  desk.lastPairingError = null;
   clearTerminalData(desk);
-  journal(desk, "bridge", null, "MetaTrader 5 terminal unlinked; live terminal data was cleared.");
+  journal(desk, "bridge", null, `MetaTrader 5 terminal unlinked: ${login}@${server} released and live terminal data was cleared.`);
   return res.json({ ok: true });
 });
 
@@ -383,6 +432,28 @@ router.post("/sync", (req, res) => {
   const desk = deskForRequest(req);
   if (!desk || !desk.terminal) return res.status(401).json({ error: "Invalid or revoked bridge token." });
 
+  // ── Has this account been claimed by another Desk since the last beat? ───
+  // The token is still cryptographically valid, so this is the only place the
+  // superseded terminal can be stopped. Letting it continue would mean two
+  // Desks streaming one account and each arming plans against it.
+  const accountKey = accountKeyFor(desk.terminal.login, desk.terminal.server);
+  if (!touchClaim(desk.sessionId, accountKey)) {
+    const { login, server } = desk.terminal;
+    revokeBridgeToken(desk.terminal.bridgeToken);
+    desk.terminal = null;
+    clearTerminalData(desk);
+    journal(
+      desk,
+      "bridge",
+      null,
+      `MetaTrader 5 account ${login}@${server} was connected in another browser. This Desk has been unlinked so two desks never trade one balance.`,
+    );
+    logger.warn({ login, server }, "MT5 heartbeat rejected: account claimed by another session");
+    return res
+      .status(409)
+      .json({ error: "This MT5 account is now connected in another browser.", code: "account_claimed_elsewhere" });
+  }
+
   const body = req.body ?? {};
   const seq = Math.round(num(body.seq));
   const now = Date.now();
@@ -563,7 +634,13 @@ router.post("/sync", (req, res) => {
 /** Browser-facing liveness / diagnostic view. */
 router.get("/status", (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
-  if (!desk.terminal) return res.json({ linked: false, catalogCount: 0, selectedCount: 0 });
+  // Surfaced even while unlinked: the EA performs the pairing, so without this
+  // the dialog would sit on "waiting for the terminal" forever while the MT5
+  // log quietly explains that the account is already connected elsewhere.
+  const lastPairingError = desk.lastPairingError?.message ?? null;
+  if (!desk.terminal) {
+    return res.json({ linked: false, catalogCount: 0, selectedCount: 0, lastPairingError });
+  }
 
   const age = Date.now() - desk.terminal.lastSyncAt;
   return res.json({
@@ -584,6 +661,7 @@ router.get("/status", (_req, res) => {
     calendarAgeMs: desk.news.checkedAt ? Date.now() - desk.news.checkedAt : null,
     clockSkewMs: desk.clockSkewMs,
     lastQuoteAgeMs: desk.lastQuoteAgeMs,
+    lastPairingError,
   });
 });
 

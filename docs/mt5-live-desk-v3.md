@@ -247,8 +247,9 @@ Every plan carries `management` — break-even with a structure buffer, two part
 
 ## Upgrading the EA
 
-`artifacts/mt5-ea/NeurotradeBridge.mq5` is now **v3.00**. Re-download and re-attach it; v2 will
-still pair but will send server-relative timestamps and rotate symbol coverage.
+The EA in this branch is **v3.01** (v3.00 above plus the one-account rule in §7). Re-download and
+re-attach it; v2 will still pair but will send server-relative timestamps and rotate symbol
+coverage.
 
 New and changed inputs:
 
@@ -282,3 +283,75 @@ statistics, the evidence ensemble and feed integrity. Run with:
 ```
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx --test src/lib/multiasset/*.test.ts
 ```
+
+---
+
+## 7. One MT5 account, one Desk
+
+An MT5 account can be connected to exactly one Desk at a time. Opening a second browser (or a
+second device, or an incognito window) and pairing the same login is **refused**.
+
+### Why it has to be refused
+
+Desk state is held per browser session, so nothing previously stopped the same broker account
+being paired twice. Both sessions would then stream the same account, both would arm plans
+against it, and either could flatten positions the other believed it owned — one balance counted
+against two independent sets of risk limits, and each Desk blind to what the other had open.
+
+### How it is enforced
+
+`lib/multiasset/claims.ts` keeps a global registry of `login@SERVER → session`, in two layers:
+
+- **Postgres `mt5_account_claims`** is the real guarantee. The unique index on `account_key`
+  makes concurrent pairings race on a single `INSERT … ON CONFLICT`, so exactly one wins — across
+  processes, and across a redeploy. The conflict clause only overwrites an existing row when it
+  belongs to the same session or has gone idle.
+- **An in-process map** mirrors it so `/sync`, which runs twice a second per terminal, never
+  touches the database.
+
+The identity is normalised (`login@SERVER`, server trimmed and upper-cased) so one broker server
+spelled two ways is never mistaken for two accounts.
+
+| Event | Effect |
+|---|---|
+| Second browser pairs a held account | **409** `account_already_connected` — refused |
+| Same browser re-pairs (EA restart, redeploy) | allowed |
+| Same browser pairs a *different* account | previous claim released — a Desk holds one terminal |
+| Unlink | claim released; the account is immediately available elsewhere |
+| Terminal stops heartbeating for 10 min | claim goes idle and can be taken over |
+| Heartbeat after another Desk took the account | **409** `account_claimed_elsewhere`; the superseded terminal is unlinked and stops trading |
+
+The last row matters: the old bearer token is still cryptographically valid, so `/sync` is the
+only place a handover can be enforced. Without it the superseded terminal would keep streaming
+and trading an account the Desk no longer owns.
+
+### What the user sees
+
+- **In the browser:** the setup dialog shows the refusal instead of sitting on "waiting for the
+  terminal". The EA performs the pairing, so the refusal is recorded on the desk and returned by
+  `GET /api/bridge/status` as `lastPairingError`.
+- **In MT5:** the Experts log prints `PAIRING REFUSED — …` (or `DISCONNECTED — …` on a
+  superseded heartbeat) with the server's own wording.
+
+A refused pairing deliberately does **not** burn the pairing code. The EA retries every few
+seconds, so keeping the code alive means one clear repeated explanation instead of "unknown or
+expired code" — and the terminal connects by itself, with no user action, the moment the other
+Desk lets go. The EA backs off to 60 s on a 409 so it does not hammer the endpoint.
+
+### Caveat
+
+When the database is unreachable the guarantee degrades to the in-process registry: this process
+still refuses a duplicate pairing, but a second application instance would not be blocked. That
+is deliberate — refusing to pair at all would be worse than a narrower check — and it is logged
+once as a warning.
+
+### Files
+
+| Area | Path |
+|---|---|
+| Registry | `artifacts/api-server/src/lib/multiasset/claims.ts` (new) |
+| Routes | `artifacts/api-server/src/routes/bridge.ts` (`/pair`, `/unpair`, `/sync`, `/status`) |
+| Schema | `lib/db/src/schema/mt5_account_claims.ts` (new), `lib/db/src/index.ts` (INIT_DDL) |
+| Frontend | `src/components/terminal/bridge-dialog.tsx`, `src/lib/desk.ts` |
+| EA | `artifacts/mt5-ea/NeurotradeBridge.mq5` (v3.01) |
+| Tests | `src/lib/multiasset/claims.test.ts`, `src/routes/mt5-account-claims.test.ts` (26 cases) |

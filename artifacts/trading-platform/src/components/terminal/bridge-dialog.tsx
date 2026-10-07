@@ -8,7 +8,7 @@
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Check, Copy, Download, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, Download, ShieldCheck, X } from "lucide-react";
 import { deskApi } from "@/lib/desk";
 
 interface BridgeDialogProps {
@@ -75,6 +75,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <dt>Economic calendar</dt><dd className={status.data.calendarAvailable ? "text-emerald-300" : "text-amber-300"}>{status.data.calendarAvailable ? "Available" : "Unavailable — entries paused"}</dd>
                 </dl>
               </div>
+              {status.data.lastPairingError && <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">{status.data.lastPairingError}</p>}
               {status.data.stale && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-300">The EA is no longer syncing. It manages existing positions locally but the server will not analyse or open a new trade until the live heartbeat resumes. Check the MT5 Journal, WebRequest allowlist and AutoTrading settings.</p>}
               <button type="button" onClick={() => unpair.mutate()} disabled={unpair.isPending} className="w-full rounded-lg border border-red-500/40 bg-red-500/10 py-2 text-[12px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50">{unpair.isPending ? "Unlinking…" : "Unlink terminal and clear live Desk data"}</button>
             </>
@@ -99,8 +100,18 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p className="mt-2 text-[10px] text-zinc-500">The code is valid for 10 minutes and can only be redeemed once. If it expires, leave the EA attached and reopen this dialog for a fresh code.</p>
                 </Step>
               </ol>
-              <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>
-              <p className="flex items-center gap-2 text-[11px] text-zinc-500"><span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />Waiting for the terminal to pair…</p>
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">One account, one Desk.</span> An MT5 account can only be linked to a single Desk at a time. If it is already connected in another browser or device, pairing here is refused until that Desk unlinks it — two Desks on one account would trade the same balance against separate risk limits.</p><p className="mt-2"><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>
+              {status.data?.lastPairingError ? (
+                <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">
+                  <p className="flex items-center gap-1.5 font-medium text-red-300"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />Pairing refused</p>
+                  <p className="mt-1.5">{status.data.lastPairingError}</p>
+                  <p className="mt-2 text-[10px] text-red-300/70">
+                    The terminal will keep retrying with the code above, so it connects by itself as soon as the account is free — or generate a new code after unlinking it elsewhere.
+                  </p>
+                </div>
+              ) : (
+                <p className="flex items-center gap-2 text-[11px] text-zinc-500"><span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />Waiting for the terminal to pair…</p>
+              )}
             </>
           )}
         </div>

@@ -284,6 +284,28 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS deriv_contract_id TEXT;
 CREATE INDEX IF NOT EXISTS trades_session_created_idx ON trades (session_id, created_at);
 CREATE INDEX IF NOT EXISTS trades_unsettled_idx ON trades (status, created_at)
   WHERE status IN ('open', 'error');
+
+-- ── Global MT5 account claims ─────────────────────────────────────────────────
+-- One row per connected MetaTrader account. Desk state is per browser session,
+-- so without a global registry the SAME broker account could be paired from two
+-- browsers at once: both would stream it, both would arm plans against it, and
+-- each could flatten positions the other thought it owned — counting one
+-- balance against two sets of risk limits.
+-- The unique index is the guarantee: concurrent pairings race on INSERT and
+-- exactly one wins. A claim is released on unpair, or goes idle once the
+-- terminal stops heartbeating, so a connection can never be locked out forever.
+CREATE TABLE IF NOT EXISTS mt5_account_claims (
+  id SERIAL PRIMARY KEY,
+  account_key TEXT NOT NULL,          -- normalised 'login@SERVER'
+  login BIGINT NOT NULL,
+  server TEXT NOT NULL,
+  company TEXT,
+  session_id TEXT NOT NULL,           -- owning browser session
+  paired_at_ms BIGINT NOT NULL,       -- epoch ms, comparable across processes
+  last_seen_at_ms BIGINT NOT NULL     -- refreshed on every EA heartbeat
+);
+CREATE UNIQUE INDEX IF NOT EXISTS mt5_account_claims_key ON mt5_account_claims (account_key);
+CREATE INDEX IF NOT EXISTS mt5_account_claims_session_idx ON mt5_account_claims (session_id);
 `;
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

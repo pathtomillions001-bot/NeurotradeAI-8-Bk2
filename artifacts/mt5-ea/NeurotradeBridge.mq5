@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.00                                                     |
+//| Version 3.01                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -29,6 +29,18 @@
 //|     swing trades from H1 to W1. The old fixed 7-timeframe set     |
 //|     could not express either.                                      |
 //|                                                                    |
+//| WHAT CHANGED IN v3.01                                             |
+//|  5. ONE ACCOUNT, ONE DESK.                                        |
+//|     The platform now refuses to pair an account that is already    |
+//|     connected in another browser: two Desks on one account would   |
+//|     stream the same balance, arm plans against it independently    |
+//|     and each could flatten positions the other believed it owned.  |
+//|     A refused pairing no longer burns the pairing code — the       |
+//|     reason is printed once and retried slowly, so the terminal     |
+//|     connects by itself as soon as the other Desk lets go. A        |
+//|     terminal whose account has since been taken over is told to    |
+//|     stop on its next heartbeat instead of sharing the balance.     |
+//|                                                                    |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -45,7 +57,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "2.00"
+#property version   "3.01"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -118,6 +130,11 @@ bool      g_liveTradingEnabled = false;
 double    g_dayStartEquity = 0;
 int       g_dayStamp = -1;
 string    g_results = "";
+// Status and server-supplied `error` of the most recent HTTP call. Pairing
+// needs them to tell "this account is already connected elsewhere" (409) apart
+// from an ordinary network failure, which must keep retrying quickly.
+int       g_lastHttpStatus = 0;
+string    g_lastHttpError = "";
 
 // Dynamically sized: users may select any number of instruments. Data is sent
 // in rotating batches so an enormous selection does not create a giant request
@@ -223,7 +240,21 @@ void TryPair()
    body += "\"catalog\":" + CatalogJson() + "}";
 
    string response = "";
-   if(!HttpPost("/api/bridge/pair", body, response, false)) return;
+   if(!HttpPost("/api/bridge/pair", body, response, false))
+   {
+      // HTTP 409: this MT5 account is already connected to another Desk. The
+      // server keeps the pairing code alive precisely so we can keep retrying
+      // with the same value, so back off instead of hammering it every 5s and
+      // print the server's own explanation once, where the user will see it.
+      if(g_lastHttpStatus == 409)
+      {
+         g_nextPairAttempt = now + 60;
+         Print("NeurotradeBridge: PAIRING REFUSED — ", (g_lastHttpError == "" ? "this MT5 account is already connected in another browser." : g_lastHttpError));
+         Print("NeurotradeBridge: open the Desk that holds account ", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
+               "@", AccountInfoString(ACCOUNT_SERVER), " and unlink it, or wait a few minutes. Retrying in 60s with the same code.");
+      }
+      return;
+   }
 
    string token = JsonString(response, "bridgeToken");
    if(token == "")
@@ -243,6 +274,11 @@ bool HttpPost(const string path, const string body, string &response, const bool
 {
    string base = NormalisedServerUrl();
    if(base == "") return false;
+
+   // Clear before every attempt: a transport failure must never leave the
+   // previous call's status behind and be mistaken for a fresh refusal.
+   g_lastHttpStatus = 0;
+   g_lastHttpError = "";
 
    string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
    if(authenticated && g_token != "") headers += "Authorization: Bearer " + g_token + "\r\n";
@@ -267,6 +303,11 @@ bool HttpPost(const string path, const string body, string &response, const bool
    }
 
    response = CharArrayToString(result, 0, WHOLE_ARRAY, CP_UTF8);
+   // Published for callers that need to distinguish a refusal (409) from a
+   // transport failure. MQL5 forbids default values on reference parameters,
+   // so this is the clean way to hand the status back to TryPair().
+   g_lastHttpStatus = status;
+   g_lastHttpError = JsonString(response, "error");
    if(status < 200 || status >= 300)
    {
       Print("NeurotradeBridge: HTTP ", status, " from ", path, " — ", response);
@@ -360,7 +401,20 @@ void Sync()
    string response = "";
    if(!HttpPost("/api/bridge/sync", body, response, true))
    {
-      if(NowServer() - g_lastOk > StaleAfterSec) g_tradingEnabled = false;
+      // HTTP 409: this account has been connected to another Desk. The token is
+      // still valid, so this is the only place the handover can be enforced —
+      // continuing would mean two Desks streaming, arming and flattening one
+      // balance. Drop the token and stop trading; the user must re-pair here.
+      if(g_lastHttpStatus == 409)
+      {
+         Print("NeurotradeBridge: DISCONNECTED — ", (g_lastHttpError == "" ? "this MT5 account is now connected in another browser." : g_lastHttpError));
+         Print("NeurotradeBridge: this terminal has stopped trading to avoid two desks managing one balance. ",
+               "Unlink it there, then enter a fresh pairing code here.");
+         g_token = "";
+         g_tradingEnabled = false;
+         g_nextPairAttempt = 0;
+      }
+      else if(NowServer() - g_lastOk > StaleAfterSec) g_tradingEnabled = false;
       return;
    }
 

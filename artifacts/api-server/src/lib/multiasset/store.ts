@@ -138,6 +138,14 @@ export interface DeskState {
   /** IANA timezone for every timestamp the Desk renders. */
   timezone: string;
   /**
+   * Why the EA's last pairing attempt was refused, or null.
+   *
+   * The EA — not the browser — calls /api/bridge/pair, so without recording
+   * the refusal here the setup dialog would sit on "waiting for the terminal"
+   * while the reason was only ever printed in the MT5 Experts log.
+   */
+  lastPairingError: { message: string; login: number; server: string; at: number } | null;
+  /**
    * Measured offset between the terminal's clock and the server's, in ms.
    *
    * A broker server running a few seconds fast or slow is normal; a terminal
@@ -198,6 +206,7 @@ export function getDesk(sessionId: string): DeskState {
       closedTrades: [],
       equityHistory: [],
       timezone: DEFAULT_DESK_TIMEZONE,
+      lastPairingError: null,
       clockSkewMs: null,
       lastQuoteAgeMs: null,
       planModes: new Map(),

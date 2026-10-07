@@ -99,11 +99,16 @@ export function Layout({ children }: { children: ReactNode }) {
   const [location] = useLocation();
   // The builder draws its own Run/Stop cluster in the same top-right corner,
   // so the floating NeuroAI button would sit on top of it on that page.
-  const showSpeedAiFab = location !== "/bot-builder";
-  // Same collision: the always-on "Active Engine / No bot running" chip is
-  // pinned top-right on desktop — exactly where the embedded Deriv builder
-  // puts its Run/Stop button — so it is hidden on the Bot Builder page.
-  const showLiveBotIndicatorDesktop = location !== "/bot-builder";
+  // The Desk has its own execution/agent controls; do not float another engine
+  // launcher over its responsive panels.
+  const showSpeedAiFab = location !== "/bot-builder" && location !== "/terminal";
+  // The Desk owns its full information hierarchy (connection, risk, news and
+  // execution controls). The global "Active Engine / No bot running" chip
+  // obscures it, so never render that unrelated bot indicator on the Desk.
+  // It also remains hidden on the embedded Bot Builder where it collides with
+  // the builder's own controls.
+  const showLiveBotIndicatorDesktop = location !== "/bot-builder" && location !== "/terminal";
+  const showLiveBotIndicatorMobile = location !== "/terminal";
   const [mobileOpen, setMobileOpen] = useState(false);
   // The single source of truth for "which bot is live right now" — polled
   // every 5s + SSE, so a bot that starts in the background appears within
@@ -205,7 +210,7 @@ export function Layout({ children }: { children: ReactNode }) {
           <span className="font-bold text-base tracking-tight">NeuroTrade</span>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <LiveBotIndicator compact live={liveBots} />
+          {showLiveBotIndicatorMobile && <LiveBotIndicator compact live={liveBots} />}
         </div>
       </header>
 

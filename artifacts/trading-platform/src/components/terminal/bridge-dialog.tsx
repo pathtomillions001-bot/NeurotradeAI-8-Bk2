@@ -1,19 +1,14 @@
 /**
  * MetaTrader 5 bridge setup.
  *
- * The pairing flow is deliberately credential-free: the user installs the
- * Expert Advisor, types a short-lived code into its inputs, and the terminal
- * proves possession by redeeming it. No MT5 password is ever entered here,
- * transmitted, or stored — the server only ever learns an account number.
- *
- * That property is worth more than the convenience of "just type your login
- * and password and we'll handle it": a database leak then exposes an
- * identifier, not the ability to trade someone else's money.
+ * The EA pairs with a short-lived code and then supplies the broker catalogue,
+ * account snapshot, quotes, bars and high-impact calendar from inside the
+ * user's own terminal. No login or password is collected by the platform.
  */
 
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Check, Copy, ShieldCheck, X } from "lucide-react";
+import { Check, Copy, Download, ShieldCheck, X } from "lucide-react";
 import { deskApi } from "@/lib/desk";
 
 interface BridgeDialogProps {
@@ -24,158 +19,88 @@ interface BridgeDialogProps {
 }
 
 export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogProps) {
-  const [copied, setCopied] = useState(false);
-
+  const [copied, setCopied] = useState<"code" | "origin" | null>(null);
+  const origin = window.location.origin;
+  const downloadUrl = `${import.meta.env.BASE_URL}downloads/NeurotradeBridge.mq5`;
   const status = useQuery({
     queryKey: ["bridge-status"],
     queryFn: deskApi.bridgeStatus,
     refetchInterval: open ? 2000 : false,
     enabled: open,
   });
+  const pairing = useMutation({ mutationFn: deskApi.pairingCode });
+  const unpair = useMutation({ mutationFn: deskApi.unpair, onSuccess: onChanged });
 
-  const pairing = useMutation({
-    mutationFn: deskApi.pairingCode,
-  });
-
-  const unpair = useMutation({
-    mutationFn: deskApi.unpair,
-    onSuccess: onChanged,
-  });
-
-  // Issue a code as soon as the dialog opens for an unlinked desk — one less
-  // click between the user and a working terminal.
   useEffect(() => {
     if (open && !linked && !pairing.data && !pairing.isPending) pairing.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, linked]);
-
-  // The moment the EA redeems the code, refresh the desk so the UI flips to
-  // live data without the user having to do anything.
   useEffect(() => {
     if (status.data?.linked && !linked) onChanged();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status.data?.linked]);
 
-  if (!open) return null;
+  const copy = (value: string, target: "code" | "origin") => {
+    navigator.clipboard?.writeText(value).then(
+      () => {
+        setCopied(target);
+        window.setTimeout(() => setCopied(null), 1500);
+      },
+      () => setCopied(null),
+    );
+  };
 
+  if (!open) return null;
   const code = pairing.data?.pairingCode;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="w-full max-w-lg rounded-lg border border-zinc-800 bg-zinc-950 shadow-2xl">
-        <header className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
-          <div className="flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-emerald-400" />
-            <h2 className="text-sm font-semibold text-zinc-100">MetaTrader 5 bridge</h2>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-zinc-500 hover:text-zinc-200 transition-colors"
-            aria-label="Close"
-          >
-            <X className="w-4 h-4" />
-          </button>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 p-0 sm:items-center sm:p-4">
+      <div className="max-h-[92dvh] w-full max-w-xl overflow-y-auto rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl sm:rounded-2xl">
+        <header className="sticky top-0 z-10 flex items-center justify-between border-b border-zinc-800 bg-zinc-950 px-4 py-3">
+          <div className="flex items-center gap-2"><ShieldCheck className="h-4 w-4 text-emerald-400" /><h2 className="text-sm font-semibold text-zinc-100">MetaTrader 5 bridge</h2></div>
+          <button type="button" onClick={onClose} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-900 hover:text-zinc-200" aria-label="Close"><X className="h-4 w-4" /></button>
         </header>
 
-        <div className="p-4 space-y-4 text-[12px] text-zinc-300">
+        <div className="space-y-4 p-4 text-[12px] text-zinc-300 sm:p-5">
           {linked && status.data?.linked ? (
             <>
-              <div className="rounded border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-1">
-                <p className="text-emerald-300 font-medium">Terminal linked</p>
-                <dl className="grid grid-cols-2 gap-1 font-mono text-[11px] text-zinc-400">
-                  <span>Login</span>
-                  <span className="text-zinc-200">{status.data.login}</span>
-                  <span>Server</span>
-                  <span className="text-zinc-200">{status.data.server}</span>
-                  <span>Last sync</span>
-                  <span className={status.data.stale ? "text-red-400" : "text-zinc-200"}>
-                    {Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s ago
-                    {status.data.stale && " · STALE"}
-                  </span>
-                  <span>Queued commands</span>
-                  <span className="text-zinc-200">{status.data.queuedCommands ?? 0}</span>
+              <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
+                <p className="font-medium text-emerald-300">Terminal linked</p>
+                <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-[11px] text-zinc-400">
+                  <dt>Login</dt><dd className="text-zinc-200">{status.data.login}</dd>
+                  <dt>Server</dt><dd className="break-all text-zinc-200">{status.data.server}</dd>
+                  <dt>Last sync</dt><dd className={status.data.stale ? "text-red-400" : "text-zinc-200"}>{Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s ago{status.data.stale && " · STALE"}</dd>
+                  <dt>Broker markets</dt><dd className="text-zinc-200">{status.data.catalogCount}</dd>
+                  <dt>Selected markets</dt><dd className="text-zinc-200">{status.data.selectedCount}</dd>
+                  <dt>Economic calendar</dt><dd className={status.data.calendarAvailable ? "text-emerald-300" : "text-amber-300"}>{status.data.calendarAvailable ? "Available" : "Unavailable — entries paused"}</dd>
                 </dl>
               </div>
-
-              {status.data.stale && (
-                <p className="text-[11px] text-amber-400 leading-relaxed">
-                  The terminal has stopped syncing. The EA keeps managing open positions but will
-                  not open anything new — that is the fail-safe direction. Check that MetaTrader is
-                  running and that AutoTrading is enabled.
-                </p>
-              )}
-
-              <button
-                type="button"
-                onClick={() => unpair.mutate()}
-                className="w-full py-2 rounded border border-red-500/40 bg-red-500/10 text-[12px] font-medium text-red-300 hover:bg-red-500/20 transition-colors"
-              >
-                Unlink terminal
-              </button>
+              {status.data.stale && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-300">The EA is no longer syncing. It manages existing positions locally but the server will not analyse or open a new trade until the live heartbeat resumes. Check the MT5 Journal, WebRequest allowlist and AutoTrading settings.</p>}
+              <button type="button" onClick={() => unpair.mutate()} disabled={unpair.isPending} className="w-full rounded-lg border border-red-500/40 bg-red-500/10 py-2 text-[12px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50">{unpair.isPending ? "Unlinking…" : "Unlink terminal and clear live Desk data"}</button>
             </>
           ) : (
             <>
-              <ol className="space-y-3">
-                <Step n={1}>
-                  Copy <code className="text-zinc-200">artifacts/mt5-ea/NeurotradeBridge.mq5</code>{" "}
-                  into your terminal&apos;s <code className="text-zinc-200">MQL5/Experts</code>{" "}
-                  folder and compile it in MetaEditor.
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400">
+                <strong className="font-semibold text-zinc-200">The EA always attaches first.</strong> The new connector does not fail initialization when a code, URL or network is missing. It stays on the chart, prints its connection status in the MT5 Journal and retries pairing safely.
+              </div>
+              <ol className="space-y-4">
+                <Step n={1} title="Download, copy and compile the EA">
+                  <a href={downloadUrl} download className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] font-medium text-emerald-300 transition-colors hover:bg-emerald-500/20"><Download className="h-3.5 w-3.5" />Download NeurotradeBridge.mq5</a>
+                  <p className="mt-2">Copy it into <code className="text-zinc-200">MQL5/Experts</code>, open it in MetaEditor and compile. Attach it to <strong className="text-zinc-200">any chart</strong>; it can monitor and execute selected symbols beyond that chart.</p>
                 </Step>
-                <Step n={2}>
-                  In MetaTrader 5, open{" "}
-                  <span className="text-zinc-200">Tools → Options → Expert Advisors</span>, tick{" "}
-                  <span className="text-zinc-200">Allow WebRequest for listed URL</span> and add
-                  this origin:
-                  <code className="block mt-1 px-2 py-1 rounded bg-zinc-900 text-[11px] text-emerald-300 break-all">
-                    {window.location.origin}
-                  </code>
+                <Step n={2} title="Allow the exact platform origin in MT5">
+                  <p>In <span className="text-zinc-200">Tools → Options → Expert Advisors</span>, tick <span className="text-zinc-200">Allow WebRequest for listed URL</span>, then add this origin exactly (no <code>/api</code> suffix):</p>
+                  <CopyValue value={origin} copied={copied === "origin"} onCopy={() => copy(origin, "origin")} />
+                  <p className="mt-2 text-[10px] text-zinc-500">For a deployed application use its public HTTPS origin. Do not use localhost from a remote/VPS terminal.</p>
                 </Step>
-                <Step n={3}>
-                  Attach the EA to any chart and paste this pairing code into its{" "}
-                  <span className="text-zinc-200">PairingCode</span> input:
-                  <div className="mt-2 flex items-center gap-2">
-                    <code className="flex-1 px-3 py-2 rounded bg-zinc-900 border border-zinc-800 font-mono text-base tracking-[0.3em] text-emerald-300 text-center">
-                      {pairing.isPending ? "………" : (code ?? "— — — —")}
-                    </code>
-                    <button
-                      type="button"
-                      disabled={!code}
-                      onClick={() => {
-                        if (!code) return;
-                        navigator.clipboard?.writeText(code).then(
-                          () => {
-                            setCopied(true);
-                            window.setTimeout(() => setCopied(false), 1500);
-                          },
-                          () => setCopied(false),
-                        );
-                      }}
-                      className="p-2 rounded border border-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors disabled:opacity-40"
-                      aria-label="Copy pairing code"
-                    >
-                      {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                    </button>
-                  </div>
-                  <p className="mt-1 text-[10px] text-zinc-500">
-                    Valid for 10 minutes, single use.
-                  </p>
+                <Step n={3} title="Set EA inputs and pair">
+                  <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this one-time value into <code className="text-zinc-200">PairingCode</code>:</p>
+                  <CopyValue value={pairing.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
+                  <p className="mt-2 text-[10px] text-zinc-500">The code is valid for 10 minutes and can only be redeemed once. If it expires, leave the EA attached and reopen this dialog for a fresh code.</p>
                 </Step>
               </ol>
-
-              <div className="rounded border border-zinc-800 bg-zinc-900/50 p-3">
-                <p className="text-[11px] text-zinc-400 leading-relaxed">
-                  <span className="text-zinc-200 font-medium">No password required.</span> The EA
-                  runs inside your terminal and places the orders itself; this platform never sees
-                  your MT5 credentials. Start on a <span className="text-zinc-200">demo account</span>{" "}
-                  — live trading stays disabled until you enable it explicitly.
-                </p>
-              </div>
-
-              <p className="text-[11px] text-zinc-500 flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
-                Waiting for the terminal to pair…
-              </p>
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>
+              <p className="flex items-center gap-2 text-[11px] text-zinc-500"><span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />Waiting for the terminal to pair…</p>
             </>
           )}
         </div>
@@ -184,13 +109,10 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
   );
 }
 
-function Step({ n, children }: { n: number; children: React.ReactNode }) {
-  return (
-    <li className="flex gap-3">
-      <span className="shrink-0 w-5 h-5 rounded-full bg-zinc-800 text-zinc-300 text-[11px] font-semibold flex items-center justify-center">
-        {n}
-      </span>
-      <div className="flex-1 text-[11px] leading-relaxed text-zinc-400">{children}</div>
-    </li>
-  );
+function CopyValue({ value, copied, onCopy, disabled, large = false }: { value: string; copied: boolean; onCopy: () => void; disabled?: boolean; large?: boolean }) {
+  return <div className="mt-2 flex items-stretch gap-2"><code className={`min-w-0 flex-1 break-all rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-emerald-300 ${large ? "text-center text-sm tracking-[0.18em]" : "text-[11px]"}`}>{value}</code><button type="button" disabled={disabled} onClick={onCopy} className="shrink-0 rounded-md border border-zinc-700 px-2 text-zinc-400 transition-colors hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Copy value">{copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}</button></div>;
+}
+
+function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {
+  return <li className="flex gap-3"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-zinc-800 text-[11px] font-semibold text-zinc-300">{n}</span><div className="min-w-0 flex-1 text-[11px] leading-relaxed text-zinc-400"><h3 className="font-medium text-zinc-200">{title}</h3>{children}</div></li>;
 }

@@ -1,9 +1,9 @@
 /**
- * Multi-Asset Desk — shared types.
+ * Multi-Asset Desk — shared transport types.
  *
- * See docs/multi-asset-architecture.md. Everything here is transport-shaped:
- * these are the exact objects exchanged with the MT5 Expert Advisor and with
- * the terminal UI, so changes are protocol changes.
+ * The MT5 terminal is the Desk's market-data authority. These shapes are used
+ * on both sides of the bridge so broker symbols, account figures, calendar
+ * events and execution commands all retain their provenance.
  */
 
 // ── Instruments ──────────────────────────────────────────────────────────────
@@ -17,6 +17,30 @@ export type AssetClass =
   | "futures"
   | "stocks"
   | "other";
+
+export const ASSET_CLASSES: readonly AssetClass[] = [
+  "forex",
+  "metals",
+  "indices",
+  "commodities",
+  "crypto",
+  "futures",
+  "stocks",
+  "other",
+] as const;
+
+/**
+ * A broker-market catalogue entry. It deliberately contains no quote: a
+ * catalogue tells the user what their broker offers, while quotes only arrive
+ * in a live MT5 heartbeat for symbols the user has selected.
+ */
+export interface MarketCatalogEntry {
+  symbol: string;
+  description: string;
+  path: string;
+  assetClass: AssetClass;
+  tradeable: boolean;
+}
 
 export type Timeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
 
@@ -42,12 +66,8 @@ export const TIMEFRAME_MINUTES: Record<Timeframe, number> = {
 };
 
 /**
- * The broker's own contract specification, reported by the EA.
- *
- * This is the single source of truth for position sizing. Nothing about an
- * instrument is inferred from its name — a symbol called "XAUUSD" can have a
- * contract size of 100 on one broker and 10 on another, and guessing is how
- * retail bots silently risk 10x what the user asked for.
+ * The broker's own contract specification, reported by the EA for actively
+ * monitored symbols. This is the single source of truth for position sizing.
  */
 export interface SymbolSpec {
   symbol: string;
@@ -57,10 +77,7 @@ export interface SymbolSpec {
   digits: number;
   /** SYMBOL_TRADE_TICK_SIZE — price granularity used for tick valuation. */
   tickSize: number;
-  /**
-   * SYMBOL_TRADE_TICK_VALUE_LOSS, already expressed in the ACCOUNT currency.
-   * The loss-side value is deliberate: size against the worse of the two.
-   */
+  /** SYMBOL_TRADE_TICK_VALUE_LOSS, already in the account currency. */
   tickValue: number;
   /** SYMBOL_TRADE_CONTRACT_SIZE (units per 1.00 lot). */
   contractSize: number;
@@ -79,7 +96,7 @@ export interface SymbolSpec {
   commissionPerLot: number;
   /** Current spread in points. Updated on every quote. */
   spreadPoints: number;
-  /** Base/quote currency, used for correlation and exposure grouping. */
+  /** Base/quote currency, used for exposure and red-folder news gates. */
   baseCurrency?: string;
   quoteCurrency?: string;
 }
@@ -89,6 +106,7 @@ export interface Quote {
   bid: number;
   ask: number;
   spreadPoints: number;
+  /** Broker-terminal timestamp, in epoch milliseconds. */
   ts: number;
 }
 
@@ -99,6 +117,33 @@ export interface CandleSeries {
   symbol: string;
   timeframe: Timeframe;
   bars: Bar[];
+}
+
+// ── Economic calendar / red-folder events ───────────────────────────────────
+
+/** A high-importance event read from MT5's economic calendar. */
+export interface HighImpactNewsEvent {
+  id: string;
+  time: number;
+  currency: string;
+  country: string;
+  name: string;
+  importance: "high";
+  actual?: number | null;
+  forecast?: number | null;
+  previous?: number | null;
+}
+
+/**
+ * The EA emits a fresh status even when there are no events. `available:false`
+ * is intentionally meaningful: the server fails closed for new entries rather
+ * than pretending a missing calendar means a clear calendar.
+ */
+export interface NewsFeed {
+  available: boolean;
+  checkedAt: number;
+  events: HighImpactNewsEvent[];
+  detail?: string;
 }
 
 // ── Account ──────────────────────────────────────────────────────────────────
@@ -157,43 +202,29 @@ export interface TradeIntent {
 }
 
 /**
- * A plan the EA holds in memory and triggers locally.
- *
- * The server does not send "buy now" — by the time a network message lands the
- * price has moved. It sends the conditions under which the EA should buy.
+ * A plan the EA holds in memory and triggers locally. The server sends the
+ * conditions under which the EA may buy or sell; it never sends a blind
+ * market-order instruction.
  */
 export interface ArmedPlan {
   id: string;
   symbol: string;
   side: Side;
   mode: TradeMode;
-  /** Price that activates the order. */
   trigger: number;
-  /**
-   * `break`  — fire when price trades through `trigger` in the trade direction.
-   * `retest` — fire when price returns to `trigger` from the trade direction.
-   * `market` — fire immediately on receipt (used for exits and manual orders).
-   */
   triggerType: "break" | "retest" | "market";
-  /** Consecutive ticks beyond the trigger required before firing. */
   confirmTicks: number;
-  /** Plan is dead if price reaches this level before triggering. */
   invalidate: number;
   sl: number;
-  /** One or more take-profit levels; the first is the primary. */
   tp: number[];
   lots: number;
-  /** Money at risk in account currency if the SL is hit. */
   riskMoney: number;
   riskPoints: number;
-  /** Execution gates evaluated locally by the EA at trigger time. */
   maxSpreadPoints: number;
   maxSlippagePoints: number;
-  /** Epoch ms after which the EA must discard the plan. */
   expiresAt: number;
   createdAt: number;
   management: ManagementPlan;
-  /** Human-readable rationale shown in the terminal and journaled. */
   rationale: PlanRationale;
 }
 
@@ -205,7 +236,6 @@ export interface PlanRationale {
   expectancyR: number;
   rewardRisk: number;
   markovPersistence: number;
-  /** One line per contributing factor, in display order. */
   factors: { label: string; detail: string; weight: number; aligned: boolean }[];
   warnings: string[];
 }
@@ -276,9 +306,12 @@ export interface CommandResult {
 export interface SyncRequest {
   seq: number;
   account: AccountSnapshot;
+  /** Full broker catalogue, normally supplied at pairing and optionally later. */
+  catalog?: MarketCatalogEntry[];
   specs?: SymbolSpec[];
   quotes?: Quote[];
   candles?: CandleSeries[];
+  news?: NewsFeed;
   positions?: Position[];
   results?: CommandResult[];
 }
@@ -286,14 +319,10 @@ export interface SyncRequest {
 export interface SyncResponse {
   serverTime: number;
   commands: BridgeCommand[];
-  /**
-   * True when the server lacks enough history to analyse the watchlist — after
-   * a restart, a re-pair, or a newly watched symbol. The EA seeds full history
-   * once and then sends only the newest bars, so without this flag a restarted
-   * server would be left analysing a four-bar window forever.
-   */
   needsHistory: boolean;
   subscriptions: { symbols: string[]; timeframes: Timeframe[] };
+  /** Calendar context lets the EA report and display the same safety posture. */
+  news: NewsFeed;
   limits: {
     maxDailyLossPct: number;
     maxOpenPositions: number;

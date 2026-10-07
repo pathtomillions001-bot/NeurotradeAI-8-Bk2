@@ -1,22 +1,11 @@
 /**
- * Multi-Asset Desk — MetaTrader 5 bridge API.
+ * MetaTrader 5 bridge API.
  *
- * This is the only endpoint the Expert Advisor talks to. Three properties
- * matter more than anything else here:
- *
- * 1. NO CREDENTIALS. The EA never sends an MT5 password, and the server never
- *    stores one. Pairing proves possession of a terminal by echoing a code the
- *    user read off the screen; the server returns a bearer token scoped to one
- *    browser session. The blast radius of a database leak is an account
- *    NUMBER, not the ability to trade someone's money.
- *
- * 2. IDEMPOTENCY. Every command carries a UUID. A sync that is retried after a
- *    timeout must never open a second position, so commands stay in flight
- *    until acknowledged and the EA keeps its own seen-set.
- *
- * 3. FAIL-SAFE DEFAULTS. The response always carries the risk limits, so an EA
- *    that loses contact with the server degrades to manage-only rather than
- *    trading blind.
+ * The EA is the only market-data and execution client for the multi-asset
+ * Desk. A pairing code creates a bearer token scoped to one browser session;
+ * MT5 passwords never traverse this service. The bridge accepts the broker's
+ * full catalogue at pairing, then only accepts real quotes/candles/account
+ * snapshots from the paired terminal — there is no replay fallback.
  */
 
 import { Router, type IRouter, type Request } from "express";
@@ -28,23 +17,29 @@ import {
   acknowledgeResult,
   applyAccount,
   candleKey,
+  clearTerminalData,
   drainOutbox,
   expirePlans,
   getDesk,
-  issueBridgeToken,
   journal,
   reconcilePositions,
   requeueStaleCommands,
   revokeBridgeToken,
   sessionForToken,
   upsertCandles,
+  issueBridgeToken,
   type DeskState,
 } from "../lib/multiasset/store";
 import {
+  ASSET_CLASSES,
   TIMEFRAMES,
   type AccountSnapshot,
+  type AssetClass,
   type Bar,
   type CommandResult,
+  type HighImpactNewsEvent,
+  type MarketCatalogEntry,
+  type NewsFeed,
   type Position,
   type Quote,
   type SymbolSpec,
@@ -53,8 +48,6 @@ import {
 } from "../lib/multiasset/types";
 
 const router: IRouter = Router();
-
-/** Pairing codes are short-lived: a code left on screen is a weak secret. */
 const PAIRING_TTL_MS = 10 * 60 * 1000;
 
 interface PendingPairing {
@@ -71,7 +64,7 @@ function prunePairings(now = Date.now()): void {
   }
 }
 
-/** Unambiguous alphabet: no O/0 or I/1, because the user retypes this by hand. */
+/** Unambiguous alphabet: no O/0 or I/1 when a user types the code by hand. */
 function makePairingCode(): string {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let out = "";
@@ -84,41 +77,26 @@ function makePairingCode(): string {
 
 // ── Pairing ──────────────────────────────────────────────────────────────────
 
-/**
- * POST /api/bridge/pairing-code  (browser)
- * Issues a code the user types into the EA's inputs.
- */
 router.post("/pairing-code", (_req, res) => {
   prunePairings();
   const sessionId = getBrowserSessionId();
-
-  // One live code per session: issuing a second would leave the first valid
-  // and pairable by someone else who saw it.
   for (const [code, pairing] of pendingPairings) {
     if (pairing.sessionId === sessionId) pendingPairings.delete(code);
   }
 
   const code = makePairingCode();
   pendingPairings.set(code, { code, sessionId, createdAt: Date.now() });
-
   res.json({ pairingCode: code, expiresInMs: PAIRING_TTL_MS });
 });
 
-/**
- * POST /api/bridge/pair  (Expert Advisor)
- * Exchanges a pairing code for a bearer token.
- */
+/** Exchange the one-time screen code for a terminal-scoped bearer token. */
 router.post("/pair", (req, res) => {
   prunePairings();
   const code = String(req.body?.pairingCode ?? "").trim().toUpperCase();
   const terminal = req.body?.terminal ?? {};
-
   const pairing = pendingPairings.get(code);
-  if (!pairing) {
-    return res.status(401).json({ error: "Unknown or expired pairing code." });
-  }
-  // Single use — a code that has been redeemed must not pair a second terminal.
-  pendingPairings.delete(code);
+  if (!pairing) return res.status(401).json({ error: "Unknown or expired pairing code." });
+  pendingPairings.delete(code); // pairing codes are single use
 
   const login = Number(terminal.login ?? 0);
   const server = String(terminal.server ?? "unknown");
@@ -128,6 +106,7 @@ router.post("/pair", (req, res) => {
 
   const desk = getDesk(pairing.sessionId);
   if (desk.terminal) revokeBridgeToken(desk.terminal.bridgeToken);
+  clearTerminalData(desk);
 
   const bridgeToken = issueBridgeToken(pairing.sessionId);
   desk.terminal = {
@@ -140,14 +119,23 @@ router.post("/pair", (req, res) => {
     lastSyncAt: Date.now(),
     lastSeq: 0,
   };
-  // Live data takes over from the replay feed the moment a terminal pairs.
-  desk.simulated = false;
-  desk.specs.clear();
-  desk.quotes.clear();
-  desk.candles.clear();
 
-  journal(desk, "bridge", null, `MetaTrader 5 terminal paired: ${login}@${server}.`);
-  logger.info({ login, server }, "MT5 bridge paired");
+  const catalog = Array.isArray(req.body?.catalog) ? req.body.catalog : [];
+  let catalogCount = 0;
+  for (const raw of catalog) {
+    const entry = parseCatalogEntry(raw);
+    if (!entry) continue;
+    desk.catalog.set(entry.symbol, entry);
+    catalogCount++;
+  }
+
+  journal(
+    desk,
+    "bridge",
+    null,
+    `MetaTrader 5 terminal paired: ${login}@${server}. ${catalogCount} broker markets discovered.`,
+  );
+  logger.info({ login, server, catalogCount }, "MT5 bridge paired");
 
   return res.status(201).json({
     bridgeToken,
@@ -157,20 +145,15 @@ router.post("/pair", (req, res) => {
   });
 });
 
-/** POST /api/bridge/unpair (browser) — revoke the token and drop live state. */
+/** Revoke the bearer token and remove every terminal-derived value. */
 router.post("/unpair", (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
   if (!desk.terminal) return res.status(404).json({ error: "No terminal is linked." });
 
   revokeBridgeToken(desk.terminal.bridgeToken);
   desk.terminal = null;
-  desk.simulated = true;
-  desk.positions = [];
-  desk.plans.clear();
-  desk.outbox = [];
-  desk.inflight.clear();
-  journal(desk, "bridge", null, "MetaTrader 5 terminal unlinked.");
-
+  clearTerminalData(desk);
+  journal(desk, "bridge", null, "MetaTrader 5 terminal unlinked; live terminal data was cleared.");
   return res.json({ ok: true });
 });
 
@@ -183,20 +166,34 @@ function deskForRequest(req: Request): DeskState | null {
   const sessionId = sessionForToken(token);
   if (!sessionId) return null;
   const desk = getDesk(sessionId);
-  // A token that is no longer the desk's current token has been superseded.
-  if (desk.terminal?.bridgeToken !== token) return null;
-  return desk;
+  return desk.terminal?.bridgeToken === token ? desk : null;
 }
 
-// ── Validation ───────────────────────────────────────────────────────────────
-//
-// The EA is a client like any other: everything it sends is validated before
-// it reaches the sizing engine. A malformed tickValue would silently produce
-// a position 100x the intended size.
+// ── Parse + validate terminal payloads ───────────────────────────────────────
 
 function num(value: unknown, fallback = 0): number {
   const parsed = typeof value === "number" ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function assetClass(value: unknown): AssetClass {
+  return typeof value === "string" && (ASSET_CLASSES as readonly string[]).includes(value)
+    ? value as AssetClass
+    : "other";
+}
+
+export function parseCatalogEntry(raw: unknown): MarketCatalogEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const symbol = String(r.symbol ?? "").trim();
+  if (!symbol || symbol.length > 128) return null;
+  return {
+    symbol,
+    description: String(r.description ?? symbol).slice(0, 512),
+    path: String(r.path ?? "").slice(0, 512),
+    assetClass: assetClass(r.assetClass),
+    tradeable: r.tradeable !== false,
+  };
 }
 
 export function parseSpec(raw: unknown): SymbolSpec | null {
@@ -209,7 +206,7 @@ export function parseSpec(raw: unknown): SymbolSpec | null {
   const tickSize = num(r.tickSize, point);
   return {
     symbol,
-    assetClass: (typeof r.assetClass === "string" ? r.assetClass : "other") as SymbolSpec["assetClass"],
+    assetClass: assetClass(r.assetClass),
     point,
     digits: Math.round(num(r.digits, 5)),
     tickSize: tickSize > 0 ? tickSize : point,
@@ -242,8 +239,6 @@ export function parseAccount(raw: unknown): AccountSnapshot | null {
     equity,
     margin,
     freeMargin: num(r.freeMargin, equity - margin),
-    // MT5 reports 0 when nothing is open; Infinity is the honest value and
-    // keeps the margin-level guard from firing on a flat account.
     marginLevel: margin > 0 ? num(r.marginLevel, (equity / margin) * 100) : Number.POSITIVE_INFINITY,
     currency: String(r.currency ?? "USD"),
     leverage: num(r.leverage, 100),
@@ -258,7 +253,6 @@ function parsePosition(raw: unknown): Position | null {
   const ticket = Math.round(num(r.ticket, NaN));
   const symbol = String(r.symbol ?? "");
   if (!Number.isFinite(ticket) || !symbol) return null;
-
   return {
     ticket,
     symbol,
@@ -319,26 +313,53 @@ function parseResult(raw: unknown): CommandResult | null {
   };
 }
 
-// ── Sync ─────────────────────────────────────────────────────────────────────
+function parseNewsEvent(raw: unknown): HighImpactNewsEvent | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const id = String(r.id ?? "").trim();
+  const time = num(r.time, NaN);
+  const name = String(r.name ?? "").trim();
+  if (!id || !Number.isFinite(time) || !name) return null;
+  return {
+    id,
+    time,
+    currency: String(r.currency ?? "").trim().toUpperCase().slice(0, 12),
+    country: String(r.country ?? "").trim().slice(0, 128),
+    name: name.slice(0, 256),
+    importance: "high",
+    actual: r.actual === null || r.actual === undefined ? null : num(r.actual),
+    forecast: r.forecast === null || r.forecast === undefined ? null : num(r.forecast),
+    previous: r.previous === null || r.previous === undefined ? null : num(r.previous),
+  };
+}
 
-/**
- * POST /api/bridge/sync  (Expert Advisor, ~1 Hz)
- *
- * The single heartbeat: the EA pushes state, the server replies with work.
- */
+function parseNewsFeed(raw: unknown): NewsFeed | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  const events = Array.isArray(r.events)
+    ? r.events.map(parseNewsEvent).filter((event): event is HighImpactNewsEvent => event !== null)
+    : [];
+  return {
+    available: r.available === true,
+    checkedAt: num(r.checkedAt, Date.now()),
+    events: events
+      .filter((event) => event.time >= Date.now() - 2 * 60 * 60_000 && event.time <= Date.now() + 48 * 60 * 60_000)
+      .sort((a, b) => a.time - b.time),
+    detail: typeof r.detail === "string" ? r.detail.slice(0, 500) : undefined,
+  };
+}
+
+// ── Heartbeat ────────────────────────────────────────────────────────────────
+
+/** POST /api/bridge/sync — the EA's authenticated state heartbeat. */
 router.post("/sync", (req, res) => {
   const desk = deskForRequest(req);
-  if (!desk || !desk.terminal) {
-    return res.status(401).json({ error: "Invalid or revoked bridge token." });
-  }
+  if (!desk || !desk.terminal) return res.status(401).json({ error: "Invalid or revoked bridge token." });
 
   const body = req.body ?? {};
   const seq = Math.round(num(body.seq));
   const now = Date.now();
 
-  // A sequence that went backwards means the EA restarted. Positions are
-  // re-adopted from the next payload; stale plans must not survive, because
-  // the EA no longer holds them.
   if (seq > 0 && seq < desk.terminal.lastSeq) {
     desk.plans.clear();
     desk.inflight.clear();
@@ -347,15 +368,32 @@ router.post("/sync", (req, res) => {
   desk.terminal.lastSeq = seq;
   desk.terminal.lastSyncAt = now;
 
-  // ── Account ────────────────────────────────────────────────────────────────
   const account = parseAccount(body.account);
   if (account) applyAccount(desk, account);
 
-  // ── Specs / quotes / candles ───────────────────────────────────────────────
+  // The EA normally ships the whole catalogue once during pairing. Accepting a
+  // later refresh handles broker symbol-list changes without a re-pair.
+  if (Array.isArray(body.catalog)) {
+    for (const raw of body.catalog) {
+      const entry = parseCatalogEntry(raw);
+      if (entry) desk.catalog.set(entry.symbol, entry);
+    }
+  }
+
   if (Array.isArray(body.specs)) {
     for (const raw of body.specs) {
       const spec = parseSpec(raw);
-      if (spec) desk.specs.set(spec.symbol, spec);
+      if (!spec) continue;
+      desk.specs.set(spec.symbol, spec);
+      if (!desk.catalog.has(spec.symbol)) {
+        desk.catalog.set(spec.symbol, {
+          symbol: spec.symbol,
+          description: spec.symbol,
+          path: "",
+          assetClass: spec.assetClass,
+          tradeable: true,
+        });
+      }
     }
   }
 
@@ -364,7 +402,6 @@ router.post("/sync", (req, res) => {
       const quote = parseQuote(raw);
       if (!quote) continue;
       desk.quotes.set(quote.symbol, quote);
-      // Keep the spec's spread fresh: sizing and the cost gate both read it.
       const spec = desk.specs.get(quote.symbol);
       if (spec) spec.spreadPoints = quote.spreadPoints;
     }
@@ -378,123 +415,82 @@ router.post("/sync", (req, res) => {
       const timeframe = String(r.timeframe ?? "");
       if (!symbol || !(TIMEFRAMES as readonly string[]).includes(timeframe)) continue;
       const bars = parseBars(r.bars);
-      if (bars.length === 0) continue;
-      upsertCandles(desk, { symbol, timeframe: timeframe as Timeframe, bars });
+      if (bars.length > 0) upsertCandles(desk, { symbol, timeframe: timeframe as Timeframe, bars });
     }
   }
 
-  // ── Positions ──────────────────────────────────────────────────────────────
+  const news = parseNewsFeed(body.news);
+  if (news) desk.news = news;
+
   if (Array.isArray(body.positions)) {
     const positions = (body.positions as unknown[])
-      .map((raw: unknown) => parsePosition(raw))
-      .filter((p: Position | null): p is Position => p !== null);
+      .map(parsePosition)
+      .filter((position): position is Position => position !== null);
     const { opened, closed } = reconcilePositions(desk, positions);
 
     for (const position of opened) {
-      journal(
-        desk,
-        "execution",
-        position.symbol,
-        `Position #${position.ticket} opened: ${position.side} ${position.volume} @ ${position.openPrice}.`,
-      );
+      journal(desk, "execution", position.symbol, `Position #${position.ticket} opened: ${position.side} ${position.volume} @ ${position.openPrice}.`);
     }
     for (const position of closed) {
-      // Realised P&L includes swap and commission — the number that actually
-      // hit the account, not the gross price move.
       const net = position.profit + position.swap + position.commission;
-      desk.riskState = recordOutcome(
-        desk.riskState,
-        { symbol: position.symbol, profit: net, closedAt: now },
-        desk.policy,
-      );
-      journal(
-        desk,
-        "execution",
-        position.symbol,
-        `Position #${position.ticket} closed: ${net >= 0 ? "+" : ""}${net.toFixed(2)}.`,
-        { consecutiveLosses: desk.riskState.consecutiveLosses },
-      );
+      desk.riskState = recordOutcome(desk.riskState, { symbol: position.symbol, profit: net, closedAt: now }, desk.policy);
+      journal(desk, "execution", position.symbol, `Position #${position.ticket} closed: ${net >= 0 ? "+" : ""}${net.toFixed(2)}.`, {
+        consecutiveLosses: desk.riskState.consecutiveLosses,
+      });
       if (desk.riskState.haltedUntilNextSession) {
         journal(desk, "risk", null, desk.riskState.haltReason ?? "Desk halted.");
       }
     }
   }
 
-  // ── Command acknowledgements ───────────────────────────────────────────────
   if (Array.isArray(body.results)) {
     for (const raw of body.results) {
       const result = parseResult(raw);
-      if (!result) continue;
-      const fresh = acknowledgeResult(desk, result);
-      if (!fresh) continue; // duplicate ack — already journalled
-
+      if (!result || !acknowledgeResult(desk, result)) continue;
       if (result.status === "rejected") {
-        journal(
-          desk,
-          "execution",
-          null,
-          `Command rejected by the terminal: ${result.error ?? "unknown error"}.`,
-          result,
-        );
+        journal(desk, "execution", null, `Command rejected by the terminal: ${result.error ?? "unknown error"}.`, result);
       } else if (result.status === "filled") {
-        journal(
-          desk,
-          "execution",
-          null,
-          `Filled at ${result.price} (slippage ${result.slippagePoints ?? 0} pts), ticket #${result.ticket}.`,
-          result,
-        );
+        journal(desk, "execution", null, `Filled at ${result.price} (slippage ${result.slippagePoints ?? 0} pts), ticket #${result.ticket}.`, result);
       }
     }
   }
 
-  // ── Housekeeping ───────────────────────────────────────────────────────────
   const expired = expirePlans(desk, now);
-  if (expired.length > 0) {
-    journal(desk, "signal", null, `${expired.length} armed plan(s) expired untriggered.`);
-  }
+  if (expired.length > 0) journal(desk, "signal", null, `${expired.length} armed plan(s) expired untriggered.`);
   requeueStaleCommands(desk);
 
-  // Ask for a full re-seed whenever a symbol this terminal actually carries is
-  // short of the 60 bars the Monte Carlo bootstrap needs.
-  //
-  // Scoped to the terminal's own instruments rather than the desk watchlist:
-  // a user watching seven symbols on a terminal that only offers three would
-  // otherwise re-seed full history on every single heartbeat, forever.
+  // Ask only for history for selected symbols that the terminal has actually
+  // reported. A large catalogue does not trigger megabytes of unused history.
   const reported = new Set(desk.specs.keys());
   const needsHistory = desk.watchlist
     .filter((symbol) => reported.has(symbol))
-    .some((symbol) =>
-      TIMEFRAMES.some((timeframe) => {
-        const series = desk.candles.get(candleKey(symbol, timeframe));
-        return !series || series.bars.length < 60;
-      }),
-    );
+    .some((symbol) => TIMEFRAMES.some((timeframe) => {
+      const series = desk.candles.get(candleKey(symbol, timeframe));
+      return !series || series.bars.length < 60;
+    }));
 
   const response: SyncResponse = {
     serverTime: now,
     commands: drainOutbox(desk),
     needsHistory,
     subscriptions: { symbols: desk.watchlist, timeframes: [...TIMEFRAMES] },
+    news: desk.news,
     limits: {
       maxDailyLossPct: desk.policy.maxDailyLossPct,
       maxOpenPositions: desk.policy.maxOpenPositions,
-      // A halted desk, or one whose owner switched auto-trade off, must stop
-      // the EA from acting on anything still in its memory.
       tradingEnabled: desk.autoTrade && !desk.riskState.haltedUntilNextSession,
       liveTradingEnabled: desk.policy.liveTradingEnabled,
       staleAfterMs: 30_000,
       flatOnDisconnect: false,
     },
   };
-
   return res.json(response);
 });
 
-/** GET /api/bridge/status (browser) — pairing/liveness for the UI. */
+/** Browser-facing liveness / diagnostic view. */
 router.get("/status", (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
-  if (!desk.terminal) return res.json({ linked: false });
+  if (!desk.terminal) return res.json({ linked: false, catalogCount: 0, selectedCount: 0 });
 
   const age = Date.now() - desk.terminal.lastSyncAt;
   return res.json({
@@ -509,11 +505,13 @@ router.get("/status", (_req, res) => {
     stale: age > 30_000,
     queuedCommands: desk.outbox.length,
     inflightCommands: desk.inflight.size,
+    catalogCount: desk.catalog.size,
+    selectedCount: desk.watchlist.length,
+    calendarAvailable: desk.news.available,
+    calendarAgeMs: desk.news.checkedAt ? Date.now() - desk.news.checkedAt : null,
   });
 });
 
 export default router;
 export { makePairingCode, pendingPairings };
-export const __testing = {
-  randomCommandId: randomUUID,
-};
+export const __testing = { randomCommandId: randomUUID };

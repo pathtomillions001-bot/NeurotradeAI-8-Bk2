@@ -1,10 +1,10 @@
 /**
- * Multi-Asset Desk — per-session state.
+ * Multi-Asset Desk — per-session live state.
  *
- * One desk per browser session, exactly like the Deriv side of the platform:
- * account data, plans and risk state are financial and must never leak across
- * sessions. State is in-memory by design — it is a live mirror of the user's
- * terminal, rebuilt from the next sync within a second of a restart.
+ * A Desk mirrors one MT5 terminal. It intentionally starts empty: no account,
+ * balance, quotes, candles or synthetic replay exists until the user pairs a
+ * real terminal. This protects users from mistaking illustrative values for
+ * broker data.
  */
 
 import { randomUUID } from "node:crypto";
@@ -15,6 +15,8 @@ import type {
   BridgeCommand,
   CandleSeries,
   CommandResult,
+  MarketCatalogEntry,
+  NewsFeed,
   Position,
   Quote,
   SymbolSpec,
@@ -51,11 +53,17 @@ export interface DeskState {
     lastSyncAt: number;
     lastSeq: number;
   } | null;
+  /** Last account snapshot from the paired terminal; never fabricated. */
   account: AccountSnapshot | null;
+  /** The broker's full tradeable catalogue, received at pairing. */
+  catalog: Map<string, MarketCatalogEntry>;
+  /** Specs/quotes/candles only for selected symbols being actively streamed. */
   specs: Map<string, SymbolSpec>;
   quotes: Map<string, Quote>;
   /** `${symbol}|${timeframe}` → bars. */
   candles: Map<string, CandleSeries>;
+  /** Latest high-impact calendar state from MT5. Fails closed when unavailable. */
+  news: NewsFeed;
   positions: Position[];
   /** Plans currently armed on the EA, by plan id. */
   plans: Map<string, ArmedPlan>;
@@ -64,27 +72,23 @@ export interface DeskState {
   /** Commands delivered but not yet acknowledged, by command id. */
   inflight: Map<string, { command: BridgeCommand; sentAt: number }>;
   seenCommandIds: string[];
+  /** User-selected broker symbols. There is deliberately no arbitrary cap. */
   watchlist: string[];
   mode: TradeMode;
   autoTrade: boolean;
   policy: RiskPolicy;
   riskState: RiskState;
   journal: JournalEntry[];
-  /** Deterministic simulator state, used when no terminal is linked. */
-  simulated: boolean;
 }
 
 const desks = new Map<string, DeskState>();
 
-export const DEFAULT_WATCHLIST = [
-  "EURUSD",
-  "GBPUSD",
-  "USDJPY",
-  "XAUUSD",
-  "US30",
-  "NAS100",
-  "BTCUSD",
-] as const;
+const UNAVAILABLE_NEWS: NewsFeed = {
+  available: false,
+  checkedAt: 0,
+  events: [],
+  detail: "Waiting for the paired MT5 terminal to provide its economic calendar.",
+};
 
 export function getDesk(sessionId: string): DeskState {
   let desk = desks.get(sessionId);
@@ -93,21 +97,22 @@ export function getDesk(sessionId: string): DeskState {
       sessionId,
       terminal: null,
       account: null,
+      catalog: new Map(),
       specs: new Map(),
       quotes: new Map(),
       candles: new Map(),
+      news: { ...UNAVAILABLE_NEWS },
       positions: [],
       plans: new Map(),
       outbox: [],
       inflight: new Map(),
       seenCommandIds: [],
-      watchlist: [...DEFAULT_WATCHLIST],
+      watchlist: [],
       mode: "intraday",
       autoTrade: false,
       policy: { ...DEFAULT_RISK_POLICY },
       riskState: createRiskState(),
       journal: [],
-      simulated: true,
     };
     desks.set(sessionId, desk);
   }
@@ -123,9 +128,23 @@ export function allDeskSessionIds(): string[] {
   return [...desks.keys()];
 }
 
+/** Remove every terminal-derived value when a user unlinks a broker. */
+export function clearTerminalData(desk: DeskState): void {
+  desk.account = null;
+  desk.catalog.clear();
+  desk.specs.clear();
+  desk.quotes.clear();
+  desk.candles.clear();
+  desk.news = { ...UNAVAILABLE_NEWS };
+  desk.positions = [];
+  desk.plans.clear();
+  desk.outbox = [];
+  desk.inflight.clear();
+  desk.watchlist = [];
+  desk.autoTrade = false;
+}
+
 // ── Bridge token index ───────────────────────────────────────────────────────
-// The EA authenticates with a bearer token and has no cookie, so tokens map
-// back to the owning session here.
 
 const tokenToSession = new Map<string, string>();
 
@@ -156,10 +175,8 @@ export function upsertCandles(desk: DeskState, series: CandleSeries): void {
   const existing = desk.candles.get(key);
 
   if (!existing) {
-    // Sort on the first insert too: MQL5's CopyRates fills newest-first on
-    // some builds, and every consumer (ATR, regression, Markov) assumes
-    // chronological order. An unsorted first batch would silently invert
-    // every trend reading for that symbol.
+    // Every consumer assumes chronological order. Sort even the first batch:
+    // CopyRates order differs across terminal builds.
     const deduped = new Map(series.bars.map((bar) => [bar[0], bar] as const));
     desk.candles.set(key, {
       ...series,
@@ -168,9 +185,8 @@ export function upsertCandles(desk: DeskState, series: CandleSeries): void {
     return;
   }
 
-  // Merge by timestamp: the EA re-sends the forming bar on every sync, so the
-  // last bar is updated in place rather than appended, and a reconnect that
-  // replays history cannot create duplicates.
+  // The forming bar is resent on each heartbeat; merge by timestamp rather
+  // than appending it so reconnects cannot create false bars.
   const byTs = new Map(existing.bars.map((bar) => [bar[0], bar] as const));
   for (const bar of series.bars) byTs.set(bar[0], bar);
   const merged = [...byTs.values()].sort((a, b) => a[0] - b[0]);
@@ -192,13 +208,7 @@ export function enqueueCommand(desk: DeskState, command: BridgeCommand): void {
   desk.outbox.push(command);
 }
 
-/**
- * Hand the outbox to the EA and move it to in-flight.
- *
- * Commands are only cleared on acknowledgement, so a sync lost in transit
- * results in redelivery rather than a silently dropped order — and the EA's
- * own duplicate suppression makes that redelivery safe.
- */
+/** Hand the outbox to the EA and move it to in-flight. */
 export function drainOutbox(desk: DeskState): BridgeCommand[] {
   const batch = desk.outbox;
   desk.outbox = [];
@@ -207,15 +217,13 @@ export function drainOutbox(desk: DeskState): BridgeCommand[] {
   return batch;
 }
 
-/** Re-queue commands that were never acknowledged within `timeoutMs`. */
+/** Re-queue safety commands that were never acknowledged. */
 export function requeueStaleCommands(desk: DeskState, timeoutMs = 15_000): number {
   const now = Date.now();
   let requeued = 0;
   for (const [id, entry] of desk.inflight) {
     if (now - entry.sentAt < timeoutMs) continue;
     desk.inflight.delete(id);
-    // flatten_all is a safety command: always retry. Entries are otherwise
-    // retried once — a plan that is 15s stale is usually better rebuilt.
     if (entry.command.type === "flatten_all") {
       desk.outbox.push(entry.command);
       requeued++;
@@ -259,8 +267,7 @@ export function journal(
 // ── Plans ────────────────────────────────────────────────────────────────────
 
 export function armPlan(desk: DeskState, plan: ArmedPlan): void {
-  // One armed plan per symbol: a second plan on the same instrument would race
-  // the first and could double the intended exposure.
+  // One armed plan per symbol prevents accidental doubled exposure.
   for (const [id, existing] of desk.plans) {
     if (existing.symbol === plan.symbol) {
       desk.plans.delete(id);
@@ -277,7 +284,7 @@ export function cancelPlan(desk: DeskState, planId: string): boolean {
   return true;
 }
 
-/** Drop plans past their TTL. The EA expires them independently too. */
+/** Drop plans past their TTL. The EA independently enforces the same expiry. */
 export function expirePlans(desk: DeskState, now = Date.now()): string[] {
   const expired: string[] = [];
   for (const [id, plan] of desk.plans) {
@@ -291,14 +298,9 @@ export function expirePlans(desk: DeskState, now = Date.now()): string[] {
 
 // ── Account bookkeeping ──────────────────────────────────────────────────────
 
-/**
- * Apply an account snapshot, maintaining the day-start and peak equity
- * baselines that the daily-loss and drawdown limits are measured against.
- */
 export function applyAccount(desk: DeskState, incoming: AccountSnapshot): void {
   const previous = desk.account;
-  const dayStartEquity =
-    incoming.dayStartEquity ?? previous?.dayStartEquity ?? incoming.equity;
+  const dayStartEquity = incoming.dayStartEquity ?? previous?.dayStartEquity ?? incoming.equity;
   const peakEquity = Math.max(previous?.peakEquity ?? 0, incoming.equity, dayStartEquity);
   desk.account = { ...incoming, dayStartEquity, peakEquity };
 }
@@ -317,14 +319,7 @@ export function startNewTradingDay(desk: DeskState): void {
   };
 }
 
-/**
- * Reconcile the position list reported by the terminal against ours.
- *
- * The terminal is always authoritative: a position we think is open but the
- * broker does not report has been closed (stop hit, margin call, manual
- * intervention), and continuing to manage it would send commands against a
- * ticket that no longer exists.
- */
+/** Terminal positions are authoritative; reconcile rather than infer. */
 export function reconcilePositions(
   desk: DeskState,
   incoming: Position[],
@@ -335,9 +330,6 @@ export function reconcilePositions(
   const opened = incoming.filter((p) => !previous.has(p.ticket));
   const closed = desk.positions.filter((p) => !next.has(p.ticket));
 
-  // Preserve the risk basis: the terminal does not report what we originally
-  // risked, and without it "progress in R" cannot be computed after a
-  // breakeven move has already shifted the stop.
   desk.positions = incoming.map((position) => {
     const prior = previous.get(position.ticket);
     return prior

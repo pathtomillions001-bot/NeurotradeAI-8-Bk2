@@ -100,7 +100,6 @@ int       g_seenCount = 0;
 
 string    g_token      = "";
 long      g_seq        = 0;
-datetime  g_lastSync   = 0;
 datetime  g_lastOk     = 0;
 bool      g_tradingEnabled     = false;
 bool      g_liveTradingEnabled = false;
@@ -545,7 +544,7 @@ void ModifyPosition(const string obj, const string cmdId)
       AddResult(cmdId, "skipped", 0, 0, 0, "position not found");
       return;
    }
-   double sl = JsonNumber(plan, "sl");
+   double sl = JsonNumber(obj, "sl");
    double tp = JsonNumber(obj, "tp");
    bool ok = trade.PositionModify(ticket, sl, tp);
    AddResult(cmdId, ok ? "done" : "rejected", ticket, 0, 0,

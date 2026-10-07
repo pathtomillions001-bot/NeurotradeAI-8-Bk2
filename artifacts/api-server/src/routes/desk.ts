@@ -13,9 +13,24 @@ import { getBrowserSessionId } from "../lib/session";
 import { logger } from "../lib/logger";
 import { evaluate, horizonMinutes } from "../lib/multiasset/agent";
 import { performanceStats } from "../lib/multiasset/analytics";
+import {
+  AUTO_SELECT_INTERVAL_MS,
+  AUTO_SELECT_MAX_CANDIDATES,
+  AUTO_SELECT_NOTE_INTERVAL_MS,
+  maybeAutoSelect as autoSelectIfDue,
+  runAutoSelect,
+} from "../lib/multiasset/auto-select";
 import { equityCurveSimulation } from "../lib/multiasset/montecarlo";
 import { aggregateExposure } from "../lib/multiasset/sizing";
-import { clockSkewWarning, feedHealth, feedIsTradeable, QUOTE_STALE_MS } from "../lib/multiasset/integrity";
+import { clockSkewWarning, feedHealth, QUOTE_STALE_MS } from "../lib/multiasset/integrity";
+import {
+  connectionProblem,
+  resolveLiveSymbol,
+  symbolReadiness,
+  TERMINAL_STALE_MS,
+  terminalIsFresh,
+} from "../lib/multiasset/live";
+import { upcomingRedFolder } from "../lib/multiasset/news";
 import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
 import { addSSEClient, broadcastSSE, removeSSEClient } from "../lib/sse";
 import {
@@ -39,7 +54,7 @@ import {
   type DeskState,
 } from "../lib/multiasset/store";
 import {
-  TIMEFRAMES,
+  ALL_TIMEFRAMES,
   type Bar,
   type Quote,
   type SymbolSpec,
@@ -49,7 +64,6 @@ import {
 
 const router: IRouter = Router();
 const VALID_MODES: TradeMode[] = ["scalp", "intraday", "swing"];
-const TERMINAL_STALE_MS = 30_000;
 
 /**
  * Timezones offered in the Desk header.
@@ -76,44 +90,9 @@ function isValidTimezone(value: unknown): value is string {
 }
 
 function isTimeframe(value: unknown): value is Timeframe {
-  return typeof value === "string" && (TIMEFRAMES as readonly string[]).includes(value);
-}
-
-function terminalIsFresh(desk: DeskState, now = Date.now()): boolean {
-  return Boolean(desk.terminal && now - desk.terminal.lastSyncAt <= TERMINAL_STALE_MS);
-}
-
-function connectionProblem(desk: DeskState, now = Date.now()): string | null {
-  if (!desk.terminal) return "Link a MetaTrader 5 terminal before requesting live Desk data.";
-  if (now - desk.terminal.lastSyncAt > TERMINAL_STALE_MS) {
-    return "The MetaTrader 5 terminal heartbeat is stale. New analysis and entries are paused.";
-  }
-  if (!desk.account) return "Waiting for the paired MetaTrader 5 terminal to send its first account snapshot.";
-  return null;
-}
-
-/**
- * Only terminal-backed, fresh, self-consistent broker data may enter the agent
- * pipeline. `feedIsTradeable` is the single gate: it covers both the freshness
- * check and the price-vs-candles cross-check, so a symbol whose quote has
- * drifted away from its own bars can never be analysed or armed.
- */
-function resolveLiveSymbol(
-  desk: DeskState,
-  symbol: string,
-  now = Date.now(),
-): { spec: SymbolSpec; quote: Quote; series: Partial<Record<Timeframe, Bar[]>> } | null {
-  if (!terminalIsFresh(desk, now)) return null;
-  if (!feedIsTradeable(feedHealth(desk, symbol, now).status)) return null;
-  const spec = desk.specs.get(symbol);
-  const quote = desk.quotes.get(symbol);
-  if (!spec || !quote) return null;
-  return { spec, quote, series: seriesFor(desk, symbol) };
-}
-
-function symbolReadiness(desk: DeskState, symbol: string, now = Date.now()) {
-  if (!desk.terminal || !terminalIsFresh(desk, now)) return "stale" as const;
-  return feedHealth(desk, symbol, now).status;
+  // ALL frames, including the server-synthesised ones: seriesFor() serves both
+  // and a consumer asking for S10 should get an empty list, not a 400.
+  return typeof value === "string" && (ALL_TIMEFRAMES as readonly string[]).includes(value);
 }
 
 function assertLiveConnection(desk: DeskState, res: Response): boolean {
@@ -189,6 +168,14 @@ router.get("/state", (_req, res) => {
   const now = Date.now();
   expirePlans(desk, now);
   pruneDeselectedSymbols(desk);
+  // A browser refresh must not be the only thing that drives the automatic
+  // best-market pass: running the throttled pass here as well means a desk whose
+  // EA heartbeats slowly still gets its sweep.
+  try {
+    autoSelectIfDue(desk, now);
+  } catch (err) {
+    logger.warn({ err }, "Auto-select pass failed on state read");
+  }
   const account = accountFor(desk);
   const statuses = new Map(desk.watchlist.map((symbol) => [symbol, symbolReadiness(desk, symbol, now)]));
   const liveSymbols = [...statuses.values()].filter((status) => status === "live").length;
@@ -239,6 +226,25 @@ router.get("/state", (_req, res) => {
       exposure: account ? aggregateExposure(desk.positions, desk.specs, account.equity) : [],
     },
     news: desk.news,
+    /**
+     * The next 24 hours of red-folder events, already filtered, sorted and
+     * distance-stamped by the server so the calendar pane, the agent's news
+     * gate and the journal all describe the same window.
+     */
+    newsUpcoming: upcomingRedFolder(desk.news.events, now),
+    /** Automatic best-market selection: what it last did and how often it runs. */
+    autoSelect: {
+      last: desk.lastAutoSelect,
+      intervalMs: AUTO_SELECT_INTERVAL_MS[desk.mode],
+      maxCandidates: AUTO_SELECT_MAX_CANDIDATES,
+      noteIntervalMs: AUTO_SELECT_NOTE_INTERVAL_MS,
+      // null until a pass has actually run: a bare 0 + interval is not a
+      // timestamp, and a client must not render 1970 as "next scan".
+      nextDueAt:
+        desk.lastAutoSelectAt > 0
+          ? desk.lastAutoSelectAt + AUTO_SELECT_INTERVAL_MS[desk.mode]
+          : null,
+    },
     journal: desk.journal.slice(0, 50),
     serverTime: now,
   });
@@ -324,10 +330,11 @@ router.get("/instruments", (_req, res) => {
 });
 
 /**
- * GET /api/desk/candles?symbol=&timeframe= — OHLC for the Desk chart.
+ * GET /api/desk/series?symbol= — every series available for a symbol.
  *
- * Returns every timeframe the terminal streams for that symbol in one call so
- * the chart can switch timeframe without another round trip.
+ * Includes the server-synthesised S10/S30 frames as well as the broker's own,
+ * so a consumer never has to know which frames MetaTrader can and cannot
+ * provide. A synthetic frame that is not dense enough is simply absent.
  */
 router.get("/series", (req, res) => {
   const desk = getDesk(getBrowserSessionId());
@@ -336,7 +343,7 @@ router.get("/series", (req, res) => {
   if (!assertLiveConnection(desk, res)) return;
   const series = seriesFor(desk, symbol);
   const out: Partial<Record<Timeframe, Bar[]>> = {};
-  for (const timeframe of TIMEFRAMES) {
+  for (const timeframe of ALL_TIMEFRAMES) {
     const bars = series[timeframe];
     if (bars && bars.length > 0) out[timeframe] = bars;
   }
@@ -405,7 +412,7 @@ router.get("/candles", (req, res) => {
   const symbol = String(req.query.symbol ?? "");
   const timeframe = req.query.timeframe;
   if (!symbol) return res.status(400).json({ error: "symbol is required" });
-  if (!isTimeframe(timeframe)) return res.status(400).json({ error: `timeframe must be one of ${TIMEFRAMES.join(", ")}` });
+  if (!isTimeframe(timeframe)) return res.status(400).json({ error: `timeframe must be one of ${ALL_TIMEFRAMES.join(", ")}` });
   if (!assertLiveConnection(desk, res)) return;
 
   const resolved = resolveLiveSymbol(desk, symbol);
@@ -493,6 +500,33 @@ router.get("/scan", (req, res) => {
     stale: results.filter((result) => result.status === "stale").length,
   };
   return res.json({ mode, source: "mt5", results, coverage, scannedAt: now });
+});
+
+/**
+ * POST /api/desk/auto-select — run the best-market pass immediately.
+ *
+ * The pass runs by itself while auto-trade is on; this endpoint exists so the
+ * user (or the UI's refresh control) can ask "look now" without waiting for the
+ * mode's interval to elapse. It is the same pass, with the same gates.
+ */
+router.post("/auto-select", (_req, res) => {
+  const desk = getDesk(getBrowserSessionId());
+  if (!assertLiveConnection(desk, res)) return;
+  if (!desk.autoTrade) {
+    return res.status(409).json({ error: "Turn auto-trade on: the best-market pass places plans by itself." });
+  }
+  desk.lastAutoSelectAt = Date.now();
+  const outcome = runAutoSelect(desk);
+  if (!outcome) return res.status(409).json({ error: "The best-market pass could not run against the current terminal state." });
+  return res.json({
+    mode: desk.mode,
+    chosen: outcome.record.chosen,
+    scanned: outcome.record.scanned,
+    qualified: outcome.record.qualified,
+    reason: outcome.record.reason,
+    ranked: outcome.record.ranked,
+    plans: [...desk.plans.values()],
+  });
 });
 
 // ── Arming and terminal actions ──────────────────────────────────────────────

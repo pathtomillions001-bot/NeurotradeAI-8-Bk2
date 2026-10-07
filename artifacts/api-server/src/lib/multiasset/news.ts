@@ -21,6 +21,61 @@ export interface NewsGate {
 
 const NEWS_MAX_AGE_MS = 5 * 60_000;
 
+/**
+ * How far ahead the desk's red-folder panel looks.
+ *
+ * Twenty-four hours, deliberately: it is the window the EA itself fetches from
+ * the MT5 calendar (`CalendarValueHistory(now - 15 min, now + 24 h)`), and it is
+ * the horizon over which a trader can actually act on an event — a swing entry
+ * planned today must know what releases tomorrow. Events are never dropped for
+ * being "too far away"; anything beyond the window is simply not fetched.
+ */
+export const NEWS_LOOKAHEAD_MS = 24 * 60 * 60_000;
+
+/** How long after an event it remains listed, so the user sees the outcome. */
+export const NEWS_LOOKBEHIND_MS = 15 * 60_000;
+
+export interface UpcomingNewsEvent {
+  id: string;
+  time: number;
+  currency: string;
+  country: string;
+  name: string;
+  importance: "high";
+  actual?: number | null;
+  forecast?: number | null;
+  previous?: number | null;
+  /** Milliseconds from `now` to the event. Negative once it has started. */
+  inMs: number;
+  /** True for the very next event that has not started yet. */
+  next: boolean;
+}
+
+/**
+ * The next 24 hours of red-folder events, in the order they will happen.
+ *
+ * The calendar PANE must not have to guess which events are in scope, and it
+ * must not silently disagree with the gate that blocks entries — the gate looks
+ * at the same event list, so both are derived here.
+ */
+export function upcomingRedFolder(
+  events: HighImpactNewsEvent[],
+  now = Date.now(),
+  horizonMs = NEWS_LOOKAHEAD_MS,
+): UpcomingNewsEvent[] {
+  const window = events
+    .filter((event) => event.importance === "high")
+    .filter((event) => event.time >= now - NEWS_LOOKBEHIND_MS && event.time <= now + horizonMs)
+    .sort((a, b) => a.time - b.time);
+
+  const firstUpcoming = window.find((event) => event.time >= now)?.id ?? null;
+  return window.map((event) => ({
+    ...event,
+    inMs: event.time - now,
+    next: event.id === firstUpcoming,
+  }));
+}
+
 /** New entries are paused ahead of a red-folder event and shortly after it. */
 function blackoutWindow(mode: TradeMode): { beforeMs: number; afterMs: number } {
   switch (mode) {

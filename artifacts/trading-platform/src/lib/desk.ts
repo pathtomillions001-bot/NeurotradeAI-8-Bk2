@@ -30,26 +30,35 @@ export type TradeMode = "scalp" | "intraday" | "swing";
 export const DEFAULT_DESK_TIMEZONE = "Africa/Nairobi";
 
 export const TRADE_MODES: { id: TradeMode; label: string; blurb: string }[] = [
-  { id: "scalp", label: "Scalp", blurb: "M1–M3 emphasis · ~25 min horizon" },
-  { id: "intraday", label: "Day", blurb: "M5–M30 emphasis · ~6 hour horizon" },
-  { id: "swing", label: "Swing", blurb: "H1–W1 emphasis · multi-day horizon" },
+  { id: "scalp", label: "Scalp", blurb: "10s–3min band · ~25 min horizon" },
+  { id: "intraday", label: "Day", blurb: "5–30min band · ~6 hour horizon" },
+  { id: "swing", label: "Swing", blurb: "1h–weekly band · multi-day horizon" },
 ];
 
 /**
- * The timeframes each style is analysed on.
+ * The monitoring window each style works in. These bands are EXCLUSIVE: a mode
+ * scores its own band and nothing else.
  *
- * Scalps are judged on 3-minute-and-below structure because they are opened
- * and closed inside a minute; swing trades look from the hourly to the weekly.
- * Timeframes outside a mode's band are context, never a requirement.
+ * `S10`/`S30` are the ten- and thirty-second frames. MetaTrader has no period
+ * faster than M1, so the server builds them from the tick stream the EA pushes
+ * on every heartbeat — and withholds them entirely when the feed is too slow to
+ * build them honestly, rather than pretending a one-tick "candle" is a chart.
  */
 export const MODE_ANALYSIS_TIMEFRAMES: Record<TradeMode, string[]> = {
-  scalp: ["M1", "M2", "M3"],
+  scalp: ["S10", "S30", "M1", "M2", "M3"],
   intraday: ["M5", "M15", "M30"],
   swing: ["H1", "H4", "D1", "W1"],
 };
 
-/** Every timeframe the Desk charts, fastest to slowest. */
-export const DESK_TIMEFRAMES = ["M1", "M2", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1"] as const;
+/** Short label for a mode's band, used in the terminal header. */
+export const MODE_ANALYSIS_LABEL: Record<TradeMode, string> = {
+  scalp: "S10–M3",
+  intraday: "M5–M30",
+  swing: "H1–W1",
+};
+
+/** Every timeframe the Desk can render, fastest to slowest. */
+export const DESK_TIMEFRAMES = ["S10", "S30", "M1", "M2", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1"] as const;
 
 export interface Market {
   symbol: string;
@@ -402,8 +411,47 @@ export interface DeskStateResponse {
     exposure: { key: string; riskMoney: number; riskPct: number }[];
   };
   news: NewsFeed;
+  /**
+   * The next 24 hours of red-folder events, filtered, sorted and
+   * distance-stamped by the server so the calendar pane and the agent's news
+   * gate describe the same window.
+   */
+  newsUpcoming: UpcomingNewsEvent[];
+  /** Automatic best-market selection: what it last did, and its cadence. */
+  autoSelect: {
+    last: AutoSelectRecord | null;
+    intervalMs: number;
+    maxCandidates: number;
+    noteIntervalMs: number;
+    /** When the next pass is due, or null if none has run yet. */
+    nextDueAt: number | null;
+  };
   journal: JournalEntry[];
   serverTime: number;
+}
+
+export interface UpcomingNewsEvent extends HighImpactNewsEvent {
+  /** Milliseconds from the response's `serverTime` to the event. */
+  inMs: number;
+  /** True for the very next event that has not started yet. */
+  next: boolean;
+}
+
+/** One automatic best-market pass, as reported by the desk. */
+export interface AutoSelectRecord {
+  at: number;
+  mode: TradeMode;
+  scanned: number;
+  qualified: number;
+  chosen: string | null;
+  reason: string;
+  ranked: {
+    symbol: string;
+    expectancyR: number | null;
+    score: number;
+    grade: string;
+    armed: boolean;
+  }[];
 }
 
 export interface ScanRow {
@@ -448,6 +496,14 @@ export const deskApi = {
   series: (symbol: string) => request<DeskSeries>(`/desk/series?symbol=${encodeURIComponent(symbol)}`),
   analysis: (symbol: string, mode: TradeMode) => request<{ source: "mt5"; horizonMinutes: number; decision: AgentDecision }>(`/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`),
   scan: (mode: TradeMode) => request<{ mode: TradeMode; source: "mt5"; results: ScanRow[]; coverage: { selected: number; live: number; warming: number; stale: number }; scannedAt: number }>(`/desk/scan?mode=${mode}`),
+  /**
+   * Run the automatic best-market pass immediately.
+   *
+   * The pass runs by itself while auto-trade is on; this is the same pass, on
+   * demand, so the user can ask "look now" without waiting for the mode's
+   * interval.
+   */
+  autoSelect: () => request<{ mode: TradeMode; chosen: string | null; scanned: number; qualified: number; reason: string; ranked: AutoSelectRecord["ranked"]; plans: ArmedPlan[] }>("/desk/auto-select", { method: "POST" }),
   arm: (symbol: string, mode: TradeMode) => request<{ plan: ArmedPlan }>("/desk/arm", { method: "POST", body: JSON.stringify({ symbol, mode }) }),
   cancelPlan: (id: string) => request<{ ok: true }>(`/desk/plans/${id}`, { method: "DELETE" }),
   closePosition: (ticket: number, lots?: number) => request<{ ok: true }>(`/desk/positions/${ticket}/close`, { method: "POST", body: JSON.stringify(lots === undefined ? {} : { lots }) }),

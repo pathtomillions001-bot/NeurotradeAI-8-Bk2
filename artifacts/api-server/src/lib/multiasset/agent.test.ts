@@ -421,3 +421,150 @@ test("missing market data is refused rather than guessed", () => {
   assert.equal(decision.armed, false);
   assert.ok(decision.rejections.length > 0);
 });
+
+// ── The stop is on the correct side of entry, always ─────────────────────────
+//
+// This is the regression that produced "Stop loss 31163.55 is on the wrong side
+// of entry 31151.36 for a buy" on the desk. After a breakdown the most recent
+// confirmed swing LOW sits above the live price; the old placement guard only
+// compared |distance|, so it accepted a buy stop above the entry and the plan
+// died in sizing instead of being placed from the ATR.
+
+test("a buy stop stays below entry even when the last swing low is above it", () => {
+  // A staircase down: every confirmed swing low is above the price that
+  // follows it, which is exactly the breakdown case.
+  const bars: Bar[] = [];
+  let price = 1.2;
+  for (let i = 0; i < 60; i++) {
+    const open = price;
+    price = open - 0.0004;
+    bars.push([i * 60_000, open, open + 0.00005, price - 0.00005, price, 100]);
+  }
+  const entry = bars[bars.length - 1][4] + 0.00005; // ask above the last close
+  const stop = structuralStop(bars, "buy", entry, "scalp");
+  assert.ok(stop.sl < entry, `buy stop ${stop.sl} must sit below entry ${entry}`);
+  assert.equal(stop.usedSwing, false, "a swing above the market cannot be a long's stop");
+});
+
+test("a sell stop stays above entry even when the last swing high is below it", () => {
+  const bars: Bar[] = [];
+  let price = 1.0;
+  for (let i = 0; i < 60; i++) {
+    const open = price;
+    price = open + 0.0004;
+    bars.push([i * 60_000, open, price + 0.00005, open - 0.00005, price, 100]);
+  }
+  const entry = bars[bars.length - 1][4] - 0.00005;
+  const stop = structuralStop(bars, "sell", entry, "scalp");
+  assert.ok(stop.sl > entry, `sell stop ${stop.sl} must sit above entry ${entry}`);
+});
+
+test("no evaluated plan ever carries a stop on the wrong side of its own trigger", () => {
+  const series = allTimeframes((s) => trendDown(220, 1.08, s));
+  for (const mode of ["scalp", "intraday", "swing"] as const) {
+    const decision = run({ series, quote: quoteFrom(series), mode });
+    if (!decision.armed || !decision.plan) continue;
+    const plan = decision.plan;
+    if (plan.side === "buy") assert.ok(plan.sl < plan.trigger, "long stop below trigger");
+    else assert.ok(plan.sl > plan.trigger, "short stop above trigger");
+    assert.ok(
+      !decision.rejections.some((reason) => /wrong side of entry/.test(reason)),
+      decision.rejections.join(" | "),
+    );
+  }
+});
+
+// ── Mode bands are exclusive, and a data gap is not a bad market ─────────────
+
+test("a scalp is scored on the sub-3-minute band only", () => {
+  // Every frame except M5/M15/M30 is missing: the scalp band is untouched, so
+  // the scalp must still be scored from S10/M1/M2/M3 data, and the slower
+  // frames must not influence it.
+  const scalpSeries: Partial<Record<Timeframe, Bar[]>> = {};
+  for (const tf of ["S10", "S30", "M1", "M2", "M3"] as Timeframe[]) {
+    scalpSeries[tf] = trendUp(220, 1.08, 0.0006, 0.0002, tf.length);
+  }
+  const decision = run({ series: scalpSeries, quote: quoteFrom(scalpSeries), mode: "scalp" });
+  assert.ok(decision.confluence.score > 0, "the band must be scored");
+  assert.ok(decision.confluence.scoredTimeframes.length >= 4, decision.confluence.scoredTimeframes.join(","));
+  for (const timeframe of decision.confluence.scoredTimeframes) {
+    assert.ok(
+      ["S10", "S30", "M1", "M2", "M3"].includes(timeframe),
+      `${timeframe} is outside the scalp band`,
+    );
+  }
+  assert.equal(decision.confluence.substituted, false);
+});
+
+test("an empty band substitutes the nearest frames instead of scoring zero", () => {
+  // Only M5 and M15 streamed: the scalp band has nothing, and the old code
+  // returned confluence 0 — which is what produced "Quality 31.8 … (confluence
+  // 0.0, evidence 57.9)" on the desk for a market whose sub-minute frames had
+  // simply not been seeded yet.
+  const partial: Partial<Record<Timeframe, Bar[]>> = {
+    M5: trendUp(220, 1.08, 0.0006, 0.0002, 11),
+    M15: trendUp(220, 1.08, 0.0006, 0.0002, 12),
+  };
+  const decision = run({ series: partial, quote: quoteFrom(partial), mode: "scalp" });
+  assert.equal(decision.confluence.substituted, true);
+  assert.ok(decision.confluence.score > 0, "a substitutable band must not score zero");
+  assert.ok(
+    decision.confluence.warnings.some((warning) => /nearest available frames were scored instead/.test(warning)),
+    decision.confluence.warnings.join(" | "),
+  );
+});
+
+// ── Costs are judged against the symbol's own asset class ────────────────────
+//
+// The desk used to hold every instrument to one fixed pair of numbers. On a
+// crypto CFD a structurally wide quote is normal, so those markets were banned
+// from trading by a rule written for EURUSD.
+
+test("the same spread that is refused on forex is allowed on crypto", () => {
+  const series = allTimeframes((s) => trendUp(220, 1.08, 0.0006, 0.0002, s));
+  // The intraday stop on this series is ~140 points, so 60 points of spread is
+  // ~43% of the stop: over the 35% forex ceiling, well under crypto's 60%.
+  const wide = 60;
+
+  const forex = run({ series, quote: quoteFrom(series, wide) });
+  assert.ok(
+    forex.rejections.some((reason) => /ceiling for forex/.test(reason)),
+    `forex must refuse it: ${forex.rejections.join(" | ")}`,
+  );
+
+  const cryptoSpec: SymbolSpec = { ...spec, symbol: "BTCUSD", assetClass: "crypto" };
+  const cryptoSeries = allTimeframes((s) => trendUp(220, 20_000, 12, 4, s));
+  const last = cryptoSeries.M15![cryptoSeries.M15!.length - 1][4];
+  const crypto = run({
+    series: cryptoSeries,
+    spec: cryptoSpec,
+    quote: {
+      symbol: "BTCUSD",
+      bid: last - (wide * cryptoSpec.point) / 2,
+      ask: last + (wide * cryptoSpec.point) / 2,
+      spreadPoints: wide,
+      ts: Date.now(),
+    },
+  });
+  assert.ok(
+    !crypto.rejections.some((reason) => /ceiling for crypto/.test(reason)),
+    `crypto must not inherit the forex ceiling: ${crypto.rejections.join(" | ")}`,
+  );
+});
+
+test("a wide-but-allowed spread is charged and named, not silently accepted", () => {
+  const series = allTimeframes((s) => trendUp(220, 1.08, 0.0006, 0.0002, s));
+  // 40 points on a ~140-point stop is ~29% — under the forex ceiling, so the
+  // trade may be taken, but it is above the level worth mentioning.
+  const decision = run({ series, quote: quoteFrom(series, 40) });
+  assert.ok(
+    decision.warnings.some((warning) => /wide for forex/.test(warning)),
+    decision.warnings.join(" | "),
+  );
+  // And the cost is really charged in the simulation it gated on.
+  assert.ok(decision.monteCarlo);
+  assert.ok(
+    decision.monteCarlo.expectancyR < decision.monteCarlo.grossExpectancyR,
+    "expectancy after costs must be below the gross figure",
+  );
+});

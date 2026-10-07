@@ -208,19 +208,29 @@ the slowest, which is the *least* relevant to a scalp — killed the setup.
 
 Now:
 
-- **Timeframes are split by role.** Each mode declares an analysis band; frames inside it are
-  weighted, frames outside it are **context only**.
-  - scalp → M1, M2, M3 (context: M5, M15, H1)
-  - day → M5, M15, M30 (context: H1, H4, D1)
-  - swing → H1, H4, D1, W1 (context: W1)
+- **Each mode monitors its own band, and nothing else.** There are no context frames:
+  - scalp → **S10, S30**, M1, M2, M3 (10 seconds to 3 minutes)
+  - day → M5, M15, M30 (5 to 30 minutes)
+  - swing → H1, H4, D1, W1 (1 hour to weekly)
 
-  Context frames cost nothing when they are simply missing — the absence of a weekly candle is
-  not evidence against a trade.
-- **Dissent is a penalty, not a veto.** `CONTEXT_PENALTY_PER_FRAME = 5`, capped at
-  `CONTEXT_PENALTY_CAP = 12`. Dissent is recorded, shown as `−N`, and folded into the score. If
-  everything else is strong, the trade still goes.
-- `VETO_TIMEFRAMES` is deleted. Higher-timeframe opposition is surfaced as a **warning** in the
-  UI ("Carried cautions") instead of a rejection.
+  `MODE_CONTEXT_TIMEFRAMES` is empty for all three modes, so the context penalty machinery
+  (`CONTEXT_PENALTY_PER_FRAME = 5`, cap 12) is inert and `contextPenalty` is always 0 — kept as a
+  stated decision rather than an absence someone has to infer. The old scheme measured frames
+  *outside* the band and deducted up to 12 points when one disagreed — which meant a scalp
+  carried an opinion about the hourly candle, and swing's "context" frame (W1) was already inside
+  its own band, so the weekly candle was both scored and penalised.
+
+  `S10`/`S30` cannot come from `CopyRates` — MetaTrader's fastest period is M1. They are built on
+  the server from the per-symbol tick stream the EA already pushes on every heartbeat
+  (`subminute.ts`), and withheld until the recent bars are dense enough to be honest
+  (`MIN_SAMPLES_PER_BAR = 2`, `DENSITY_WINDOW = 20`). A terminal heartbeating every 30 s produces
+  no sub-minute frames at all, and the band falls back to M1–M3.
+- **Dissent inside the band is priced, not vetoed.** `VETO_TIMEFRAMES` stays deleted;
+  higher-timeframe opposition inside the band is surfaced as a caution ("Carried cautions").
+- **A data gap is not a bad market.** A band with no seeded frames used to score **0** — the
+  source of the `confluence 0.0` in "Quality 31.8 is below the 62.0 required…". The score is now
+  taken from the nearest available frames, with `substituted: true` and the substitution named in
+  `warnings`; the missing frames are listed individually.
 
 Verified: with two and three timeframes inverted against the trend, all three modes still arm
 (quality 74–95 against thresholds of 60–62). Nothing in any rejection list mentions alignment.
@@ -229,7 +239,7 @@ Verified: with two and three timeframes inverted against the trend, all three mo
 
 | | Scalp | Day | Swing |
 |---|---|---|---|
-| Analysis band | M1–M3 | M5–M30 | H1–W1 |
+| Analysis band | S10–M3 | M5–M30 | H1–W1 |
 | Horizon | ~25 min | ~6 h | ~48 h |
 | Stop (ATR ×) | 0.8 | 1.5 | 2.0 |
 | Plan TTL | 60 s | 10 min | 60 min |
@@ -239,9 +249,62 @@ Verified: with two and three timeframes inverted against the trend, all three mo
 | Evidence blend | 0.55 | 0.45 | 0.40 |
 | Default chart | M2 | M15 | H1 |
 
+Ownership now sits in one place per concern: the bands in
+`lib/multiasset/types.ts` (`MODE_ANALYSIS_TIMEFRAMES`, `MODE_ANALYSIS_LABEL`), the weights and
+substitution in `lib/multiasset/confluence.ts`, the sub-minute construction in
+`lib/multiasset/subminute.ts`.
+
 Every plan carries `management` — break-even with a structure buffer, two partial exits (35% at
 1.5R, 25% at 3R), an ATR chandelier trail activating at 1.2R, one pyramid add at 1.5R capped at
 1.5R portfolio risk, a time stop, and spread/slippage/news guards.
+
+### Costs are per asset class
+
+The single global `maxSpreadFractionOfStop = 0.25` (and a companion spread gate in the agent that
+could never fire, because it compared the live spread against the live spec's own spread) is
+replaced by `lib/multiasset/asset-costs.ts`. Every limit is a **ratio**, so "points" — which mean
+something different on every instrument — never enter the decision:
+
+| Asset class | spread ÷ stop | (spread + commission) ÷ risk | fill spread ÷ stop | slippage × |
+|---|---|---|---|---|
+| forex | 35% | 35% | 40% | 1 |
+| metals | 40% | 40% | 45% | 1.5 |
+| indices / commodities | 50% | 45% | 55% | 2 |
+| futures | 45% | 45% | 50% | 2 |
+| crypto / stocks | 60% | 55% | 65% | 3 |
+
+The spread is charged *in* the expectancy simulation, so the gate that decides is
+`minEdgeR = 0.15R` net of costs; the ceilings above are the outermost refuse. A spread that is
+wide for its class but still inside the ceiling becomes a caution on the plan rather than a
+silent veto. Pairs: `asset-costs.ts` (policy), `sizing.ts` (refusal + sizing),
+`agent.ts` (cost-aware expectancy), `bridge.ts`/`presenter.ts` (`plan.maxSpreadPoints`).
+
+---
+
+## The desk finds the best market itself
+
+While auto-trade is on, `lib/multiasset/auto-select.ts` runs on the heartbeat: it evaluates every
+**selected** market through the same `evaluate()` as the manual path (same risk governor, news
+gate, cost policy, sizing), skips markets that already hold a position or an armed plan, ranks
+what qualifies by **expectancy after costs** and then quality, and arms exactly one — the best.
+The EA then watches the trigger locally and manages the position from the plan's `management`
+block, exactly as for a hand-armed plan.
+
+Cadence is per mode (scalp 15 s, day 30 s, swing 60 s) and the pass sweeps a rotating window of
+the watchlist, so a large selection is covered over several passes without blocking a heartbeat.
+`/api/desk/state` reports the last pass (`autoSelect.last`) — scanned, qualified, chosen, ranked —
+and `POST /api/desk/auto-select` runs one on demand. When nothing qualifies, the desktop names the
+**closest miss** and its rejection in the journal.
+
+The binding limits stay risk-based; auto-select is not a trade-count budget.
+
+## The red-folder calendar shows the next 24 hours
+
+`NewsPane` lists high-impact events from 15 minutes ago to **24 hours ahead**, sorted, with the
+next one flagged. The window is computed once on the server (`news.ts → upcomingRedFolder()`), so
+the pane, the agent's news gate and the journal all describe the same list. Every time is
+rendered in the desk's configured timezone (Nairobi EAT by default) and labelled with that zone's
+abbreviation.
 
 ---
 
@@ -261,7 +324,9 @@ New and changed inputs:
 
 Timeframe set grew from 7 to 10 with **M2, M3 and W1** (`#define TF_COUNT 10`). The Desk's
 scalp mode analyses M2 and M3, and swing mode analyses W1, so v2 left those modes working from
-a thinner set of frames than intended.
+a thinner set of frames than intended. The EA's timeframe list is unchanged by the S10/S30
+work: those frames are synthesised on the server from ticks the EA already sends
+(`SendAllQuotesEachBeat = true`), never requested from the terminal.
 
 ---
 

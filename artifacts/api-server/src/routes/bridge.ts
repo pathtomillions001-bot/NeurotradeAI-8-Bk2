@@ -20,6 +20,8 @@ import {
   updateClockSkew,
 } from "../lib/multiasset/integrity";
 import { broadcastSSE } from "../lib/sse";
+import { maybeAutoSelect } from "../lib/multiasset/auto-select";
+import { recordTick } from "../lib/multiasset/subminute";
 import {
   accountKeyFor,
   describeConflict,
@@ -41,6 +43,7 @@ import {
   requeueStaleCommands,
   revokeBridgeToken,
   sessionForToken,
+  ticksFor,
   upsertCandles,
   issueBridgeToken,
   type DeskState,
@@ -521,6 +524,10 @@ router.post("/sync", (req, res) => {
       desk.quotes.set(quote.symbol, quote);
       const spec = desk.specs.get(quote.symbol);
       if (spec) spec.spreadPoints = quote.spreadPoints;
+      // Feed the tick into the sub-minute bar builder. MetaTrader has no
+      // period faster than M1, so S10/S30 exist only because this runs on
+      // every accepted tick (see subminute.ts).
+      recordTick(ticksFor(desk, quote.symbol), quote);
       accepted++;
     }
     if (rejected > 0) {
@@ -602,6 +609,17 @@ router.post("/sync", (req, res) => {
       return !series || series.bars.length < 60;
     }));
 
+  // ── Automatic best-market pass ───────────────────────────────────────────
+  // Runs here — after quotes, candles and positions have been folded in and
+  // before the browser is updated — so the desk arms the best of the user's
+  // selected markets on the same tick the decision was based on. Throttled per
+  // mode; every gate the manual path uses still applies.
+  try {
+    maybeAutoSelect(desk, now);
+  } catch (err) {
+    logger.warn({ err }, "Auto-select pass failed");
+  }
+
   // ── Push the new prices to the browser immediately ───────────────────────
   // The Desk used to be polled every 4 s, so a quote could be four seconds
   // old before it was even rendered and up to a full rotation old on symbols
@@ -622,7 +640,12 @@ router.post("/sync", (req, res) => {
     limits: {
       maxDailyLossPct: desk.policy.maxDailyLossPct,
       maxOpenPositions: desk.policy.maxOpenPositions,
-      tradingEnabled: desk.autoTrade && !desk.riskState.haltedUntilNextSession,
+      // Auto-trade ON authorises the desk to create plans by itself. A plan the
+      // USER armed must be executable regardless of the auto toggle — the EA
+      // refuses every arm_plan when this flag is false, so gating it on
+      // autoTrade alone silently discarded hand-armed setups ("trading disabled
+      // by server" in the MT5 log, nothing on screen). Risk state still wins.
+      tradingEnabled: (desk.autoTrade || desk.plans.size > 0) && !desk.riskState.haltedUntilNextSession,
       liveTradingEnabled: desk.policy.liveTradingEnabled,
       staleAfterMs: 30_000,
       flatOnDisconnect: false,

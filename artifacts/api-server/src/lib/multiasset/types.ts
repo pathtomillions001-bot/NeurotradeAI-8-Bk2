@@ -45,12 +45,27 @@ export interface MarketCatalogEntry {
 /**
  * Desk timeframes.
  *
- * Ordered from fastest to slowest. M2/M3 exist because a scalp book is
- * analysed on 3-minute-and-below structure — M1 alone is too noisy to place a
- * stop against, and M5 is already the intraday entry frame. W1 gives swing
- * trades the weekly context they are actually held for.
+ * Ordered from fastest to slowest.
+ *
+ * `S10` / `S30` are the ten- and thirty-second frames. MetaTrader has no such
+ * chart periods — its fastest period is M1 — so they are SYNTHESISED on the
+ * server from the tick stream the EA already pushes on every heartbeat (see
+ * subminute.ts). They exist because a scalp book has to be able to see faster
+ * than a minute: "3-minute-and-below" without a sub-minute frame is really
+ * "1–3 minutes", which is a slower decision than a scalper is making.
+ *
+ * M2/M3 exist so a scalp has 2- and 3-minute structure to place a stop against
+ * rather than M1 alone. W1 gives swing trades the weekly context they are held
+ * for.
+ *
+ * IMPORTANT: `TIMEFRAMES` below is the BROKER list — the frames the EA can
+ * request history for and stream. Never add a synthetic frame to it: the EA's
+ * `Period()` call would fail and the subscription contract would be wrong. Use
+ * `SYNTHETIC_TIMEFRAMES` / `ALL_TIMEFRAMES` where the server-side set is meant.
  */
 export type Timeframe =
+  | "S10"
+  | "S30"
   | "M1"
   | "M2"
   | "M3"
@@ -62,6 +77,7 @@ export type Timeframe =
   | "D1"
   | "W1";
 
+/** Every timeframe the MT5 terminal can stream. The EA wire contract. */
 export const TIMEFRAMES: readonly Timeframe[] = [
   "M1",
   "M2",
@@ -75,8 +91,29 @@ export const TIMEFRAMES: readonly Timeframe[] = [
   "W1",
 ] as const;
 
+/** Frames the server builds itself from the tick feed. Never sent to the EA. */
+export const SYNTHETIC_TIMEFRAMES: readonly Timeframe[] = ["S10", "S30"] as const;
+
+/** Broker + synthetic frames, fastest to slowest. */
+export const ALL_TIMEFRAMES: readonly Timeframe[] = [
+  ...SYNTHETIC_TIMEFRAMES,
+  ...TIMEFRAMES,
+] as const;
+
+/** Bar width of a synthesised frame, in milliseconds. */
+export const TICK_TIMEFRAME_MS: Partial<Record<Timeframe, number>> = {
+  S10: 10_000,
+  S30: 30_000,
+};
+
+export function isSyntheticTimeframe(timeframe: Timeframe): boolean {
+  return (SYNTHETIC_TIMEFRAMES as readonly string[]).includes(timeframe);
+}
+
 /** Minutes per timeframe — used for horizons and time stops. */
 export const TIMEFRAME_MINUTES: Record<Timeframe, number> = {
+  S10: 10 / 60,
+  S30: 0.5,
   M1: 1,
   M2: 2,
   M3: 3,
@@ -92,16 +129,29 @@ export const TIMEFRAME_MINUTES: Record<Timeframe, number> = {
 /**
  * The set of timeframes each trading style is actually analysed on.
  *
- * A scalp is judged on 3-minute-and-below structure; intraday on M5–M30;
- * swing from H1 to W1. Timeframes outside a mode's band are *context*, never
- * a requirement: a scalp is not disqualified because the weekly candle is
- * pointing the other way (see confluence.ts → CONTEXT_TIMEFRAMES).
+ * These bands are the monitoring windows the desk is specified to work in, and
+ * they are exclusive — a mode looks at its own band and nothing else:
+ *
+ *   scalp    → S10 … M3    (ten seconds up to three minutes)
+ *   intraday → M5 … M30    (five minutes to half an hour)
+ *   swing    → H1 … W1     (one hour to the weekly candle)
+ *
+ * Nothing outside a mode's band is scored, penalised or required (see
+ * confluence.ts). A scalp is never demoted because an hourly candle leans the
+ * other way; that was the old bounded-context penalty and it is gone.
  */
 export const MODE_ANALYSIS_TIMEFRAMES: Record<TradeMode, readonly Timeframe[]> = {
-  scalp: ["M1", "M2", "M3"],
+  scalp: ["S10", "S30", "M1", "M2", "M3"],
   intraday: ["M5", "M15", "M30"],
   swing: ["H1", "H4", "D1", "W1"],
 } as const;
+
+/** Human label for a mode's monitoring window, for the terminal. */
+export const MODE_ANALYSIS_LABEL: Record<TradeMode, string> = {
+  scalp: "S10–M3",
+  intraday: "M5–M30",
+  swing: "H1–W1",
+};
 
 /**
  * The broker's own contract specification, reported by the EA for actively

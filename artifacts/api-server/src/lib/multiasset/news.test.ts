@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { assessNewsGate } from "./news";
+import { assessNewsGate, upcomingRedFolder } from "./news";
 import type { NewsFeed, SymbolSpec } from "./types";
 
 const spec: SymbolSpec = {
@@ -70,4 +70,32 @@ test("news gate fails closed when a formerly available feed becomes stale", () =
   assert.equal(result.blocked, true);
   assert.equal(result.status, "unavailable");
   assert.match(result.reason ?? "", /stale/i);
+});
+
+// ── The next 24 hours of red-folder events ───────────────────────────────────
+//
+// The calendar pane is only useful if it shows what is COMING. It used to list
+// whatever the feed happened to carry, with the window decided in the browser.
+
+test("the upcoming window is the next 24 hours, in the order they happen", () => {
+  const events = [
+    { id: "later", time: now + 20 * 60 * 60_000, currency: "USD", country: "US", name: "FOMC", importance: "high" as const },
+    { id: "soon", time: now + 45 * 60_000, currency: "EUR", country: "EU", name: "ECB", importance: "high" as const },
+    { id: "tomorrow", time: now + 30 * 60 * 60_000, currency: "USD", country: "US", name: "NFP", importance: "high" as const },
+    { id: "justHappened", time: now - 5 * 60_000, currency: "GBP", country: "UK", name: "CPI", importance: "high" as const },
+    { id: "stale", time: now - 3 * 60 * 60_000, currency: "JPY", country: "JP", name: "BoJ", importance: "high" as const },
+  ];
+
+  const upcoming = upcomingRedFolder(events, now);
+  assert.deepEqual(upcoming.map((event) => event.id), ["justHappened", "soon", "later"]);
+  // 30 hours out is outside the 24-hour horizon.
+  assert.ok(!upcoming.some((event) => event.id === "tomorrow"));
+  // Events are stamped with their distance so the UI never recomputes it.
+  assert.equal(upcoming[1]!.inMs, 45 * 60_000);
+  assert.equal(upcoming[1]!.next, true, "the next event is flagged");
+  assert.equal(upcoming[2]!.next, false);
+});
+
+test("an empty calendar yields an empty list, not a fabricated one", () => {
+  assert.deepEqual(upcomingRedFolder([], now), []);
 });

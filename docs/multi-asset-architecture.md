@@ -97,9 +97,12 @@ Then, in order, every one of these can **reject or reduce** the order:
    silent over-risk on indices with a small account.)
 3. Margin: `OrderCalcMargin` estimate must leave post-trade margin level above
    `minMarginLevelPct` (default 500 %). Otherwise reduce, then reject.
-4. Cost: spread + commission must be below `maxCostFractionOfRisk` (default
-   33 % of the risk budget) — a scalp whose cost eats a third of its risk has
-   no edge left.
+4. Cost: spread + commission must be below `maxCostFractionOfRisk` — a scalp
+   whose cost eats a third of its risk has no edge left. Both this and the
+   spread ceiling are **per asset class** (`asset-costs.ts`): 35 % / 35 % for
+   forex, 40 % for metals, 45–50 % for indices, commodities and futures, 55–60 %
+   for crypto and stocks. A structurally wide quote on a crypto CFD is not
+   judged by a rule written for EURUSD.
 5. Portfolio: aggregate risk per currency/complex must stay under
    `maxCurrencyExposurePct`, using a correlation matrix, so three correlated
    1 % trades cannot become one 3 % bet.
@@ -126,7 +129,10 @@ All pure functions, all deterministic, all unit-tested. No paid services.
 | `markov.ts` | Discrete state = (direction bucket × volatility bucket). Transition matrix with Laplace smoothing, n-step distribution, stationary distribution, persistence of the current state |
 | `regime.ts` | Per-timeframe classification: `trend_up`, `trend_down`, `range`, `volatile`. Uses slope/R², ATR ratio, Bollinger-width percentile. Produces a confidence in [0,1] |
 | `montecarlo.ts` | Simulates N bootstrapped/GBM paths from current drift + EWMA vol. Returns P(TP before SL), P(timeout), expected R, and **expectancy after spread + commission** |
-| `confluence.ts` | Scores M1…D1 for trend, momentum, structure, S/R distance, volatility fit; weights by timeframe and by the chosen mode (scalp / intraday / swing); yields a 0–100 score and a grade |
+| `confluence.ts` | Scores the frames **inside the chosen mode's band** for trend, momentum, structure, S/R distance, volatility fit; weights by timeframe and mode; yields a 0–100 score and a grade. Bands are exclusive — scalp S10/M1–M3, intraday M5–M30, swing H1–W1 — and a band with no seeded frames is scored from the nearest available ones with the substitution flagged, never as 0 |
+| `subminute.ts` | Builds the S10/S30 frames from the per-symbol tick stream (MetaTrader has no period below M1), gated on bar density so a slow feed yields no sub-minute frames rather than a one-tick "candle" |
+| `asset-costs.ts` | Per-asset-class spread/commission/slippage policy, resolved from the broker-reported `assetClass` |
+| `auto-select.ts` | Automatic best-market pass: evaluates the selected markets, ranks qualifying plans by expectancy after costs, arms one; reports what it did and, when nothing qualifies, the closest miss |
 | `agent.ts` | Orchestrates the above into an `ArmedPlan` + `ManagementPlan`, or an explicit no-trade with reasons |
 | `risk.ts` | Risk governor: per-trade, per-symbol, per-currency, daily loss, drawdown, consecutive-loss de-escalation, circuit breakers |
 
@@ -134,14 +140,23 @@ All pure functions, all deterministic, all unit-tested. No paid services.
 
 A plan is only armed when **all** hold:
 
-1. Confluence score ≥ mode threshold (scalp 72, intraday 68, swing 65).
-2. Timeframe agreement: higher-TF bias not opposed to the trade direction.
-3. Regime is tradeable for the mode (no scalping in `volatile` unless the setup
-   is a volatility-breakout template).
-4. Monte Carlo **expectancy after costs > 0** with ≥ `minEdgeR` (default 0.15 R).
-5. Markov persistence of the current favourable state ≥ 0.55 over the plan horizon.
-6. Risk governor returns `allow`.
-7. Spread ≤ `maxSpreadPoints` and the session filter is green.
+1. Confluence score ≥ mode threshold (scalp 62, intraday 60, swing 60) — computed
+   over the mode's own band only.
+2. Regime is tradeable for the mode.
+3. Monte Carlo **expectancy after costs** ≥ `minEdgeR` (default 0.15 R). The
+   spread and commission are charged inside the simulation, so this is the gate
+   that decides the cost question.
+4. Markov persistence of the current favourable state ≥ the mode's floor
+   (`DEFAULT_MIN_PERSISTENCE = 0` — advisory by default, since persistence is
+   already part of the evidence blend).
+5. Risk governor returns `allow`.
+6. Sizing accepts the plan: lots ≥ broker minimum, margin headroom, and the
+   spread below the **asset class's** `maxSpreadFractionOfStop` ceiling (the
+   live quote's spread is what is measured, and what the fill will pay). A
+   spread wide for its class but still inside the ceiling is carried as a
+   caution, not a rejection.
+7. The session filter is green and the news gate is open (no red-folder release
+   within the blackout, from the same 24-hour window the calendar pane shows).
 
 Failing any gate produces a *reasoned* no-trade, which the terminal displays.
 "No A+ setup right now" is a first-class, visible output.

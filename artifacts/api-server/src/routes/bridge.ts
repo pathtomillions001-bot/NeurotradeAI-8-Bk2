@@ -38,6 +38,7 @@ import {
 } from "../lib/multiasset/claims";
 import {
   acknowledgeResult,
+  adoptBridgeToken,
   applyAccount,
   candleKey,
   clearTerminalData,
@@ -47,14 +48,30 @@ import {
   journal,
   pruneDeselectedSymbols,
   reconcilePositions,
+  rememberBridgeToken,
   requeueStaleCommands,
-  revokeBridgeToken,
+  resendArmedPlans,
+  revokeBridgeTokens,
   sessionForToken,
   ticksFor,
   upsertCandles,
   issueBridgeToken,
   type DeskState,
 } from "../lib/multiasset/store";
+import {
+  PAIRING_CODE_TTL_MS,
+  deletePairingCodesForSession,
+  loadBridgeLink,
+  loadPairingCode,
+  markPairingCodeRedeemed,
+  pairingCodesForSession,
+  prunePairingCodes,
+  revokeBridgeLink,
+  revokeBridgeLinksForSession,
+  saveBridgeLink,
+  savePairingCode,
+  touchBridgeLink,
+} from "../lib/multiasset/bridge-links";
 import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
 import {
   ASSET_CLASSES,
@@ -75,20 +92,54 @@ import {
 } from "../lib/multiasset/types";
 
 const router: IRouter = Router();
-const PAIRING_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * The EA version this server expects.
+ *
+ * The Desk ships the expert advisor itself, so a stale terminal is a
+ * first-class failure mode: the version that was published before this change
+ * sent economic-calendar times in broker-server time, only looked two hours
+ * ahead, and reported no read counts — which the desk rendered as "no
+ * high-impact events in the next 24 hours" while the MT5 calendar tab showed
+ * three red-folder releases. The terminal now reports its version and the Desk
+ * says plainly when it is behind, instead of leaving the user to guess why the
+ * feed looks empty.
+ */
+export const EXPECTED_EA_VERSION = "3.03";
 
 interface PendingPairing {
   code: string;
   sessionId: string;
   createdAt: number;
+  expiresAt: number;
+  redeemedAt: number | null;
 }
 
+/**
+ * In-process mirror of the durable pairing codes.
+ *
+ * Reads and writes go through `bridge-links.ts` (Postgres), so a restart no
+ * longer destroys a code the user has already pasted into their terminal. This
+ * map only keeps the hot path fast and stays exported for the test harness.
+ */
 const pendingPairings = new Map<string, PendingPairing>();
+
+function rememberPendingPairing(record: PendingPairing): void {
+  pendingPairings.set(record.code, record);
+}
+
+/** Drop this session's codes from the in-process mirror (rotation / unlink). */
+function forgetPendingPairings(sessionId: string): void {
+  for (const [code, pairing] of pendingPairings) {
+    if (pairing.sessionId === sessionId) pendingPairings.delete(code);
+  }
+}
 
 function prunePairings(now = Date.now()): void {
   for (const [code, pairing] of pendingPairings) {
-    if (now - pairing.createdAt > PAIRING_TTL_MS) pendingPairings.delete(code);
+    if (pairing.expiresAt <= now) pendingPairings.delete(code);
   }
+  void prunePairingCodes(now);
 }
 
 /** Unambiguous alphabet: no O/0 or I/1 when a user types the code by hand. */
@@ -104,38 +155,86 @@ function makePairingCode(): string {
 
 // ── Pairing ──────────────────────────────────────────────────────────────────
 
-router.post("/pairing-code", (_req, res) => {
-  prunePairings();
+/**
+ * Issue the browser a pairing code — or hand back the one it already has.
+ *
+ * WHY IDEMPOTENT: this used to delete every other code the session owned and
+ * mint a new one on every call, and the setup dialog calls it whenever it is
+ * reopened. So opening the dialog a second time to read the code out loud
+ * invalidated the code the EA was already retrying with, and the MT5 journal
+ * filled with `HTTP 401 … Unknown or expired pairing code` every five seconds,
+ * forever. A code now lives until the user unlinks the terminal (`unpair`),
+ * rotates it explicitly (`{ rotate: true }`), or the sliding 30-day TTL lapses.
+ */
+router.post("/pairing-code", async (req, res) => {
   const sessionId = getBrowserSessionId();
-  for (const [code, pairing] of pendingPairings) {
-    if (pairing.sessionId === sessionId) pendingPairings.delete(code);
+  const rotate = req.body?.rotate === true;
+  const now = Date.now();
+  prunePairings(now);
+
+  if (!rotate) {
+    const stored = await pairingCodesForSession(sessionId, now);
+    const live = stored.find((record) => record.expiresAt > now);
+    if (live) {
+      rememberPendingPairing(live);
+      return res.json({
+        pairingCode: live.code,
+        expiresInMs: Math.max(0, live.expiresAt - now),
+        reused: true,
+      });
+    }
+  } else {
+    // An explicit rotation retires the previous codes: leaving them alive would
+    // mean a value the user believes they have replaced still pairs.
+    await deletePairingCodesForSession(sessionId);
+    forgetPendingPairings(sessionId);
   }
 
   const code = makePairingCode();
-  pendingPairings.set(code, { code, sessionId, createdAt: Date.now() });
-  res.json({ pairingCode: code, expiresInMs: PAIRING_TTL_MS });
+  const record: PendingPairing = {
+    code,
+    sessionId,
+    createdAt: now,
+    expiresAt: now + PAIRING_CODE_TTL_MS,
+    redeemedAt: null,
+  };
+  rememberPendingPairing(record);
+  await savePairingCode(record);
+  return res.json({ pairingCode: code, expiresInMs: PAIRING_CODE_TTL_MS, reused: false });
 });
 
 /**
- * Exchange the one-time screen code for a terminal-scoped bearer token.
+ * Exchange the pairing code for a terminal-scoped bearer token.
  *
  * A broker account may only be held by one Desk at a time. Two Desks on one
  * account would both stream it, both arm plans against it and either could
  * flatten positions the other believed it owned — one balance counted against
  * two independent sets of risk limits. The claim is taken here, atomically,
  * before any token exists.
+ *
+ * Re-pairing the SAME account on the SAME Desk (an EA restart, a redeploy, a
+ * second chart) adds a token to the existing link instead of rotating it: two
+ * instances invalidating each other is what made the connection flap.
  */
 router.post("/pair", async (req, res) => {
   prunePairings();
   const code = String(req.body?.pairingCode ?? "").trim().toUpperCase();
   const terminal = req.body?.terminal ?? {};
-  const pairing = pendingPairings.get(code);
+  let pairing = pendingPairings.get(code);
+  if (!pairing) {
+    // Not in this process — a restart may have happened since the code was
+    // issued. The durable record is the authority now.
+    const stored = await loadPairingCode(code);
+    if (stored) {
+      pairing = stored;
+      rememberPendingPairing(stored);
+    }
+  }
   if (!pairing) return res.status(401).json({ error: "Unknown or expired pairing code." });
 
   const login = Number(terminal.login ?? 0);
   const server = String(terminal.server ?? "unknown");
   if (!Number.isFinite(login) || login <= 0) {
-    pendingPairings.delete(code);
     return res.status(400).json({ error: "terminal.login is required." });
   }
 
@@ -160,11 +259,30 @@ router.post("/pair", async (req, res) => {
     return res.status(409).json({ error: message, code: "account_already_connected" });
   }
 
-  // Redeemed: this code can never be used again.
-  pendingPairings.delete(code);
+  const accountKey = accountKeyFor(login, server);
+  const sameLink = Boolean(
+    desk.terminal &&
+      desk.terminal.login === Math.trunc(login) &&
+      accountKeyFor(desk.terminal.login, desk.terminal.server) === accountKey,
+  );
 
-  if (desk.terminal) revokeBridgeToken(desk.terminal.bridgeToken);
-  clearTerminalData(desk);
+  // The code stays valid (and is marked as used) — that is what lets the same
+  // terminal re-pair after a restart without the user fetching a new one.
+  await markPairingCodeRedeemed(code);
+
+  if (!sameLink) {
+    // A different terminal (or the same Desk linking another account): the
+    // previous link's tokens must die, or a superseded terminal could keep
+    // streaming and trading this Desk.
+    const revoked = revokeBridgeTokens(desk);
+    for (const token of revoked) await revokeBridgeLink(token);
+    clearTerminalData(desk);
+  }
+  // Same account, same Desk: the existing tokens stay valid. That is the whole
+  // point — two EA instances on one account must not invalidate each other in a
+  // re-pair loop, and the command outbox already guarantees that each command is
+  // delivered to exactly one of them.
+
   desk.lastPairingError = null;
 
   const bridgeToken = issueBridgeToken(pairing.sessionId);
@@ -174,71 +292,175 @@ router.post("/pair", async (req, res) => {
     server,
     company: String(terminal.company ?? ""),
     bridgeToken,
-    pairedAt: Date.now(),
+    tokens: sameLink ? [...(desk.terminal?.tokens ?? []), bridgeToken] : [bridgeToken],
+    pairedAt: sameLink ? (desk.terminal?.pairedAt ?? Date.now()) : Date.now(),
     lastSyncAt: Date.now(),
     lastSeq: 0,
+    // Kept while the same link continues; the next beat re-reports it anyway.
+    instanceId: sameLink ? (desk.terminal?.instanceId ?? null) : null,
+    eaVersion: typeof terminal.version === "string" ? terminal.version.slice(0, 32) : null,
     // Filled in from the first heartbeat that reports it. Until then the desk
     // uses its fixed staleness window.
     syncIntervalMs: 0,
   };
 
+  await saveBridgeLink({
+    token: bridgeToken,
+    sessionId: pairing.sessionId,
+    accountKey,
+    login,
+    server,
+    company: String(terminal.company ?? ""),
+    pairedAt: desk.terminal.pairedAt,
+  });
+
   const catalog = Array.isArray(req.body?.catalog) ? req.body.catalog : [];
   let catalogCount = 0;
-  for (const raw of catalog) {
-    const entry = parseCatalogEntry(raw);
-    if (!entry) continue;
-    desk.catalog.set(entry.symbol, entry);
-    catalogCount++;
+  if (!sameLink) {
+    for (const raw of catalog) {
+      const entry = parseCatalogEntry(raw);
+      if (!entry) continue;
+      desk.catalog.set(entry.symbol, entry);
+      catalogCount++;
+    }
   }
 
   journal(
     desk,
     "bridge",
     null,
-    `MetaTrader 5 terminal paired: ${login}@${server}. ${catalogCount} broker markets discovered. This account is now reserved for this Desk.`,
+    sameLink
+      ? `MetaTrader 5 terminal reconnected on account ${login}@${server}. The existing link was kept, so no re-linking is needed.`
+      : `MetaTrader 5 terminal paired: ${login}@${server}. ${catalogCount} broker markets discovered. This account is now reserved for this Desk.`,
   );
-  logger.info({ login, server, catalogCount }, "MT5 bridge paired");
+  logger.info({ login, server, catalogCount, sameLink }, "MT5 bridge paired");
 
   return res.status(201).json({
     bridgeToken,
     accountId: desk.terminal.accountId,
     syncIntervalMs: 1000,
+    // The EA keeps its link across restarts; `durable` tells a newer EA that
+    // the token it saved is expected to keep working.
+    durableLink: true,
     subscriptions: { symbols: desk.watchlist, timeframes: TIMEFRAMES },
   });
 });
 
 /**
- * Revoke the bearer token, release the global account claim and remove every
- * terminal-derived value.
+ * Revoke every token, release the global account claim, drop the pairing codes
+ * and remove every terminal-derived value.
  *
- * Releasing the claim is what lets the same account be connected somewhere
- * else afterwards; without it the account would stay reserved for a Desk that
- * is no longer using it.
+ * This is the ONLY action that ends a link. Closing MT5, closing the browser or
+ * redeploying the API all leave it intact — the terminal reconnects with the
+ * token it saved. Releasing the claim is what lets the same account be
+ * connected somewhere else afterwards.
  */
 router.post("/unpair", async (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
   if (!desk.terminal) return res.status(404).json({ error: "No terminal is linked." });
 
-  revokeBridgeToken(desk.terminal.bridgeToken);
-  await releaseClaimsForSession(desk.sessionId);
   const { login, server } = desk.terminal;
+  const tokens = revokeBridgeTokens(desk);
+  for (const token of tokens) await revokeBridgeLink(token);
+  await revokeBridgeLinksForSession(desk.sessionId);
+  await deletePairingCodesForSession(desk.sessionId);
+  forgetPendingPairings(desk.sessionId);
+  await releaseClaimsForSession(desk.sessionId);
   desk.terminal = null;
   desk.lastPairingError = null;
   clearTerminalData(desk);
-  journal(desk, "bridge", null, `MetaTrader 5 terminal unlinked: ${login}@${server} released and live terminal data was cleared.`);
-  return res.json({ ok: true });
+  journal(
+    desk,
+    "bridge",
+    null,
+    `MetaTrader 5 terminal unlinked: ${login}@${server} released. The saved link was revoked, so a fresh pairing code is required to connect again.`,
+  );
+  return res.json({ ok: true, revoked: tokens.length });
 });
 
 // ── Authentication ───────────────────────────────────────────────────────────
 
-function deskForRequest(req: Request): DeskState | null {
+function bearerToken(req: Request): string {
   const header = req.headers.authorization ?? "";
-  const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  return header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+}
+
+/**
+ * Resolve the Desk a bearer token belongs to.
+ *
+ * The token only has to belong to this session's link — it is no longer
+ * compared for equality against a single "current" token, because a link can
+ * legitimately have more than one live token (a restarted terminal until its
+ * old socket goes quiet, a second chart on the same account). Every token is
+ * bound to one session by `tokenToSession`, so this cannot cross sessions.
+ */
+function deskForRequest(req: Request): DeskState | null {
+  const token = bearerToken(req);
   if (!token) return null;
   const sessionId = sessionForToken(token);
   if (!sessionId) return null;
   const desk = getDesk(sessionId);
-  return desk.terminal?.bridgeToken === token ? desk : null;
+  return desk.terminal ? desk : null;
+}
+
+/**
+ * Rebuild a Desk whose link survived in the database but not in this process.
+ *
+ * This is the fix for "the API restarted and the MT5 terminal never came
+ * back": the EA keeps heartbeating with the token it saved, the link row still
+ * proves it was issued, so the Desk is re-attached and the account claim is
+ * re-taken. The user sees a one-line journal entry, not a dead terminal.
+ */
+async function rehydrateFromDurableLink(req: Request): Promise<DeskState | null> {
+  const token = bearerToken(req);
+  if (!token) return null;
+  const link = await loadBridgeLink(token);
+  if (!link || link.revokedAt) return null;
+
+  const desk = getDesk(link.sessionId);
+  adoptBridgeToken(token, link.sessionId);
+
+  // Re-take the claim so the local mirror agrees with the database again. If
+  // another Desk has taken the account in the meantime this fails and the next
+  // touchClaim() disconnects the terminal with the usual explanation.
+  const claim = await tryClaimAccount({
+    login: link.login,
+    server: link.server,
+    company: link.company,
+    sessionId: link.sessionId,
+  });
+  if (!claim.ok) {
+    logger.warn(
+      { login: link.login, server: link.server, heldBySession: claim.holder.sessionId },
+      "MT5 durable link rehydrated but the account is held by another Desk",
+    );
+  }
+
+  if (!desk.terminal) {
+    desk.terminal = {
+      accountId: `mt5:${link.login}@${link.server}`,
+      login: link.login,
+      server: link.server,
+      company: link.company,
+      bridgeToken: token,
+      tokens: [token],
+      pairedAt: link.pairedAt,
+      lastSyncAt: Date.now(),
+      lastSeq: 0,
+      instanceId: null,
+      eaVersion: null,
+      syncIntervalMs: 0,
+    };
+    journal(
+      desk,
+      "bridge",
+      null,
+      `Desk restored after a server restart: ${link.login}@${link.server} reconnected with its saved link, so no re-pairing was needed.`,
+    );
+  } else {
+    rememberBridgeToken(desk, token);
+  }
+  return desk.terminal ? desk : null;
 }
 
 // ── Parse + validate terminal payloads ───────────────────────────────────────
@@ -440,6 +662,16 @@ function parseNewsFeed(raw: unknown): NewsFeed | null {
     .filter((event) => event.time >= now - 24 * 60 * 60_000 && event.time <= now + 48 * 60 * 60_000)
     .sort((a, b) => a.time - b.time);
   const rawCount = Number.isFinite(num(r.rawCount, NaN)) ? Math.max(0, Math.round(num(r.rawCount))) : undefined;
+  // The window the terminal read, when it reports one. Sanity-bounded: a value
+  // years away cannot be a calendar window, and a window whose end precedes its
+  // start would only produce nonsense in the UI.
+  const windowFromMs = Number.isFinite(num(r.windowFromMs, NaN)) ? Math.round(num(r.windowFromMs)) : null;
+  const windowToMs = Number.isFinite(num(r.windowToMs, NaN)) ? Math.round(num(r.windowToMs)) : null;
+  const usableWindow =
+    windowFromMs !== null && windowToMs !== null &&
+    windowToMs > windowFromMs &&
+    windowToMs > now - 7 * 24 * 60 * 60_000 &&
+    windowFromMs < now + 7 * 24 * 60 * 60_000;
   return {
     available: r.available === true,
     checkedAt: num(r.checkedAt, now),
@@ -449,15 +681,28 @@ function parseNewsFeed(raw: unknown): NewsFeed | null {
     // actually read calendar rows (rawCount) or returned nothing at all.
     rawCount,
     redCount: Number.isFinite(num(r.redCount, NaN)) ? Math.max(0, Math.round(num(r.redCount))) : kept.length,
+    windowFromMs: usableWindow ? windowFromMs : null,
+    windowToMs: usableWindow ? windowToMs : null,
   };
 }
 
 // ── Heartbeat ────────────────────────────────────────────────────────────────
 
-/** POST /api/bridge/sync — the EA's authenticated state heartbeat. */
-router.post("/sync", (req, res) => {
-  const desk = deskForRequest(req);
+/**
+ * POST /api/bridge/sync — the EA's authenticated state heartbeat.
+ *
+ * The first thing it does is make sure the link can be served at all: if this
+ * process has never seen the token (restart, redeploy, a second instance behind
+ * the router) the durable link rebuilds the Desk instead of answering 401. A
+ * 401 here is what used to knock a terminal out of the system permanently.
+ */
+router.post("/sync", async (req, res) => {
+  let desk = deskForRequest(req);
+  if (!desk) desk = await rehydrateFromDurableLink(req);
   if (!desk || !desk.terminal) return res.status(401).json({ error: "Invalid or revoked bridge token." });
+
+  const presentedToken = bearerToken(req);
+  touchBridgeLink(presentedToken);
 
   // ── Has this account been claimed by another Desk since the last beat? ───
   // The token is still cryptographically valid, so this is the only place the
@@ -466,7 +711,8 @@ router.post("/sync", (req, res) => {
   const accountKey = accountKeyFor(desk.terminal.login, desk.terminal.server);
   if (!touchClaim(desk.sessionId, accountKey)) {
     const { login, server } = desk.terminal;
-    revokeBridgeToken(desk.terminal.bridgeToken);
+    const tokens = revokeBridgeTokens(desk);
+    for (const token of tokens) await revokeBridgeLink(token);
     desk.terminal = null;
     clearTerminalData(desk);
     journal(
@@ -485,13 +731,58 @@ router.post("/sync", (req, res) => {
   const seq = Math.round(num(body.seq));
   const now = Date.now();
 
-  if (seq > 0 && seq < desk.terminal.lastSeq) {
+  /**
+   * ── Sequence numbers are per EA INSTANCE ────────────────────────────────
+   *
+   * `seq` is a counter that the EA increments per heartbeat, and it was
+   * compared against a single stored value. That only holds for one instance:
+   * a second chart running the same EA (or an instance that restarted) starts
+   * its counter near zero, so the desk saw "seq went backwards" and concluded
+   * the terminal had restarted — clearing every armed plan and dropping the
+   * setups the user had just approved, on every alternating beat.
+   *
+   * With an instance id the two cases are distinguishable:
+   *   • same instance, lower seq  → a genuine restart of that instance;
+   *   • different instance        → an additional (or replaced) terminal, whose
+   *     local plan array is empty, so the Desk re-delivers its armed plans
+   *     instead of discarding them.
+   */
+  const instanceId = typeof body.instanceId === "string" ? body.instanceId.trim().slice(0, 64) : "";
+  const previousInstance = desk.terminal.instanceId;
+  if (instanceId) {
+    if (instanceId === previousInstance) {
+      if (seq > 0 && seq < desk.terminal.lastSeq) {
+        journal(desk, "bridge", null, "Terminal restarted — armed plans cleared and state resynchronised.");
+        desk.plans.clear();
+        desk.inflight.clear();
+      }
+    } else {
+      if (previousInstance !== null) {
+        const resent = resendArmedPlans(desk, now);
+        journal(
+          desk,
+          "bridge",
+          null,
+          resent > 0
+            ? `A new terminal instance joined this link; ${resent} armed plan(s) were re-sent to it so nothing was left on screen untraded.`
+            : "A new terminal instance joined this link.",
+        );
+      }
+      desk.terminal.instanceId = instanceId;
+      desk.terminal.lastSeq = 0;
+    }
+  } else if (seq > 0 && seq < desk.terminal.lastSeq) {
+    // Legacy EA without an instance id: keep the original heuristic.
     desk.plans.clear();
     desk.inflight.clear();
     journal(desk, "bridge", null, "Terminal restarted — armed plans cleared and state resynchronised.");
   }
   desk.terminal.lastSeq = seq;
   desk.terminal.lastSyncAt = now;
+
+  if (typeof body.version === "string" && body.version.trim()) {
+    desk.terminal.eaVersion = body.version.trim().slice(0, 32);
+  }
 
   const account = parseAccount(body.account);
   if (account) applyAccount(desk, account);
@@ -703,6 +994,15 @@ router.get("/status", (_req, res) => {
    * the user the link was dead while the desk was still analysing normally.
    */
   const now = Date.now();
+  // Version skew is judged numerically so a string comparison can never claim
+  // "3.9" is older than "3.10".
+  const reported = (desk.terminal.eaVersion ?? "").split(".").map((part) => Number(part));
+  const expected = EXPECTED_EA_VERSION.split(".").map((part) => Number(part));
+  const eaUpdateAvailable =
+    reported.some((part) => !Number.isFinite(part)) ||
+    reported[0] < expected[0] ||
+    (reported[0] === expected[0] && (reported[1] ?? 0) < (expected[1] ?? 0));
+
   return res.json({
     linked: true,
     accountId: desk.terminal.accountId,
@@ -717,6 +1017,16 @@ router.get("/status", (_req, res) => {
     degradedAfterMs: TERMINAL_DEGRADED_MS,
     staleAfterMs: terminalStaleWindowMs(desk),
     syncIntervalMs: desk.terminal.syncIntervalMs || null,
+    /**
+     * The link is durable: the EA saved its token in the terminal, the server
+     * persisted the link, and neither MT5 being closed nor a redeploy ends it.
+     * Only "Unlink terminal" does. Surfaced so the dialog can say so plainly
+     * instead of warning the user about a ten-minute code that no longer exists.
+     */
+    durable: true,
+    eaVersion: desk.terminal.eaVersion,
+    expectedEaVersion: EXPECTED_EA_VERSION,
+    eaUpdateAvailable,
     queuedCommands: desk.outbox.length,
     inflightCommands: desk.inflight.size,
     catalogCount: desk.catalog.size,

@@ -259,6 +259,18 @@ export interface NewsFeed {
   rawCount?: number;
   /** Rows that survived the red-folder filter. Equals events.length when sent. */
   redCount?: number;
+  /**
+   * The time range (UTC epoch ms) the terminal actually read.
+   *
+   * WHY IT MATTERS: "0 red-folder events" is only meaningful next to the window
+   * it describes. An older EA read a two-hour window and reported nothing about
+   * it, so the Desk printed "No high-impact events in the next 24 hours" while
+   * the terminal's own calendar tab listed three red-folder releases for the
+   * day. The Desk now shows the range it was given, and says plainly when that
+   * range does not cover the day it claims to describe.
+   */
+  windowFromMs?: number | null;
+  windowToMs?: number | null;
 }
 
 // ── Account ──────────────────────────────────────────────────────────────────

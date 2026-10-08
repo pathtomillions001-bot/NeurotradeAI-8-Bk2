@@ -28,11 +28,13 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
     refetchInterval: open ? 2000 : false,
     enabled: open,
   });
-  const pairing = useMutation({ mutationFn: deskApi.pairingCode });
+  const pairing = useMutation({ mutationFn: (rotate: boolean) => deskApi.pairingCode(rotate) });
+  // Rotating only replaces the code shown here; the link itself is untouched.
+  const rotate = useMutation({ mutationFn: () => deskApi.pairingCode(true) });
   const unpair = useMutation({ mutationFn: deskApi.unpair, onSuccess: onChanged });
 
   useEffect(() => {
-    if (open && !linked && !pairing.data && !pairing.isPending) pairing.mutate();
+    if (open && !linked && !pairing.data && !pairing.isPending) pairing.mutate(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, linked]);
   useEffect(() => {
@@ -51,7 +53,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
   };
 
   if (!open) return null;
-  const code = pairing.data?.pairingCode;
+  const code = rotate.data?.pairingCode ?? pairing.data?.pairingCode;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 p-0 sm:items-center sm:p-4">
@@ -76,6 +78,17 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                 </dl>
               </div>
               {status.data.lastPairingError && <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">{status.data.lastPairingError}</p>}
+              {status.data.eaUpdateAvailable && (
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-200">
+                  <p className="font-medium text-amber-300">This terminal is running an older EA{status.data.eaVersion ? ` (v${status.data.eaVersion})` : ""}.</p>
+                  <p className="mt-1.5">
+                    Older builds read a much shorter economic-calendar window and report broker-server times, so the news pane can
+                    show "no red-folder events" while MT5's own Calendar tab lists releases for the day. Download the EA below,
+                    recompile it in MetaEditor and re-attach it to the chart — the link is restored automatically, no new code needed.
+                  </p>
+                  <a href={downloadUrl} download className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-200 transition-colors hover:bg-amber-500/20"><Download className="h-3.5 w-3.5" />Download EA v{status.data.expectedEaVersion}</a>
+                </div>
+              )}
               {status.data.degraded && !status.data.stale && (
                 <p className="rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-[11px] leading-relaxed text-sky-200">
                   The heartbeat is late — the terminal last synced {Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s ago
@@ -103,9 +116,20 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p className="mt-2 text-[10px] text-zinc-500">For a deployed application use its public HTTPS origin. Do not use localhost from a remote/VPS terminal.</p>
                 </Step>
                 <Step n={3} title="Set EA inputs and pair">
-                  <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this one-time value into <code className="text-zinc-200">PairingCode</code>:</p>
-                  <CopyValue value={pairing.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
-                  <p className="mt-2 text-[10px] text-zinc-500">The code is valid for 10 minutes and can only be redeemed once. If it expires, leave the EA attached and reopen this dialog for a fresh code.</p>
+                  <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this code into <code className="text-zinc-200">PairingCode</code>:</p>
+                  <CopyValue value={pairing.isPending || rotate.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
+                  <p className="mt-2 text-[10px] text-zinc-500">
+                    This code stays valid until you unlink the terminal here. The EA saves it — together with the link itself — inside
+                    your MT5 installation, so closing MT5, restarting the computer or a platform update reconnects automatically.
+                    Only "Unlink terminal" ends the connection.
+                  </p>
+                  <div className="mt-2 flex items-center gap-2">
+                    <button type="button" onClick={() => rotate.mutate()} disabled={rotate.isPending} className="rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50">
+                      {rotate.isPending ? "Generating…" : "Generate a new code"}
+                    </button>
+                    <span className="text-[10px] text-zinc-600">Only if this code may have been seen by someone else.</span>
+                  </div>
+                  {status.data?.eaUpdateAvailable && <p className="mt-2 text-[10px] text-amber-300">The connected terminal is running an older EA — the download below is the current build ({status.data.expectedEaVersion}).</p>}
                 </Step>
               </ol>
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">One account, one Desk.</span> An MT5 account can only be linked to a single Desk at a time. If it is already connected in another browser or device, pairing here is refused until that Desk unlinks it — two Desks on one account would trade the same balance against separate risk limits.</p><p className="mt-2"><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>

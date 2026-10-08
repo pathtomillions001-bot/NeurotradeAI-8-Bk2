@@ -306,6 +306,47 @@ CREATE TABLE IF NOT EXISTS mt5_account_claims (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mt5_account_claims_key ON mt5_account_claims (account_key);
 CREATE INDEX IF NOT EXISTS mt5_account_claims_session_idx ON mt5_account_claims (session_id);
+
+-- ── Durable MT5 bridge links ────────────────────────────────────────────────
+-- The bridge token used to live only in the API process's memory, so every
+-- deploy, restart or crash broke the terminal <-> Desk link: the EA's token
+-- became "invalid", the EA fell back to its pairing code, and the code was
+-- only in memory too — so it had expired as well. The terminal then retried a
+-- dead code every 5 seconds forever (HTTP 401 in the MT5 journal), stopped
+-- heartbeating (the Desk showed "reconnecting"), and armed plans were never
+-- delivered. Persisting both makes the link survive restarts and makes the
+-- pairing code stay valid until the user actually unlinks the terminal.
+--
+-- Tokens are stored HASHED: the raw bearer token only ever exists in the
+-- terminal and in process memory, so a database leak cannot be replayed
+-- against the bridge. Revoking a link marks it revoked (the row is kept so a
+-- reused link is still refused after a restart has cleared process memory).
+CREATE TABLE IF NOT EXISTS mt5_bridge_links (
+  token_hash TEXT PRIMARY KEY,        -- sha256 of the bearer token the EA holds
+  session_id TEXT NOT NULL,           -- Desk (browser session) this terminal feeds
+  account_key TEXT NOT NULL,          -- normalised 'login@SERVER'
+  login BIGINT NOT NULL,
+  server TEXT NOT NULL,
+  company TEXT,
+  paired_at_ms BIGINT NOT NULL,
+  last_seen_at_ms BIGINT NOT NULL,
+  revoked_at_ms BIGINT                -- non-null once the user unlinks
+);
+CREATE INDEX IF NOT EXISTS mt5_bridge_links_session_idx ON mt5_bridge_links (session_id);
+CREATE INDEX IF NOT EXISTS mt5_bridge_links_account_idx ON mt5_bridge_links (account_key);
+
+-- Pairing codes live until the user unlinks the terminal (or rotates the
+-- code), not for ten minutes: an EA restart must be able to re-pair with the
+-- code the user already pasted instead of hammering a 401 loop until they
+-- notice. The code is scoped to the browser session that generated it.
+CREATE TABLE IF NOT EXISTS mt5_pairing_codes (
+  code TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  expires_at_ms BIGINT NOT NULL,      -- sliding, refreshed by use
+  redeemed_at_ms BIGINT               -- first successful use
+);
+CREATE INDEX IF NOT EXISTS mt5_pairing_codes_session_idx ON mt5_pairing_codes (session_id);
 `;
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

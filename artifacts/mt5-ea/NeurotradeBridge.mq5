@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.02                                                     |
+//| Version 3.03                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -67,6 +67,38 @@
 //|     redCount, and reports the calendar as unavailable (fail closed |
 //|     for new entries) when the read returns nothing at all.         |
 //|                                                                    |
+//| WHAT CHANGED IN v3.03                                             |
+//|  9. THE LINK OUTLIVES EVERY RESTART.                              |
+//|     The bearer token used to live only in the EA's memory and on   |
+//|     the server's heap, so closing MT5, closing the browser or a    |
+//|     server redeploy broke the connection. The EA then retried its  |
+//|     old pairing code every 5 seconds, the server had forgotten it  |
+//|     too, and the MT5 journal filled with                       |
+//|       HTTP 401 ... Unknown or expired pairing code                 |
+//|     while the Desk showed "reconnecting" and armed plans were      |
+//|     never delivered. The token AND the pairing code are now saved  |
+//|     in the terminal's common Files folder (shared by every chart   |
+//|     of this installation) and restored at startup, and the server  |
+//|     persists the link as well. The connection now ends only when   |
+//|     the user unlinks the terminal in the Desk.                     |
+//| 10. A REFUSED TOKEN NO LONGER MEANS A BLIND RETRY LOOP.            |
+//|     A definitive 401 clears the saved token, prints ONE line       |
+//|     saying what to do, and backs off to a slow re-pair cadence     |
+//|     instead of hammering the server five times a second.           |
+//| 11. THE CALENDAR READ COVERS THE DAY THE DESK DESCRIBES.           |
+//|     The Desk lists the last 12 hours of red-folder releases and    |
+//|     the next 24; the EA only ever fetched the next two. The        |
+//|     terminal's own calendar could show three releases for today    |
+//|     while the Desk showed none. The window is now 12 h back to     |
+//|     24 h ahead, and the range actually read is published on the    |
+//|     wire so the Desk can show what it covered.                     |
+//| 12. INSTANCES ARE IDENTIFIED.                                      |
+//|     A second chart (or a restarted EA) reporting a lower sequence  |
+//|     counter looked like "the terminal restarted", which cleared    |
+//|     armed plans and dropped the setup the user had just approved.  |
+//|     Each instance now identifies itself, so the Desk re-sends      |
+//|     armed plans to a new instance instead of discarding them.      |
+//|                                                                    |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -83,7 +115,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "3.02"
+#property version   "3.03"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -111,6 +143,13 @@ input bool   VerboseLog                = true;
 #define MAX_PLANS      32
 #define MAX_SEEN_CMDS  512
 #define NEWS_REFRESH_SECONDS 60
+// The Desk lists red-folder releases from the last 12 hours and the next 24.
+// The EA must fetch the SAME span: fetching only the next two hours meant the
+// terminal's own calendar could show three red-folder releases for the day
+// while the Desk showed none — and the Desk's window is the one the news gate
+// reasons about.
+#define NEWS_LOOKBEHIND_SECONDS (12 * 60 * 60)
+#define NEWS_LOOKAHEAD_SECONDS  (24 * 60 * 60)
 
 // M2/M3 exist so a scalp book can be analysed on 3-minute-and-below structure;
 // W1 so a swing book can see the weekly candle it is actually held against.
@@ -154,6 +193,23 @@ datetime  g_lastOk = 0;
 datetime  g_nextPairAttempt = 0;
 bool      g_tradingEnabled = false;
 bool      g_liveTradingEnabled = false;
+// ── Durable link ────────────────────────────────────────────────────────────
+// The token and the pairing code are kept in this terminal's common Files
+// folder, keyed by account + server, and restored at startup. That is what
+// makes "close MT5, reboot the VPS, redeploy the server" survive without the
+// user touching anything — the connection ends only when they unlink the
+// terminal in the Desk. The common folder is shared by every chart in this
+// installation, so a second chart reads the same link instead of pairing again.
+string    g_savedCode = "";
+bool      g_linkLoaded = false;
+// A definitive refusal (401) must not be retried every five seconds forever:
+// that is what buried the real reason in thousands of identical journal lines.
+int       g_pairAttemptDelaySeconds = 5;
+bool      g_refusalPrinted = false;
+// Identity of THIS instance (one OnInit). The Desk needs it to tell "a second
+// chart" from "the same EA restarted": the former must be handed the armed
+// plans again, the latter means the terminal's local plans are genuinely gone.
+string    g_instanceId = "";
 double    g_dayStartEquity = 0;
 int       g_dayStamp = -1;
 string    g_results = "";
@@ -180,6 +236,10 @@ datetime  g_newsTimes[];
 // desk can tell "nothing is scheduled" from "the read returned nothing".
 int       g_rawCount = 0;
 int       g_redCount = 0;
+// The UTC range actually read from the calendar, published on the wire so the
+// Desk can show what "0 red-folder events" is actually describing.
+long      g_calendarFromMs = 0;
+long      g_calendarToMs = 0;
 // The heartbeat interval this EA is actually running with, sent in `clock` so
 // the desk sizes its own patience from the terminal's contract instead of
 // assuming a cadence: a slow heartbeat must not read as a dead terminal.
@@ -203,12 +263,30 @@ int OnInit()
    g_syncIntervalMs = interval;
    EventSetMillisecondTimer(interval);
 
-   Print("NeurotradeBridge v2 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   // A fresh identity per attach. Two charts (or a reloaded EA) are then
+   // distinguishable, which is what lets the Desk hand armed plans back to a
+   // terminal that has none instead of assuming the whole terminal restarted.
+   MathSrand((int)(TimeLocal() + (long)GetTickCount()));
+   g_instanceId = StringFormat("%s-%I64d-%d",
+                               AccountInfoString(ACCOUNT_SERVER),
+                               AccountInfoInteger(ACCOUNT_LOGIN),
+                               MathRand());
+
+   // Restore the saved link BEFORE anything else: if this terminal is already
+   // paired, the very first heartbeat continues the connection and no code is
+   // ever needed again.
+   LoadSavedLink();
+
+   Print("NeurotradeBridge v3.03 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
-   if(StringLen(PairingCode) == 0)
-      Print("NeurotradeBridge: PairingCode is empty. Open Desk -> Link MT5 to generate one.");
+   if(g_token != "")
+      Print("NeurotradeBridge: restored the saved link for account ",
+            IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), "@", AccountInfoString(ACCOUNT_SERVER),
+            ". No pairing code is needed — the connection resumes automatically.");
+   else if(StringLen(EffectivePairingCode()) == 0)
+      Log("Waiting for PairingCode input. Open Desk -> Link MT5 to generate one.");
 
    // Never fail initialization simply because pairing is not ready yet.
    return(INIT_SUCCEEDED);
@@ -252,13 +330,96 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
+//| Durable link (terminal-side)                                      |
+//|                                                                  |
+//| The Desk persists the link server-side; this is the other half:  |
+//| the EA stores the token it was issued, plus the pairing code that |
+//| produced it, in the terminal's common Files folder so that        |
+//| restarting MT5 (or the machine) reconnects instead of falling    |
+//| back to a code the server has long forgotten.                    |
+//|                                                                  |
+//| The file lives in the COMMON folder on purpose: every chart of    |
+//| this installation shares it, so a second chart adopts the existing |
+//| link instead of pairing again (which is what made two instances   |
+//| invalidate each other in a re-pair loop).                        |
+//+------------------------------------------------------------------+
+string LinkFileName()
+{
+   // One link per broker account, sanitised so a server name with spaces or
+   // slashes can never escape the folder.
+   string account = StringFormat("%I64d_%s",
+                                 AccountInfoInteger(ACCOUNT_LOGIN),
+                                 AccountInfoString(ACCOUNT_SERVER));
+   string safe = "";
+   for(int i = 0; i < StringLen(account); i++)
+   {
+      ushort ch = StringGetCharacter(account, i);
+      if((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '_')
+         safe += ShortToString(ch);
+      else
+         safe += "_";
+   }
+   return "NeurotradeBridge_" + safe + ".link";
+}
+
+void SaveLink()
+{
+   string name = LinkFileName();
+   ResetLastError();
+   int handle = FileOpen(name, FILE_COMMON | FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+   {
+      Log("Could not save the connection link (" + IntegerToString(GetLastError()) +
+          "). This terminal will need the pairing code again after a restart.");
+      return;
+   }
+   FileWriteString(handle, "v1\n");
+   FileWriteString(handle, g_token + "\n");
+   FileWriteString(EffectivePairingCode() + "\n");
+   FileClose(handle);
+}
+
+void LoadSavedLink()
+{
+   if(g_linkLoaded) return;
+   g_linkLoaded = true;
+   string name = LinkFileName();
+   ResetLastError();
+   if(!FileIsExist(name, FILE_COMMON)) return;
+   int handle = FileOpen(name, FILE_COMMON | FILE_READ | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE) return;
+   string version = FileReadString(handle);
+   string token = FileReadString(handle);
+   string code = FileReadString(handle);
+   FileClose(handle);
+   if(version != "v1") return;
+   g_token = token;
+   if(StringLen(code) > 0) g_savedCode = code;
+}
+
+/** Keep the saved token in step with memory (a 401 empties both). */
+void ForgetSavedLinkToken()
+{
+   g_token = "";
+   SaveLink();
+}
+
+/** The code to present: what the user typed, else the one that worked before. */
+string EffectivePairingCode()
+{
+   string typed = StringTrimmed(PairingCode);
+   if(StringLen(typed) > 0) return typed;
+   return g_savedCode;
+}
+
+//+------------------------------------------------------------------+
 //| Pairing and HTTP                                                  |
 //+------------------------------------------------------------------+
 void TryPair()
 {
    datetime now = NowServer();
    if(now < g_nextPairAttempt) return;
-   g_nextPairAttempt = now + 5;
+   g_nextPairAttempt = now + g_pairAttemptDelaySeconds;
 
    string base = NormalisedServerUrl();
    if(base == "")
@@ -266,16 +427,19 @@ void TryPair()
       Log("Waiting for ServerUrl input.");
       return;
    }
-   if(StringLen(StringTrimmed(PairingCode)) == 0)
+   string code = EffectivePairingCode();
+   if(StringLen(code) == 0)
    {
       Log("Waiting for PairingCode input.");
       return;
    }
 
-   string body = "{\"pairingCode\":\"" + JsonEscape(StringTrimmed(PairingCode)) + "\",\"terminal\":{";
+   string body = "{\"pairingCode\":\"" + JsonEscape(code) + "\",\"terminal\":{";
    body += "\"login\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
    body += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
    body += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
+   body += "\"version\":\"3.03\",";
+   body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
    body += "\"currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\"},";
    // All broker symbols are discovered once at pairing. This is a catalogue,
    // not a quote feed: live specs/quotes/bars are sent only for user-selected
@@ -292,9 +456,32 @@ void TryPair()
       if(g_lastHttpStatus == 409)
       {
          g_nextPairAttempt = now + 60;
+         g_pairAttemptDelaySeconds = 60;
          Print("NeurotradeBridge: PAIRING REFUSED — ", (g_lastHttpError == "" ? "this MT5 account is already connected in another browser." : g_lastHttpError));
          Print("NeurotradeBridge: open the Desk that holds account ", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
                "@", AccountInfoString(ACCOUNT_SERVER), " and unlink it, or wait a few minutes. Retrying in 60s with the same code.");
+      }
+      else if(g_lastHttpStatus == 401)
+      {
+         // The code itself is unknown or was retired (the user unlinked the
+         // terminal, or rotated the code). Retrying it five times a second
+         // produced thousands of identical 401 lines and hid the real reason.
+         // Say it once, back off, and let the user paste a fresh code.
+         g_pairAttemptDelaySeconds = 60;
+         g_nextPairAttempt = now + 60;
+         if(!g_refusalPrinted)
+         {
+            g_refusalPrinted = true;
+            Print("NeurotradeBridge: this pairing code is not valid any more — it was either replaced ",
+                  "or the terminal was unlinked in the Desk. Open the Desk, copy the current code into this ",
+                  "EA's PairingCode input (or unlink and re-link), and the terminal will connect again. ",
+                  "Still trying in the background every 60s.");
+         }
+      }
+      else
+      {
+         g_pairAttemptDelaySeconds = 5;
+         g_nextPairAttempt = now + g_pairAttemptDelaySeconds;
       }
       return;
    }
@@ -309,8 +496,15 @@ void TryPair()
    g_token = token;
    g_lastOk = now;
    g_seq = 0;
+   g_savedCode = code;
+   g_pairAttemptDelaySeconds = 5;
+   g_refusalPrinted = false;
+   // Persist immediately: from here on, a restart of MT5 or of the server
+   // reconnects with this token instead of asking the user for a code again.
+   SaveLink();
    ApplyServerResponse(response);
-   Print("NeurotradeBridge: paired successfully. Waiting for Desk market selections.");
+   Print("NeurotradeBridge: paired successfully. The link is saved in this terminal, so closing MT5 ",
+         "or restarting the platform will reconnect automatically. It ends only if you unlink the terminal in the Desk.");
 }
 
 bool HttpPost(const string path, const string body, string &response, const bool authenticated)
@@ -357,9 +551,13 @@ bool HttpPost(const string path, const string body, string &response, const bool
       if(status == 401 && authenticated)
       {
          // Token may have been unpaired/replaced. Remain attached and let the
-         // user enter a fresh code rather than doing any blind work.
+         // user enter a fresh code rather than doing any blind work. The saved
+         // copy is cleared too — otherwise the next restart would restore the
+         // very token the server just refused and the loop would never end.
          g_token = "";
          g_tradingEnabled = false;
+         g_savedCode = EffectivePairingCode();
+         SaveLink();
       }
       return false;
    }
@@ -422,6 +620,12 @@ void Sync()
    g_seq++;
    string body = "{";
    body += "\"seq\":" + IntegerToString(g_seq) + ",";
+   // Who is speaking, and with which build. The instance id keeps a second
+   // chart's counter from looking like a terminal restart; the version lets the
+   // Desk say "your EA is out of date" instead of leaving a stale terminal
+   // silently disagreeing with it about the calendar.
+   body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
+   body += "\"version\":\"3.03\",";
    // Tell the server how this terminal's clock relates to UTC. Combined with
    // the UTC-normalised timestamps below it lets the Desk detect a skewed
    // clock instead of trusting (or silently mis-trusting) every tick.
@@ -459,7 +663,25 @@ void Sync()
                "Unlink it there, then enter a fresh pairing code here.");
          g_token = "";
          g_tradingEnabled = false;
+         SaveLink();
          g_nextPairAttempt = 0;
+      }
+      else if(g_lastHttpStatus == 401)
+      {
+         // The Desk no longer recognises this token. It backs off to a slow
+         // re-pair attempt rather than a five-second loop; the saved code is
+         // still tried (it may simply have been a transient server restart) and
+         // the reason is printed once.
+         if(!g_refusalPrinted)
+         {
+            g_refusalPrinted = true;
+            Print("NeurotradeBridge: the Desk no longer accepts this terminal's link (401). It was most ",
+                  "likely unlinked from the Desk. Open Desk -> Link MT5, copy the current pairing code into ",
+                  "this EA's PairingCode input, and it will reconnect. Retrying slowly in the background.");
+         }
+         g_pairAttemptDelaySeconds = 60;
+         g_nextPairAttempt = NowServer() + 60;
+         g_tradingEnabled = false;
       }
       // Bounded by the SERVER-silence budget, not the tick-freshness one: the
       // desk keeps a link alive for its own (adaptive) window, and the EA must
@@ -826,17 +1048,29 @@ void RefreshCalendar(const bool force)
 
    MqlCalendarValue values[];
    ResetLastError();
-   // A day of forward visibility: the Desk renders an upcoming-events list,
-   // and a two-hour window left it empty for most of the session.
-   int count = CalendarValueHistory(values, now - 15 * 60, now + 24 * 60 * 60);
+   // The window the Desk renders: the day's releases that have already happened
+   // plus the next 24 hours. Both halves matter — the upcoming list is what
+   // gates new entries, and the passed list is the evidence that the gate is
+   // working at all ("0 red-folder events" next to an MT5 calendar showing
+   // three of them is indistinguishable from a broken feed).
+   datetime windowFrom = now - NEWS_LOOKBEHIND_SECONDS;
+   datetime windowTo = now + NEWS_LOOKAHEAD_SECONDS;
+   int count = CalendarValueHistory(values, windowFrom, windowTo);
    if(count <= 0)
    {
-      // Fallback: everything the terminal knows from six hours ago onward.
-      int wide = CalendarValueHistory(values, now - 6 * 60 * 60, 0);
-      if(wide > 0) count = wide;
+      // Fallback: everything the terminal knows from the same look-behind
+      // onward, with an open upper bound — the form MQL5's own examples use.
+      int wide = CalendarValueHistory(values, windowFrom, 0);
+      if(wide > 0)
+      {
+         count = wide;
+         windowTo = 0;   // open-ended; reported as "no upper bound" on the wire
+      }
    }
 
    g_rawCount = count > 0 ? count : 0;
+   g_calendarFromMs = ToUtcMs(windowFrom);
+   g_calendarToMs = windowTo > 0 ? ToUtcMs(windowTo) : 0;
 
    ArrayResize(g_newsTimes, 0);
    ArrayResize(g_newsCurrencies, 0);
@@ -891,6 +1125,12 @@ string NewsJson()
    // at all, and the desk must say so rather than promise a quiet session.
    json += "\"rawCount\":" + IntegerToString(g_rawCount) + ",";
    json += "\"redCount\":" + IntegerToString(g_redCount) + ",";
+   // The span actually read. Without it the Desk can only say "no red-folder
+   // events" without saying over what — which is how a two-hour window came to
+   // be displayed as an all-clear for the whole day.
+   json += "\"windowFromMs\":" + IntegerToString(g_calendarFromMs) + ",";
+   if(g_calendarToMs > 0)
+      json += "\"windowToMs\":" + IntegerToString(g_calendarToMs) + ",";
    json += "\"events\":[";
    for(int i = 0; i < ArraySize(g_newsTimes); i++)
    {

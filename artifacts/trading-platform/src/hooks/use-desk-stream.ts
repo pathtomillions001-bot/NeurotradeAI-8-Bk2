@@ -17,7 +17,6 @@ import { withTabSession } from "@/lib/tab-session";
 import type {
   Account,
   ArmedPlan,
-  FeedDiagnostics,
   Instrument,
   Position,
   TradeMode,
@@ -44,9 +43,15 @@ export interface DeskStreamState {
   plans: ArmedPlan[] | null;
   terminal: { login: number; lastSyncAt: number; stale: boolean; degraded?: boolean } | null;
   connected: boolean;
+  /**
+   * True while `desk` events are actually arriving. Distinct from
+   * `connected` (the socket being open): during a heartbeat gap the socket
+   * stays open but no data flows, and the desk must fall back to fast polling
+   * instead of showing frozen prices for twenty seconds.
+   */
+  flowing: boolean;
   /** Server timestamp of the last event — a heartbeat, not a price update. */
   lastEventAt: number | null;
-  feed: FeedDiagnostics | null;
 }
 
 /**
@@ -82,8 +87,8 @@ export function useDeskStream(enabled: boolean): DeskStreamState & {
     plans: null,
     terminal: null,
     connected: false,
+    flowing: false,
     lastEventAt: null,
-    feed: null,
   });
   const [tick, setTick] = useState(0);
   const lastEventAtRef = useRef<number | null>(null);
@@ -97,8 +102,8 @@ export function useDeskStream(enabled: boolean): DeskStreamState & {
         plans: null,
         terminal: null,
         connected: false,
+        flowing: false,
         lastEventAt: null,
-        feed: null,
       });
       return;
     }
@@ -116,13 +121,8 @@ export function useDeskStream(enabled: boolean): DeskStreamState & {
           plans: payload.plans,
           terminal: payload.terminal,
           connected: true,
+          flowing: true,
           lastEventAt: Date.now(),
-          feed: {
-            clockSkewMs: payload.clockSkewMs,
-            clockWarning: null,
-            lastQuoteAgeMs: payload.lastQuoteAgeMs,
-            quoteFreshForMs: 8_000,
-          },
         });
       } catch {
         // A malformed frame must not kill the stream.
@@ -145,16 +145,18 @@ export function useDeskStream(enabled: boolean): DeskStreamState & {
     const interval = setInterval(() => {
       const last = lastEventAtRef.current;
       if (last !== null && Date.now() - last > STALE_STREAM_MS) {
-        // Clear the push cache so the polling fallback wins the `??` race.
+        // Clear the push cache so the polling fallback wins the `??` race,
+        // and mark the stream as not flowing so the desk polls fast and the
+        // STREAM/POLL badge tells the truth.
         setState((prev) => ({
           ...prev,
           instruments: null,
           account: null,
           positions: null,
           plans: null,
-          // Keep terminal and feed — they describe the connection, not
-          // tick-level data, and the REST /state query already refreshes
-          // them independently.
+          flowing: false,
+          // Keep terminal — it describes the connection, not tick-level data,
+          // and the REST /state query already refreshes it independently.
         }));
         lastEventAtRef.current = null;
       }

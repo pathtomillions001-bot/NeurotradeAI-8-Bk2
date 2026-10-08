@@ -291,12 +291,12 @@ describe("MT5 bridge — durable link", () => {
       eaUpdateAvailable: boolean;
     };
     assert.equal(status.eaVersion, "2.00");
-    assert.equal(status.expectedEaVersion, "3.03");
+    assert.equal(status.expectedEaVersion, "3.04");
     assert.equal(status.eaUpdateAvailable, true);
 
     // A terminal that reports the current version is not nagged.
     const current = await connect(session, 6113);
-    await as(session, () => post("/sync", { seq: 1, version: "3.03" }, current));
+    await as(session, () => post("/sync", { seq: 1, version: "3.04" }, current));
     const fresh = (await (await as(session, () => get("/status"))).json()) as { eaUpdateAvailable: boolean };
     assert.equal(fresh.eaUpdateAvailable, false);
   });

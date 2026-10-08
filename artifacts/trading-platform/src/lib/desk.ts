@@ -580,7 +580,16 @@ export const deskApi = {
     calendarAvailable?: boolean;
     calendarAgeMs?: number | null;
     clockSkewMs?: number | null;
+    /**
+     * The terminal MACHINE's own clock error (EA v3.04+). The EA self-corrects
+     * its timestamps against the server clock, so this is a calm "sync NTP"
+     * signal, not a data-quality alarm.
+     */
+    computerClockSkewMs?: number | null;
     lastQuoteAgeMs?: number | null;
+    /** Rolling heartbeat round-trip health (ms), for diagnosing a slow beat. */
+    lastBeatRttMs?: number | null;
+    avgBeatRttMs?: number | null;
     /**
      * The link is durable: it survives closing MT5, closing the browser and a
      * server redeploy. Only "unlink" ends it.

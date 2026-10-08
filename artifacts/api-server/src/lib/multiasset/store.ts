@@ -26,7 +26,7 @@ import type {
 } from "./types";
 
 /** Bars retained per symbol/timeframe. Enough for D1 regime work, bounded. */
-const MAX_BARS = 400;
+export const MAX_BARS = 400;
 /** Signal-log entries retained per desk. */
 const MAX_JOURNAL = 200;
 /** Command ids remembered for duplicate suppression. */
@@ -226,6 +226,36 @@ export interface DeskState {
    */
   lastQuoteAgeMs: number | null;
   /**
+   * `symbol|timeframe` → bars the terminal reports holding (EA v3.04+ sends
+   * `barsAvailable` every heartbeat). Drives the exact history-request rule
+   * in history.ts: the desk asks for a series only while the terminal holds
+   * bars the desk lacks, so a series the terminal cannot fill is never
+   * re-demanded and the EA never falls into a full re-seed on every beat.
+   */
+  historyAvailable: Map<string, number>;
+  /**
+   * Legacy EA (no bar counts): heartbeats each `symbol|timeframe` key has
+   * been asked for history on. Bounds the fallback request rule so an
+   * unseedable series cannot loop forever.
+   */
+  historyRequests: Map<string, number>;
+  /**
+   * The terminal MACHINE's own clock vs true UTC, as reported by the EA
+   * (v3.04+). Distinct from `clockSkewMs`, which measures the timestamps the
+   * EA sends — those are self-corrected against the platform server's clock,
+   * so this field is the honest "fix your NTP" signal, surfaced calmly in
+   * the bridge dialog rather than as a dashboard alarm.
+   */
+  computerClockSkewMs: number | null;
+  /**
+   * The machine-clock skew reported on the previous heartbeat. Lets the
+   * bridge journal note a large machine-clock error exactly once (when it
+   * crosses the 30s line) instead of on every beat.
+   */
+  prevComputerClockSkewMs: number | null;
+  /** Rolling sync round-trip samples (ms), newest last. Bounded. */
+  beatRttSamples: number[];
+  /**
    * symbol → mode of the most recently armed plan. Kept after the plan is
    * consumed so a fill can still be attributed to the right trading style.
    */
@@ -297,6 +327,11 @@ export function getDesk(sessionId: string): DeskState {
       lastPairingError: null,
       clockSkewMs: null,
       lastQuoteAgeMs: null,
+      historyAvailable: new Map(),
+      historyRequests: new Map(),
+      computerClockSkewMs: null,
+      prevComputerClockSkewMs: null,
+      beatRttSamples: [],
       planModes: new Map(),
       positionModes: new Map(),
       lastEquitySampleAt: 0,
@@ -341,6 +376,11 @@ export function clearTerminalData(desk: DeskState): void {
   desk.equityHistory = [];
   desk.clockSkewMs = null;
   desk.lastQuoteAgeMs = null;
+  desk.historyAvailable.clear();
+  desk.historyRequests.clear();
+  desk.computerClockSkewMs = null;
+  desk.prevComputerClockSkewMs = null;
+  desk.beatRttSamples = [];
   desk.lastAutoSelect = null;
   desk.lastAutoSelectAt = 0;
   desk.lastAutoSelectNoteAt = 0;
@@ -715,6 +755,16 @@ export function pruneDeselectedSymbols(desk: DeskState): number {
   for (const symbol of [...desk.ticks.keys()]) {
     if (selected.has(symbol)) continue;
     desk.ticks.delete(symbol);
+  }
+  // History bookkeeping is per symbol as well: a deselected market must not
+  // keep being asked for history (or keep its request counters alive).
+  for (const key of [...desk.historyAvailable.keys()]) {
+    if (selected.has(key.split("|")[0])) continue;
+    desk.historyAvailable.delete(key);
+  }
+  for (const key of [...desk.historyRequests.keys()]) {
+    if (selected.has(key.split("|")[0])) continue;
+    desk.historyRequests.delete(key);
   }
   for (const [planId, plan] of [...desk.plans]) {
     if (selected.has(plan.symbol)) continue;

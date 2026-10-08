@@ -24,8 +24,8 @@
  */
 
 import { atr, closes } from "./math";
-import { seriesFor, type DeskState } from "./store";
-import { TIMEFRAMES, type Bar, type Quote, type SymbolSpec } from "./types";
+import { MAX_BARS, seriesFor, type DeskState } from "./store";
+import { TIMEFRAMES, TIMEFRAME_MINUTES, type Bar, type Quote, type SymbolSpec, type Timeframe } from "./types";
 
 /** How old a quote may be before the desk refuses to analyse or trade it. */
 export const QUOTE_STALE_MS = 8_000;
@@ -36,6 +36,20 @@ export const QUOTE_WARMING_MS = 20_000;
 const CLOCK_SKEW_WARN_MS = 5_000;
 /** Hard reject: a quote timestamp this far from now cannot be a real tick. */
 const MAX_CLOCK_DEVIATION_MS = 6 * 60 * 60_000;
+/** Hard reject: a bar older than this cannot be a real candle. */
+export const MAX_BAR_AGE_MS = 400 * 24 * 60 * 60_000;
+
+/**
+ * How many bars of a timeframe the desk can ever hold for one symbol: the
+ * ingest gate rejects bars older than MAX_BAR_AGE_MS, and a series is also
+ * capped at MAX_BARS. The history-request rule (history.ts) must never demand
+ * more than this — on W1 the age gate caps a series at 58 bars, so asking for
+ * 60 would keep the EA re-seeding that series on every heartbeat, forever.
+ */
+export function maxStorableBars(timeframe: Timeframe): number {
+  const tfMs = TIMEFRAME_MINUTES[timeframe] * 60_000;
+  return Math.min(MAX_BARS, Math.floor(MAX_BAR_AGE_MS / tfMs) + 1);
+}
 
 /**
  * A quote is only called a mismatch when it is extreme on BOTH scales:
@@ -130,7 +144,7 @@ export function barTimestampUsable(desk: DeskState, time: number, now = Date.now
   // Bars may legitimately be slightly ahead of the server (a forming candle on
   // a fast broker clock), but not days out.
   const corrected = toServerTime(desk, time);
-  return corrected <= now + MAX_CLOCK_DEVIATION_MS && corrected >= now - 400 * 24 * 60 * 60_000;
+  return corrected <= now + MAX_CLOCK_DEVIATION_MS && corrected >= now - MAX_BAR_AGE_MS;
 }
 
 function lastCloses(desk: DeskState, symbol: string): { bars: Bar[] | null; timeframe: string | null } {

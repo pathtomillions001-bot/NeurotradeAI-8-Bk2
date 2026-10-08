@@ -72,11 +72,24 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <dt>Login</dt><dd className="text-zinc-200">{status.data.login}</dd>
                   <dt>Server</dt><dd className="break-all text-zinc-200">{status.data.server}</dd>
                   <dt>Last sync</dt><dd className={status.data.stale ? "text-red-400" : status.data.degraded ? "text-amber-300" : "text-zinc-200"}>{Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s ago{status.data.stale ? " · STALE" : status.data.degraded ? " · reconnecting" : ""}</dd>
+                  {status.data.avgBeatRttMs !== null && status.data.avgBeatRttMs !== undefined && (
+                    <><dt>Heartbeat</dt><dd className="text-zinc-200">~{status.data.avgBeatRttMs} ms avg{status.data.lastBeatRttMs !== null && status.data.lastBeatRttMs !== undefined ? ` · last ${status.data.lastBeatRttMs} ms` : ""}</dd></>
+                  )}
                   <dt>Broker markets</dt><dd className="text-zinc-200">{status.data.catalogCount}</dd>
                   <dt>Selected markets</dt><dd className="text-zinc-200">{status.data.selectedCount}</dd>
                   <dt>Economic calendar</dt><dd className={status.data.calendarAvailable ? "text-emerald-300" : "text-amber-300"}>{status.data.calendarAvailable ? "Available" : "Unavailable — entries paused"}</dd>
                 </dl>
               </div>
+              {(() => {
+                const machineSkew = status.data.computerClockSkewMs ?? status.data.clockSkewMs ?? 0;
+                return Math.abs(machineSkew) > 5_000 ? (
+                  <p className="rounded-lg border border-zinc-700 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-300">
+                    The terminal machine&apos;s clock is {Math.abs(Math.round(machineSkew / 1000))}s {machineSkew > 0 ? "ahead of" : "behind"} UTC.
+                    The EA compensates automatically, so desk prices and times stay correct — sync the machine&apos;s clock (NTP)
+                    to keep time-based features inside MT5 exact.
+                  </p>
+                ) : null;
+              })()}
               {status.data.lastPairingError && <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">{status.data.lastPairingError}</p>}
               {status.data.eaUpdateAvailable && (
                 <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-200">

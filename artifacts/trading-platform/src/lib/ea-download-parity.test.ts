@@ -67,11 +67,25 @@ test("the published EA is a build that reports its own version and link", () => 
   const published_body = fs.readFileSync(published, "utf8");
   // The version reported to the Desk must be the one the API expects, or the
   // "your EA is out of date" banner would fire on a current terminal.
-  assert.equal(declaredVersion(published), "3.03");
+  assert.equal(declaredVersion(published), "3.04");
   for (const marker of ["instanceId", "windowFromMs", "rawCount", "durable"]) {
     assert.match(
       published_body,
       new RegExp(marker, "i"),
+      `the published EA must carry the ${marker} contract`,
+    );
+  }
+});
+
+test("the published EA carries the v3.04 heartbeat-reliability contract", () => {
+  const published_body = fs.readFileSync(published, "utf8");
+  // The re-seed loop fix and the clock self-correction are only real if the
+  // shipped EA actually contains them — the parity test is what stops a stale
+  // download from silently reintroducing the stale-desk bug.
+  for (const marker of ["barsAvailable", "computerClockSkewMs", "serverTime", "\"history\""]) {
+    assert.match(
+      published_body,
+      new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
       `the published EA must carry the ${marker} contract`,
     );
   }

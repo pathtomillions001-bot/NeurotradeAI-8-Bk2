@@ -30,6 +30,11 @@ import {
 } from "../lib/multiasset/live";
 import { recordTick } from "../lib/multiasset/subminute";
 import {
+  computeHistoryNeeded,
+  parseBarsAvailable,
+  recordLegacyHistoryRequests,
+} from "../lib/multiasset/history";
+import {
   accountKeyFor,
   describeConflict,
   releaseClaimsForSession,
@@ -40,7 +45,6 @@ import {
   acknowledgeResult,
   adoptBridgeToken,
   applyAccount,
-  candleKey,
   clearTerminalData,
   drainOutbox,
   expirePlans,
@@ -104,8 +108,14 @@ const router: IRouter = Router();
  * three red-folder releases. The terminal now reports its version and the Desk
  * says plainly when it is behind, instead of leaving the user to guess why the
  * feed looks empty.
+ *
+ * v3.04 adds: per-series bar counts (`barsAvailable`) so the desk asks for
+ * history only while the terminal holds bars it lacks (killing the re-seed
+ * loop that stalled the heartbeat), targeted `history` re-seed keys, a shorter
+ * WebRequest timeout, beat-duration logging, and timestamps self-corrected
+ * against this server's clock (`serverTime`) instead of the machine clock.
  */
-export const EXPECTED_EA_VERSION = "3.03";
+export const EXPECTED_EA_VERSION = "3.04";
 
 interface PendingPairing {
   code: string;
@@ -599,9 +609,14 @@ function parseClock(raw: unknown): SyncClock | null {
   const terminalUtcMs = num(r.terminalUtcMs, NaN);
   if (!Number.isFinite(terminalUtcMs) || terminalUtcMs <= 0) return null;
   const syncIntervalMs = Math.round(num(r.syncIntervalMs, 0));
+  const computerClockSkewMs = num(r.computerClockSkewMs, NaN);
   return {
     serverUtcOffsetSeconds: Math.round(num(r.serverUtcOffsetSeconds, 0)),
     terminalUtcMs,
+    // v3.04+: the machine's own clock error, reported separately because the
+    // EA self-corrects its timestamps — this is the "sync NTP" signal, not a
+    // data-quality alarm.
+    computerClockSkewMs: Number.isFinite(computerClockSkewMs) ? Math.round(computerClockSkewMs) : undefined,
     label: typeof r.label === "string" ? r.label.slice(0, 64) : undefined,
     // Only a plausible heartbeat interval is accepted: 250ms (the EA's floor)
     // to 10 minutes. Anything else is noise and is ignored in favour of the
@@ -697,6 +712,7 @@ function parseNewsFeed(raw: unknown): NewsFeed | null {
  * 401 here is what used to knock a terminal out of the system permanently.
  */
 router.post("/sync", async (req, res) => {
+  const startedAt = Date.now();
   let desk = deskForRequest(req);
   if (!desk) desk = await rehydrateFromDurableLink(req);
   if (!desk || !desk.terminal) return res.status(401).json({ error: "Invalid or revoked bridge token." });
@@ -820,12 +836,55 @@ router.post("/sync", async (req, res) => {
   // seconds old" from "this terminal thinks it is 1998".
   const clock = parseClock(body.clock);
   if (clock) {
+    const previousSkew = desk.clockSkewMs;
     updateClockSkew(desk, clock.terminalUtcMs, now);
+    const skew = desk.clockSkewMs ?? 0;
+    if (clock.computerClockSkewMs !== undefined) {
+      // v3.04+: the EA self-corrects its timestamps against the platform
+      // server's clock, so the measured skew settles near zero and the
+      // machine's own clock error is the honest "fix your NTP" signal.
+      // Journal it once, when it crosses the 30s line.
+      const machineSkew = clock.computerClockSkewMs;
+      const prevMachineSkew = desk.prevComputerClockSkewMs;
+      desk.prevComputerClockSkewMs = machineSkew;
+      desk.computerClockSkewMs = machineSkew;
+      if (Math.abs(machineSkew) > 30_000 && Math.abs(prevMachineSkew ?? 0) <= 30_000) {
+        journal(
+          desk,
+          "bridge",
+          null,
+          `The machine running the MT5 terminal has its clock ${Math.round(Math.abs(machineSkew) / 1000)}s ` +
+            `${machineSkew > 0 ? "ahead of" : "behind"} this server. The EA corrects its timestamps automatically; ` +
+            `sync the machine's clock (NTP) to keep time-based features inside the terminal exact.`,
+        );
+      }
+    } else if (Math.abs(skew) > 30_000 && Math.abs(previousSkew ?? 0) <= 30_000) {
+      // Legacy EA: the measured timestamp skew IS the machine clock. Journal
+      // once when it appears, so the desk's own record shows it without
+      // alarming the dashboard — ages are corrected either way.
+      journal(
+        desk,
+        "bridge",
+        null,
+        `The MT5 terminal's clock is ${Math.round(skew / 1000)}s ${skew > 0 ? "ahead of" : "behind"} this server. ` +
+          `Quote ages are corrected automatically; sync the machine's clock (NTP) to keep time-based features inside the terminal exact.`,
+      );
+    }
     // The terminal's own heartbeat contract. Recorded (not assumed) so the
     // desk's staleness window can be sized from it: an EA configured to beat
     // every 10 seconds must not be declared dead after 30. A missing value
     // leaves the fixed window in place.
     if (clock.syncIntervalMs) desk.terminal.syncIntervalMs = clock.syncIntervalMs;
+  }
+
+  // ── Bar counts (EA v3.04+) ───────────────────────────────────────────────
+  // The EA reports how many bars the terminal holds per symbol|timeframe.
+  // The desk asks for history only while the terminal holds bars it lacks
+  // (history.ts), so a series the terminal cannot fill never triggers a
+  // re-seed — which is what used to stall the heartbeat and freeze the desk
+  // on stale data.
+  for (const [key, count] of parseBarsAvailable(body.barsAvailable)) {
+    desk.historyAvailable.set(key, count);
   }
 
   if (Array.isArray(body.quotes)) {
@@ -923,13 +982,15 @@ router.post("/sync", async (req, res) => {
 
   // Ask only for history for selected symbols that the terminal has actually
   // reported. A large catalogue does not trigger megabytes of unused history.
+  //
+  // The exact rule lives in history.ts: with the EA's bar counts the desk asks
+  // only while the terminal holds bars it lacks; legacy EAs get a bounded
+  // request count. Either way, one thin series can no longer keep `needsHistory`
+  // true forever and re-seed a multi-megabyte payload on every heartbeat.
   const reported = new Set(desk.specs.keys());
-  const needsHistory = desk.watchlist
-    .filter((symbol) => reported.has(symbol))
-    .some((symbol) => TIMEFRAMES.some((timeframe) => {
-      const series = desk.candles.get(candleKey(symbol, timeframe));
-      return !series || series.bars.length < 60;
-    }));
+  const historyKeys = computeHistoryNeeded(desk, reported);
+  recordLegacyHistoryRequests(desk, historyKeys);
+  const needsHistory = historyKeys.length > 0;
 
   // ── Automatic best-market pass ───────────────────────────────────────────
   // Runs here — after quotes, candles and positions have been folded in and
@@ -941,6 +1002,19 @@ router.post("/sync", async (req, res) => {
   } catch (err) {
     logger.warn({ err }, "Auto-select pass failed");
   }
+
+  // ── Beat health sample ───────────────────────────────────────────────────
+  // The heartbeat is the desk's lifeline: a beat that takes seconds ages every
+  // quote past the freshness gate. Sample the round trip (and the payload
+  // size) so a slow heartbeat is measurable in /bridge/status and the logs
+  // instead of guessed from a stale board.
+  const rttMs = Date.now() - startedAt;
+  desk.beatRttSamples.push(rttMs);
+  if (desk.beatRttSamples.length > 20) desk.beatRttSamples.splice(0, desk.beatRttSamples.length - 20);
+  logger.debug(
+    { rttMs, bytes: Number(req.headers["content-length"] ?? 0), historyKeys: historyKeys.length },
+    "MT5 heartbeat",
+  );
 
   // ── Push the new prices to the browser immediately ───────────────────────
   // The Desk used to be polled every 4 s, so a quote could be four seconds
@@ -957,6 +1031,8 @@ router.post("/sync", async (req, res) => {
     serverTime: now,
     commands: drainOutbox(desk),
     needsHistory,
+    // v3.04+ EAs re-seed exactly these series instead of the whole batch.
+    history: historyKeys,
     subscriptions: { symbols: desk.watchlist, timeframes: [...TIMEFRAMES] },
     news: desk.news,
     limits: {
@@ -1034,7 +1110,18 @@ router.get("/status", (_req, res) => {
     calendarAvailable: desk.news.available,
     calendarAgeMs: desk.news.checkedAt ? Date.now() - desk.news.checkedAt : null,
     clockSkewMs: desk.clockSkewMs,
+    /**
+     * The terminal MACHINE's own clock error (EA v3.04+). The EA self-corrects
+     * its timestamps against this server's clock, so this is a calm "sync NTP"
+     * signal — not a data-quality alarm.
+     */
+    computerClockSkewMs: desk.computerClockSkewMs,
     lastQuoteAgeMs: desk.lastQuoteAgeMs,
+    /** Rolling heartbeat round-trip health (ms), for diagnosing a slow beat. */
+    lastBeatRttMs: desk.beatRttSamples.length > 0 ? desk.beatRttSamples[desk.beatRttSamples.length - 1] : null,
+    avgBeatRttMs: desk.beatRttSamples.length > 0
+      ? Math.round(desk.beatRttSamples.reduce((sum, value) => sum + value, 0) / desk.beatRttSamples.length)
+      : null,
     lastPairingError,
   });
 });

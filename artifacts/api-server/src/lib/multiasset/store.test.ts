@@ -360,15 +360,3 @@ test("journal entries carry a kind, timestamp and id", () => {
   assert.ok(entry.ts > 0);
   assert.deepEqual(entry.detail, { reason: "test" });
 });
-
-test("local plan fills/expiry are recognised by plan id after arm acknowledgement", () => {
-  const desk = freshDesk();
-  armPlan(desk, plan("execution-plan"));
-  const command = drainOutbox(desk)[0]!;
-  assert.equal(acknowledgeResult(desk, { commandId: command.id, status: "done", ts: Date.now() }), true);
-  assert.equal(desk.plans.has("execution-plan"), true);
-  const result = { commandId: "execution-plan", status: "filled" as const, ts: Date.now(), price: 1.085, ticket: 100 };
-  assert.equal(acknowledgeResult(desk, result), true);
-  assert.equal(desk.plans.has("execution-plan"), false);
-  assert.equal(acknowledgeResult(desk, result), false, "duplicate result must not double-journal");
-});

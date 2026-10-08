@@ -124,7 +124,7 @@ describe("MT5 account claims", () => {
     assert.equal(touchClaim("session-b", key), true);
   });
 
-  it("an offline claim stays owned until explicit unlink", async () => {
+  it("an abandoned claim is released once the terminal stops heartbeating", async () => {
     const key = accountKeyFor(1012, "BROKER-DEMO");
     await claim(1012, "BROKER-DEMO", "session-a");
 
@@ -132,13 +132,11 @@ describe("MT5 account claims", () => {
     await __testing.ageClaim(key, Date.now() - CLAIM_IDLE_RELEASE_MS + 60_000);
     assert.equal((await claim(1012, "BROKER-DEMO", "session-b")).ok, false);
 
-    // Closing either app does not release ownership.
+    // A browser that is simply closed must never lock the account out forever.
     await __testing.ageClaim(key, Date.now() - CLAIM_IDLE_RELEASE_MS - 1);
     const takeover = await claim(1012, "BROKER-DEMO", "session-b");
-    assert.equal(takeover.ok, false);
-    assert.equal(claimHolder(key)?.sessionId, "session-a");
-    await releaseClaimsForSession("session-a");
-    assert.equal((await claim(1012, "BROKER-DEMO", "session-b")).ok, true);
+    assert.equal(takeover.ok, true);
+    assert.equal(claimHolder(key)?.sessionId, "session-b");
   });
 
   it("a refused takeover leaves the original owner untouched", async () => {

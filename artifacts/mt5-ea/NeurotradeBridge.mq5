@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.03                                                     |
+//| Version 3.02                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -67,11 +67,6 @@
 //|     redCount, and reports the calendar as unavailable (fail closed |
 //|     for new entries) when the read returns nothing at all.         |
 //|                                                                    |
-//| WHAT CHANGED IN v3.03                                             |
-//|  Durable private pairing + saved local token/instance identity.   |
-//|  One account connector (other charts standby); staged history.    |
-//|  Full-day news, failed metadata is unavailable, local tick gate.  |
-//|  Download file now matches source, including UTC expiry fixes.    |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -88,16 +83,16 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "3.03"
+#property version   "3.02"
 #property strict
 
 #include <Trade/Trade.mqh>
 
 //--- Connection and coverage ---------------------------------------------------
 input string ServerUrl                 = "";     // Platform origin only; do not append /api
-input string PairingCode               = "";     // Private reusable code from the Desk
+input string PairingCode               = "";     // One-time code from the Desk
 input int    SyncIntervalMs            = 500;    // Heartbeat; 250-10000 ms (ticks push every beat)
-input int    SymbolsPerHeartbeat       = 1;     // CANDLE batch per beat, not a selection cap
+input int    SymbolsPerHeartbeat       = 12;     // CANDLE batch per beat, not a selection cap
 input bool   SendAllQuotesEachBeat     = true;   // Stream every selected symbol's tick every beat
 input int    HistoryBars               = 220;    // Initial bars per selected symbol/timeframe
 input int    DeltaBars                 = 4;      // Forming + recent bars after seed
@@ -140,7 +135,6 @@ struct ArmedPlan
    long   expiresAt;
    int    confirmTicks;
    int    confirmCount;
-   long   lastConfirmTick;
    double beTriggerR;
    double beOffsetR;
    double trailMult;
@@ -197,77 +191,19 @@ string    g_newsNames[];
 //+------------------------------------------------------------------+
 //| Lifecycle                                                         |
 //+------------------------------------------------------------------+
-// Local exclusive file lock elects ONE connector across charts, without time
-// based takeover during a slow WebRequest. MT5 closes handles on termination.
-int g_connectorLock = INVALID_HANDLE;
-string g_instanceId = "";
-string g_cachedCandles = "[]";
-bool g_sendCatalog = true;
-int g_historySymbol = 0;
-int g_historyTf = 0;
-
-string ScopedFile(const string suffix)
-{
-   // Filename hash only (not cryptographic authentication). Never contains the
-   // private code; scope includes origin, account, broker and configured code.
-   string scope = NormalisedServerUrl() + "|" + AccountInfoString(ACCOUNT_SERVER) + "|" +
-                  IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "|" + ToUpper(StringTrimmed(PairingCode));
-   ulong h = 1469598103934665603;
-   for(int i = 0; i < StringLen(scope); i++) { h ^= StringGetCharacter(scope, i); h *= 1099511628211; }
-   return "Neurotrade-" + IntegerToString((long)h) + suffix;
-}
-
-string ConnectorLockFile()
-{
-   // Account-wide, even when two charts have different old pairing codes.
-   string scope = AccountInfoString(ACCOUNT_SERVER) + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN));
-   ulong h = 1469598103934665603;
-   for(int i = 0; i < StringLen(scope); i++) { h ^= StringGetCharacter(scope, i); h *= 1099511628211; }
-   return "Neurotrade-executor-" + IntegerToString((long)h) + ".lock";
-}
-
-bool BecomeConnector()
-{
-   if(g_connectorLock != INVALID_HANDLE) return true;
-   g_connectorLock = FileOpen(ConnectorLockFile(), FILE_READ | FILE_WRITE | FILE_BIN);
-   if(g_connectorLock == INVALID_HANDLE) return false; // another chart owns it
-   int handle = FileOpen(ScopedFile(".token"), FILE_READ | FILE_TXT | FILE_ANSI);
-   if(handle != INVALID_HANDLE) { g_token = FileReadString(handle); FileClose(handle); }
-   handle = FileOpen(ScopedFile(".instance"), FILE_READ | FILE_TXT | FILE_ANSI);
-   if(handle != INVALID_HANDLE) { g_instanceId = FileReadString(handle); FileClose(handle); }
-   if(g_instanceId == "")
-   {
-      g_instanceId = IntegerToString((long)TimeLocal()) + "-" + IntegerToString((long)ChartID()) + "-" + IntegerToString((long)GetMicrosecondCount());
-      handle = FileOpen(ScopedFile(".instance"), FILE_WRITE | FILE_TXT | FILE_ANSI);
-      if(handle != INVALID_HANDLE) { FileWriteString(handle, g_instanceId); FileClose(handle); }
-   }
-   Print("NeurotradeBridge: this chart is the account connector; other charts stay on standby.");
-   return true;
-}
-
-void SaveToken()
-{
-   int handle = FileOpen(ScopedFile(".token"), FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if(handle == INVALID_HANDLE) { Print("NeurotradeBridge: could not save token locally; reusable code will reconnect."); return; }
-   FileWriteString(handle, g_token);
-   FileFlush(handle);
-   FileClose(handle);
-}
-
 int OnInit()
 {
    trade.SetExpertMagicNumber(MagicNumber);
    trade.SetAsyncMode(false);
    trade.SetDeviationInPoints(10);
    ResetDayBaseline();
-   // Calendar is read only after a successful heartbeat, never during attach.
-   BecomeConnector();
+   RefreshCalendar(true);
 
    int interval = (int)MathMax(500, MathMin(10000, SyncIntervalMs));
    g_syncIntervalMs = interval;
    EventSetMillisecondTimer(interval);
 
-   Print("NeurotradeBridge v3.03 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   Print("NeurotradeBridge v2 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -281,8 +217,6 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   if(g_connectorLock != INVALID_HANDLE) FileClose(g_connectorLock);
-   g_connectorLock = INVALID_HANDLE;
    Print("NeurotradeBridge: stopped (reason ", reason, ").");
 }
 
@@ -291,14 +225,12 @@ void OnDeinit(const int reason)
 // an XAUUSD/BTCUSD plan safely.
 void OnTick()
 {
-   if(g_connectorLock == INVALID_HANDLE) return;
    ManageOpenPositions();
    EvaluatePlans();
 }
 
 void OnTimer()
 {
-   if(!BecomeConnector()) return;
    // HEARTBEAT FIRST.
    //
    // The desk's freshness window is measured from the moment this call lands,
@@ -314,12 +246,7 @@ void OnTimer()
       Sync();
 
    RollDayBaselineIfNeeded();
-   // Slow MT5 calendar/history calls run after the lightweight heartbeat.
-   if(g_lastHttpStatus >= 200 && g_lastHttpStatus < 300)
-   {
-      RefreshCalendar(false);
-      PrepareCandleChunk();
-   }
+   RefreshCalendar(false);
    ManageOpenPositions();
    EvaluatePlans();
 }
@@ -367,7 +294,7 @@ void TryPair()
          g_nextPairAttempt = now + 60;
          Print("NeurotradeBridge: PAIRING REFUSED — ", (g_lastHttpError == "" ? "this MT5 account is already connected in another browser." : g_lastHttpError));
          Print("NeurotradeBridge: open the Desk that holds account ", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
-               "@", AccountInfoString(ACCOUNT_SERVER), " and unlink it,. Retrying in 60s with the same code.");
+               "@", AccountInfoString(ACCOUNT_SERVER), " and unlink it, or wait a few minutes. Retrying in 60s with the same code.");
       }
       return;
    }
@@ -380,8 +307,6 @@ void TryPair()
    }
 
    g_token = token;
-   g_sendCatalog = true;
-   SaveToken();
    g_lastOk = now;
    g_seq = 0;
    ApplyServerResponse(response);
@@ -434,7 +359,6 @@ bool HttpPost(const string path, const string body, string &response, const bool
          // Token may have been unpaired/replaced. Remain attached and let the
          // user enter a fresh code rather than doing any blind work.
          g_token = "";
-         FileDelete(ScopedFile(".token"));
          g_tradingEnabled = false;
       }
       return false;
@@ -498,7 +422,6 @@ void Sync()
    g_seq++;
    string body = "{";
    body += "\"seq\":" + IntegerToString(g_seq) + ",";
-   body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
    // Tell the server how this terminal's clock relates to UTC. Combined with
    // the UTC-normalised timestamps below it lets the Desk detect a skewed
    // clock instead of trusting (or silently mis-trusting) every tick.
@@ -510,14 +433,13 @@ void Sync()
          + ",\"syncIntervalMs\":" + IntegerToString(g_syncIntervalMs)
          + ",\"label\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\"},";
    body += "\"account\":" + AccountJson() + ",";
-   if(g_sendCatalog) body += "\"catalog\":" + CatalogJson() + ",";
    body += "\"specs\":" + SpecsJson(batch) + ",";
    // Quotes cover the whole selection on every beat; candles stay batched.
    if(SendAllQuotesEachBeat)
       body += "\"quotes\":" + QuotesJson(g_symbols) + ",";
    else
       body += "\"quotes\":" + QuotesJson(batch) + ",";
-   body += "\"candles\":" + g_cachedCandles + ",";
+   body += "\"candles\":" + CandlesJson(batch) + ",";
    body += "\"news\":" + NewsJson() + ",";
    body += "\"positions\":" + PositionsJson() + ",";
    body += "\"results\":[" + g_results + "]";
@@ -530,19 +452,12 @@ void Sync()
       // still valid, so this is the only place the handover can be enforced —
       // continuing would mean two Desks streaming, arming and flattening one
       // balance. Drop the token and stop trading; the user must re-pair here.
-      if(g_lastHttpStatus == 423 || g_lastHttpStatus == 426)
-      {
-         g_tradingEnabled = false; // active elsewhere or obsolete connector
-         for(int i = 0; i < MAX_PLANS; i++) g_plans[i].active = false;
-         return;
-      }
       if(g_lastHttpStatus == 409)
       {
          Print("NeurotradeBridge: DISCONNECTED — ", (g_lastHttpError == "" ? "this MT5 account is now connected in another browser." : g_lastHttpError));
          Print("NeurotradeBridge: this terminal has stopped trading to avoid two desks managing one balance. ",
                "Unlink it there, then enter a fresh pairing code here.");
          g_token = "";
-         FileDelete(ScopedFile(".token"));
          g_tradingEnabled = false;
          g_nextPairAttempt = 0;
       }
@@ -554,8 +469,6 @@ void Sync()
    }
 
    g_lastOk = NowServer();
-   g_sendCatalog = false;
-   g_cachedCandles = "[]";
    g_results = "";
    if(JsonBool(response, "needsHistory") == 1) ResetSeeding();
    ApplyServerResponse(response);
@@ -786,34 +699,40 @@ string QuotesJson(const string &symbols[])
    return json;
 }
 
-// One symbol/timeframe chunk per successful heartbeat. A failed upload keeps
-// the chunk cached for retry. CopyRates may block in MT5 while broker history
-// downloads; isolating a single call avoids multiplying that delay by 120.
-void PrepareCandleChunk()
+string CandlesJson(const string &symbols[])
 {
-   if(g_cachedCandles != "[]" || ArraySize(g_symbols) == 0) return;
-   if(g_historySymbol >= ArraySize(g_symbols)) g_historySymbol = 0;
-   int sourceIndex = g_historySymbol;
-   int t = g_historyTf;
-   g_historyTf++;
-   if(g_historyTf >= TF_COUNT) { g_historyTf = 0; g_historySymbol++; }
-   string symbol = g_symbols[sourceIndex];
-   int want = IsSeeded(sourceIndex, t) ? (int)MathMax(2, DeltaBars) : (int)MathMax(60, HistoryBars);
-   MqlRates rates[];
-   ArraySetAsSeries(rates, false);
-   int copied = CopyRates(symbol, TF_LIST[t], 0, want, rates);
-   if(copied <= 0) return;
-   if(copied >= 60) MarkSeeded(sourceIndex, t); // partial cold history is not seeded
-   string json = "[{\"symbol\":\"" + JsonEscape(symbol) + "\",\"timeframe\":\"" + TF_NAMES[t] + "\",\"bars\":[";
-   for(int b = 0; b < copied; b++)
+   string json = "[";
+   bool first = true;
+   for(int s = 0; s < ArraySize(symbols); s++)
    {
-      if(b > 0) json += ",";
-      json += "[" + IntegerToString(ToUtcMs(rates[b].time)) + "," +
-              DoubleToString(rates[b].open, 10) + "," + DoubleToString(rates[b].high, 10) + "," +
-              DoubleToString(rates[b].low, 10) + "," + DoubleToString(rates[b].close, 10) + "," +
-              IntegerToString((long)rates[b].tick_volume) + "]";
+      int sourceIndex = SymbolIndex(symbols[s]);
+      if(sourceIndex < 0) continue;
+      for(int t = 0; t < TF_COUNT; t++)
+      {
+         int want = IsSeeded(sourceIndex, t) ? (int)MathMax(2, DeltaBars) : (int)MathMax(60, HistoryBars);
+         MqlRates rates[];
+         ArraySetAsSeries(rates, false);
+         int copied = CopyRates(symbols[s], TF_LIST[t], 0, want, rates);
+         if(copied <= 0) continue;
+         MarkSeeded(sourceIndex, t);
+         if(!first) json += ",";
+         first = false;
+         json += "{\"symbol\":\"" + JsonEscape(symbols[s]) + "\",\"timeframe\":\"" + TF_NAMES[t] + "\",\"bars\":[";
+         for(int b = 0; b < copied; b++)
+         {
+            if(b > 0) json += ",";
+            json += "[" + IntegerToString(ToUtcMs(rates[b].time)) + "," +
+                    DoubleToString(rates[b].open, 10) + "," +
+                    DoubleToString(rates[b].high, 10) + "," +
+                    DoubleToString(rates[b].low, 10) + "," +
+                    DoubleToString(rates[b].close, 10) + "," +
+                    IntegerToString((long)rates[b].tick_volume) + "]";
+         }
+         json += "]}";
+      }
    }
-   g_cachedCandles = json + "]}]";
+   json += "]";
+   return json;
 }
 
 //+------------------------------------------------------------------+
@@ -909,11 +828,11 @@ void RefreshCalendar(const bool force)
    ResetLastError();
    // A day of forward visibility: the Desk renders an upcoming-events list,
    // and a two-hour window left it empty for most of the session.
-   int count = CalendarValueHistory(values, now - 24 * 60 * 60, now + 24 * 60 * 60);
+   int count = CalendarValueHistory(values, now - 15 * 60, now + 24 * 60 * 60);
    if(count <= 0)
    {
-      // Fallback: everything known from a full day ago onward.
-      int wide = CalendarValueHistory(values, now - 24 * 60 * 60, 0);
+      // Fallback: everything the terminal knows from six hours ago onward.
+      int wide = CalendarValueHistory(values, now - 6 * 60 * 60, 0);
       if(wide > 0) count = wide;
    }
 
@@ -924,11 +843,10 @@ void RefreshCalendar(const bool force)
    ArrayResize(g_newsCountries, 0);
    ArrayResize(g_newsNames, 0);
 
-   int detailFailures = 0;
    for(int i = 0; i < count; i++)
    {
       MqlCalendarEvent event;
-      if(!CalendarEventById(values[i].event_id, event)) { detailFailures++; continue; }
+      if(!CalendarEventById(values[i].event_id, event)) continue;
       if(event.importance != CALENDAR_IMPORTANCE_HIGH) continue;
       // A value with no scheduled time cannot be rendered or compared against.
       // It is counted (so the read is not mistaken for an empty calendar) but
@@ -942,7 +860,6 @@ void RefreshCalendar(const bool force)
          currency = country.currency;
          countryName = country.name;
       }
-      else detailFailures++;
       int index = ArraySize(g_newsTimes);
       ArrayResize(g_newsTimes, index + 1);
       ArrayResize(g_newsCurrencies, index + 1);
@@ -955,8 +872,7 @@ void RefreshCalendar(const bool force)
    }
 
    g_redCount = ArraySize(g_newsTimes);
-   g_calendarAvailable = (g_rawCount > 0 && detailFailures == 0);
-   if(detailFailures > 0) Print("NeurotradeBridge: calendar event/country lookup failed for ", detailFailures, " rows; new entries paused, retrying.");
+   g_calendarAvailable = (g_rawCount > 0);
    if(!g_calendarAvailable)
       Print("NeurotradeBridge: MT5 returned no calendar rows for this window — the terminal's ",
             "economic calendar may still be syncing. New entries are paused until it reads.");
@@ -964,7 +880,7 @@ void RefreshCalendar(const bool force)
 
 string NewsJson()
 {
-   // Serialization is deliberately non-blocking: use the last calendar read.
+   RefreshCalendar(false);
    string json = "{\"available\":" + (g_calendarAvailable ? "true" : "false") + ",";
    // g_newsTimes stays in trade-server time so IsNewsBlackout() can compare it
    // directly with NowServer(); only the wire format is converted to UTC.
@@ -992,7 +908,7 @@ string NewsJson()
 
 bool IsNewsBlackout(const string symbol)
 {
-   if(!UseEconomicCalendar || !g_calendarAvailable || NowServer() - g_lastCalendarCheck > 300) return true; // fail closed
+   if(!UseEconomicCalendar || !g_calendarAvailable) return true; // fail closed
    datetime now = NowServer();
    string base = ToUpper(SymbolInfoString(symbol, SYMBOL_CURRENCY_BASE));
    string quote = ToUpper(SymbolInfoString(symbol, SYMBOL_CURRENCY_PROFIT));
@@ -1026,7 +942,6 @@ void EvaluatePlans()
       if(g_plans[i].expiresAt > 0 && nowMs > g_plans[i].expiresAt)
       {
          Log("Plan " + g_plans[i].id + " expired untriggered.");
-         AddResult(g_plans[i].id, "expired", 0, 0, 0, "plan TTL elapsed before a safe trigger");
          g_plans[i].active = false;
          continue;
       }
@@ -1042,7 +957,6 @@ void EvaluatePlans()
       bool invalidated = g_plans[i].isBuy ? tick.bid <= g_plans[i].invalidate : tick.ask >= g_plans[i].invalidate;
       if(invalidated)
       {
-         AddResult(g_plans[i].id, "skipped", 0, 0, 0, "plan invalidated before trigger");
          Log("Plan " + g_plans[i].id + " invalidated before trigger.");
          g_plans[i].active = false;
          continue;
@@ -1054,12 +968,7 @@ void EvaluatePlans()
          g_plans[i].confirmCount = 0;
          continue;
       }
-      // Count real ticks, not OnTick + OnTimer visits to the same quote.
-      if(tick.time_msc != g_plans[i].lastConfirmTick)
-      {
-         g_plans[i].lastConfirmTick = tick.time_msc;
-         g_plans[i].confirmCount++;
-      }
+      g_plans[i].confirmCount++;
       if(g_plans[i].confirmCount < g_plans[i].confirmTicks) continue;
       if(g_plans[i].maxSpreadPoints > 0 && spread > g_plans[i].maxSpreadPoints) continue;
 
@@ -1071,7 +980,11 @@ void EvaluatePlans()
          Log("Plan " + g_plans[i].id + " held: high-impact news blackout.");
          continue;
       }
-      if(!TradingAllowed(symbol)) continue; // temporary guard: hold until TTL, never silently discard
+      if(!TradingAllowed(symbol))
+      {
+         g_plans[i].active = false;
+         continue;
+      }
       ExecutePlan(i, price);
    }
 }
@@ -1219,10 +1132,7 @@ void ArmPlanFromJson(const string obj, const string commandId)
       return;
    }
    string symbol = JsonString(plan, "symbol");
-   // Arming is not buying. Temporary news/tick/AutoTrading guards hold the
-   // plan at evaluation rather than silently discarding the user's approval.
-   bool liveAccount = AccountInfoInteger(ACCOUNT_TRADE_MODE) == ACCOUNT_TRADE_MODE_REAL;
-   if(symbol == "" || DailyLossBreached() || (liveAccount && (!AllowLiveAccount || !g_liveTradingEnabled)))
+   if(symbol == "" || !TradingAllowed(symbol))
    {
       AddResult(commandId, "skipped", 0, 0, 0, "local safety guard blocked this plan");
       return;
@@ -1252,7 +1162,6 @@ void ArmPlanFromJson(const string obj, const string commandId)
    g_plans[slot].expiresAt = (long)JsonNumber(plan, "expiresAt");
    g_plans[slot].confirmTicks = (int)MathMax(1, JsonNumber(plan, "confirmTicks"));
    g_plans[slot].confirmCount = 0;
-   g_plans[slot].lastConfirmTick = 0;
    string management = JsonObject(plan, "management");
    string breakeven = JsonObject(management, "breakeven");
    string trail = JsonObject(management, "trail");
@@ -1321,12 +1230,7 @@ void FlattenAll(const string reason)
 //+------------------------------------------------------------------+
 bool TradingAllowed(const string symbol)
 {
-   if(!g_tradingEnabled || g_token == "") return false;
-   if(NowServer() - g_lastOk > 120) return false; // fixed executor lease safety bound
-   MqlTick tick;
-   if(!SymbolInfoTick(symbol, tick) || tick.bid <= 0 || tick.ask < tick.bid) return false;
-   // Per-symbol freshness, not a relaxed terminal heartbeat window.
-   if(NowUtcMs() - TickToUtcMs(tick.time_msc, (long)tick.time) > 8000) return false;
+   if(!g_tradingEnabled) return false;
    if(!MQLInfoInteger(MQL_TRADE_ALLOWED)) return false;
    if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return false;
    if(SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE) == SYMBOL_TRADE_MODE_DISABLED) return false;

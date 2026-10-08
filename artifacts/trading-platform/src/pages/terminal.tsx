@@ -390,7 +390,6 @@ export default function Terminal() {
                   feed={state.data?.news ?? { available: false, checkedAt: 0, events: [] }}
                   upcoming={state.data?.newsUpcoming ?? []}
                   timeZone={timeZone}
-                  stale={state.data?.newsStale ?? false}
                 />
               </Pane>
               {/* Fills the column the calendar used to leave short on desktop

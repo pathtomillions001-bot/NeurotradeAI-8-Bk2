@@ -306,56 +306,6 @@ CREATE TABLE IF NOT EXISTS mt5_account_claims (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS mt5_account_claims_key ON mt5_account_claims (account_key);
 CREATE INDEX IF NOT EXISTS mt5_account_claims_session_idx ON mt5_account_claims (session_id);
-
--- ── MT5 bridge pairing codes ──────────────────────────────────────────────────
--- The 8-character code a user pastes into the EA's PairingCode input.
---
--- These used to live only in a process-local Map with a 10-minute TTL, and were
--- deleted the instant they were redeemed. That combination is what stranded
--- terminals: the value sits in the EA's inputs, which the user cannot edit while
--- MT5 is running, so the moment the API restarted (redeploy, crash, autoscale)
--- or the terminal was closed and reopened, every /api/bridge/pair retry answered
--- 401 "Unknown or expired pairing code." forever — no data, no executions, and
--- the only recovery was re-typing a new code into the EA.
---
--- A code is now durable and is revoked ONLY when the user unlinks the terminal
--- from the Desk (or when this session has issued more than the retention cap,
--- so rows cannot accumulate without bound).
-CREATE TABLE IF NOT EXISTS mt5_pairing_codes (
-  code TEXT PRIMARY KEY,              -- e.g. 'K7QM-2TXP'
-  session_id TEXT NOT NULL,           -- Desk that issued it
-  created_at_ms BIGINT NOT NULL,
-  -- Set only by an explicit unlink from the Desk. Never set by a timer.
-  revoked_at_ms BIGINT,
-  -- Diagnostic: when a terminal last redeemed it. A redeemed code stays valid
-  -- so the same EA can pair again after an MT5 restart or an API redeploy.
-  redeemed_at_ms BIGINT,
-  last_attempt_at_ms BIGINT,
-  last_error TEXT
-);
-CREATE INDEX IF NOT EXISTS mt5_pairing_codes_session_idx ON mt5_pairing_codes (session_id);
-
--- ── MT5 bridge links ─────────────────────────────────────────────────────────
--- The live binding between one Desk (browser session) and the terminal serving
--- it, keyed by the bearer token the EA presents on every heartbeat.
---
--- The token is the EA's only credential and the Desk's terminal record used to
--- exist only in memory, so an API restart orphaned every connected terminal:
--- the EA still held a valid-looking token, /api/bridge/sync answered 401, and
--- the EA fell back to pairing with a code the server no longer knew. Persisting
--- the link is what lets a heartbeat restore the Desk after a redeploy without
--- the user touching MT5 at all.
-CREATE TABLE IF NOT EXISTS mt5_bridge_links (
-  session_id TEXT PRIMARY KEY,        -- one Desk holds one terminal
-  bridge_token TEXT NOT NULL,         -- bearer token issued at pairing
-  login BIGINT NOT NULL,
-  server TEXT NOT NULL,
-  company TEXT,
-  paired_at_ms BIGINT NOT NULL,
-  last_sync_at_ms BIGINT NOT NULL,    -- throttled write, not one per heartbeat
-  sync_interval_ms INTEGER NOT NULL DEFAULT 0
-);
-CREATE UNIQUE INDEX IF NOT EXISTS mt5_bridge_links_token_idx ON mt5_bridge_links (bridge_token);
 `;
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

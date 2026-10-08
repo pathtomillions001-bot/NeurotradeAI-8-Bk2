@@ -27,7 +27,7 @@ export interface DeskStreamPayload {
   serverTime: number;
   mode: TradeMode;
   autoTrade: boolean;
-  terminal: { login: number; lastSyncAt: number; stale: boolean } | null;
+  terminal: { login: number; lastSyncAt: number; stale: boolean; degraded?: boolean } | null;
   account: Account | null;
   instruments: Instrument[];
   positions: Position[];
@@ -42,15 +42,24 @@ export interface DeskStreamState {
   account: Account | null;
   positions: Position[] | null;
   plans: ArmedPlan[] | null;
-  terminal: DeskStreamPayload["terminal"];
+  terminal: { login: number; lastSyncAt: number; stale: boolean; degraded?: boolean } | null;
   connected: boolean;
   /** Server timestamp of the last event — a heartbeat, not a price update. */
   lastEventAt: number | null;
   feed: FeedDiagnostics | null;
 }
 
-/** Poll fallback interval when the stream is down. */
-const FALLBACK_POLL_MS = 4_000;
+/**
+ * How long to consider SSE data "fresh" before falling back to polling.
+ *
+ * When the stream has not delivered an event within this window the hook
+ * clears its cached instruments/account/positions/plans so the polled REST
+ * data takes over. Without this, the stale SSE array (which is non-null and
+ * therefore wins `??` over the polling query's data) would keep being
+ * rendered indefinitely — which is exactly the bug that made the Desk show
+ * frozen prices after every proxy timeout or redeploy.
+ */
+const STALE_STREAM_MS = 6_000;
 
 export function deskStreamUrl(): string {
   return withTabSession(deskUrl("/desk/stream"));
@@ -81,7 +90,16 @@ export function useDeskStream(enabled: boolean): DeskStreamState & {
 
   useEffect(() => {
     if (!enabled) {
-      setState((prev) => ({ ...prev, connected: false }));
+      setState({
+        instruments: null,
+        account: null,
+        positions: null,
+        plans: null,
+        terminal: null,
+        connected: false,
+        lastEventAt: null,
+        feed: null,
+      });
       return;
     }
 
@@ -117,17 +135,35 @@ export function useDeskStream(enabled: boolean): DeskStreamState & {
     return () => source.close();
   }, [enabled]);
 
-  // Fallback polling while the stream is not delivering.
+  // Stale-data watchdog: when the SSE stream has not delivered an event in
+  // STALE_STREAM_MS the cached push data is cleared so the polled REST
+  // fallback takes over. Without this, `stream.instruments` (a non-null
+  // array) shadows `instruments.data?.instruments` via `??` — and the Desk
+  // renders frozen prices from the last successful push forever.
   useEffect(() => {
     if (!enabled) return;
     const interval = setInterval(() => {
-      if (lastEventAtRef.current && Date.now() - lastEventAtRef.current < FALLBACK_POLL_MS) return;
+      const last = lastEventAtRef.current;
+      if (last !== null && Date.now() - last > STALE_STREAM_MS) {
+        // Clear the push cache so the polling fallback wins the `??` race.
+        setState((prev) => ({
+          ...prev,
+          instruments: null,
+          account: null,
+          positions: null,
+          plans: null,
+          // Keep terminal and feed — they describe the connection, not
+          // tick-level data, and the REST /state query already refreshes
+          // them independently.
+        }));
+        lastEventAtRef.current = null;
+      }
       setTick((value) => value + 1);
-    }, FALLBACK_POLL_MS);
+    }, STALE_STREAM_MS);
     return () => clearInterval(interval);
   }, [enabled]);
 
   return { ...state, refresh: () => setTick((value) => value + 1) };
 }
 
-export { FALLBACK_POLL_MS };
+export { STALE_STREAM_MS };

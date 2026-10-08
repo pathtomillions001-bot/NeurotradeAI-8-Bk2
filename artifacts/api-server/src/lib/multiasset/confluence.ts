@@ -133,14 +133,17 @@ export const MIN_BARS_PER_FRAME = 30;
 
 /**
  * Bars ahead a trade of each style is expected to need, counted on that mode's
- * entry timeframe (M2 / M15 / H1 respectively):
+ * entry timeframe (M1 / M15 / H1 respectively):
  *
- *   scalp    → 12 × M2  ≈ 25 minutes
+ *   scalp    → 5 × M1   = 5 minutes  (the hold a scalp is allowed)
  *   intraday → 24 × M15 ≈ 6 hours
  *   swing    → 48 × H1  ≈ 2 days
+ *
+ * The horizon is also the EA's time stop: the simulation values a path that is
+ * still open at the horizon as a time exit, so the two must be the same number.
  */
 export const MODE_HORIZON_BARS: Record<TradeMode, number> = {
-  scalp: 12,
+  scalp: 5,
   intraday: 24,
   swing: 48,
 };

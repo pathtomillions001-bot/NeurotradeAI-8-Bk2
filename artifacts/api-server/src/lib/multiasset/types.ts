@@ -316,6 +316,51 @@ export interface Position {
   initialRiskPoints?: number;
 }
 
+/**
+ * Why a position closed, as the terminal recorded it. `breakeven_stop` is a
+ * stop-loss hit after the stop had been moved to breakeven, which is a
+ * different outcome from the original stop and is reported that way.
+ */
+export type ExitReason =
+  | "sl"
+  | "breakeven_stop"
+  | "tp"
+  | "time_stop"
+  | "manual"
+  | "expert"
+  | "stop_out"
+  | "other"
+  | "unknown";
+
+/**
+ * A closed position as the terminal reports it. The OUT deal carries the close;
+ * the IN deal and the EA's own managed state supply the rest. This is the
+ * authoritative record of a trade — the disappearance of a position is not.
+ */
+export interface ClosedDealReport {
+  dealTicket: number;
+  positionId: number;
+  symbol: string;
+  side: Side;
+  volume: number;
+  openPrice: number;
+  closePrice: number;
+  openTime: number;
+  closeTime: number;
+  /** Realised P&L of the whole position, summed over its deals. */
+  profit: number;
+  commission: number;
+  swap: number;
+  reason: ExitReason;
+  planId: string | null;
+  /** Risk in account currency at the fill (OrderCalcProfit to the stop). */
+  initialRiskMoney: number | null;
+  initialRiskPoints: number | null;
+  /** Best and worst excursion in R while the position was open. */
+  mfeR: number | null;
+  maeR: number | null;
+}
+
 // ── Trading intent ───────────────────────────────────────────────────────────
 
 export type TradeMode = "scalp" | "intraday" | "swing";
@@ -367,26 +412,31 @@ export interface PlanRationale {
   warnings: string[];
 }
 
+/**
+ * What the EA does to a position after the fill (policy v3.05).
+ *
+ * Every field here is something the terminal enforces. Partial closes, trailing
+ * stops and pyramiding were removed from the policy: they were planned and
+ * shipped but never executed, so they described behaviour the Desk did not have.
+ */
 export interface ManagementPlan {
-  breakeven: { triggerR: number; offsetR: number; structureBuffer: boolean } | null;
-  partials: { atR: number; closePct: number }[];
-  trail:
-    | {
-        mode: "atr_chandelier" | "structure" | "fixed_points";
-        period: number;
-        mult: number;
-        activateAtR: number;
-        stepPoints: number;
-      }
-    | null;
-  pyramid: {
-    maxAdds: number;
-    addAtR: number;
-    sizeRatio: number;
-    requireBaseAtBreakeven: boolean;
-    portfolioRiskCapR: number;
+  /** Once progress reaches triggerR, the stop moves to entry + offsetR × risk, once. */
+  breakeven: { triggerR: number; offsetR: number } | null;
+  /**
+   * Conditional extension (null for scalp). At checkAtR, while the target is still
+   * ahead, the EA checks that the trend still favours the trade. If it does, the
+   * target moves to extendToR and the stop to +lockR × risk. If it does not, the
+   * original target stands.
+   */
+  extension: {
+    checkAtR: number;
+    extendToR: number;
+    lockR: number;
+    emaPeriod: number;
+    timeframe: Timeframe;
   } | null;
-  timeStop: { noProgressBars: number; timeframe: Timeframe } | null;
+  /** The EA closes the position once it has been open this long. */
+  timeStop: { maxHoldMinutes: number } | null;
   guards: {
     maxSpreadPoints: number;
     newsBlackoutMin: number;

@@ -262,9 +262,10 @@ Ownership now sits in one place per concern: the bands in
 substitution in `lib/multiasset/confluence.ts`, the sub-minute construction in
 `lib/multiasset/subminute.ts`.
 
-Every plan carries `management` — break-even with a structure buffer, two partial exits (35% at
-1.5R, 25% at 3R), an ATR chandelier trail activating at 1.2R, one pyramid add at 1.5R capped at
-1.5R portfolio risk, a time stop, and spread/slippage/news guards.
+Every plan carries `management` — break-even once at 1R, a conditional target extension for intraday
+and swing (3R if the trend still favours the trade at 1.8R), a time stop, and spread/slippage/news
+guards. The EA enforces each of these from v3.05. Partial exits, the trail and pyramiding are not in
+the plan any more; see `multi-asset-architecture.md` §5.
 
 ### The spread is priced, never a veto
 
@@ -336,7 +337,7 @@ abbreviation.
 
 ## Upgrading the EA
 
-The EA in this branch is **v3.01** (v3.00 above plus the one-account rule in §7). Re-download and
+The EA in this branch is **v3.05** (v3.01 above, plus post-fill management and deal reporting, `multi-asset-architecture.md` §5). Re-download and
 re-attach it; v2 will still pair but will send server-relative timestamps and rotate symbol
 coverage.
 

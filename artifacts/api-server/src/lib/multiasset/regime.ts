@@ -35,10 +35,15 @@ export interface RegimeAssessment {
   /** Percentile of current Bollinger width vs history (squeeze detection). */
   bandWidthPercentile: number;
   atr: number;
-  /** EWMA volatility of log returns, per bar. */
+  /** EWMA volatility of log returns, per bar, over the volatility window. */
   stepVolatility: number;
-  /** Mean log return per bar over the regression window. */
+  /** Mean log return per bar over the same window as stepVolatility. */
   drift: number;
+  /**
+   * How many returns the drift and stepVolatility were measured over. The drift's
+   * t-statistic needs this count; using the full history instead overstates it.
+   */
+  driftSamples: number;
 }
 
 export interface RegimeOptions {
@@ -80,6 +85,7 @@ export function assessRegime(bars: Bar[], options: Partial<RegimeOptions> = {}):
       atr: 0,
       stepVolatility: 0,
       drift: 0,
+      driftSamples: 0,
     };
   }
 
@@ -137,6 +143,7 @@ export function assessRegime(bars: Bar[], options: Partial<RegimeOptions> = {}):
     atr: currentAtr,
     stepVolatility,
     drift,
+    driftSamples: returns.length,
   };
 }
 

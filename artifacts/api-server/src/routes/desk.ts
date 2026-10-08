@@ -13,6 +13,7 @@ import { getBrowserSessionId } from "../lib/session";
 import { logger } from "../lib/logger";
 import { evaluate, horizonMinutes } from "../lib/multiasset/agent";
 import { performanceStats } from "../lib/multiasset/analytics";
+import { tradeMetrics } from "../lib/multiasset/quant";
 import {
   AUTO_SELECT_INTERVAL_MS,
   AUTO_SELECT_MAX_CANDIDATES,
@@ -407,6 +408,34 @@ router.get("/performance", (_req, res) => {
     .map((t) => t.rMultiple)
     .filter((r): r is number => r !== null);
 
+  // Quant metrics over the realised record. The Sharpe is annualised over the span
+  // the record covers, and the drawdown is stated at the desk's base risk per
+  // trade. Both assumptions are returned in `metrics.basis`, not hidden.
+  const spanMs =
+    desk.closedTrades.length > 0 ? now - Math.min(...desk.closedTrades.map((t) => t.openedAt)) : 0;
+  const years = Math.max(1 / 365, spanMs / (365.25 * 24 * 3_600_000));
+  const riskPct = desk.policy.baseRiskPct;
+  const rOf = (trades: typeof desk.closedTrades) =>
+    trades.map((t) => t.rMultiple).filter((r): r is number => r !== null);
+  const byMode = (["scalp", "intraday", "swing"] as const).map((mode) => ({
+    mode,
+    ...tradeMetrics(
+      rOf(desk.closedTrades.filter((t) => t.mode === mode)),
+      { years, riskPct },
+    ),
+  }));
+  const exitTally = new Map<string, { reason: string; trades: number; withR: number; sumR: number }>();
+  for (const trade of desk.closedTrades) {
+    const reason = trade.exitReason ?? "unknown";
+    const tally = exitTally.get(reason) ?? { reason, trades: 0, withR: 0, sumR: 0 };
+    tally.trades++;
+    if (trade.rMultiple !== null) {
+      tally.withR++;
+      tally.sumR += trade.rMultiple;
+    }
+    exitTally.set(reason, tally);
+  }
+
   return res.json({
     source: desk.terminal ? "mt5" : "unlinked",
     currency: desk.account?.currency ?? "USD",
@@ -414,6 +443,21 @@ router.get("/performance", (_req, res) => {
     closedTrades: desk.closedTrades.slice(-50).reverse(),
     bySymbol: symbols,
     overall: performanceStats(allR),
+    metrics: {
+      ...tradeMetrics(allR, { years, riskPct }),
+      byMode,
+      exitReasons: [...exitTally.values()].map((tally) => ({
+        reason: tally.reason,
+        trades: tally.trades,
+        meanR: tally.withR > 0 ? Number((tally.sumR / tally.withR).toFixed(3)) : null,
+      })),
+      basis: {
+        trades: allR.length,
+        dealSourced: desk.closedTrades.filter((t) => t.source === "deal").length,
+        spanYears: Number(years.toFixed(4)),
+        riskPct,
+      },
+    },
     outcomes: [...desk.outcomes.values()],
     realisedPnl: desk.riskState.realisedPnlToday,
     generatedAt: now,

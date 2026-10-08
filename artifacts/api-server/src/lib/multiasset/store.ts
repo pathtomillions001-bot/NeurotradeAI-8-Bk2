@@ -15,7 +15,9 @@ import type {
   ArmedPlan,
   BridgeCommand,
   CandleSeries,
+  ClosedDealReport,
   CommandResult,
+  ExitReason,
   MarketCatalogEntry,
   NewsFeed,
   Position,
@@ -67,6 +69,23 @@ export interface ClosedTrade {
   rMultiple: number | null;
   openedAt: number;
   closedAt: number;
+  /**
+   * `deal`: the terminal's own close record (authoritative, with commission and
+   * the exit reason). `inferred`: the position vanished between snapshots and its
+   * last floating P&L was used — what an older EA forces, and an approximation.
+   */
+  source: "deal" | "inferred";
+  mode: TradeMode | null;
+  closePrice: number | null;
+  exitReason: ExitReason;
+  planId: string | null;
+  /** The terminal's deal ticket; the idempotency key for re-sent closes. */
+  dealTicket: number | null;
+  initialRiskMoney: number | null;
+  mfeR: number | null;
+  maeR: number | null;
+  /** Minutes from fill to close. */
+  holdMinutes: number | null;
 }
 
 export interface EquitySample {
@@ -669,6 +688,98 @@ export function sampleEquity(desk: DeskState, account: AccountSnapshot, now = Da
 }
 
 /** Record a realised trade: one closed position, attributed to a mode. */
+/** Adds one realised result to the symbol+mode ledger that feeds the agent's prior. */
+function ledgerOutcome(
+  desk: DeskState,
+  symbol: string,
+  mode: TradeMode,
+  net: number,
+  rMultiple: number | null,
+  closedAt: number,
+): void {
+  const key = outcomeKey(symbol, mode);
+  const existing = desk.outcomes.get(key) ?? {
+    key,
+    symbol,
+    mode,
+    wins: 0,
+    losses: 0,
+    totalR: 0,
+    updatedAt: closedAt,
+  };
+  if (net > 0) existing.wins++;
+  else if (net < 0) existing.losses++;
+  // A scratch (net ≈ 0) counts as neither a win nor a loss but still moves R.
+  existing.totalR += rMultiple ?? 0;
+  existing.updatedAt = closedAt;
+  desk.outcomes.set(key, existing);
+}
+
+function pushClosedTrade(desk: DeskState, trade: ClosedTrade): void {
+  desk.closedTrades.push(trade);
+  if (desk.closedTrades.length > MAX_CLOSED_TRADES) {
+    desk.closedTrades.splice(0, desk.closedTrades.length - MAX_CLOSED_TRADES);
+  }
+}
+
+/**
+ * Record a position closed by the terminal, from its own deal report.
+ *
+ * This is the authoritative path. Commission, the exit reason, the excursions
+ * and the initial risk all come from the terminal, not from a snapshot taken
+ * before the close. Idempotent on the deal ticket: the EA keeps re-sending a
+ * close until the server has acknowledged it, so a repeat is a no-op and
+ * returns null.
+ */
+export function recordDealClose(
+  desk: DeskState,
+  deal: ClosedDealReport,
+  now = Date.now(),
+): ClosedTrade | null {
+  if (desk.closedTrades.some((t) => t.dealTicket === deal.dealTicket)) return null;
+
+  const mode = desk.positionModes.get(deal.positionId) ?? desk.planModes.get(deal.symbol) ?? desk.mode;
+  const net = deal.profit + deal.swap + deal.commission;
+  const rMultiple =
+    deal.initialRiskMoney !== null && deal.initialRiskMoney > 0 ? net / deal.initialRiskMoney : null;
+
+  const trade: ClosedTrade = {
+    ticket: deal.positionId,
+    symbol: deal.symbol,
+    side: deal.side,
+    volume: deal.volume,
+    openPrice: deal.openPrice,
+    profit: deal.profit,
+    swap: deal.swap,
+    commission: deal.commission,
+    rMultiple,
+    openedAt: deal.openTime,
+    closedAt: deal.closeTime || now,
+    source: "deal",
+    mode,
+    closePrice: deal.closePrice,
+    exitReason: deal.reason,
+    planId: deal.planId,
+    dealTicket: deal.dealTicket,
+    initialRiskMoney: deal.initialRiskMoney,
+    mfeR: deal.mfeR,
+    maeR: deal.maeR,
+    holdMinutes: deal.closeTime > deal.openTime ? (deal.closeTime - deal.openTime) / 60_000 : null,
+  };
+  pushClosedTrade(desk, trade);
+  ledgerOutcome(desk, deal.symbol, mode, net, rMultiple, trade.closedAt);
+  desk.positionModes.delete(deal.positionId);
+  return trade;
+}
+
+/**
+ * Record a position that vanished between snapshots, from its last floating P&L.
+ *
+ * This is the FALLBACK for an EA that does not report deals. Its result is an
+ * approximation (the last floating value is not the fill's realised P&L, and
+ * commission is unknown), so it is labelled `inferred` and never mixed silently
+ * with authoritative records.
+ */
 export function recordClosedTrade(
   desk: DeskState,
   position: Position,
@@ -677,9 +788,7 @@ export function recordClosedTrade(
   const mode = desk.positionModes.get(position.ticket) ?? desk.mode;
   const net = position.profit + position.swap + position.commission;
   const rMultiple =
-    position.initialRiskMoney && position.initialRiskMoney > 0
-      ? net / position.initialRiskMoney
-      : null;
+    position.initialRiskMoney && position.initialRiskMoney > 0 ? net / position.initialRiskMoney : null;
 
   const trade: ClosedTrade = {
     ticket: position.ticket,
@@ -693,30 +802,20 @@ export function recordClosedTrade(
     rMultiple,
     openedAt: position.openTime,
     closedAt,
-  };
-  desk.closedTrades.push(trade);
-  if (desk.closedTrades.length > MAX_CLOSED_TRADES) {
-    desk.closedTrades.splice(0, desk.closedTrades.length - MAX_CLOSED_TRADES);
-  }
-
-  const key = outcomeKey(position.symbol, mode);
-  const existing = desk.outcomes.get(key) ?? {
-    key,
-    symbol: position.symbol,
+    source: "inferred",
     mode,
-    wins: 0,
-    losses: 0,
-    totalR: 0,
-    updatedAt: closedAt,
+    closePrice: null,
+    exitReason: "unknown",
+    planId: null,
+    dealTicket: null,
+    initialRiskMoney: position.initialRiskMoney ?? null,
+    mfeR: null,
+    maeR: null,
+    holdMinutes: null,
   };
-  if (net > 0) existing.wins++;
-  else if (net < 0) existing.losses++;
-  // A scratch (net ≈ 0) counts as neither a win nor a loss but still moves R.
-  existing.totalR += rMultiple ?? 0;
-  existing.updatedAt = closedAt;
-  desk.outcomes.set(key, existing);
+  pushClosedTrade(desk, trade);
+  ledgerOutcome(desk, position.symbol, mode, net, rMultiple, closedAt);
   desk.positionModes.delete(position.ticket);
-
   return trade;
 }
 
@@ -791,7 +890,17 @@ export function startNewTradingDay(desk: DeskState): void {
 export function reconcilePositions(
   desk: DeskState,
   incoming: Position[],
+  options: {
+    /**
+     * Infer closed trades from positions that disappear. Turn this OFF when the
+     * terminal reports its closed deals: a position that vanished was then closed
+     * by a deal that arrives separately, and recording it here as well would count
+     * the trade twice (or count it with the wrong P&L).
+     */
+    inferCloses?: boolean;
+  } = {},
 ): { opened: Position[]; closed: Position[] } {
+  const inferCloses = options.inferCloses ?? true;
   const previous = new Map(desk.positions.map((p) => [p.ticket, p]));
   const next = new Map(incoming.map((p) => [p.ticket, p]));
 
@@ -805,8 +914,8 @@ export function reconcilePositions(
     const mode = desk.planModes.get(position.symbol) ?? null;
     if (mode) desk.positionModes.set(position.ticket, mode);
   }
-  for (const position of closed) {
-    recordClosedTrade(desk, position);
+  if (inferCloses) {
+    for (const position of closed) recordClosedTrade(desk, position);
   }
 
   desk.positions = incoming.map((position) => {

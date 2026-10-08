@@ -440,9 +440,19 @@ export interface DeskStateResponse {
   /**
    * The next 24 hours of red-folder events, filtered, sorted and
    * distance-stamped by the server so the calendar pane and the agent's news
-   * gate describe the same window.
+   * gate describe the same window. Released events from the last 24 hours are
+   * included and flagged `passed`, so a day whose releases are all behind us is
+   * never reported as an empty calendar.
    */
   newsUpcoming: UpcomingNewsEvent[];
+  /**
+   * True when the terminal has stopped refreshing the calendar. The news gate
+   * fails closed on this; the pane uses it to say "this read is old" instead of
+   * reporting a quiet day from stale evidence.
+   */
+  newsStale: boolean;
+  /** How old a calendar read may be before `newsStale` is set. */
+  newsStaleAfterMs: number;
   /** Automatic best-market selection: what it last did, and its cadence. */
   autoSelect: {
     last: AutoSelectRecord | null;
@@ -544,7 +554,14 @@ export const deskApi = {
   settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy; timezone: string; timezones: DeskTimezone[] }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
   resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
   projection: (params: { winProbability: number; rewardRisk: number; trades: number }) => request<{ assumptions: Record<string, number>; disciplined: ProjectionResult; martingale: ProjectionResult; note: string }>(`/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`),
-  pairingCode: () => request<{ pairingCode: string; expiresInMs: number }>("/bridge/pairing-code", { method: "POST" }),
+  /**
+   * Ask for a pairing code. `expiresInMs` is null by contract: a code has no
+   * expiry and stays valid until this Desk unlinks the terminal.
+   */
+  pairingCode: () =>
+    request<{ pairingCode: string; expiresInMs: number | null; revokedBy?: string }>("/bridge/pairing-code", {
+      method: "POST",
+    }),
   bridgeStatus: () => request<{
     linked: boolean;
     login?: number;
@@ -572,8 +589,13 @@ export const deskApi = {
      * sat in the MT5 Experts log.
      */
     lastPairingError?: string | null;
+    /**
+     * How the link ends. Always "until-unlinked": closing MT5, restarting MT5,
+     * closing the browser or a platform redeploy all resume the same bridge.
+     */
+    linkPersistence?: string;
   }>("/bridge/status"),
-  unpair: () => request<{ ok: true }>("/bridge/unpair", { method: "POST" }),
+  unpair: () => request<{ ok: boolean; revokedCodes?: number }>("/bridge/unpair", { method: "POST" }),
 };
 
 export interface ProjectionResult {

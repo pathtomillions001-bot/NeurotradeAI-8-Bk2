@@ -19,13 +19,33 @@ export interface NewsGate {
   checkedAt: number | null;
 }
 
-const NEWS_MAX_AGE_MS = 5 * 60_000;
+/**
+ * How old a calendar read may be before it is no longer evidence.
+ *
+ * The terminal refreshes the calendar every 60 seconds, so a read older than
+ * five minutes means the bridge has stopped delivering — and a stopped bridge
+ * must never be presented as a quiet calendar.
+ */
+export const NEWS_MAX_AGE_MS = 5 * 60_000;
+
+/**
+ * True when the feed's last read is too old to trust.
+ *
+ * The gate below already fails closed on a stale read; this exists so the
+ * calendar PANE can say the same thing instead of reporting "no high-impact
+ * events" from a read that is hours old.
+ */
+export function newsFeedIsStale(feed: NewsFeed | null | undefined, now = Date.now()): boolean {
+  if (!feed?.available) return false;
+  return !Number.isFinite(feed.checkedAt) || now - feed.checkedAt > NEWS_MAX_AGE_MS;
+}
 
 /**
  * How far ahead the desk's red-folder panel looks.
  *
- * Twenty-four hours, deliberately: it is the window the EA itself fetches from
- * the MT5 calendar (`CalendarValueHistory(now - 15 min, now + 24 h)`), and it is
+ * Twenty-four hours, deliberately: it is the forward half of the window the EA
+ * itself fetches from the MT5 calendar (`CalendarValueHistory(now - 24 h,
+ * now + 24 h)`), and it is
  * the horizon over which a trader can actually act on an event — a swing entry
  * planned today must know what releases tomorrow. Events are never dropped for
  * being "too far away"; anything beyond the window is simply not fetched.
@@ -35,14 +55,18 @@ export const NEWS_LOOKAHEAD_MS = 24 * 60 * 60_000;
 /**
  * How long after an event it remains listed.
  *
- * Twelve hours, not fifteen minutes. The pane is the user's evidence that the
+ * A full day, not fifteen minutes. The pane is the user's evidence that the
  * news gate is doing its job, and "0 red-folder events" reads as a bug when the
  * terminal's own calendar shows three releases earlier the same day. A release
  * that has already passed is not actionable, but it IS the explanation for a
  * quiet session — so it stays on the list, marked as passed, for the rest of the
  * trading day.
+ *
+ * It matches the lookbehind the EA reads from the MT5 calendar. A narrower
+ * filter here silently drops releases the terminal DID send, which is exactly
+ * the discrepancy this pane exists to disprove.
  */
-export const NEWS_LOOKBEHIND_MS = 12 * 60 * 60_000;
+export const NEWS_LOOKBEHIND_MS = 24 * 60 * 60_000;
 
 export interface UpcomingNewsEvent {
   id: string;

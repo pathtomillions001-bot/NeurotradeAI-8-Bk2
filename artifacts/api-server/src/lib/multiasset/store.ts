@@ -231,6 +231,28 @@ export interface DeskState {
    * without analysing hundreds of symbols inside one heartbeat.
    */
   autoSelectCursor: number;
+  /**
+   * Delivery state of each armed plan's `arm_plan` command, by plan id.
+   *
+   * The Desk shows a plan as armed the moment it is queued, but the terminal
+   * only actually holds it once it has replied. If that reply never arrives —
+   * the bridge token was rejected, the heartbeat that carried the command was
+   * lost, or the terminal was mid-restart — the user is left looking at an
+   * armed plan that the EA never received, and no execution ever happens. This
+   * map is what lets the desk notice the silence and re-send, instead of
+   * trusting that a queued command was delivered.
+   */
+  planDelivery: Map<string, PlanDelivery>;
+}
+
+/** Per-plan record of whether the terminal has acknowledged the arm command. */
+export interface PlanDelivery {
+  /** Times the arm command has been sent, including the first attempt. */
+  attempts: number;
+  /** True once the terminal answered for this plan, with ANY status. */
+  acked: boolean;
+  /** When the most recent attempt was handed to the terminal. */
+  sentAt: number;
 }
 
 const desks = new Map<string, DeskState>();
@@ -280,6 +302,7 @@ export function getDesk(sessionId: string): DeskState {
       lastAutoSelectAt: 0,
       lastAutoSelectNoteAt: 0,
       autoSelectCursor: 0,
+      planDelivery: new Map(),
     };
     desks.set(sessionId, desk);
   }
@@ -306,6 +329,7 @@ export function clearTerminalData(desk: DeskState): void {
   desk.news = { ...UNAVAILABLE_NEWS };
   desk.positions = [];
   desk.plans.clear();
+  desk.planDelivery.clear();
   desk.outbox = [];
   desk.inflight.clear();
   desk.watchlist = [];
@@ -335,6 +359,19 @@ export function issueBridgeToken(sessionId: string): string {
   const token = `nt_${randomUUID().replace(/-/g, "")}${randomUUID().replace(/-/g, "").slice(0, 16)}`;
   tokenToSession.set(token, sessionId);
   return token;
+}
+
+/**
+ * Re-register a token that was issued earlier (a link restored from storage).
+ *
+ * A redeploy empties `tokenToSession`, so without this every restored heartbeat
+ * would take the slow path — a database lookup per beat per terminal — for the
+ * rest of this process's life.
+ */
+export function rememberBridgeToken(sessionId: string, token: string): void {
+  const existing = desks.get(sessionId)?.terminal?.bridgeToken;
+  if (existing && existing !== token) tokenToSession.delete(existing);
+  tokenToSession.set(token, sessionId);
 }
 
 export function sessionForToken(token: string): string | null {
@@ -433,7 +470,20 @@ export function requeueStaleCommands(desk: DeskState, timeoutMs = 15_000): numbe
 }
 
 export function acknowledgeResult(desk: DeskState, result: CommandResult): boolean {
+  const entry = desk.inflight.get(result.commandId);
   const known = desk.inflight.delete(result.commandId);
+
+  // ANY answer counts as delivered — including "skipped: trading disabled" or
+  // "rejected: no free plan slot". Those are the terminal telling us why it did
+  // not take the plan, which the desk surfaces separately; only silence means
+  // the command never got there, and only silence should trigger a re-send.
+  if (entry?.command.type === "arm_plan") {
+    const delivery = desk.planDelivery.get(entry.command.plan.id);
+    if (delivery) delivery.acked = true;
+  } else if (entry?.command.type === "cancel_plan") {
+    desk.planDelivery.delete(entry.command.planId);
+  }
+
   if (desk.seenCommandIds.includes(result.commandId)) return false;
   desk.seenCommandIds.push(result.commandId);
   if (desk.seenCommandIds.length > MAX_SEEN_COMMANDS) {
@@ -471,16 +521,22 @@ export function armPlan(desk: DeskState, plan: ArmedPlan): void {
   for (const [id, existing] of desk.plans) {
     if (existing.symbol === plan.symbol) {
       desk.plans.delete(id);
+      desk.planDelivery.delete(id);
       enqueueCommand(desk, { id: randomUUID(), type: "cancel_plan", planId: id });
     }
   }
   desk.plans.set(plan.id, plan);
   desk.planModes.set(plan.symbol, plan.mode);
+  // `sentAt` starts at the arm time; the command itself waits in the outbox for
+  // the next heartbeat. `syncUnackedPlans` refuses to re-send while a command
+  // for this plan is still queued or in flight, so this cannot double-send.
+  desk.planDelivery.set(plan.id, { attempts: 1, acked: false, sentAt: Date.now() });
   enqueueCommand(desk, { id: randomUUID(), type: "arm_plan", plan });
 }
 
 export function cancelPlan(desk: DeskState, planId: string): boolean {
   if (!desk.plans.delete(planId)) return false;
+  desk.planDelivery.delete(planId);
   enqueueCommand(desk, { id: randomUUID(), type: "cancel_plan", planId });
   return true;
 }
@@ -491,10 +547,77 @@ export function expirePlans(desk: DeskState, now = Date.now()): string[] {
   for (const [id, plan] of desk.plans) {
     if (plan.expiresAt <= now) {
       desk.plans.delete(id);
+      desk.planDelivery.delete(id);
       expired.push(id);
     }
   }
   return expired;
+}
+
+/**
+ * How many times one plan's arm command may be re-sent after silence.
+ *
+ * Bounded so a terminal that is genuinely rejecting the plan (or a bridge that
+ * is down for good) cannot be hammered with the same command forever.
+ */
+export const MAX_PLAN_RESENDS = 3;
+
+/**
+ * Re-send the arm command for any plan the terminal has not acknowledged.
+ *
+ * This is the guard against the worst kind of silent failure in the desk: a
+ * plan the UI shows as armed, on a terminal that never received it, so nothing
+ * ever executes and the only evidence is the plan quietly expiring. The
+ * re-send uses a NEW command id on purpose — the EA de-duplicates by command
+ * id, so replaying the original would be dropped unread.
+ *
+ * Runs on every heartbeat, after un-acknowledged commands have been cleared
+ * from the in-flight map, and never touches a plan whose command is still
+ * queued, still in flight, already answered, expired, or already re-sent
+ * {@link MAX_PLAN_RESENDS} times.
+ */
+export function syncUnackedPlans(desk: DeskState, now = Date.now(), timeoutMs = 15_000): number {
+  // Delivery records for plans that no longer exist cannot accumulate.
+  for (const planId of [...desk.planDelivery.keys()]) {
+    if (!desk.plans.has(planId)) desk.planDelivery.delete(planId);
+  }
+
+  const inFlightPlanIds = new Set<string>();
+  for (const entry of desk.inflight.values()) {
+    if (entry.command.type === "arm_plan") inFlightPlanIds.add(entry.command.plan.id);
+  }
+  const queuedPlanIds = new Set<string>();
+  for (const command of desk.outbox) {
+    if (command.type === "arm_plan") queuedPlanIds.add(command.plan.id);
+  }
+
+  let resent = 0;
+  for (const [planId, plan] of desk.plans) {
+    if (plan.expiresAt <= now) continue;
+    if (queuedPlanIds.has(planId) || inFlightPlanIds.has(planId)) continue;
+
+    let delivery = desk.planDelivery.get(planId);
+    if (!delivery) {
+      // No record — e.g. a plan restored from a desk rebuilt after a restart.
+      // Start the clock instead of sending twice in the same heartbeat.
+      desk.planDelivery.set(planId, { attempts: 0, acked: false, sentAt: now });
+      continue;
+    }
+    if (delivery.acked) continue;
+    if (now - delivery.sentAt < timeoutMs) continue;
+    if (delivery.attempts >= MAX_PLAN_RESENDS) continue;
+
+    delivery.attempts += 1;
+    delivery.sentAt = now;
+    enqueueCommand(desk, { id: randomUUID(), type: "arm_plan", plan });
+    resent++;
+  }
+  return resent;
+}
+
+/** Delivery state for one armed plan, for the desk's diagnostics. */
+export function planDeliveryFor(desk: DeskState, planId: string): PlanDelivery | null {
+  return desk.planDelivery.get(planId) ?? null;
 }
 
 // ── Account bookkeeping ──────────────────────────────────────────────────────

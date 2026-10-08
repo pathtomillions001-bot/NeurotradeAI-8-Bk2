@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.02                                                     |
+//| Version 3.10                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -67,6 +67,30 @@
 //|     redCount, and reports the calendar as unavailable (fail closed |
 //|     for new entries) when the read returns nothing at all.         |
 //|                                                                    |
+//| WHAT CHANGED IN v3.10                                             |
+//|  9. THE LINK SURVIVES A RESTART OF MT5 OR OF THE PLATFORM.        |
+//|     The bridge token is now written to the terminal's own Files    |
+//|     folder and reused on the next attach, so closing and reopening |
+//|     MT5 — or re-attaching the EA to another chart — resumes the    |
+//|     same connection instead of demanding a pairing code the user   |
+//|     cannot type into a running EA. The platform persists the code  |
+//|     and the link on its side too, and both now end ONLY when the   |
+//|     terminal is unlinked from the Desk.                            |
+//| 10. A REJECTED CODE IS REPORTED, NOT RETRIED FIVE TIMES A MINUTE.  |
+//|     "HTTP 401 from /api/bridge/pair - Unknown or expired pairing   |
+//|     code." used to repeat every 5 seconds forever, burying the     |
+//|     Journal. The EA now says plainly that the code was rejected,   |
+//|     tells the user where to get a current one, and backs off. A    |
+//|     revoked token (an unlink from the Desk) re-pairs on the very   |
+//|     next tick instead of waiting out the pairing backoff.          |
+//| 11. THE CALENDAR READ COVERS THE WHOLE DAY.                        |
+//|     The window started 15 minutes in the past, so a red-folder     |
+//|     release that had already happened today was invisible: the     |
+//|     terminal's Calendar tab showed three high-impact events while  |
+//|     the Desk's news pane said "0 red-folder events". The read now  |
+//|     covers the last 24 hours as well as the next 24, so released   |
+//|     events are listed as passed instead of silently missing.       |
+//|                                                                    |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -83,7 +107,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "3.02"
+#property version   "3.10"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -203,7 +227,22 @@ int OnInit()
    g_syncIntervalMs = interval;
    EventSetMillisecondTimer(interval);
 
-   Print("NeurotradeBridge v2 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   // Resume the link this terminal already had, if it had one. Closing MT5
+   // used to throw the token away with the process, which forced a re-pair
+   // with the code in the inputs — the one request that cannot succeed after
+   // the platform has restarted. If the platform has since revoked it (an
+   // unlink from the Desk) the first heartbeat says so and the EA pairs again.
+   string stored = LoadToken();
+   if(StringLen(stored) > 0)
+   {
+      g_token = stored;
+      g_nextPairAttempt = 0;
+      Print("NeurotradeBridge: resumed the stored bridge link for account ",
+            IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
+            " — no pairing code needed. The Desk keeps this link until it is unlinked there.");
+   }
+
+   Print("NeurotradeBridge v3 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -252,6 +291,59 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
+//| Durable bridge identity                                           |
+//+------------------------------------------------------------------+
+/**
+ * The bridge token, persisted in the terminal's own Files folder.
+ *
+ * WHY: the token is this EA's only credential. Kept in a global variable alone
+ * it died with the process, so restarting MT5 — or moving the EA to another
+ * chart — forced a re-pair with the code in the inputs, which the user cannot
+ * change while the terminal is running. On disk it survives, and the platform
+ * keeps its half of the link too, so a restart on either side reconnects
+ * without anybody typing anything.
+ *
+ * The file is per terminal account, so two MT5 installs (or two logins in one
+ * data folder) never share a credential.
+ */
+string TokenFileName()
+{
+   return "NeurotradeBridge-" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".token";
+}
+
+void SaveToken(const string token)
+{
+   if(StringLen(token) == 0) return;
+   int handle = FileOpen(TokenFileName(), FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+   {
+      Print("NeurotradeBridge: could not store the bridge token (error ", GetLastError(),
+            "). The link still works now, but a restart of MT5 will need a fresh pairing code.");
+      return;
+   }
+   FileWriteString(handle, token);
+   FileClose(handle);
+}
+
+string LoadToken()
+{
+   if(!FileIsExist(TokenFileName())) return "";
+   int handle = FileOpen(TokenFileName(), FILE_READ | FILE_TXT | FILE_ANSI);
+   if(handle == INVALID_HANDLE) return "";
+   string token = StringTrimmed(FileReadString(handle));
+   FileClose(handle);
+   // Only a token this platform issues is ever presented. Anything else — an
+   // edited, truncated or stale file — must start from pairing instead.
+   if(StringFind(token, "nt_") != 0) return "";
+   return token;
+}
+
+void ForgetToken()
+{
+   if(FileIsExist(TokenFileName())) FileDelete(TokenFileName());
+}
+
+//+------------------------------------------------------------------+
 //| Pairing and HTTP                                                  |
 //+------------------------------------------------------------------+
 void TryPair()
@@ -296,6 +388,20 @@ void TryPair()
          Print("NeurotradeBridge: open the Desk that holds account ", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
                "@", AccountInfoString(ACCOUNT_SERVER), " and unlink it, or wait a few minutes. Retrying in 60s with the same code.");
       }
+      // HTTP 401: the code itself is not accepted — it was never issued by this
+      // platform, or it was revoked when the terminal was unlinked from the
+      // Desk. Retrying it every 5 seconds cannot help and only buries the
+      // Journal, which is exactly the log flood this used to produce. Say what
+      // is wrong, say where to get a working code, and back right off.
+      else if(g_lastHttpStatus == 401)
+      {
+         g_nextPairAttempt = now + 60;
+         Print("NeurotradeBridge: PAIRING CODE REJECTED — ",
+               (g_lastHttpError == "" ? "this pairing code is not valid for the Desk." : g_lastHttpError));
+         Print("NeurotradeBridge: open the Desk -> Link MT5 dialog, copy the current code into this EA's ",
+               "PairingCode input and re-attach the EA. A valid code does not expire on its own; it ends only ",
+               "when the terminal is unlinked from the Desk. Retrying in 60s.");
+      }
       return;
    }
 
@@ -309,8 +415,12 @@ void TryPair()
    g_token = token;
    g_lastOk = now;
    g_seq = 0;
+   // Written before anything else can fail, so a restart of MT5 resumes this
+   // link instead of asking the user for a code they cannot type right now.
+   SaveToken(token);
    ApplyServerResponse(response);
-   Print("NeurotradeBridge: paired successfully. Waiting for Desk market selections.");
+   Print("NeurotradeBridge: paired successfully. This link is stored in the terminal and survives restarts ",
+         "until the terminal is unlinked from the Desk. Waiting for Desk market selections.");
 }
 
 bool HttpPost(const string path, const string body, string &response, const bool authenticated)
@@ -356,10 +466,16 @@ bool HttpPost(const string path, const string body, string &response, const bool
       Print("NeurotradeBridge: HTTP ", status, " from ", path, " — ", response);
       if(status == 401 && authenticated)
       {
-         // Token may have been unpaired/replaced. Remain attached and let the
-         // user enter a fresh code rather than doing any blind work.
+         // The platform no longer recognises this token: it was replaced by a
+         // newer pairing, or the terminal was unlinked from the Desk. Drop the
+         // stored credential as well, or the next restart would present a token
+         // that is already dead, and re-pair on the very next tick — the link
+         // is down and waiting out the pairing backoff only delays recovery.
          g_token = "";
          g_tradingEnabled = false;
+         g_nextPairAttempt = 0;
+         ForgetToken();
+         Print("NeurotradeBridge: bridge token rejected. Re-pairing with the PairingCode input on the next tick.");
       }
       return false;
    }
@@ -790,7 +906,8 @@ string PositionsJson()
 //| Red-folder economic calendar                                      |
 //+------------------------------------------------------------------+
 /**
- * Read the MT5 economic calendar for the day, with a retry ladder.
+ * Read the MT5 economic calendar — the last 24 hours and the next 24 — with a
+ * retry ladder.
  *
  * WHY THERE IS A LADDER
  *
@@ -826,13 +943,20 @@ void RefreshCalendar(const bool force)
 
    MqlCalendarValue values[];
    ResetLastError();
-   // A day of forward visibility: the Desk renders an upcoming-events list,
-   // and a two-hour window left it empty for most of the session.
-   int count = CalendarValueHistory(values, now - 15 * 60, now + 24 * 60 * 60);
+   // A full day BEHIND as well as ahead.
+   //
+   // The lookbehind used to be fifteen minutes, which silently dropped every
+   // high-impact release that had already happened today. The terminal's own
+   // Calendar tab was showing three red-folder events while the Desk's news
+   // pane reported "0 red-folder events in the next 24 hours" — the pane was
+   // not lying about the future, it had simply never been sent the morning's
+   // releases. The Desk lists released events as passed for the rest of the
+   // day (news.ts NEWS_LOOKBEHIND_MS), so it needs them on the wire.
+   int count = CalendarValueHistory(values, now - 24 * 60 * 60, now + 24 * 60 * 60);
    if(count <= 0)
    {
-      // Fallback: everything the terminal knows from six hours ago onward.
-      int wide = CalendarValueHistory(values, now - 6 * 60 * 60, 0);
+      // Fallback: everything the terminal knows from a day ago onward.
+      int wide = CalendarValueHistory(values, now - 24 * 60 * 60, 0);
       if(wide > 0) count = wide;
    }
 

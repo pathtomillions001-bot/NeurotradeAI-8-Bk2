@@ -6,6 +6,7 @@ import express from "express";
 import { schemaReady } from "@workspace/db";
 import { runWithSession } from "../lib/session";
 import { __testing as claimTesting, accountKeyFor, resetClaims } from "../lib/multiasset/claims";
+import { __testing as bridgeLinkTesting } from "../lib/multiasset/bridge-links";
 import { resetDesk } from "../lib/multiasset/store";
 import router, { pendingPairings } from "./bridge";
 
@@ -42,11 +43,14 @@ describe("MT5 bridge — one account, one Desk", () => {
     server.close();
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     resetClaims();
     pendingPairings.clear();
-    // Every browser starts from a genuinely empty Desk, so one test's
-    // successful pairing can never mask another's refusal.
+    // Stored pairing codes and bridge links survive a `resetDesk` by design —
+    // that durability is the whole point of bridge-links.ts, and without this
+    // purge one test's terminal would be "restored from storage" inside the
+    // next. Every browser therefore starts from a genuinely empty Desk.
+    await bridgeLinkTesting.purgeAll();
     for (const id of sessions.values()) resetDesk(id);
   });
 

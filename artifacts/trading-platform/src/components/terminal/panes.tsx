@@ -652,10 +652,17 @@ export function NewsPane({
   feed,
   upcoming,
   timeZone = DEFAULT_DESK_TIMEZONE,
+  stale = false,
 }: {
   feed: NewsFeed;
   upcoming?: UpcomingNewsEvent[];
   timeZone?: string;
+  /**
+   * The terminal has stopped refreshing the calendar (server-decided, from the
+   * same threshold the news gate fails closed on). The events below are then
+   * the LAST read, not the current schedule.
+   */
+  stale?: boolean;
 }) {
   const now = Date.now();
   const events = upcoming ?? [];
@@ -688,7 +695,17 @@ export function NewsPane({
         <span className="text-zinc-700">·</span>
         <span>{zoneAbbreviation(now, timeZone)} · {timeZone.replace("_", " ")}</span>
       </div>
-      {unverified ? (
+      {stale && (
+        <div className="flex gap-2 p-3 text-[11px] leading-relaxed text-amber-300">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            The terminal has not refreshed the calendar for {relativeTime(feed.checkedAt)} — the schedule below is the last
+            read, not the current one. New entries fail closed until the bridge delivers a fresh read, so a release that
+            appeared since then is not visible here. Check the MT5 Journal and the bridge connection.
+          </span>
+        </div>
+      )}
+      {!stale && unverified ? (
         <div className="flex gap-2 p-3 text-[11px] leading-relaxed text-amber-300">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
@@ -698,7 +715,7 @@ export function NewsPane({
           </span>
         </div>
       ) : events.length === 0 ? (
-        <p className="p-4 text-xs text-zinc-500">No high-impact events in the next 24 hours. The gate stays armed — the calendar is refreshed by the terminal every minute.</p>
+        <p className="p-4 text-xs text-zinc-500">No high-impact events in the last or next 24 hours. The gate stays armed — the calendar is refreshed by the terminal every minute.</p>
       ) : (
         events.map((event) => <NewsRow key={event.id} event={event} timeZone={timeZone} />)
       )}

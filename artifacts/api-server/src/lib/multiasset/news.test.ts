@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
-import { assessNewsGate, upcomingRedFolder } from "./news";
+import { assessNewsGate, newsFeedIsStale, upcomingRedFolder } from "./news";
 import type { NewsFeed, SymbolSpec } from "./types";
 
 const spec: SymbolSpec = {
@@ -79,8 +79,10 @@ test("news gate fails closed when a formerly available feed becomes stale", () =
 // drop everything more than fifteen minutes old, so on a day whose three
 // red-folder releases were all in the morning the desk answered "0 red-folder
 // events" while the terminal's own calendar showed three. The list therefore
-// carries the trading day: releases from the last twelve hours stay, flagged as
-// passed, and only the 24-hour forward horizon is enforced.
+// carries the trading day: releases from the last twenty-four hours stay,
+// flagged as passed, and only the 24-hour forward horizon is enforced. That
+// lookbehind matches the window the EA reads out of the MT5 calendar, so the
+// pane can never show fewer events than the terminal sent.
 
 test("the upcoming window is the next 24 hours, in the order they happen", () => {
   const events = [
@@ -89,15 +91,16 @@ test("the upcoming window is the next 24 hours, in the order they happen", () =>
     { id: "tomorrow", time: now + 30 * 60 * 60_000, currency: "USD", country: "US", name: "NFP", importance: "high" as const },
     { id: "justHappened", time: now - 5 * 60_000, currency: "GBP", country: "UK", name: "CPI", importance: "high" as const },
     { id: "thisMorning", time: now - 3 * 60 * 60_000, currency: "JPY", country: "JP", name: "BoJ", importance: "high" as const },
-    { id: "yesterday", time: now - 20 * 60 * 60_000, currency: "USD", country: "US", name: "PPI", importance: "high" as const },
+    { id: "lastNight", time: now - 20 * 60 * 60_000, currency: "USD", country: "US", name: "PPI", importance: "high" as const },
+    { id: "twoDaysAgo", time: now - 30 * 60 * 60_000, currency: "USD", country: "US", name: "Jobless claims", importance: "high" as const },
   ];
 
   const upcoming = upcomingRedFolder(events, now);
-  assert.deepEqual(upcoming.map((event) => event.id), ["thisMorning", "justHappened", "soon", "later"]);
-  // 30 hours out is outside the 24-hour horizon, and yesterday is outside the
-  // day this list describes.
+  assert.deepEqual(upcoming.map((event) => event.id), ["lastNight", "thisMorning", "justHappened", "soon", "later"]);
+  // 30 hours out is outside the 24-hour horizon, and 30 hours back is outside
+  // the day this list describes.
   assert.ok(!upcoming.some((event) => event.id === "tomorrow"));
-  assert.ok(!upcoming.some((event) => event.id === "yesterday"));
+  assert.ok(!upcoming.some((event) => event.id === "twoDaysAgo"));
   // Events are stamped with their distance so the UI never recomputes it.
   const soon = upcoming.find((event) => event.id === "soon")!;
   assert.equal(soon.inMs, 45 * 60_000);
@@ -107,6 +110,32 @@ test("the upcoming window is the next 24 hours, in the order they happen", () =>
   const morning = upcoming.find((event) => event.id === "thisMorning")!;
   assert.equal(morning.passed, true);
   assert.equal(morning.next, false);
+});
+
+test("every release from earlier today is listed, so the day is never reported empty", () => {
+  // The reported bug: MT5's Calendar tab showed three red-folder events for the
+  // day, and the pane said "0 red-folder events in the next 24 hours". They had
+  // all been released before the EA's read window started, so they never
+  // reached the desk. Anything inside the last 24 hours must be listed.
+  const events = [
+    { id: "early", time: now - 9 * 60 * 60_000, currency: "GBP", country: "UK", name: "CPI", importance: "high" as const },
+    { id: "midday", time: now - 5 * 60 * 60_000, currency: "EUR", country: "EU", name: "ECB rate decision", importance: "high" as const },
+    { id: "afternoon", time: now - 90 * 60_000, currency: "USD", country: "US", name: "FOMC statement", importance: "high" as const },
+  ];
+  const upcoming = upcomingRedFolder(events, now);
+  assert.equal(upcoming.length, 3);
+  assert.deepEqual(upcoming.map((event) => event.id), ["early", "midday", "afternoon"]);
+  assert.ok(upcoming.every((event) => event.passed), "released events are listed as passed, not hidden");
+  assert.ok(upcoming.every((event) => event.next === false), "a released event is never the next one");
+});
+
+test("a stale calendar read is reported as stale, not as a quiet day", () => {
+  assert.equal(newsFeedIsStale({ available: true, checkedAt: now, events: [] }, now), false);
+  assert.equal(newsFeedIsStale({ available: true, checkedAt: now - 6 * 60_000, events: [] }, now), true);
+  assert.equal(newsFeedIsStale({ available: true, checkedAt: 0, events: [] }, now), true);
+  // An unavailable feed is already reported as unavailable; calling it stale
+  // too would hide the more specific message.
+  assert.equal(newsFeedIsStale({ available: false, checkedAt: 0, events: [] }, now), false);
 });
 
 test("an empty calendar yields an empty list, not a fabricated one", () => {

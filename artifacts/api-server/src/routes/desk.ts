@@ -33,7 +33,7 @@ import {
   terminalSilenceMs,
   terminalStaleWindowMs,
 } from "../lib/multiasset/live";
-import { upcomingRedFolder } from "../lib/multiasset/news";
+import { NEWS_MAX_AGE_MS, newsFeedIsStale, upcomingRedFolder } from "../lib/multiasset/news";
 import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
 import { addSSEClient, broadcastSSE, removeSSEClient } from "../lib/sse";
 import {
@@ -246,6 +246,13 @@ router.get("/state", (_req, res) => {
      * gate and the journal all describe the same window.
      */
     newsUpcoming: upcomingRedFolder(desk.news.events, now),
+    /**
+     * True when the terminal has stopped refreshing the calendar. The gate
+     * already fails closed on this; the flag exists so the pane can say "this
+     * read is old" instead of reporting a quiet day from stale evidence.
+     */
+    newsStale: newsFeedIsStale(desk.news, now),
+    newsStaleAfterMs: NEWS_MAX_AGE_MS,
     /** Automatic best-market selection: what it last did and how often it runs. */
     autoSelect: {
       last: desk.lastAutoSelect,

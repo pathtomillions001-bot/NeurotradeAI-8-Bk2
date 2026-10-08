@@ -32,8 +32,17 @@ const NEWS_MAX_AGE_MS = 5 * 60_000;
  */
 export const NEWS_LOOKAHEAD_MS = 24 * 60 * 60_000;
 
-/** How long after an event it remains listed, so the user sees the outcome. */
-export const NEWS_LOOKBEHIND_MS = 15 * 60_000;
+/**
+ * How long after an event it remains listed.
+ *
+ * Twelve hours, not fifteen minutes. The pane is the user's evidence that the
+ * news gate is doing its job, and "0 red-folder events" reads as a bug when the
+ * terminal's own calendar shows three releases earlier the same day. A release
+ * that has already passed is not actionable, but it IS the explanation for a
+ * quiet session — so it stays on the list, marked as passed, for the rest of the
+ * trading day.
+ */
+export const NEWS_LOOKBEHIND_MS = 12 * 60 * 60_000;
 
 export interface UpcomingNewsEvent {
   id: string;
@@ -49,14 +58,18 @@ export interface UpcomingNewsEvent {
   inMs: number;
   /** True for the very next event that has not started yet. */
   next: boolean;
+  /** True once the release is behind us — listed for context, not actionable. */
+  passed: boolean;
 }
 
 /**
- * The next 24 hours of red-folder events, in the order they will happen.
+ * Red-folder events from the last 12 hours through the next 24, in order.
  *
  * The calendar PANE must not have to guess which events are in scope, and it
  * must not silently disagree with the gate that blocks entries — the gate looks
- * at the same event list, so both are derived here.
+ * at the same event list, so both are derived here. Events already released are
+ * included (flagged `passed`) so a quiet session can be read against the day's
+ * releases instead of against an empty list.
  */
 export function upcomingRedFolder(
   events: HighImpactNewsEvent[],
@@ -73,6 +86,7 @@ export function upcomingRedFolder(
     ...event,
     inMs: event.time - now,
     next: event.id === firstUpcoming,
+    passed: event.time < now,
   }));
 }
 

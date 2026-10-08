@@ -132,9 +132,13 @@ test("a win resets the streak and restores full size", () => {
   assert.ok(check({ state }).riskPct > reduced);
 });
 
-test("risk never exceeds the policy ceiling", () => {
+test("risk never exceeds the policy ceiling — and the desk budget caps that ceiling", () => {
   const decision = check({ policy: { baseRiskPct: 50, maxRiskPct: 2 } });
   assert.ok(decision.riskPct <= 2);
+  // The desk's per-trade budget is 0.5%: a policy asking for 2% gets 0.5%, and
+  // the ceiling is what the sizer's minimum-lot decision is judged against.
+  assert.equal(decision.riskCeilingPct, 0.5);
+  assert.ok(decision.riskPct <= 0.5 + 1e-12, `${decision.riskPct}% exceeds the budget`);
 });
 
 // ── Symbol-level responses ───────────────────────────────────────────────────

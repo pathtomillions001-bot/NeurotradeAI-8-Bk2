@@ -27,8 +27,11 @@ import {
   connectionProblem,
   resolveLiveSymbol,
   symbolReadiness,
-  TERMINAL_STALE_MS,
+  TERMINAL_DEGRADED_MS,
+  terminalIsDegraded,
   terminalIsFresh,
+  terminalSilenceMs,
+  terminalStaleWindowMs,
 } from "../lib/multiasset/live";
 import { upcomingRedFolder } from "../lib/multiasset/news";
 import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
@@ -192,7 +195,18 @@ router.get("/state", (_req, res) => {
           company: desk.terminal.company,
           pairedAt: desk.terminal.pairedAt,
           lastSyncAt: desk.terminal.lastSyncAt,
-          stale: now - desk.terminal.lastSyncAt > TERMINAL_STALE_MS,
+          lastSyncAgeMs: terminalSilenceMs(desk, now),
+          /**
+           * `stale` is the hard state (analysis paused). `degraded` is the soft
+           * one: the heartbeat is late, every symbol is still being checked on
+           * its own 8-second quote, and the desk keeps working. The UI must not
+           * tell the user trading has stopped for a 39-second hiccup.
+           */
+          stale: !terminalIsFresh(desk, now),
+          degraded: terminalIsDegraded(desk, now),
+          degradedAfterMs: TERMINAL_DEGRADED_MS,
+          staleAfterMs: terminalStaleWindowMs(desk),
+          syncIntervalMs: desk.terminal.syncIntervalMs || null,
         }
       : null,
     account,
@@ -524,6 +538,7 @@ router.post("/auto-select", (_req, res) => {
     scanned: outcome.record.scanned,
     qualified: outcome.record.qualified,
     reason: outcome.record.reason,
+    skipped: outcome.record.skipped,
     ranked: outcome.record.ranked,
     plans: [...desk.plans.values()],
   });

@@ -19,9 +19,8 @@
 
 import { randomUUID } from "node:crypto";
 import { atr, clamp, closes, hashSeed, lastSwing, logReturns } from "./math";
-import { costPolicyFor, fillSpreadGuard, slippageAllowancePoints, spreadIsNotable } from "./asset-costs";
+import { fillSpreadGuard, slippageAllowancePoints } from "./asset-costs";
 import {
-  resolveScoringFrames,
   scoreConfluence,
   MODE_HORIZON_BARS,
   MODE_SCORE_THRESHOLD,
@@ -37,6 +36,7 @@ import { kellyFraction, pointValuePerLot, priceToPoints, sizePosition, type Sizi
 import { assessNewsGate, type NewsGate } from "./news";
 import {
   MODE_ANALYSIS_TIMEFRAMES,
+  ALL_TIMEFRAMES,
   TIMEFRAME_MINUTES,
   type AccountSnapshot,
   type ArmedPlan,
@@ -109,6 +109,18 @@ export interface AgentDecision {
   risk: RiskDecision;
   /** Red-folder calendar gate evaluated with this decision. */
   news: NewsGate;
+  /**
+   * The frame the stop, the volatility and the horizon were measured on, and
+   * that horizon in minutes. Reported so the terminal can never print a horizon
+   * the analysis did not use (it used to print 12 x M2 = 24 min while the
+   * simulation ran on S10 bars).
+   */
+  entryTimeframe: Timeframe | null;
+  horizonMinutes: number | null;
+  /** Round-trip cost as a fraction of the risk unit: `cost / |entry - sl|`. */
+  costR: number | null;
+  /** True when the structural stop was widened to keep the risk unit real. */
+  stopWidened: boolean;
   /** Every gate that failed, in evaluation order. Shown verbatim in the UI. */
   rejections: string[];
   /** Non-blocking cautions that were recorded but did not stop the trade. */
@@ -144,6 +156,41 @@ const STOP_ATR_MULT: Record<TradeMode, number> = {
   intraday: 1.5,
   swing: 2.0,
 };
+
+/**
+ * The stop may never be smaller than this many times the round-trip cost.
+ *
+ * THIS IS THE FIX FOR "the expectancy is always below 0.15R".
+ *
+ * Every gate in the desk is measured in R — the distance to the stop. If R is
+ * about the same size as the spread, then "one R" of edge can never cover "one
+ * R" of cost, and the expectancy is structurally negative no matter how good
+ * the setup is. That is exactly what a 0.8 × ATR stop on a one-minute FX frame
+ * produces on a broker quoting a 0.8-pip spread: an 8-point spread against a
+ * 10-point stop is 0.8R of cost before the trade has any edge at all.
+ *
+ * Four is a deliberate number: it caps the round-trip cost at 25% of the money
+ * risked, which still leaves room for a 0.15R+ net edge on a genuine setup.
+ * The spread is *not* filtered out anywhere — it is priced here, inside the
+ * risk the trade is taking.
+ */
+export const MIN_COST_COVERAGE = 4;
+
+/**
+ * ...and the stop may never be smaller than this many ATRs of the entry frame,
+ * because a stop inside one average bar's range is taken out by noise rather
+ * than by the market disagreeing with the idea.
+ */
+const MIN_RISK_ATR = 0.8;
+
+/**
+ * The smallest risk the adaptive sizer may choose, in percent of equity.
+ *
+ * Below this a position is no longer a position — the spread and the commission
+ * dominate it outright. The ceiling lives in `risk.ts`
+ * (`PER_TRADE_RISK_BUDGET_PCT`), because it is a desk-level policy.
+ */
+const MIN_TRADE_RISK_PCT = 0.05;
 
 /**
  * How long an armed plan stays valid, per style.
@@ -192,41 +239,51 @@ const PERSISTENCE_ADVISORY = 0.45;
 /**
  * Resolve the series the evidence ensemble and the structural stop are built on.
  *
- * Preference order: the frames the confluence actually scored (so the two
- * halves of the quality score describe the same market), then the entry frame,
- * then the mode's band, then outward to the slower frames the terminal is most
- * likely to have seeded. Substitution is normal and is reported by the caller.
+ * THE ENTRY FRAME COMES FIRST, AND THAT IS THE POINT.
+ *
+ * This used to prefer the frames the confluence had scored — fastest first — so
+ * a scalp resolved its stop and its volatility off S10/S30 and an intraday book
+ * off M5. The horizon, meanwhile, was always counted in bars of the mode's own
+ * entry frame (M2 / M15 / H1). Two different clocks were therefore used to
+ * build one trade:
+ *
+ *   stop      = 0.8 × ATR(S10)          → a few points on EURUSD
+ *   horizon   = 12 bars of M2           → 24 minutes of price action
+ *
+ * so the stop sat inside the noise of the very horizon the trade was planned
+ * over, the Monte Carlo resolved it as a near-certain loss, and the target
+ * search then picked the least-bad multiple of a hopeless geometry (which is
+ * how "A+ setup, R:R 4.0, win 11%" got printed). Worse, on FX it made the stop
+ * smaller than the spread: the expectancy could never be anything but deeply
+ * negative.
+ *
+ * Now the entry frame is the anchor. Missing or too-short frames are replaced
+ * by their nearest neighbours — slower first, so a substitution widens the
+ * stop rather than tightening it — and the frame actually used is reported on
+ * the decision (`entryTimeframe`) with its horizon, so the terminal can never
+ * claim a horizon the analysis did not use.
  */
-function firstAvailable(
+function resolveEntrySeries(
   series: Partial<Record<Timeframe, Bar[]>>,
-  preferred: Timeframe,
   mode: TradeMode,
-  scoredFrames: Timeframe[] = [],
 ): { timeframe: Timeframe; bars: Bar[] } | null {
-  const band = MODE_ANALYSIS_TIMEFRAMES[mode];
-  const order: Timeframe[] = [
-    ...scoredFrames,
-    preferred,
-    ...band,
-    "M5",
-    "M15",
-    "M30",
-    "M1",
-    "M2",
-    "M3",
-    "H1",
-    "H4",
-    "D1",
-  ];
-  const seen = new Set<Timeframe>();
-  for (const tf of order) {
-    if (seen.has(tf)) continue;
-    seen.add(tf);
-    const bars = series[tf];
-    if (bars && bars.length >= 30) return { timeframe: tf, bars };
+  const preferred = ENTRY_TIMEFRAME[mode];
+  const anchor = ALL_TIMEFRAMES.indexOf(preferred);
+  const order = [...ALL_TIMEFRAMES]
+    .map((timeframe, index) => ({ timeframe, index, distance: Math.abs(index - anchor) }))
+    // Nearest first; on a tie take the SLOWER frame (a wider stop is safer).
+    .sort((a, b) => a.distance - b.distance || b.index - a.index)
+    .map((entry) => entry.timeframe);
+
+  for (const timeframe of order) {
+    const bars = series[timeframe];
+    if (bars && bars.length >= MIN_ENTRY_BARS) return { timeframe, bars };
   }
   return null;
 }
+
+/** Bars the entry frame needs before a stop may be placed on it. */
+const MIN_ENTRY_BARS = 30;
 
 /**
  * Structural stop: beyond the last swing against the trade, with an ATR
@@ -364,6 +421,8 @@ export function evaluate(input: AgentInput): AgentDecision {
   const minPersistence = input.minPersistence ?? DEFAULT_MIN_PERSISTENCE;
   const rejections: string[] = [];
   const warnings: string[] = [];
+  /** Set once the entry frame is resolved; reported on every decision. */
+  let resolvedEntryFrame: Timeframe | null = null;
 
   /**
    * Build a no-trade decision.
@@ -401,6 +460,14 @@ export function evaluate(input: AgentInput): AgentDecision {
       sizing: null,
       risk,
       news,
+      // A no-trade decision still names the frame and horizon it would have
+      // measured on, so the desk can explain itself.
+      entryTimeframe: resolvedEntryFrame,
+      horizonMinutes: resolvedEntryFrame
+        ? MODE_HORIZON_BARS[input.mode] * TIMEFRAME_MINUTES[resolvedEntryFrame]
+        : null,
+      costR: null,
+      stopWidened: false,
       rejections: [...rejections, ...extra],
       warnings,
       summary: `${input.symbol} ${input.mode}: no trade (quality ${usedScore.toFixed(0)}/${usedThreshold.toFixed(0)}).`,
@@ -445,18 +512,16 @@ export function evaluate(input: AgentInput): AgentDecision {
   });
 
   // ── 3b. Entry timeframe, evidence ensemble ────────────────────────────────
-  // The ensemble needs the entry series, so resolve it before scoring. The
-  // frames the confluence scored come first so both halves of the quality
-  // score describe the same market.
-  const entrySeries = firstAvailable(
-    input.series,
-    ENTRY_TIMEFRAME[input.mode],
-    input.mode,
-    confluence.scoredTimeframes,
-  );
+  // The ensemble needs the entry series, so resolve it before scoring — and it
+  // resolves to the MODE'S OWN ENTRY FRAME (M2 / M15 / H1), never to the
+  // fastest frame the confluence happened to score. The stop, the volatility
+  // and the horizon must all be measured on the same clock; see
+  // `resolveEntrySeries`.
+  const entrySeries = resolveEntrySeries(input.series, input.mode);
   if (!entrySeries) {
     return fail(["No timeframe has the 30+ bars needed to place a stop on this market."]);
   }
+  resolvedEntryFrame = entrySeries.timeframe;
   const horizon = MODE_HORIZON_BARS[input.mode];
   const direction = confluence.direction === "none" ? undefined : confluence.direction;
   const evidence = buildEvidence({
@@ -508,6 +573,34 @@ export function evaluate(input: AgentInput): AgentDecision {
     );
   }
 
+  const side = effectiveDirection === "up" ? "buy" : "sell";
+  // Enter at the price we would actually pay, not the mid.
+  const entry = side === "buy" ? input.quote.ask : input.quote.bid;
+  if (!(entry > 0)) return fail(["No live quote for this symbol."]);
+
+  // ── Cost, in price units, BEFORE the stop is accepted ─────────────────────
+  //
+  // THE LIVE SPREAD IS THE TRUTH, NOT THE SPEC'S CACHED COPY.
+  //
+  // `spec.spreadPoints` is refreshed on every heartbeat, so in the live Desk the
+  // two agree — but the spread the fill will actually pay is the one on the
+  // quote being analysed, and a plan armed on a calm tick must not be costed at
+  // yesterday's spread. Anywhere the two differ, the quote wins.
+  const liveSpreadPoints =
+    input.quote.spreadPoints > 0 ? input.quote.spreadPoints : input.spec.spreadPoints;
+  const specForSizing =
+    liveSpreadPoints === input.spec.spreadPoints
+      ? input.spec
+      : { ...input.spec, spreadPoints: liveSpreadPoints };
+
+  const pointValue = pointValuePerLot(input.spec);
+  const slippagePoints = slippageAllowancePoints(input.spec, input.mode);
+  const commissionPoints = pointValue > 0 ? input.spec.commissionPerLot / pointValue : 0;
+  // Spread crossed once, commission converted via point value, plus an
+  // allowance for slippage. Slippage is scaled by asset class — a crypto CFD
+  // does not fill like a major FX pair.
+  const costPrice = (liveSpreadPoints + commissionPoints + slippagePoints) * input.spec.point;
+
   // ── 3d. Regime and stop ───────────────────────────────────────────────────
   const regime = assessRegime(entrySeries.bars);
   if (!isRegimeTradeable(regime.kind, input.mode)) {
@@ -516,15 +609,45 @@ export function evaluate(input: AgentInput): AgentDecision {
     );
   }
 
-  const side = effectiveDirection === "up" ? "buy" : "sell";
-  // Enter at the price we would actually pay, not the mid.
-  const entry = side === "buy" ? input.quote.ask : input.quote.bid;
-  if (!(entry > 0)) return fail(["No live quote for this symbol."]);
-
   const stop = structuralStop(entrySeries.bars, side, entry, input.mode);
   if (!(Math.abs(entry - stop.sl) > 0)) {
     return fail(["Stop placement produced a zero-distance stop (flat market)."]);
   }
+
+  /**
+   * THE RISK UNIT IS ENFORCED HERE, NOT ASSUMED.
+   *
+   * A stop closer than the round-trip cost makes "one R" smaller than the price
+   * of getting in: the expectancy gate can then never be satisfied, on any
+   * setup, however good — which is precisely what the desk was reporting on
+   * every FX symbol. The stop is therefore widened to the larger of the two
+   * floors below, and the widening is reported so it is never a silent change
+   * of plan.
+   *
+   * Note what this does NOT do: it does not remove the spread from the trade.
+   * The spread is still charged in the expectancy, in the sizing explanation and
+   * at fill time. It simply stops being larger than the trade's own risk unit —
+   * and, because the cost is now bounded inside R, the spread-ratio vetoes that
+   * used to block these setups have nothing left to do (they are gone).
+   */
+  const minimumRiskPrice = Math.max(
+    costPrice * MIN_COST_COVERAGE,
+    stop.atrValue * MIN_RISK_ATR,
+  );
+  const structuralRiskPrice = Math.abs(entry - stop.sl);
+  let sl = stop.sl;
+  const riskWidened = structuralRiskPrice < minimumRiskPrice;
+  if (riskWidened) {
+    sl = side === "buy" ? entry - minimumRiskPrice : entry + minimumRiskPrice;
+    warnings.push(
+      `Stop widened from ${priceToPoints(input.spec, structuralRiskPrice).toFixed(0)} to ` +
+        `${priceToPoints(input.spec, minimumRiskPrice).toFixed(0)} pts: a stop inside the ` +
+        `${priceToPoints(input.spec, costPrice).toFixed(1)}-pt round-trip cost (or inside one ${entrySeries.timeframe} bar) ` +
+        `is not a risk unit — it is the spread, charged twice.`,
+    );
+  }
+  const riskPrice = Math.abs(entry - sl);
+  const costR = riskPrice > 0 ? costPrice / riskPrice : 0;
 
   // ── 4. Markov persistence — one vote, not a veto ──────────────────────────
   const price = closes(entrySeries.bars);
@@ -545,31 +668,6 @@ export function evaluate(input: AgentInput): AgentDecision {
 
   // ── 5. Monte Carlo target search ──────────────────────────────────────────
   const returns = logReturns(price);
-  const pointValue = pointValuePerLot(input.spec);
-  const riskPrice = Math.abs(entry - stop.sl);
-  const costPolicy = costPolicyFor(input.spec);
-
-  // THE LIVE SPREAD IS THE TRUTH, NOT THE SPEC'S CACHED COPY.
-  //
-  // `spec.spreadPoints` is refreshed on every heartbeat, so in the live Desk the
-  // two agree — but the spread the fill will actually pay is the one on the
-  // quote being analysed, and a plan armed on a calm tick must not be costed at
-  // yesterday's spread. Anywhere the two differ, the quote wins.
-  const liveSpreadPoints =
-    input.quote.spreadPoints > 0 ? input.quote.spreadPoints : input.spec.spreadPoints;
-  const specForSizing =
-    liveSpreadPoints === input.spec.spreadPoints
-      ? input.spec
-      : { ...input.spec, spreadPoints: liveSpreadPoints };
-
-  // Cost expressed in PRICE units so it can be compared with the stop
-  // distance: spread crossed once, commission converted via point value, plus
-  // an allowance for slippage. Slippage is scaled by asset class — a crypto
-  // CFD does not fill like a major FX pair.
-  const slippagePoints = slippageAllowancePoints(input.spec, input.mode);
-  const commissionPoints = pointValue > 0 ? input.spec.commissionPerLot / pointValue : 0;
-  const costPrice = (liveSpreadPoints + commissionPoints + slippagePoints) * input.spec.point;
-
   const seed = hashSeed(`${input.symbol}|${input.mode}|${entrySeries.timeframe}|${entrySeries.bars.length}`);
 
   // Volatility for the simulation: the regime's own step volatility, widened
@@ -583,7 +681,9 @@ export function evaluate(input: AgentInput): AgentDecision {
 
   const search = bestTarget({
     entry,
-    sl: stop.sl,
+    // The RISK UNIT the gate is measured in — the widened stop, not the raw
+    // structural one. Target multiples are searched off this distance.
+    sl,
     side,
     // Blend the measured drift with the Markov view, scaled by how much data
     // backs the model. With little history the simulation leans on raw drift.
@@ -619,68 +719,105 @@ export function evaluate(input: AgentInput): AgentDecision {
     );
   }
 
-  // Expectancy recomputed on the blended probability: this is the number the
-  // edge gate actually enforces, so a symbol that under-delivers live stops
-  // passing on a simulation that flatters it.
+  /**
+   * Expectancy recomputed on the blended probability — WITHOUT THROWING AWAY
+   * THE TIMEOUT PATHS.
+   *
+   * This used to be `p·RR − (1−p) − costR`, which treats every path that is
+   * neither a win nor a loss as a full −1R. It is not: a plan with a stop and a
+   * target both wider than the horizon closes at the horizon, at whatever the
+   * market is then worth (`timeoutMeanR`), and with a wide stop — the normal
+   * case once the risk unit is real — the majority of paths end that way. The
+   * old formula therefore *manufactured* a negative expectancy: a setup the
+   * simulation scored at +2.20R gross was reported as −0.25R, and the desk
+   * refused it. This is the second half of "the expectancy is always below the
+   * 0.15R minimum".
+   *
+   * Only `p(win)` is re-estimated by the blend, so the fix is to re-normalise
+   * the remaining probability between loss and timeout in the SAME PROPORTION
+   * the simulation found, and to keep the payoff those timeout paths actually
+   * have. When no realised history is blended in, this reduces exactly to the
+   * simulation's own expectancy — which is the property a gate should have.
+   */
+  const timeoutProbability = monteCarlo.timeoutProbability;
+  const blendedLossProbability = clamp(
+    1 - blendedWinProbability - timeoutProbability,
+    0,
+    1,
+  );
+  const costRFromModel = Math.max(0, monteCarlo.grossExpectancyR - monteCarlo.expectancyR);
   const effectiveExpectancyR =
     blendedWinProbability * monteCarlo.rewardRisk -
-    (1 - blendedWinProbability) +
-    (monteCarlo.expectancyR - monteCarlo.grossExpectancyR);
+    blendedLossProbability +
+    timeoutProbability * monteCarlo.timeoutMeanR -
+    costRFromModel;
 
   if (effectiveExpectancyR < minEdgeR) {
     rejections.push(
-      `Expectancy after costs is ${effectiveExpectancyR.toFixed(2)}R (model ${monteCarlo.expectancyR.toFixed(2)}R, gross ${monteCarlo.grossExpectancyR.toFixed(2)}R), below the ${minEdgeR}R minimum.`,
+      `Expectancy after costs is ${effectiveExpectancyR.toFixed(2)}R (model ${monteCarlo.expectancyR.toFixed(2)}R, ` +
+        `gross ${monteCarlo.grossExpectancyR.toFixed(2)}R, ${(monteCarlo.lossProbability * 100).toFixed(0)}% stop / ` +
+        `${(monteCarlo.timeoutProbability * 100).toFixed(0)}% time-stop paths), below the ${minEdgeR}R minimum.`,
     );
   }
 
-  // ── 6. Spread: measured, priced, and judged against its own asset class ───
+  // ── 6. Spread: priced, and ONLY priced ────────────────────────────────────
   //
-  // The old gate here compared the live spread with `spec.spreadPoints * 2` —
-  // and `spec.spreadPoints` IS the live spread (the heartbeat writes it on
-  // every tick), so the ceiling could never be crossed. It was dead code that
-  // looked like a safety check.
+  // There is exactly one cost decision in this desk, and this is it: the spread
+  // (plus commission and slippage) is charged inside the expectancy above, and
+  // `minEdgeR` is the single gate that judges it. The two ratio vetoes that used
+  // to sit here and in sizing — "spread is more than 35% of the stop" and
+  // "(spread + commission) is more than 35% of the risk" — are gone. They were
+  // blocking A+ setups on the strength of a ratio, while the number that
+  // actually decides whether a trade pays was already computed one step above.
   //
-  // There is now exactly one cost decision, and it is asset-class aware:
-  //   • the spread is priced into the Monte-Carlo cost term above, so the
-  //     expectancy gate (minEdgeR) is measured net of it;
-  //   • sizing refuses when spread + commission exceed the asset class's
-  //     fraction of the money risked, and when the spread alone exceeds the
-  //     class's fraction of the stop distance;
-  //   • here, a spread that is wide *for its own asset class* is recorded as a
-  //     caution with the number that matters, so it is visible without being a
-  //     second, arbitrary veto stacked on top of those two.
-  const spreadPoints = liveSpreadPoints;
-  const stopPoints = input.spec.point > 0 ? riskPrice / input.spec.point : 0;
-  if (stopPoints > 0 && spreadPoints > 0) {
-    const spreadFraction = spreadPoints / stopPoints;
-    if (spreadIsNotable(input.spec, spreadFraction)) {
-      warnings.push(
-        `Spread ${spreadPoints} pts is ${(spreadFraction * 100).toFixed(0)}% of the ${stopPoints.toFixed(0)}-pt stop — ` +
-          `wide for ${input.spec.assetClass} (ceiling ${(costPolicy.maxSpreadFractionOfStop * 100).toFixed(0)}%). ` +
-          `It is charged in the expectancy above rather than blocking the trade on its own.`,
-      );
-    }
-  }
-
+  // What replaces them is arithmetic, not a threshold: the risk unit itself may
+  // not be smaller than the cost of entering (see MIN_COST_COVERAGE above), so
+  // a wide spread widens the stop instead of vetoing the idea. The spread is
+  // still visible on the plan — `costR` states it in R, which is the only unit
+  // in which it is comparable between a forex scalp and an index swing.
+  //
   // Fill-time guard sent to the EA: how far the spread may widen between arming
   // and firing. Expressed against the STOP, not in absolute points, because a
   // point means something different on every asset class — and floored above
   // the spread we actually measured so a normal tick cannot block the fill.
-  const maxSpreadPoints = fillSpreadGuard(input.spec, stopPoints, spreadPoints);
+  const stopPoints = input.spec.point > 0 ? riskPrice / input.spec.point : 0;
+  const maxSpreadPoints = fillSpreadGuard(input.spec, stopPoints, liveSpreadPoints);
 
-  // ── 7. Edge-aware sizing ──────────────────────────────────────────────────
-  // Risk scales with measured edge (fractional Kelly) and with how confident
-  // the regime call is — never with recent losses.
+  // ── 7. Edge-aware sizing inside a real budget ─────────────────────────────
   //
-  // Kelly is driven by the BLENDED win probability: a strategy that looks
-  // great in simulation but has been losing on this desk must shrink, and one
-  // that has been delivering may grow — within the policy ceiling.
+  // THE BUDGET IS A CEILING, NOT A SIZE.
+  //
+  // The desk allows up to 0.5% of equity per trade (`risk.riskCeilingPct`, which
+  // the user can only tighten in settings). What is actually risked is this
+  // agent's call, made from three measured inputs and never from a fixed
+  // number:
+  //
+  //   • the edge       — fractional Kelly on the BLENDED win probability: a
+  //                      strategy that looks great in simulation but has been
+  //                      losing on this desk sizes smaller, one that has been
+  //                      delivering earns its way back toward the governor's
+  //                      allowance (never above it);
+  //   • the regime     — how confident the volatility/trend read is;
+  //   • the loss ladder — the governor's de-escalation after consecutive losses.
+  //
+  // The target is capped at the governor's number, NOT at some multiple of it:
+  // once the budget is a real ceiling, letting a strong edge multiply the risk
+  // back up would quietly undo the de-escalation the ladder exists to apply
+  // (and it would let a "0.5% budget" trade 0.75%). The edge can therefore only
+  // ever vote for LESS risk, which is the safe direction for a multiplier.
+  //
+  // The BUDGET is still handed to sizing, so the broker's indivisible minimum
+  // lot is judged against it rather than against the (possibly much smaller)
+  // target. That is what stops "Minimum 0.01 lots would risk 0.17% of equity,
+  // above the 0.15% budget" refusals on accounts where 0.17% was affordable.
   const kelly = kellyFraction(blendedWinProbability, monteCarlo.rewardRisk, 0.25);
   const edgeScale = clamp(kelly * 10, 0.35, 1.5);
   const riskPct = clamp(
     risk.riskPct * edgeScale * clamp(0.6 + 0.4 * regime.confidence, 0.6, 1),
-    0.05,
-    risk.riskPct * 1.5,
+    MIN_TRADE_RISK_PCT,
+    // The governor's number, and never more than the desk budget — the two can
+    // only differ if a policy was configured above the desk's own ceiling.
+    Math.min(risk.riskPct, risk.riskCeilingPct),
   );
 
   // The trigger is a small displacement beyond the current price in the trade
@@ -699,26 +836,36 @@ export function evaluate(input: AgentInput): AgentDecision {
   // the budget — ~8% more on an intraday plan, and up to ~16% on a scalp where
   // a 0.08 ATR offset sits against a 0.5 ATR minimum stop. Risk has to be
   // measured from the price we actually expect to pay.
+  //
+  // No cost ceilings are passed any more: sizing's job is to convert a risk
+  // budget into a legal lot size, not to re-litigate the edge. The spread is
+  // already inside `expectancyR` (the gate) and inside the widened risk unit.
   const sizing = sizePosition({
     spec: specForSizing,
     side,
     entry: trigger,
-    sl: stop.sl,
+    sl,
     tp: search.tp,
     equity: input.account.equity,
     freeMargin: input.account.freeMargin,
     usedMargin: input.account.margin,
     riskPct,
+    // The minimum-lot decision is made against the budget, not the target —
+    // see SizingRequest.riskCeilingPct.
+    riskCeilingPct: risk.riskCeilingPct,
     leverage: input.account.leverage,
-    // Cost ceilings come from the symbol's own asset class. A crypto CFD is
-    // not held to a major-FX spread standard.
-    limits: {
-      maxCostFractionOfRisk: costPolicy.maxCostFractionOfRisk,
-      maxSpreadFractionOfStop: costPolicy.maxSpreadFractionOfStop,
-    },
   });
 
   if (!sizing.ok) rejections.push(sizing.explanation);
+
+  // When the broker's indivisible minimum lot forces more risk than the edge
+  // asked for, say so out loud. The trade is inside the desk budget, but the
+  // user should never have to infer that from the lot size alone.
+  if (sizing.ok && sizing.minLotApplied) {
+    warnings.push(
+      `Broker minimum lot ${sizing.lots} taken: ${sizing.effectiveRiskPct.toFixed(2)}% of equity at risk vs the ${riskPct.toFixed(2)}% adaptive target (per-trade budget ${risk.riskCeilingPct.toFixed(2)}%).`,
+    );
+  }
 
   // ── 8. Arm, or explain ────────────────────────────────────────────────────
   if (rejections.length > 0 || !sizing.ok) {
@@ -737,6 +884,10 @@ export function evaluate(input: AgentInput): AgentDecision {
       sizing,
       risk,
       news,
+      entryTimeframe: entrySeries.timeframe,
+      horizonMinutes: horizon * TIMEFRAME_MINUTES[entrySeries.timeframe],
+      costR: Number(costR.toFixed(3)),
+      stopWidened: riskWidened,
       rejections,
       warnings,
       summary:
@@ -811,7 +962,18 @@ export function evaluate(input: AgentInput): AgentDecision {
         ...confluence.factors,
         {
           label: "Monte Carlo",
-          detail: `${(blendedWinProbability * 100).toFixed(0)}% win (${posterior.source}) over ${horizon} bars at ${monteCarlo.rewardRisk.toFixed(1)}R, E=${effectiveExpectancyR.toFixed(2)}R after costs`,
+          detail:
+            `${(blendedWinProbability * 100).toFixed(0)}% win (${posterior.source}) over ${horizon} ${entrySeries.timeframe} bars ` +
+            `at ${monteCarlo.rewardRisk.toFixed(1)}R, E=${effectiveExpectancyR.toFixed(2)}R after costs`,
+          weight: 1,
+          aligned: true,
+        },
+        {
+          label: "Cost & risk unit",
+          detail:
+            `cost ${(costR * 100).toFixed(0)}% of the ${sizing.riskPoints.toFixed(0)}-pt risk unit ` +
+            `(${liveSpreadPoints}-pt spread + ${slippagePoints} pt slippage)` +
+            (riskWidened ? ` — stop widened from the structural ${structuralRiskPrice / input.spec.point} pts to keep the risk unit real` : ""),
           weight: 1,
           aligned: true,
         },
@@ -846,6 +1008,10 @@ export function evaluate(input: AgentInput): AgentDecision {
     sizing,
     risk,
     news,
+    entryTimeframe: entrySeries.timeframe,
+    horizonMinutes: horizon * TIMEFRAME_MINUTES[entrySeries.timeframe],
+    costR: Number(costR.toFixed(3)),
+    stopWidened: riskWidened,
     rejections: [],
     warnings,
     summary:
@@ -853,7 +1019,7 @@ export function evaluate(input: AgentInput): AgentDecision {
       `quality ${qualityScore.toFixed(0)} (${confluence.grade}), ` +
       `${evidence.agreeingFamilies}/${evidence.totalFamilies} families agree, ` +
       `${(blendedWinProbability * 100).toFixed(0)}% win, E ${effectiveExpectancyR.toFixed(2)}R, ` +
-      `risk ${sizing.riskMoney.toFixed(2)}.`,
+      `risk ${sizing.riskMoney.toFixed(2)} (${sizing.effectiveRiskPct.toFixed(2)}% of equity).`,
     evaluatedAt: now,
   };
 }

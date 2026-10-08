@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.01                                                     |
+//| Version 3.02                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -41,6 +41,32 @@
 //|     terminal whose account has since been taken over is told to    |
 //|     stop on its next heartbeat instead of sharing the balance.     |
 //|                                                                    |
+//| WHAT CHANGED IN v3.02                                             |
+//|  6. PLAN EXPIRY COMPARES LIKE WITH LIKE.                          |
+//|     `expiresAt` arrives from the server as a UTC epoch in          |
+//|     milliseconds; it was compared against NowServer() * 1000 — a   |
+//|     trade-server epoch. With a broker at GMT+3 every plan was      |
+//|     therefore "expired" the instant it was armed, so a setup the   |
+//|     desk had approved never reached the market. Expiry now uses    |
+//|     the same UTC clock as the value it tests.                     |
+//|  7. THE HEARTBEAT CANNOT BE POSTPONED BY LOCAL WORK.               |
+//|     Sync() now runs FIRST in OnTimer(). It used to run after the   |
+//|     calendar refresh and the local plan evaluation, which on a     |
+//|     busy terminal could delay it by seconds — and the Desk         |
+//|     reported that as a paused connection. The EA also publishes    |
+//|     its heartbeat interval (clock.syncIntervalMs) so the desk can  |
+//|     size its own patience from the terminal's real cadence.        |
+//|  8. THE CALENDAR READ IS NO LONGER SILENTLY OPTIMISTIC.            |
+//|     MT5 can return an empty array with a success code while its    |
+//|     economic-calendar database is still syncing. The old code      |
+//|     latched "available" on that result and the Desk printed "No    |
+//|     high-impact events in the next 24 hours. The gate stays        |
+//|     armed." — an all-clear it had never verified, while the        |
+//|     terminal's own calendar showed three red-folder releases. The  |
+//|     EA now retries with an open-ended window, publishes rawCount/  |
+//|     redCount, and reports the calendar as unavailable (fail closed |
+//|     for new entries) when the read returns nothing at all.         |
+//|                                                                    |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -57,7 +83,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "3.01"
+#property version   "3.02"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -75,7 +101,8 @@ input int    DeltaBars                 = 4;      // Forming + recent bars after 
 input int    MagicNumber               = 7781001;
 input bool   AllowLiveAccount          = false;  // Independent real-account safety switch
 input double MaxDailyLossPct           = 3.0;
-input int    StaleAfterSec             = 30;
+input int    StaleAfterSec             = 30;    // Reject a tick older than this (quote freshness)
+input int    ServerSilenceSec          = 120;   // Server silent this long -> local trading pauses
 input bool   UseEconomicCalendar       = true;
 input int    NewsBlackoutBeforeMinutes = 30;
 input int    NewsBlackoutAfterMinutes  = 15;
@@ -149,6 +176,14 @@ int       g_batchCursor = 0;
 bool      g_calendarAvailable = false;
 datetime  g_lastCalendarCheck = 0;
 datetime  g_newsTimes[];
+// Rows the MT5 calendar returned vs rows kept, published on the wire so the
+// desk can tell "nothing is scheduled" from "the read returned nothing".
+int       g_rawCount = 0;
+int       g_redCount = 0;
+// The heartbeat interval this EA is actually running with, sent in `clock` so
+// the desk sizes its own patience from the terminal's contract instead of
+// assuming a cadence: a slow heartbeat must not read as a dead terminal.
+int       g_syncIntervalMs = 500;
 string    g_newsCurrencies[];
 string    g_newsCountries[];
 string    g_newsNames[];
@@ -165,6 +200,7 @@ int OnInit()
    RefreshCalendar(true);
 
    int interval = (int)MathMax(500, MathMin(10000, SyncIntervalMs));
+   g_syncIntervalMs = interval;
    EventSetMillisecondTimer(interval);
 
    Print("NeurotradeBridge v2 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
@@ -195,17 +231,24 @@ void OnTick()
 
 void OnTimer()
 {
+   // HEARTBEAT FIRST.
+   //
+   // The desk's freshness window is measured from the moment this call lands,
+   // so nothing local is allowed to delay it. It used to run after the calendar
+   // refresh and the local plan evaluation, and on a busy terminal — history
+   // being copied, a trade modification round-trip — that could postpone the
+   // heartbeat by whole seconds. The desk, whose own window was thirty seconds,
+   // then announced "Quotes and agent entries are paused" for what was only a
+   // slow timer tick.
+   if(g_token == "")
+      TryPair();
+   else
+      Sync();
+
    RollDayBaselineIfNeeded();
    RefreshCalendar(false);
    ManageOpenPositions();
    EvaluatePlans();
-
-   if(g_token == "")
-   {
-      TryPair();
-      return;
-   }
-   Sync();
 }
 
 //+------------------------------------------------------------------+
@@ -384,6 +427,10 @@ void Sync()
    // clock instead of trusting (or silently mis-trusting) every tick.
    body += "\"clock\":{\"serverUtcOffsetSeconds\":" + IntegerToString(ServerUtcOffsetSeconds())
          + ",\"terminalUtcMs\":" + IntegerToString(NowUtcMs())
+         // The cadence this EA is actually running with. The desk uses it to
+         // size its staleness window (12 missed beats, bounded), so a terminal
+         // configured with a slow heartbeat is not declared dead on schedule.
+         + ",\"syncIntervalMs\":" + IntegerToString(g_syncIntervalMs)
          + ",\"label\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\"},";
    body += "\"account\":" + AccountJson() + ",";
    body += "\"specs\":" + SpecsJson(batch) + ",";
@@ -414,7 +461,10 @@ void Sync()
          g_tradingEnabled = false;
          g_nextPairAttempt = 0;
       }
-      else if(NowServer() - g_lastOk > StaleAfterSec) g_tradingEnabled = false;
+      // Bounded by the SERVER-silence budget, not the tick-freshness one: the
+      // desk keeps a link alive for its own (adaptive) window, and the EA must
+      // not stop executing plans while the desk still considers the link live.
+      else if(NowServer() - g_lastOk > ServerSilenceSec) g_tradingEnabled = false;
       return;
    }
 
@@ -739,6 +789,30 @@ string PositionsJson()
 //+------------------------------------------------------------------+
 //| Red-folder economic calendar                                      |
 //+------------------------------------------------------------------+
+/**
+ * Read the MT5 economic calendar for the day, with a retry ladder.
+ *
+ * WHY THERE IS A LADDER
+ *
+ * `CalendarValueHistory` returns SUCCESS with a zero-length array while the
+ * terminal's calendar database is still syncing (and in some builds, for a
+ * window it has no rows for). The previous version latched
+ * `g_calendarAvailable = true` on that result, so the Desk reported
+ * "No high-impact events in the next 24 hours. The gate stays armed" — an
+ * all-clear — on a terminal whose calendar it had never actually read, while
+ * the MT5 calendar tab visibly showed three red-folder releases for the day.
+ * The news gate was silently disarmed.
+ *
+ * So: try the windowed read; if it yields no rows at all, retry with an open
+ * upper bound (`datetime_to = 0` means "everything known from here on"), which
+ * is the form the MQL5 examples use; if THAT also yields nothing, the terminal
+ * genuinely cannot tell us the schedule, and the feed is published as
+ * unavailable with the reason — the desk then fails closed and says why,
+ * instead of showing a calm that was never verified.
+ *
+ * `g_rawCount` / `g_redCount` are published on the wire so the desk can make
+ * that distinction visible to the user as well.
+ */
 void RefreshCalendar(const bool force)
 {
    if(!UseEconomicCalendar)
@@ -755,12 +829,14 @@ void RefreshCalendar(const bool force)
    // A day of forward visibility: the Desk renders an upcoming-events list,
    // and a two-hour window left it empty for most of the session.
    int count = CalendarValueHistory(values, now - 15 * 60, now + 24 * 60 * 60);
-   if(count < 0)
+   if(count <= 0)
    {
-      g_calendarAvailable = false;
-      Print("NeurotradeBridge: MT5 economic calendar unavailable (", GetLastError(), "). New entries are paused.");
-      return;
+      // Fallback: everything the terminal knows from six hours ago onward.
+      int wide = CalendarValueHistory(values, now - 6 * 60 * 60, 0);
+      if(wide > 0) count = wide;
    }
+
+   g_rawCount = count > 0 ? count : 0;
 
    ArrayResize(g_newsTimes, 0);
    ArrayResize(g_newsCurrencies, 0);
@@ -772,6 +848,10 @@ void RefreshCalendar(const bool force)
       MqlCalendarEvent event;
       if(!CalendarEventById(values[i].event_id, event)) continue;
       if(event.importance != CALENDAR_IMPORTANCE_HIGH) continue;
+      // A value with no scheduled time cannot be rendered or compared against.
+      // It is counted (so the read is not mistaken for an empty calendar) but
+      // it is not listed.
+      if(values[i].time <= 0) continue;
       MqlCalendarCountry country;
       string currency = "";
       string countryName = "";
@@ -790,7 +870,12 @@ void RefreshCalendar(const bool force)
       g_newsCountries[index] = countryName;
       g_newsNames[index] = event.name;
    }
-   g_calendarAvailable = true;
+
+   g_redCount = ArraySize(g_newsTimes);
+   g_calendarAvailable = (g_rawCount > 0);
+   if(!g_calendarAvailable)
+      Print("NeurotradeBridge: MT5 returned no calendar rows for this window — the terminal's ",
+            "economic calendar may still be syncing. New entries are paused until it reads.");
 }
 
 string NewsJson()
@@ -801,6 +886,11 @@ string NewsJson()
    // directly with NowServer(); only the wire format is converted to UTC.
    json += "\"checkedAt\":" + IntegerToString(ToUtcMs(g_lastCalendarCheck)) + ",";
    json += "\"detail\":\"" + (g_calendarAvailable ? "MT5 economic calendar" : "MT5 economic calendar unavailable") + "\",";
+   // Rows read vs rows kept. `rawCount > 0, redCount == 0` is a genuine
+   // all-clear; `rawCount == 0` means the terminal could not read its calendar
+   // at all, and the desk must say so rather than promise a quiet session.
+   json += "\"rawCount\":" + IntegerToString(g_rawCount) + ",";
+   json += "\"redCount\":" + IntegerToString(g_redCount) + ",";
    json += "\"events\":[";
    for(int i = 0; i < ArraySize(g_newsTimes); i++)
    {
@@ -839,7 +929,13 @@ bool IsNewsBlackout(const string symbol)
 //+------------------------------------------------------------------+
 void EvaluatePlans()
 {
-   long nowMs = (long)NowServer() * 1000;
+   // UTC, because `expiresAt` comes from the server as a UTC epoch in
+   // milliseconds. Comparing it with NowServer()*1000 — a trade-server epoch —
+   // put the clock two or three hours ahead of itself on a normal broker, so
+   // EVERY plan was declared expired on the first evaluation after arming and
+   // nothing the desk approved ever reached the market. It also meant a broker
+   // west of UTC kept plans alive hours after their TTL.
+   long nowMs = NowUtcMs();
    for(int i = 0; i < MAX_PLANS; i++)
    {
       if(!g_plans[i].active) continue;
@@ -1237,7 +1333,7 @@ void AddResult(const string commandId, const string status, const long ticket,
                 ",\"price\":" + DoubleToString(price, 10) +
                 ",\"slippagePoints\":" + DoubleToString(slippage, 2) +
                 ",\"error\":" + (error == "" ? "null" : "\"" + JsonEscape(error) + "\"") +
-                ",\"ts\":" + IntegerToString((long)NowServer() * 1000) + "}";
+                ",\"ts\":" + IntegerToString(NowUtcMs()) + "}";
 }
 
 //+------------------------------------------------------------------+

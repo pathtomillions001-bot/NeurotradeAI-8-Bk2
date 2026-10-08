@@ -259,23 +259,44 @@ test("an impossible persistence requirement refuses every setup", () => {
   assert.ok(decision.rejections.some((r) => /Markov persistence/.test(r)));
 });
 
-test("a blown-out spread blocks execution", () => {
+/**
+ * THE SPREAD IS PRICED, NEVER VETOED.
+ *
+ * A blown-out quote used to be refused on a ratio ("Spread 8 pts is 83% of the
+ * 10-pt stop — above the 35% ceiling for forex") — a rule that rejected exactly
+ * the setups whose risk unit was small, while the number that decides whether a
+ * trade pays (the expectancy, net of cost) was already computed one step above.
+ * The gate is gone. What replaces it is arithmetic: `costR` states how much of
+ * the risk unit the round trip costs, the risk unit is floored above that cost,
+ * and the expectancy gate — with the same input for every asset class — is the
+ * only thing that can refuse on economics.
+ */
+test("a blown-out spread is priced into the risk unit, not vetoed by a ratio", () => {
   const series = allTimeframes((s) => trendUp(220, 1.08, 0.0006, 0.0002, s));
-  const decision = run({ series, quote: quoteFrom(series, 400) });
-  assert.equal(decision.armed, false);
-  assert.ok(
-    decision.rejections.some((r) => /[Ss]pread/.test(r)),
-    decision.rejections.join(" | "),
-  );
+  const calm = run({ series, quote: quoteFrom(series, 8) });
+  const wild = run({ series, quote: quoteFrom(series, 400) });
+
+  // The spread is never the reason for a refusal any more.
+  for (const rejection of wild.rejections) {
+    assert.ok(!/spread/i.test(rejection), `a ratio veto slipped back in: ${rejection}`);
+  }
+  assert.ok(wild.costR !== null && wild.costR > 0.2, "a 400-point spread must show up in R");
+  // …and it visibly costs more than a calm quote on the same market.
+  assert.ok((wild.costR ?? 0) > (calm.costR ?? 0));
+
+  // A quote that wide needs a real risk unit: the stop is widened until the
+  // cost is a minority of it, and the widening is reported, never silent.
+  const widened = [...wild.warnings, ...calm.warnings].some((warning) => /Stop widened/.test(warning));
+  assert.ok(widened, "the stop must be widened rather than the trade blocked");
+  assert.ok(wild.plan === null || wild.plan.maxSpreadPoints > 400, "the fill guard must clear the measured spread");
 });
 
-test("punitive commission blocks the trade on cost grounds", () => {
+test("punitive commission is charged inside the expectancy, not vetoed", () => {
   const decision = run({ spec: { ...spec, commissionPerLot: 400 } });
-  assert.equal(decision.armed, false);
-  assert.ok(
-    decision.rejections.some((r) => /cost|Expectancy/i.test(r)),
-    decision.rejections.join(" | "),
-  );
+  assert.ok(decision.costR !== null && decision.costR > 0.2, "commission must appear in the cost term");
+  for (const rejection of decision.rejections) {
+    assert.ok(!/ceiling for forex/i.test(rejection), `cost veto slipped back in: ${rejection}`);
+  }
 });
 
 test("an account too small for the minimum lot is refused, not over-risked", () => {
@@ -318,6 +339,80 @@ test("de-escalation shrinks the armed size after losses", () => {
     // Also acceptable: the raised quality bar rejected the setup entirely.
     assert.ok(after.rejections.length > 0);
   }
+});
+
+// ── The per-trade risk budget ────────────────────────────────────────────────
+// The desk allows 0.5% of equity per trade. It is a CEILING, not the size: the
+// sizer still decides, from edge and de-escalation, how much of it to use — and
+// the broker's indivisible minimum lot is judged against the ceiling rather than
+// against the (possibly much smaller) adaptive target.
+//
+// This is the reported failure: on a ~$760 account, 0.01 lots risked 0.17% of
+// equity and the old code refused the trade because the adaptive target was
+// 0.15%. An account that could afford 0.17% was told it could not trade at all.
+
+test("the reported minimum-lot refusal no longer blocks an affordable account", () => {
+  const decision = run({
+    account: { equity: 760, freeMargin: 760, dayStartEquity: 760, peakEquity: 760 },
+  });
+
+  assert.equal(decision.armed, true, decision.rejections[0]);
+  assert.ok(
+    decision.sizing!.lots >= spec.volumeMin,
+    `expected at least the broker minimum, got ${decision.sizing!.lots} lots`,
+  );
+  assert.ok(
+    !decision.rejections.some((r) => /Minimum .*lots/.test(r)),
+    `minimum-lot refusal resurfaced: ${decision.rejections.join("; ")}`,
+  );
+  assert.ok(
+    decision.sizing!.effectiveRiskPct <= 0.5 + 1e-9,
+    `risk ${decision.sizing!.effectiveRiskPct}% breached the 0.50% budget`,
+  );
+});
+
+test("the per-trade budget is enforced end to end, and named when it binds", () => {
+  // $200 of equity: the smallest legal lot risks $1.35 = 0.67%, which is inside
+  // the loose 2% policy ceiling but ABOVE the desk's 0.50% per-trade budget.
+  // The refusal must therefore come from the budget, and say so.
+  const decision = run({
+    account: { equity: 200, freeMargin: 200, dayStartEquity: 200, peakEquity: 200 },
+  });
+
+  assert.equal(decision.armed, false);
+  assert.equal(decision.sizing!.ok, false);
+  assert.equal(decision.sizing!.rejection, "below_min_lot");
+  assert.match(decision.rejections.join(" "), /above the 0\.50% per-trade risk budget/);
+});
+
+test("the budget caps risk without fixing it — the ladder still decides the size", () => {
+  const clean = run();
+  assert.equal(clean.armed, true);
+  assert.equal(clean.risk.riskCeilingPct, 0.5);
+  assert.ok(clean.sizing!.effectiveRiskPct <= 0.5 + 1e-9);
+
+  // Three consecutive losses: the governor de-escalates and the same market,
+  // with the same edge, must be taken SMALLER — well inside the budget. That is
+  // only possible because the budget is a ceiling rather than a fixed size.
+  let state = createRiskState();
+  for (let i = 0; i < 3; i++) {
+    state = recordOutcome(state, { symbol: "EURUSD", profit: -20, closedAt: i + 1 });
+  }
+  const after = run({ riskState: state });
+
+  assert.equal(after.armed, true, after.rejections[0]);
+  assert.ok(
+    after.risk.riskPct < clean.risk.riskPct,
+    `governor did not de-escalate: ${clean.risk.riskPct}% -> ${after.risk.riskPct}%`,
+  );
+  assert.ok(
+    after.sizing!.effectiveRiskPct < 0.5 - 1e-9,
+    `de-escalated risk ${after.sizing!.effectiveRiskPct}% still filled the budget`,
+  );
+  assert.ok(
+    after.sizing!.effectiveRiskPct < clean.sizing!.effectiveRiskPct,
+    `size did not shrink: ${clean.sizing!.effectiveRiskPct}% -> ${after.sizing!.effectiveRiskPct}%`,
+  );
 });
 
 // ── Management plan ──────────────────────────────────────────────────────────
@@ -514,24 +609,27 @@ test("an empty band substitutes the nearest frames instead of scoring zero", () 
   );
 });
 
-// ── Costs are judged against the symbol's own asset class ────────────────────
+// ── Costs are charged in R, identically on every asset class ─────────────────
 //
-// The desk used to hold every instrument to one fixed pair of numbers. On a
-// crypto CFD a structurally wide quote is normal, so those markets were banned
-// from trading by a rule written for EURUSD.
+// The desk used to hold every instrument to its own pair of spread ratios, and
+// refused the ones that exceeded them. That is gone: the spread is charged
+// inside the expectancy, the risk unit is floored above it, and the same 0.15R
+// gate judges a forex scalp and a crypto CFD on the same unit — R.
 
-test("the same spread that is refused on forex is allowed on crypto", () => {
+test("a spread that was 43% of the stop no longer refuses the trade", () => {
   const series = allTimeframes((s) => trendUp(220, 1.08, 0.0006, 0.0002, s));
   // The intraday stop on this series is ~140 points, so 60 points of spread is
-  // ~43% of the stop: over the 35% forex ceiling, well under crypto's 60%.
+  // ~43% of the stop. Under the old rule that was a forex refusal.
   const wide = 60;
+  const decision = run({ series, quote: quoteFrom(series, wide) });
 
-  const forex = run({ series, quote: quoteFrom(series, wide) });
   assert.ok(
-    forex.rejections.some((reason) => /ceiling for forex/.test(reason)),
-    `forex must refuse it: ${forex.rejections.join(" | ")}`,
+    !decision.rejections.some((reason) => /ceiling/.test(reason)),
+    `no asset-class ceiling may refuse this: ${decision.rejections.join(" | ")}`,
   );
+  assert.ok(decision.costR !== null && decision.costR > 0.2, "the spread must be visible in R");
 
+  // Crypto is not a special case any more — same rule, same unit.
   const cryptoSpec: SymbolSpec = { ...spec, symbol: "BTCUSD", assetClass: "crypto" };
   const cryptoSeries = allTimeframes((s) => trendUp(220, 20_000, 12, 4, s));
   const last = cryptoSeries.M15![cryptoSeries.M15!.length - 1][4];
@@ -547,24 +645,109 @@ test("the same spread that is refused on forex is allowed on crypto", () => {
     },
   });
   assert.ok(
-    !crypto.rejections.some((reason) => /ceiling for crypto/.test(reason)),
-    `crypto must not inherit the forex ceiling: ${crypto.rejections.join(" | ")}`,
+    !crypto.rejections.some((reason) => /ceiling/.test(reason)),
+    `crypto must not inherit a forex ceiling: ${crypto.rejections.join(" | ")}`,
   );
 });
 
-test("a wide-but-allowed spread is charged and named, not silently accepted", () => {
+test("a wide spread is charged in the simulation it gated on, and the widening is named", () => {
   const series = allTimeframes((s) => trendUp(220, 1.08, 0.0006, 0.0002, s));
-  // 40 points on a ~140-point stop is ~29% — under the forex ceiling, so the
-  // trade may be taken, but it is above the level worth mentioning.
   const decision = run({ series, quote: quoteFrom(series, 40) });
-  assert.ok(
-    decision.warnings.some((warning) => /wide for forex/.test(warning)),
-    decision.warnings.join(" | "),
-  );
-  // And the cost is really charged in the simulation it gated on.
+  // The cost is really charged in the simulation the gate read.
   assert.ok(decision.monteCarlo);
   assert.ok(
     decision.monteCarlo.expectancyR < decision.monteCarlo.grossExpectancyR,
     "expectancy after costs must be below the gross figure",
   );
+  // 40 points of spread against a 140-point structural stop cannot be a risk
+  // unit, so it is widened — out loud, with both distances in the message.
+  assert.ok(
+    decision.warnings.some((warning) => /Stop widened/.test(warning)),
+    decision.warnings.join(" | "),
+  );
+  assert.ok(decision.costR !== null && decision.costR <= 0.25 + 1e-9, `costR ${decision.costR}`);
+  assert.equal(decision.stopWidened, true);
+});
+
+// ── The risk unit, the horizon, and the number the gate actually reads ───────
+//
+// Three arithmetic faults stacked up behind the user's report — an A+ scalp on
+// EURUSD.m refused with "Expectancy after costs is -1.55R (model -1.14R, gross
+// -0.05R)" and "Spread 8 pts is 83% of the 10-pt stop":
+//
+//   1. the stop was resolved from the FASTEST frame the confluence happened to
+//      score (S10) while the horizon was counted in the mode's own entry frame
+//      (12 × M2 = 24 min), so the stop sat inside the noise of the trade;
+//   2. the same stop could be smaller than the round-trip spread, which makes
+//      "one R" smaller than the price of getting in — expectancy can then never
+//      clear any positive threshold, on any setup;
+//   3. the blended expectancy was recomputed as p·RR − (1−p) − costR, charging
+//      every path that ends at the time stop as a FULL −1R. A plan whose stop
+//      and target are both wider than the horizon resolves at the horizon, so
+//      most of its paths end that way, and the formula manufactured the
+//      negative number the gate then refused.
+
+test("a scalp's stop, horizon and report all describe the SAME frame", () => {
+  const series = allTimeframes((s) => trendDown(220, 1.08, s));
+  const decision = run({ series, quote: quoteFrom(series), mode: "scalp" });
+
+  // The mode's own entry frame, never the fastest scored one.
+  assert.equal(decision.entryTimeframe, "M2", "a scalp is measured on its entry frame");
+  assert.equal(decision.horizonMinutes, 12 * 2, "12 M2 bars is 24 minutes — the number the pane shows");
+});
+
+test("the risk unit is never smaller than the round trip that pays for it", () => {
+  const series = allTimeframes((s) => trendDown(220, 1.08, s));
+  const decision = run({ series, quote: quoteFrom(series), mode: "scalp" });
+
+  assert.ok(decision.costR !== null);
+  assert.ok(decision.costR > 0, "a real market has a real cost");
+  assert.ok(decision.costR <= 0.25 + 1e-9, `cost must fit inside the risk unit, costR ${decision.costR}`);
+  if (decision.plan) {
+    const riskPoints = Math.abs(decision.plan.trigger - decision.plan.sl) / spec.point;
+    // 4 × cost, EXACTLY the floor MIN_COST_COVERAGE promises.
+    const costPoints = (decision.costR ?? 0) * riskPoints;
+    assert.ok(riskPoints >= 4 * costPoints - 1e-6, `${riskPoints} pts of risk against ${costPoints} pts of cost`);
+    assert.ok(riskPoints > 10, "the 8-point spread must not be the whole stop");
+  }
+  // A stop that had to be widened says so — it is never a silent change of plan.
+  if (decision.stopWidened) {
+    assert.ok(
+      decision.warnings.some((warning) => /Stop widened/.test(warning)),
+      decision.warnings.join(" | "),
+    );
+  }
+});
+
+test("the expectancy the gate reads IS the simulation's expectancy", () => {
+  // With no realised history blended in (the fixtures pass none), the gate must
+  // agree with the Monte Carlo it just ran. The old re-derivation disagreed by
+  // design, and that disagreement was always in the pessimistic direction.
+  for (const mode of ["scalp", "intraday", "swing"] as const) {
+    const series = allTimeframes((s) => trendDown(220, 1.08, s));
+    const decision = run({ series, quote: quoteFrom(series), mode });
+    assert.ok(decision.monteCarlo, `${mode} must reach the simulation`);
+    assert.ok(decision.expectancyR !== null);
+    assert.ok(
+      Math.abs(decision.expectancyR - decision.monteCarlo.expectancyR) < 0.02,
+      `${mode}: gate read ${decision.expectancyR}, simulation said ${decision.monteCarlo.expectancyR}`,
+    );
+  }
+});
+
+test("paths that end at the time stop are priced, not written off as losses", () => {
+  const series = allTimeframes((s) => trendDown(220, 1.08, s));
+  const decision = run({ series, quote: quoteFrom(series), mode: "scalp" });
+  const mc = decision.monteCarlo!;
+  // The old formula assumed every non-win is a −1R. Whenever timed-out paths
+  // end in profit on average, the true expectancy must be BETTER than that.
+  if (mc.timeoutProbability > 0.05 && mc.timeoutMeanR > 0) {
+    const naive = mc.winProbability * mc.rewardRisk - (1 - mc.winProbability);
+    assert.ok(
+      decision.expectancyR! > naive,
+      `timeouts were written off: E ${decision.expectancyR} vs naive ${naive}`,
+    );
+  }
+  // …and the split is reported, so a refusal can be read rather than guessed at.
+  assert.ok(mc.lossProbability + mc.winProbability + mc.timeoutProbability > 0.999);
 });

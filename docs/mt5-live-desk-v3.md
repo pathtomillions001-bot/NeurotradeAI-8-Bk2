@@ -189,6 +189,14 @@ Rejections quote expectancy *after* spread, commission and swap (`Expectancy aft
 confirmations required, the binding constraint should be the portfolio, not a per-symbol cap of
 one.
 
+The per-trade budget is **0.5% of equity** (`PER_TRADE_RISK_BUDGET_PCT`) and it is a ceiling, not
+a size: the edge (fractional Kelly on the blended win probability), the regime confidence and the
+loss ladder all shrink the amount actually risked, and the edge cap is 1× the governor's number so
+a strong signal can never trade through a de-escalation. The broker's indivisible minimum lot is
+judged against the ceiling rather than the shrunken target, so a `0.17%` minimum lot is executable
+on an account whose adaptive target happened to be `0.15%` — the refusal only stands when even the
+cheapest legal position exceeds the budget, and then it names the budget.
+
 Measured on synthetic data (all three modes, trending / ranging / choppy):
 
 | Regime | Scalp | Day | Swing |
@@ -258,26 +266,44 @@ Every plan carries `management` — break-even with a structure buffer, two part
 1.5R, 25% at 3R), an ATR chandelier trail activating at 1.2R, one pyramid add at 1.5R capped at
 1.5R portfolio risk, a time stop, and spread/slippage/news guards.
 
-### Costs are per asset class
+### The spread is priced, never a veto
 
-The single global `maxSpreadFractionOfStop = 0.25` (and a companion spread gate in the agent that
-could never fire, because it compared the live spread against the live spec's own spread) is
-replaced by `lib/multiasset/asset-costs.ts`. Every limit is a **ratio**, so "points" — which mean
-something different on every instrument — never enter the decision:
+The old design had the same global `maxSpreadFractionOfStop` on every instrument
+plus a second spread gate in the agent that could never fire (it compared the
+live spread against the live spec's own spread). A later revision made the
+ceilings asset-class aware, and that was still the wrong shape: a ratio can
+refuse a setup whose edge covers the cost it is being refused for. The
+user-visible result was an A+ scalp refused with *"Spread 8 pts is 83% of the
+10-pt stop — above the 35% ceiling for forex"* and *"Expectancy after costs is
+−1.55R … below the 0.15R minimum"*.
 
-| Asset class | spread ÷ stop | (spread + commission) ÷ risk | fill spread ÷ stop | slippage × |
-|---|---|---|---|---|
-| forex | 35% | 35% | 40% | 1 |
-| metals | 40% | 40% | 45% | 1.5 |
-| indices / commodities | 50% | 45% | 55% | 2 |
-| futures | 45% | 45% | 50% | 2 |
-| crypto / stocks | 60% | 55% | 65% | 3 |
+The ratios are gone. `asset-costs.ts` now carries only:
 
-The spread is charged *in* the expectancy simulation, so the gate that decides is
-`minEdgeR = 0.15R` net of costs; the ceilings above are the outermost refuse. A spread that is
-wide for its class but still inside the ceiling becomes a caution on the plan rather than a
-silent veto. Pairs: `asset-costs.ts` (policy), `sizing.ts` (refusal + sizing),
-`agent.ts` (cost-aware expectancy), `bridge.ts`/`presenter.ts` (`plan.maxSpreadPoints`).
+| Asset class | fill spread ÷ stop | slippage × |
+|---|---|---|
+| forex | 40% | 1 |
+| metals | 45% | 1.5 |
+| indices / commodities | 55% | 2 |
+| futures | 50% | 2 |
+| crypto / stocks | 65% | 3 |
+
+`fillSpreadFractionOfStop` is an **execution** guard: how far the spread may
+widen between arming a plan and filling it (`plan.maxSpreadPoints`). It never
+judges the edge.
+
+The edge decision lives in exactly one place, `minEdgeR = 0.15R`, measured net of
+spread + commission + slippage. For that number to mean anything the risk unit
+must be able to absorb the cost of entering, so `agent.ts` **floors** the stop at
+`max(4 × round-trip cost, 0.8 × ATR of the entry frame)` and widens it (with a
+warning, `stopWidened`) when the structure is tighter than that. The stop, the
+volatility and the horizon are all measured on the mode's own entry frame
+(M2 / M15 / H1) — never on the fastest frame the confluence happened to score.
+Sizing no longer refuses on cost; it converts a risk budget into a legal lot size
+and reports `costMoney`/`riskMoney`.
+
+Pairs: `asset-costs.ts` (fill guard + slippage), `sizing.ts` (sizing only),
+`agent.ts` (cost-aware expectancy, risk-unit floor, entry-frame anchor),
+`bridge.ts`/`presenter.ts` (`plan.maxSpreadPoints`).
 
 ---
 

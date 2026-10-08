@@ -21,6 +21,13 @@ import {
 } from "../lib/multiasset/integrity";
 import { broadcastSSE } from "../lib/sse";
 import { maybeAutoSelect } from "../lib/multiasset/auto-select";
+import {
+  TERMINAL_DEGRADED_MS,
+  terminalIsDegraded,
+  terminalIsFresh,
+  terminalSilenceMs,
+  terminalStaleWindowMs,
+} from "../lib/multiasset/live";
 import { recordTick } from "../lib/multiasset/subminute";
 import {
   accountKeyFor,
@@ -170,6 +177,9 @@ router.post("/pair", async (req, res) => {
     pairedAt: Date.now(),
     lastSyncAt: Date.now(),
     lastSeq: 0,
+    // Filled in from the first heartbeat that reports it. Until then the desk
+    // uses its fixed staleness window.
+    syncIntervalMs: 0,
   };
 
   const catalog = Array.isArray(req.body?.catalog) ? req.body.catalog : [];
@@ -366,10 +376,15 @@ function parseClock(raw: unknown): SyncClock | null {
   const r = raw as Record<string, unknown>;
   const terminalUtcMs = num(r.terminalUtcMs, NaN);
   if (!Number.isFinite(terminalUtcMs) || terminalUtcMs <= 0) return null;
+  const syncIntervalMs = Math.round(num(r.syncIntervalMs, 0));
   return {
     serverUtcOffsetSeconds: Math.round(num(r.serverUtcOffsetSeconds, 0)),
     terminalUtcMs,
     label: typeof r.label === "string" ? r.label.slice(0, 64) : undefined,
+    // Only a plausible heartbeat interval is accepted: 250ms (the EA's floor)
+    // to 10 minutes. Anything else is noise and is ignored in favour of the
+    // fixed window.
+    syncIntervalMs: syncIntervalMs >= 250 && syncIntervalMs <= 600_000 ? syncIntervalMs : undefined,
   };
 }
 
@@ -418,13 +433,22 @@ function parseNewsFeed(raw: unknown): NewsFeed | null {
   const events = Array.isArray(r.events)
     ? r.events.map(parseNewsEvent).filter((event): event is HighImpactNewsEvent => event !== null)
     : [];
+  const now = Date.now();
+  // Keep a full day of history: the pane lists the day's releases so "0 in the
+  // next 24 h" can be read against what already happened.
+  const kept = events
+    .filter((event) => event.time >= now - 24 * 60 * 60_000 && event.time <= now + 48 * 60 * 60_000)
+    .sort((a, b) => a.time - b.time);
+  const rawCount = Number.isFinite(num(r.rawCount, NaN)) ? Math.max(0, Math.round(num(r.rawCount))) : undefined;
   return {
     available: r.available === true,
-    checkedAt: num(r.checkedAt, Date.now()),
-    events: events
-      .filter((event) => event.time >= Date.now() - 2 * 60 * 60_000 && event.time <= Date.now() + 48 * 60 * 60_000)
-      .sort((a, b) => a.time - b.time),
+    checkedAt: num(r.checkedAt, now),
+    events: kept,
     detail: typeof r.detail === "string" ? r.detail.slice(0, 500) : undefined,
+    // Passed through untouched: the desk needs to know whether the terminal
+    // actually read calendar rows (rawCount) or returned nothing at all.
+    rawCount,
+    redCount: Number.isFinite(num(r.redCount, NaN)) ? Math.max(0, Math.round(num(r.redCount))) : kept.length,
   };
 }
 
@@ -504,7 +528,14 @@ router.post("/sync", (req, res) => {
   // Measuring the offset here is what lets the desk tell "this quote is 3
   // seconds old" from "this terminal thinks it is 1998".
   const clock = parseClock(body.clock);
-  if (clock) updateClockSkew(desk, clock.terminalUtcMs, now);
+  if (clock) {
+    updateClockSkew(desk, clock.terminalUtcMs, now);
+    // The terminal's own heartbeat contract. Recorded (not assumed) so the
+    // desk's staleness window can be sized from it: an EA configured to beat
+    // every 10 seconds must not be declared dead after 30. A missing value
+    // leaves the fixed window in place.
+    if (clock.syncIntervalMs) desk.terminal.syncIntervalMs = clock.syncIntervalMs;
+  }
 
   if (Array.isArray(body.quotes)) {
     let accepted = 0;
@@ -665,7 +696,13 @@ router.get("/status", (_req, res) => {
     return res.json({ linked: false, catalogCount: 0, selectedCount: 0, lastPairingError });
   }
 
-  const age = Date.now() - desk.terminal.lastSyncAt;
+  /**
+   * Staleness is judged by the SAME rules the desk trades by — the two-stage
+   * window in live.ts, sized from the heartbeat the terminal reports. This
+   * endpoint had its own hardcoded 30-second cliff, so the dialog could tell
+   * the user the link was dead while the desk was still analysing normally.
+   */
+  const now = Date.now();
   return res.json({
     linked: true,
     accountId: desk.terminal.accountId,
@@ -674,8 +711,12 @@ router.get("/status", (_req, res) => {
     company: desk.terminal.company,
     pairedAt: desk.terminal.pairedAt,
     lastSyncAt: desk.terminal.lastSyncAt,
-    lastSyncAgeMs: age,
-    stale: age > 30_000,
+    lastSyncAgeMs: terminalSilenceMs(desk, now),
+    stale: !terminalIsFresh(desk, now),
+    degraded: terminalIsDegraded(desk, now),
+    degradedAfterMs: TERMINAL_DEGRADED_MS,
+    staleAfterMs: terminalStaleWindowMs(desk),
+    syncIntervalMs: desk.terminal.syncIntervalMs || null,
     queuedCommands: desk.outbox.length,
     inflightCommands: desk.inflight.size,
     catalogCount: desk.catalog.size,

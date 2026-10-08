@@ -237,12 +237,28 @@ export interface HighImpactNewsEvent {
  * The EA emits a fresh status even when there are no events. `available:false`
  * is intentionally meaningful: the server fails closed for new entries rather
  * than pretending a missing calendar means a clear calendar.
+ *
+ * ── EMPTY IS NOT THE SAME AS CLEAR ───────────────────────────────────────────
+ *
+ * `rawCount` is how many rows the MT5 calendar API returned for the window,
+ * before any importance filtering, and `redCount` is how many survived it.
+ * Both exist because the desk was reporting "No high-impact events in the next
+ * 24 hours. The gate stays armed" on terminals whose calendar read had simply
+ * come back empty — MT5 returns success with a zero-length array while the
+ * terminal's calendar database is still syncing, and the old code could not
+ * tell that apart from a genuinely quiet day. `rawCount === 0` means "the
+ * terminal could not tell us", and the desk says exactly that instead of
+ * claiming an all-clear it cannot back up.
  */
 export interface NewsFeed {
   available: boolean;
   checkedAt: number;
   events: HighImpactNewsEvent[];
   detail?: string;
+  /** Rows the MT5 calendar returned for the window, before importance filter. */
+  rawCount?: number;
+  /** Rows that survived the red-folder filter. Equals events.length when sent. */
+  redCount?: number;
 }
 
 // ── Account ──────────────────────────────────────────────────────────────────
@@ -418,6 +434,16 @@ export interface SyncClock {
   terminalUtcMs: number;
   /** Human-readable broker timezone label, when the terminal exposes one. */
   label?: string;
+  /**
+   * The heartbeat interval the EA is actually configured with.
+   *
+   * Reported so the desk can size its own patience from the terminal's contract
+   * instead of guessing: an EA told to beat every 10 seconds must not be
+   * declared dead after 30, and one beating every 500ms should not keep a dead
+   * link alive for two minutes. Absent means "unknown" — the fixed window
+   * applies.
+   */
+  syncIntervalMs?: number;
 }
 
 export interface SyncRequest {

@@ -321,6 +321,14 @@ export interface AgentDecision {
   /** Blended confluence/evidence score that was actually gated on. */
   qualityScore: number;
   qualityThreshold: number;
+  /** The frame the stop, the volatility and the horizon were measured on. */
+  entryTimeframe: string | null;
+  /** That frame's horizon, in minutes — the number the pane prints. */
+  horizonMinutes: number | null;
+  /** Round-trip cost as a fraction of the risk unit (0.25 = 25% of one R). */
+  costR: number | null;
+  /** True when the structural stop was widened to keep the risk unit real. */
+  stopWidened: boolean;
   rejections: string[];
   /** Cautions recorded but not enforced. */
   warnings: string[];
@@ -366,6 +374,14 @@ export interface NewsFeed {
   checkedAt: number;
   events: HighImpactNewsEvent[];
   detail?: string;
+  /**
+   * Rows the MT5 calendar returned for the window, before importance filtering.
+   * `0` means the terminal could not read its calendar at all — an empty list
+   * that must never be rendered as an all-clear.
+   */
+  rawCount?: number;
+  /** Rows that survived the red-folder filter. */
+  redCount?: number;
 }
 
 export interface DeskStateResponse {
@@ -377,7 +393,17 @@ export interface DeskStateResponse {
     company: string;
     pairedAt: number;
     lastSyncAt: number;
+    lastSyncAgeMs: number | null;
+    /** Hard state: the terminal is gone and new analysis is paused. */
     stale: boolean;
+    /**
+     * Soft state: the heartbeat is late but every symbol is still gated on its
+     * own quote age, so the desk keeps working. Never shown as "paused".
+     */
+    degraded: boolean;
+    degradedAfterMs: number;
+    staleAfterMs: number;
+    syncIntervalMs: number | null;
   } | null;
   account: Account | null;
   mode: TradeMode;
@@ -435,6 +461,11 @@ export interface UpcomingNewsEvent extends HighImpactNewsEvent {
   inMs: number;
   /** True for the very next event that has not started yet. */
   next: boolean;
+  /**
+   * True once the release is behind us. Passed events stay listed for the day
+   * so a quiet session can be read against what already happened.
+   */
+  passed: boolean;
 }
 
 /** One automatic best-market pass, as reported by the desk. */
@@ -445,6 +476,8 @@ export interface AutoSelectRecord {
   qualified: number;
   chosen: string | null;
   reason: string;
+  /** Selected markets the pass could not analyse (no fresh, coherent data). */
+  skipped: string[];
   ranked: {
     symbol: string;
     expectancyR: number | null;
@@ -503,7 +536,7 @@ export const deskApi = {
    * demand, so the user can ask "look now" without waiting for the mode's
    * interval.
    */
-  autoSelect: () => request<{ mode: TradeMode; chosen: string | null; scanned: number; qualified: number; reason: string; ranked: AutoSelectRecord["ranked"]; plans: ArmedPlan[] }>("/desk/auto-select", { method: "POST" }),
+  autoSelect: () => request<{ mode: TradeMode; chosen: string | null; scanned: number; qualified: number; reason: string; skipped: string[]; ranked: AutoSelectRecord["ranked"]; plans: ArmedPlan[] }>("/desk/auto-select", { method: "POST" }),
   arm: (symbol: string, mode: TradeMode) => request<{ plan: ArmedPlan }>("/desk/arm", { method: "POST", body: JSON.stringify({ symbol, mode }) }),
   cancelPlan: (id: string) => request<{ ok: true }>(`/desk/plans/${id}`, { method: "DELETE" }),
   closePosition: (ticket: number, lots?: number) => request<{ ok: true }>(`/desk/positions/${ticket}/close`, { method: "POST", body: JSON.stringify(lots === undefined ? {} : { lots }) }),
@@ -517,7 +550,13 @@ export const deskApi = {
     login?: number;
     server?: string;
     lastSyncAgeMs?: number;
+    /** Hard state: the desk has written the terminal off and paused entries. */
     stale?: boolean;
+    /** Soft state: late heartbeat, still analysing, gated per symbol. */
+    degraded?: boolean;
+    degradedAfterMs?: number;
+    staleAfterMs?: number;
+    syncIntervalMs?: number | null;
     queuedCommands?: number;
     catalogCount: number;
     selectedCount: number;

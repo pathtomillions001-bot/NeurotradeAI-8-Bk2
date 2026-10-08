@@ -69,14 +69,22 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                 <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-[11px] text-zinc-400">
                   <dt>Login</dt><dd className="text-zinc-200">{status.data.login}</dd>
                   <dt>Server</dt><dd className="break-all text-zinc-200">{status.data.server}</dd>
-                  <dt>Last sync</dt><dd className={status.data.stale ? "text-red-400" : "text-zinc-200"}>{Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s ago{status.data.stale && " · STALE"}</dd>
+                  <dt>Last sync</dt><dd className={status.data.stale ? "text-red-400" : status.data.degraded ? "text-amber-300" : "text-zinc-200"}>{Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s ago{status.data.stale ? " · STALE" : status.data.degraded ? " · reconnecting" : ""}</dd>
                   <dt>Broker markets</dt><dd className="text-zinc-200">{status.data.catalogCount}</dd>
                   <dt>Selected markets</dt><dd className="text-zinc-200">{status.data.selectedCount}</dd>
                   <dt>Economic calendar</dt><dd className={status.data.calendarAvailable ? "text-emerald-300" : "text-amber-300"}>{status.data.calendarAvailable ? "Available" : "Unavailable — entries paused"}</dd>
                 </dl>
               </div>
               {status.data.lastPairingError && <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">{status.data.lastPairingError}</p>}
-              {status.data.stale && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-300">The EA is no longer syncing. It manages existing positions locally but the server will not analyse or open a new trade until the live heartbeat resumes. Check the MT5 Journal, WebRequest allowlist and AutoTrading settings.</p>}
+              {status.data.degraded && !status.data.stale && (
+                <p className="rounded-lg border border-sky-500/40 bg-sky-500/10 p-3 text-[11px] leading-relaxed text-sky-200">
+                  The heartbeat is late — the terminal last synced {Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s ago
+                  {status.data.syncIntervalMs ? ` (it beats every ${(status.data.syncIntervalMs / 1000).toFixed(1)}s)` : ""}. The desk is
+                  still analysing, and every market remains gated on its own quote age, so nothing trades on a stale price. If this
+                  persists past {Math.round((status.data.staleAfterMs ?? 120_000) / 1000)}s the desk will pause new entries.
+                </p>
+              )}
+              {status.data.stale && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-300">The EA is no longer syncing ({Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s, limit {Math.round((status.data.staleAfterMs ?? 120_000) / 1000)}s). It manages existing positions locally but the server will not analyse or open a new trade until the live heartbeat resumes. Check the MT5 Journal, WebRequest allowlist and AutoTrading settings.</p>}
               <button type="button" onClick={() => unpair.mutate()} disabled={unpair.isPending} className="w-full rounded-lg border border-red-500/40 bg-red-500/10 py-2 text-[12px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50">{unpair.isPending ? "Unlinking…" : "Unlink terminal and clear live Desk data"}</button>
             </>
           ) : (

@@ -110,6 +110,12 @@ export interface AutoSelectRecord {
   chosen: string | null;
   /** One-line explanation, shown verbatim on the desk. */
   reason: string;
+  /**
+   * Selected markets this pass could not analyse at all, because their data was
+   * not fresh and self-consistent. Named so "why was my market not even
+   * considered?" is answered without reading the journal.
+   */
+  skipped: string[];
   /** Best few candidates, in rank order. */
   ranked: {
     symbol: string;
@@ -132,6 +138,11 @@ export interface DeskState {
     pairedAt: number;
     lastSyncAt: number;
     lastSeq: number;
+    /**
+     * Heartbeat interval the EA reports, in ms. Zero when it has not said —
+     * `live.ts` then falls back to the fixed staleness window.
+     */
+    syncIntervalMs: number;
   } | null;
   /** Last account snapshot from the paired terminal; never fabricated. */
   account: AccountSnapshot | null;

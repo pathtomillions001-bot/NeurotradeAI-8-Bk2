@@ -6,11 +6,10 @@
  * user's own terminal. No login or password is collected by the platform.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Check, Copy, Download, LoaderCircle, RotateCw, ShieldCheck, X } from "lucide-react";
+import { AlertTriangle, Check, Copy, Download, ShieldCheck, X } from "lucide-react";
 import { deskApi } from "@/lib/desk";
-import { pairingRequestView, shouldRequestInitialPairingCode } from "@/lib/pairing-code";
 
 interface BridgeDialogProps {
   open: boolean;
@@ -21,7 +20,6 @@ interface BridgeDialogProps {
 
 export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogProps) {
   const [copied, setCopied] = useState<"code" | "origin" | null>(null);
-  const initialPairingRequested = useRef(false);
   const origin = window.location.origin;
   const downloadUrl = `${import.meta.env.BASE_URL}downloads/NeurotradeBridge.mq5?v=3.03`;
   const status = useQuery({
@@ -31,28 +29,10 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
     enabled: open,
   });
   const pairing = useMutation({ mutationFn: deskApi.pairingCode });
-  const unpair = useMutation({
-    mutationFn: deskApi.unpair,
-    onSuccess: () => {
-      pairing.reset();
-      initialPairingRequested.current = false;
-      onChanged();
-    },
-  });
+  const unpair = useMutation({ mutationFn: deskApi.unpair, onSuccess: () => { pairing.reset(); onChanged(); } });
 
   useEffect(() => {
-    if (
-      shouldRequestInitialPairingCode({
-        open,
-        linked,
-        alreadyAttempted: initialPairingRequested.current,
-      })
-    ) {
-      // Set before mutate so React StrictMode effect replay cannot issue a
-      // second code and invalidate the one the user is about to enter.
-      initialPairingRequested.current = true;
-      pairing.mutate();
-    }
+    if (open && !linked && !pairing.data && !pairing.isPending) pairing.mutate();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, linked]);
   useEffect(() => {
@@ -70,20 +50,8 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
     );
   };
 
-  const pairingView = pairingRequestView({
-    isPending: pairing.isPending,
-    data: pairing.data,
-    error: pairing.error,
-  });
   if (!open) return null;
-  const code = pairingView.kind === "ready" ? pairingView.code : undefined;
-  const codeFieldValue = pairingView.kind === "loading"
-    ? "Saving durable code…"
-    : pairingView.kind === "error"
-      ? "Code unavailable"
-      : pairingView.kind === "ready"
-        ? pairingView.code
-        : "Preparing code…";
+  const code = pairing.data?.pairingCode;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 p-0 sm:items-center sm:p-4">
@@ -137,35 +105,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                 </Step>
                 <Step n={3} title="Set EA inputs and pair">
                   <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this private, reusable code into <code className="text-zinc-200">PairingCode</code>:</p>
-                  <CopyValue value={codeFieldValue} copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
-                  {pairingView.kind === "loading" && (
-                    <p role="status" aria-live="polite" className="mt-2 flex items-center gap-2 text-[11px] text-sky-300">
-                      <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> Saving the code securely before it is shown…
-                    </p>
-                  )}
-                  {pairingView.kind === "ready" && (
-                    <p role="status" aria-live="polite" className="mt-2 flex items-center gap-2 text-[11px] text-emerald-300">
-                      <Check className="h-3.5 w-3.5" /> Code saved. Enter this exact code in the EA.
-                    </p>
-                  )}
-                  {pairingView.kind === "error" && (
-                    <div role="alert" className="mt-2 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">
-                      <p className="flex items-center gap-1.5 font-medium text-red-300"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />Pairing code unavailable</p>
-                      <p className="mt-1.5">{pairingView.message}</p>
-                      <button
-                        type="button"
-                        onClick={() => pairing.mutate()}
-                        disabled={pairing.isPending}
-                        className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-red-400/40 bg-red-500/10 px-2.5 py-1.5 font-medium text-red-200 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        <RotateCw className="h-3.5 w-3.5" /> Retry code generation
-                      </button>
-                      <p className="mt-2 text-[10px] text-red-300/70">A retry may issue a replacement. Since no code is displayed yet, use only the code shown after a successful retry.</p>
-                    </div>
-                  )}
-                  {pairingView.kind === "idle" && (
-                    <p role="status" aria-live="polite" className="mt-2 text-[11px] text-zinc-500">Preparing the durable pairing code…</p>
-                  )}
+                  <CopyValue value={pairing.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
                   <p className="mt-2 text-[10px] text-zinc-500">This code stays valid until you unlink MT5 or generate a replacement. Keep it private. The EA saves its token locally and reconnects after restarts. Run one active bridge per account; other charts remain on standby.</p>
                 </Step>
               </ol>
@@ -178,9 +118,9 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                     The terminal will keep retrying with the code above, so it connects by itself as soon as the account is free — or generate a new code after unlinking it elsewhere.
                   </p>
                 </div>
-              ) : pairingView.kind === "ready" ? (
-                <p role="status" aria-live="polite" className="flex items-center gap-2 text-[11px] text-zinc-500"><span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />Waiting for the terminal to pair…</p>
-              ) : null}
+              ) : (
+                <p className="flex items-center gap-2 text-[11px] text-zinc-500"><span className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />Waiting for the terminal to pair…</p>
+              )}
             </>
           )}
         </div>

@@ -66,10 +66,6 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
             <>
               <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
                 <p className="font-medium text-emerald-300">Terminal linked</p>
-                <p className="mt-1.5 text-[10px] leading-relaxed text-zinc-500">
-                  This link survives MT5 restarts, browser restarts and platform redeploys — the terminal keeps its token
-                  and this Desk keeps the pairing. It ends only when you unlink it below.
-                </p>
                 <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 font-mono text-[11px] text-zinc-400">
                   <dt>Login</dt><dd className="text-zinc-200">{status.data.login}</dd>
                   <dt>Server</dt><dd className="break-all text-zinc-200">{status.data.server}</dd>
@@ -109,11 +105,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                 <Step n={3} title="Set EA inputs and pair">
                   <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this one-time value into <code className="text-zinc-200">PairingCode</code>:</p>
                   <CopyValue value={pairing.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
-                  <p className="mt-2 text-[10px] text-zinc-500">
-                    <span className="font-medium text-zinc-400">The code does not expire.</span> It stays valid until you
-                    unlink the terminal below, so MT5 can be closed and reopened — and this platform can be redeployed —
-                    without a new code. Generating another code here does not invalidate the one already inside a running EA.
-                  </p>
+                  <p className="mt-2 text-[10px] text-zinc-500">The code is valid for 10 minutes and can only be redeemed once. If it expires, leave the EA attached and reopen this dialog for a fresh code.</p>
                 </Step>
               </ol>
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">One account, one Desk.</span> An MT5 account can only be linked to a single Desk at a time. If it is already connected in another browser or device, pairing here is refused until that Desk unlinks it — two Desks on one account would trade the same balance against separate risk limits.</p><p className="mt-2"><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>

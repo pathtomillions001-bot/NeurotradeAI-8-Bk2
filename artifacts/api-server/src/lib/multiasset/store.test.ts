@@ -22,11 +22,8 @@ import {
   getDesk,
   issueBridgeToken,
   journal,
-  MAX_PLAN_RESENDS,
-  planDeliveryFor,
   reconcilePositions,
   requeueStaleCommands,
-  syncUnackedPlans,
   resetDesk,
   revokeBridgeToken,
   seriesFor,
@@ -265,95 +262,6 @@ test("expired plans are dropped", () => {
   const expired = expirePlans(desk);
   assert.deepEqual(expired, ["old"]);
   assert.ok(desk.plans.has("live"));
-});
-
-// ── Plan delivery ────────────────────────────────────────────────────────────
-//
-// The Desk shows a plan as armed the instant it is queued, but only the
-// terminal can actually execute it. These cover the silent failure behind
-// "armed plans, no executions": an arm command that never reached the EA.
-
-test("a plan the terminal never acknowledges is re-sent with a fresh command id", () => {
-  const desk = freshDesk();
-  armPlan(desk, plan("plan-unacked"));
-  const [first] = drainOutbox(desk);
-  assert.equal(first.type, "arm_plan");
-
-  // The EA has a full window to answer; nothing is re-sent yet.
-  assert.equal(syncUnackedPlans(desk, Date.now(), 60_000), 0);
-
-  // The acknowledgement never arrives — the token was rejected, or the response
-  // carrying it was lost — so the stale command leaves the in-flight map.
-  requeueStaleCommands(desk, -1);
-  assert.equal(syncUnackedPlans(desk, Date.now(), -1), 1);
-
-  assert.equal(desk.outbox.length, 1);
-  const resent = desk.outbox[0];
-  assert.equal(resent.type, "arm_plan");
-  // The EA de-duplicates by command id, so replaying the original id would be
-  // dropped unread and the plan would stay undelivered forever.
-  assert.notEqual(resent.id, first.id);
-});
-
-test("a plan the terminal acknowledged is never re-sent", () => {
-  const desk = freshDesk();
-  armPlan(desk, plan("plan-acked"));
-  const [command] = drainOutbox(desk);
-  acknowledgeResult(desk, { commandId: command.id, status: "done", ts: 1 });
-
-  requeueStaleCommands(desk, -1);
-  assert.equal(syncUnackedPlans(desk, Date.now(), -1), 0);
-  assert.equal(desk.outbox.length, 0);
-  assert.equal(planDeliveryFor(desk, "plan-acked")?.acked, true);
-});
-
-test("a plan the terminal explicitly refused counts as delivered", () => {
-  const desk = freshDesk();
-  armPlan(desk, plan("plan-refused"));
-  const [command] = drainOutbox(desk);
-  // "trading disabled by server" / "local safety guard blocked this plan" are
-  // answers, not silence — re-sending them would change nothing.
-  acknowledgeResult(desk, { commandId: command.id, status: "skipped", error: "trading disabled by server", ts: 1 });
-
-  requeueStaleCommands(desk, -1);
-  assert.equal(syncUnackedPlans(desk, Date.now(), -1), 0);
-  assert.equal(desk.outbox.length, 0);
-});
-
-test("an undelivered plan is not re-sent while its command is still queued", () => {
-  const desk = freshDesk();
-  armPlan(desk, plan("plan-queued"));
-  // Never drained: the command is still waiting for the next heartbeat.
-  assert.equal(syncUnackedPlans(desk, Date.now(), -1), 0);
-  assert.equal(desk.outbox.length, 1, "the original command must not be duplicated");
-});
-
-test("re-sends stop at the cap so a dead bridge is not hammered forever", () => {
-  const desk = freshDesk();
-  armPlan(desk, plan("plan-dead"));
-  drainOutbox(desk);
-
-  for (let i = 0; i < MAX_PLAN_RESENDS + 3; i++) {
-    requeueStaleCommands(desk, -1);
-    syncUnackedPlans(desk, Date.now(), -1);
-    drainOutbox(desk);
-  }
-
-  assert.equal(planDeliveryFor(desk, "plan-dead")?.attempts, MAX_PLAN_RESENDS);
-  assert.equal(desk.outbox.length, 0, "no further attempts once the cap is reached");
-});
-
-test("an expired plan is never re-sent", () => {
-  const desk = freshDesk();
-  armPlan(desk, plan("plan-expired", "EURUSD", Date.now() - 1));
-  drainOutbox(desk);
-  requeueStaleCommands(desk, -1);
-  assert.equal(syncUnackedPlans(desk, Date.now(), -1), 0, "re-arming a plan past its TTL would trade a stale setup");
-  assert.equal(desk.outbox.length, 0);
-
-  // The delivery record goes with the plan when it expires.
-  expirePlans(desk);
-  assert.equal(planDeliveryFor(desk, "plan-expired"), null);
 });
 
 // ── Account baselines ────────────────────────────────────────────────────────

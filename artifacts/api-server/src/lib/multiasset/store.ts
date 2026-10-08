@@ -433,10 +433,7 @@ export function requeueStaleCommands(desk: DeskState, timeoutMs = 15_000): numbe
 }
 
 export function acknowledgeResult(desk: DeskState, result: CommandResult): boolean {
-  const executionPlan = desk.plans.get(result.commandId);
-  const finalPlanResult = executionPlan && ["filled", "rejected", "expired", "skipped"].includes(result.status);
-  const known = desk.inflight.delete(result.commandId) || Boolean(finalPlanResult);
-  if (finalPlanResult) desk.plans.delete(result.commandId);
+  const known = desk.inflight.delete(result.commandId);
   if (desk.seenCommandIds.includes(result.commandId)) return false;
   desk.seenCommandIds.push(result.commandId);
   if (desk.seenCommandIds.length > MAX_SEEN_COMMANDS) {

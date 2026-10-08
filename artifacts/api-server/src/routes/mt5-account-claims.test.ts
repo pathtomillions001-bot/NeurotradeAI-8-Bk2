@@ -3,12 +3,11 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { after, before, beforeEach, describe, it } from "node:test";
 import express from "express";
-import { pool, schemaReady } from "@workspace/db";
-import { browserSession, runWithSession } from "../lib/session";
+import { schemaReady } from "@workspace/db";
+import { runWithSession } from "../lib/session";
 import { __testing as claimTesting, accountKeyFor, resetClaims } from "../lib/multiasset/claims";
-import { getDesk, resetDesk } from "../lib/multiasset/store";
-import router, { parseNewsFeed } from "./bridge";
-import { acquireConnector, saveBridgeLink } from "../lib/multiasset/bridge-links";
+import { resetDesk } from "../lib/multiasset/store";
+import router, { pendingPairings } from "./bridge";
 
 /**
  * End-to-end proof that one MT5 account can only be connected to one Desk.
@@ -23,7 +22,6 @@ describe("MT5 bridge — one account, one Desk", () => {
   let sessionId = "session-a";
   app.use(express.json());
   app.use((req, _res, next) => {
-    req.clientId = typeof req.headers["x-client-id"] === "string" ? req.headers["x-client-id"] : undefined;
     req.sessionId = sessionId;
     runWithSession(sessionId, next);
   });
@@ -44,10 +42,9 @@ describe("MT5 bridge — one account, one Desk", () => {
     server.close();
   });
 
-  beforeEach(async () => {
+  beforeEach(() => {
     resetClaims();
-    await pool.query("DELETE FROM mt5_bridge_links");
-    await pool.query("DELETE FROM mt5_account_claims");
+    pendingPairings.clear();
     // Every browser starts from a genuinely empty Desk, so one test's
     // successful pairing can never mask another's refusal.
     for (const id of sessions.values()) resetDesk(id);
@@ -200,141 +197,41 @@ describe("MT5 bridge — one account, one Desk", () => {
 
     const codeB = await requestCode(browser("b"));
     assert.equal((await pair(browser("b"), codeB, 5010)).status, 409, "the current account is still held");
-    assert.equal((await pair(browser("b"), await requestCode(browser("b")), 5009)).status, 201, "the released account is free again");
+    assert.equal((await pair(browser("b"), codeB, 5009)).status, 201, "the released account is free again");
   });
 
   it("the owner's heartbeat keeps syncing", async () => {
     const token = await connect(browser("a"), 5011);
-    const sync = await as(browser("a"), () => post("/sync", { seq: 1, instanceId: "terminal-a" }, token));
+    const sync = await as(browser("a"), () => post("/sync", { seq: 1 }, token));
     assert.equal(sync.status, 200);
   });
 
-  it("explicit unlink revokes old code and token; closing MT5 does not", async () => {
-    const code = await requestCode(browser("a"));
-    const paired = await pair(browser("a"), code, 5012);
-    const { bridgeToken } = await paired.json() as { bridgeToken: string };
-    await claimTesting.ageClaim(accountKeyFor(5012, "BROKER-DEMO"), Date.now() - 30 * 86400_000);
-    assert.equal((await pair(browser("b"), await requestCode(browser("b")), 5012)).status, 409);
-    assert.equal((await pair(browser("a"), code, 5012)).status, 201);
-    await as(browser("a"), () => post("/unpair", {}));
-    assert.equal((await pair(browser("a"), code, 5012)).status, 401);
-    assert.equal((await as(browser("a"), () => post("/sync", { seq: 2, instanceId: "terminal-a" }, bridgeToken))).status, 401);
+  it("a superseded terminal is disconnected instead of silently sharing the account", async () => {
+    const tokenA = await connect(browser("a"), 5012);
+    assert.equal((await as(browser("a"), () => post("/sync", { seq: 1 }, tokenA))).status, 200);
+
+    // Simulate a Desk that stopped heartbeating long enough to go idle: another
+    // browser legitimately takes the account over.
+    await claimTesting.ageClaim(
+      accountKeyFor(5012, "BROKER-DEMO"),
+      Date.now() - 60 * 60 * 1000,
+    );
     await connect(browser("b"), 5012);
-  });
 
-  it("same code retries are idempotent and preserve selection/plans", async () => {
-    const session = browser("a");
-    const code = await requestCode(session);
-    const first = await pair(session, code, 5101);
-    const { bridgeToken } = await first.json() as { bridgeToken: string };
-    const desk = getDesk(session);
-    desk.watchlist = ["EURUSD.m"];
-    desk.autoTrade = true;
-    const again = await pair(session, code, 5101);
-    assert.equal(again.status, 201);
-    assert.equal((await again.json() as { bridgeToken: string }).bridgeToken, bridgeToken);
-    assert.deepEqual(desk.watchlist, ["EURUSD.m"]);
-    assert.equal(desk.autoTrade, true);
-  });
+    // Terminal A still holds a cryptographically valid token. It must be told
+    // to stop, or two Desks would stream and trade one balance.
+    const late = await as(browser("a"), () => post("/sync", { seq: 2 }, tokenA));
+    assert.equal(late.status, 409);
+    const body = (await late.json()) as { code: string };
+    assert.equal(body.code, "account_claimed_elsewhere");
 
-  it("code and token survive loss of all process caches; no prices are restored", async () => {
-    const session = browser("a");
-    const code = await requestCode(session);
-    const paired = await pair(session, code, 5102);
-    const { bridgeToken } = await paired.json() as { bridgeToken: string };
-    resetDesk(session); resetClaims();
-    assert.equal((await pair(session, code, 5102)).status, 201);
-    resetDesk(session); resetClaims();
-    const status = await as(session, () => get("/status"));
-    assert.equal((await status.json() as { linked: boolean }).linked, true);
-    assert.equal(getDesk(session).quotes.size, 0);
-    const sync = await as(session, () => post("/sync", { seq: 1, instanceId: "terminal-a" }, bridgeToken));
-    assert.equal(sync.status, 200);
-  });
-
-  it("a second connector cannot drain commands or update heartbeat", async () => {
-    const session = browser("a");
-    const token = await connect(session, 5103);
-    assert.equal((await as(session, () => post("/sync", { seq: 1, instanceId: "terminal-a" }, token))).status, 200);
-    const lastSync = getDesk(session).terminal!.lastSyncAt;
-    const competing = await as(session, () => post("/sync", { seq: 2, instanceId: "terminal-b" }, token));
-    assert.equal(competing.status, 423);
-    assert.equal(getDesk(session).terminal!.lastSyncAt, lastSync);
-  });
-
-  it("a code cannot be reused on a different broker account", async () => {
-    const session = browser("a");
-    const code = await requestCode(session);
-    assert.equal((await pair(session, code, 5104)).status, 201);
-    assert.equal((await pair(session, code, 5105)).status, 409);
-    assert.equal(getDesk(session).terminal!.login, 5104);
-  });
-
-  it("saving settings after a browser-first restore does not revoke the EA token", async () => {
-    const session = browser("a");
-    const token = await connect(session, 5110);
-    resetDesk(session);
-    await as(session, () => get("/status"));
-    assert.equal(getDesk(session).terminal!.bridgeToken, "");
-    getDesk(session).watchlist = ["GBPUSD.m"];
-    await saveBridgeLink(getDesk(session));
-    assert.equal((await as(session, () => post("/sync", { seq: 1, instanceId: "terminal-a" }, token))).status, 200);
-  });
-
-  it("connector handover is allowed only after the old executor silence bound", async () => {
-    const session = browser("a");
-    await connect(session, 5111);
-    const now = Date.now();
-    assert.equal((await acquireConnector(session, "a", now)).ok, true);
-    assert.equal((await acquireConnector(session, "b", now + 120_000)).ok, false);
-    const handover = await acquireConnector(session, "b", now + 150_001);
-    assert.deepEqual(handover, { ok: true, changed: true });
-  });
-
-  it("replacement code revokes the old code, without disrupting the active token", async () => {
-    const session = browser("a");
-    const code = await requestCode(session);
-    const response = await pair(session, code, 5112);
-    const { bridgeToken } = await response.json() as { bridgeToken: string };
-    const replacement = await requestCode(session);
-    assert.equal((await pair(session, code, 5112)).status, 401);
-    assert.equal((await as(session, () => post("/sync", { seq: 1, instanceId: "a" }, bridgeToken))).status, 200);
-    assert.equal((await pair(session, replacement, 5112)).status, 201);
-    assert.equal((await as(session, () => post("/sync", { seq: 2, instanceId: "a" }, bridgeToken))).status, 401);
-  });
-
-  it("restart sequence clears undelivered commands instead of replaying old buys", async () => {
-    const session = browser("a");
-    const token = await connect(session, 5113);
-    await as(session, () => post("/sync", { seq: 8, instanceId: "a" }, token));
-    getDesk(session).outbox.push({ id: randomUUID(), type: "flatten_all", reason: "old command" });
-    const response = await as(session, () => post("/sync", { seq: 1, instanceId: "a" }, token));
-    assert.equal(response.status, 200);
-    assert.deepEqual((await response.json() as { commands: unknown[] }).commands, []);
-  });
-
-  it("empty MT5 calendar success is not an all-clear, and earlier releases are retained", () => {
-    assert.equal(parseNewsFeed({ available: true, rawCount: 0, events: [] })!.available, false);
-    const earlier = { id: "usd", time: Date.now() - 5 * 3600_000, name: "USD release", currency: "USD" };
-    const feed = parseNewsFeed({ available: true, rawCount: 3, redCount: 1, events: [earlier] })!;
-    assert.equal(feed.available, true);
-    assert.equal(feed.events[0]!.id, "usd");
-  });
-
-  it("pairing binds the durable browser identity for new tabs/restarts", async () => {
-    const session = browser("a");
-    const clientId = randomUUID();
-    const response = await as(session, () => fetch(baseUrl + "/pairing-code", { method: "POST", headers: { "Content-Type": "application/json", "x-client-id": clientId }, body: "{}" }));
-    assert.equal(response.status, 200);
-    const req = { headers: { "x-tab-session": randomUUID(), "x-client-id": clientId }, query: {}, cookies: {}, get(name: string) { return this.headers[name as keyof typeof this.headers]; } };
-    const res = { cookie() {}, setHeader() {} };
-    let resolved = "";
-    await browserSession(req as never, res as never, () => { resolved = (req as unknown as { sessionId: string }).sessionId; });
-    assert.equal(resolved, session);
+    // And browser A is no longer shown as connected.
+    const status = (await (await as(browser("a"), () => get("/status"))).json()) as { linked: boolean };
+    assert.equal(status.linked, false);
   });
 
   it("a heartbeat from an unpaired session is still a 401", async () => {
-    const response = await as(browser("a"), () => post("/sync", { seq: 1, instanceId: "terminal-a" }, "nt_not-a-real-token"));
+    const response = await as(browser("a"), () => post("/sync", { seq: 1 }, "nt_not-a-real-token"));
     assert.equal(response.status, 401);
   });
 

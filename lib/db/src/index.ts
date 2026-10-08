@@ -9,17 +9,6 @@ import * as schema from "./schema";
 const { Pool } = pg;
 
 const INIT_DDL = `
-CREATE TABLE IF NOT EXISTS mt5_bridge_links (
-  session_id TEXT PRIMARY KEY,
-  code_hash TEXT NOT NULL UNIQUE,
-  token_hash TEXT UNIQUE,
-  terminal JSONB,
-  settings JSONB NOT NULL DEFAULT '{}'::jsonb,
-  code_account_key TEXT,
-  connector_id TEXT,
-  connector_seen_ms BIGINT NOT NULL DEFAULT 0
-);
-
 CREATE TABLE IF NOT EXISTS accounts (
   id SERIAL PRIMARY KEY,
   session_id TEXT NOT NULL DEFAULT 'legacy',

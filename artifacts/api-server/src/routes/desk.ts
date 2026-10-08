@@ -9,7 +9,6 @@
 
 import { Router, type IRouter, type Response } from "express";
 import { randomUUID } from "node:crypto";
-import { restoreBridgeLink, saveBridgeLink } from "../lib/multiasset/bridge-links";
 import { getBrowserSessionId } from "../lib/session";
 import { logger } from "../lib/logger";
 import { evaluate, horizonMinutes } from "../lib/multiasset/agent";
@@ -67,10 +66,6 @@ import {
 } from "../lib/multiasset/types";
 
 const router: IRouter = Router();
-// Restore only credentials/settings. Prices, history and orders require a new heartbeat.
-router.use(async (_req, _res, next) => {
-  try { await restoreBridgeLink(getBrowserSessionId()); next(); } catch (error) { next(error); }
-});
 const VALID_MODES: TradeMode[] = ["scalp", "intraday", "swing"];
 
 /**
@@ -626,7 +621,7 @@ router.post("/flatten", (req, res) => {
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 
-router.post("/settings", async (req, res) => {
+router.post("/settings", (req, res) => {
   const desk = getDesk(getBrowserSessionId());
   const body = req.body ?? {};
 
@@ -676,7 +671,6 @@ router.post("/settings", async (req, res) => {
     journal(desk, "risk", null, "Risk policy updated.");
   }
 
-  await saveBridgeLink(desk);
   return res.json({
     mode: desk.mode,
     autoTrade: desk.autoTrade,

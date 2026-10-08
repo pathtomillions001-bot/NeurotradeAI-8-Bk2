@@ -38,6 +38,8 @@ function parseArgs(argv: string[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
+    // pnpm forwards the `--` separator to the script; it carries no meaning here.
+    if (arg === "--") continue;
     if (!arg.startsWith("--")) throw new Error(`Unexpected argument "${arg}".`);
     const value = argv[i + 1];
     if (value === undefined || value.startsWith("--")) throw new Error(`${arg} needs a value.`);
@@ -102,7 +104,9 @@ export function main(argv: string[]): void {
     "",
     `  trades            ${m.trades}`,
     `  win rate          ${f(winRate !== null && winRate !== undefined ? winRate * 100 : null, 1)}%`,
-    `  expectancy        ${f(m.expectancyR, 3)} R   95% CI [${f(m.expectancyCI95.low, 3)}, ${f(m.expectancyCI95.high, 3)}]`,
+    m.trades === 0
+      ? "  expectancy        n/a (no trades)"
+      : `  expectancy        ${f(m.expectancyR, 3)} R   95% CI [${f(m.expectancyCI95.low, 3)}, ${f(m.expectancyCI95.high, 3)}]`,
     `  profit factor     ${f(m.profitFactor)}`,
     `  Sharpe (annual)   ${f(m.sharpeAnnualised)}   per trade ${f(m.sharpePerTrade, 3)}`,
     `  Sortino           ${f(m.sortino)}`,

@@ -254,6 +254,52 @@ describe("MT5 bridge — durable link", () => {
     assert.equal(desk.plans.size, 0);
   });
 
+  it("a close the terminal reports is recorded once, even when the report is re-sent", async () => {
+    const session = browser("a");
+    const token = await connect(session, 6115);
+    const opened = {
+      ticket: 701, symbol: "EURUSD", side: "buy", volume: 0.1, openPrice: 1.085,
+      openTime: Date.now() - 12 * 60_000, sl: 1.0838, tp: 1.09, profit: 0, swap: 0, commission: 0,
+      initialRiskMoney: 25, initialRiskPoints: 120,
+    };
+    assert.equal((await as(session, () => post("/sync", { seq: 1, version: "3.05", positions: [opened] }, token))).status, 200);
+
+    // The position closes: the terminal reports the deal, and the position is gone.
+    const deal = {
+      dealTicket: 9001, positionId: 701, symbol: "EURUSD", side: "buy", volume: 0.1,
+      openPrice: 1.085, closePrice: 1.09, openTime: opened.openTime, closeTime: Date.now(),
+      profit: 50, commission: -1.4, swap: 0, reason: "tp", planId: "plan-x",
+      initialRiskMoney: 25, initialRiskPoints: 120, mfeR: 2.1, maeR: -0.3,
+    };
+    const closing = { version: "3.05", closedDeals: [deal], positions: [] };
+    assert.equal((await as(session, () => post("/sync", { ...closing, seq: 2 }, token))).status, 200);
+    // The EA re-sends an unacknowledged close. The retry must change nothing.
+    assert.equal((await as(session, () => post("/sync", { ...closing, seq: 3 }, token))).status, 200);
+
+    const trades = getDesk(session).closedTrades;
+    assert.equal(trades.length, 1, "one trade: not one per report, and not also inferred from the vanished position");
+    assert.equal(trades[0].source, "deal");
+    assert.equal(trades[0].exitReason, "tp");
+    // Net = 50 − 1.4 = 48.6 over 25 of risk.
+    assert.ok(Math.abs((trades[0].rMultiple ?? Number.NaN) - 48.6 / 25) < 1e-9);
+  });
+
+  it("an EA that does not report deals still has its vanished positions recorded, labelled as inferred", async () => {
+    const session = browser("a");
+    const token = await connect(session, 6116);
+    const opened = {
+      ticket: 702, symbol: "EURUSD", side: "sell", volume: 0.1, openPrice: 1.085,
+      openTime: Date.now() - 60_000, sl: 1.0862, tp: null, profit: 12, swap: 0, commission: 0,
+    };
+    assert.equal((await as(session, () => post("/sync", { seq: 1, version: "3.04", positions: [opened] }, token))).status, 200);
+    assert.equal((await as(session, () => post("/sync", { seq: 2, version: "3.04", positions: [] }, token))).status, 200);
+
+    const trades = getDesk(session).closedTrades;
+    assert.equal(trades.length, 1);
+    assert.equal(trades[0].source, "inferred");
+    assert.equal(trades[0].exitReason, "unknown");
+  });
+
   it("ends the link permanently when the user unlinks", async () => {
     const session = browser("a");
     const { pairingCode } = await requestCode(session);
@@ -291,12 +337,12 @@ describe("MT5 bridge — durable link", () => {
       eaUpdateAvailable: boolean;
     };
     assert.equal(status.eaVersion, "2.00");
-    assert.equal(status.expectedEaVersion, "3.04");
+    assert.equal(status.expectedEaVersion, "3.05");
     assert.equal(status.eaUpdateAvailable, true);
 
     // A terminal that reports the current version is not nagged.
     const current = await connect(session, 6113);
-    await as(session, () => post("/sync", { seq: 1, version: "3.04" }, current));
+    await as(session, () => post("/sync", { seq: 1, version: "3.05" }, current));
     const fresh = (await (await as(session, () => get("/status"))).json()) as { eaUpdateAvailable: boolean };
     assert.equal(fresh.eaUpdateAvailable, false);
   });
@@ -324,9 +370,9 @@ function armedPlan(ticketLike: number, symbol: string): ArmedPlan {
     expiresAt: now + 60 * 60_000,
     createdAt: now,
     management: {
-      breakeven: { triggerR: 1, offsetR: 0, structureBuffer: false },
-      partials: [],
-      trail: null,
+      breakeven: { triggerR: 1, offsetR: 0.1 },
+      extension: null,
+      timeStop: { maxHoldMinutes: 5 },
     },
     rationale: {
       confluenceScore: 80,

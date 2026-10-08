@@ -8,9 +8,9 @@
  * ranks the ones that pass EVERY gate (risk, news, quality, evidence
  * agreement, expectancy after costs, sizing), and arms the single best of them.
  * The EA then does the rest: it watches the trigger locally, opens the
- * position, and manages it from the plan's `management` block (break-even with
- * a structure buffer, partial exits, ATR trail, time stop) exactly as it does
- * for a manually armed plan.
+ * position, and manages it from the plan's `management` block (break-even once,
+ * a conditional target extension for intraday and swing, and a time stop) exactly
+ * as it does for a manually armed plan. The EA enforces only those three.
  *
  * WHAT IT IS NOT
  *

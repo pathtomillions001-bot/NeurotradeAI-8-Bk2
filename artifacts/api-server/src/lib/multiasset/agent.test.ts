@@ -11,7 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildManagementPlan, evaluate, horizonMinutes, structuralStop } from "./agent";
+import { buildManagementPlan, evaluate, horizonMinutes, RR_POLICY, structuralStop, structureTarget } from "./agent";
 import { createRiskState, recordOutcome, type RiskState } from "./risk";
 import { makeRng } from "./math";
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type Quote, type SymbolSpec, type Timeframe } from "./types";
@@ -417,68 +417,121 @@ test("the budget caps risk without fixing it — the ladder still decides the si
 
 // ── Management plan ──────────────────────────────────────────────────────────
 
-test("trending markets trail and allow pyramiding; ranges do neither", () => {
-  const trending = buildManagementPlan({
-    spec, mode: "intraday", lots: 1, regimeKind: "trend_up",
-    atrPoints: 200, retraceProbability: 0.2,
-  });
-  assert.ok(trending.trail, "a trend must trail so winners can run");
-  assert.ok(trending.pyramid, "a trend may add");
+// ── Target policy (RR_POLICY) ────────────────────────────────────────────────
 
-  const ranging = buildManagementPlan({
-    spec, mode: "intraday", lots: 1, regimeKind: "range",
-    atrPoints: 200, retraceProbability: 0.2,
-  });
-  assert.equal(ranging.trail, null, "a range should bank at the band edge");
-  assert.equal(ranging.pyramid, null, "never pyramid into a range");
+/**
+ * A flat tape at `price`, with one spike reaching `spikePrice` at `spikeAt`.
+ * The spike is the only confirmed swing, so it is the only structure the scalp
+ * target can see. `kind` picks which side of the bar the spike lives on.
+ */
+function tapeWithSpike(count: number, price: number, spikeAt: number | null, spikePrice: number, kind: "high" | "low"): Bar[] {
+  const bars: Bar[] = [];
+  for (let i = 0; i < count; i++) bars.push([i * 60_000, price, price + 0.1, price - 0.1, price, 100]);
+  if (spikeAt !== null) {
+    const bar = bars[spikeAt]!;
+    if (kind === "high") bar[2] = spikePrice;
+    else bar[3] = spikePrice;
+  }
+  return bars;
+}
+
+test("a scalp target is the nearest opposing structure, clamped to [1R, 2R]", () => {
+  const base = { side: "buy" as const, trigger: 100, riskPrice: 1, atrValue: 0.5 };
+
+  // Structure 1.5R ahead: the target sits a tenth of an ATR short of it.
+  const inside = structureTarget({ ...base, bars: tapeWithSpike(60, 100, 40, 101.5, "high") });
+  assert.equal(inside.blocked, false);
+  assert.ok(Math.abs(inside.rewardRisk - 1.45) < 1e-9, `rr was ${inside.rewardRisk}`);
+
+  // Structure beyond the cap: the cap itself, not the structure.
+  const far = structureTarget({ ...base, bars: tapeWithSpike(60, 100, 40, 104, "high") });
+  assert.equal(far.rewardRisk, RR_POLICY.scalpMax);
+
+  // No structure at all: the cap.
+  const none = structureTarget({ ...base, bars: tapeWithSpike(60, 100, null, 0, "high") });
+  assert.equal(none.rewardRisk, RR_POLICY.scalpMax);
 });
 
-test("breakeven is deferred when a retrace is likely", () => {
-  const safe = buildManagementPlan({
-    spec, mode: "intraday", lots: 1, regimeKind: "trend_up",
-    atrPoints: 200, retraceProbability: 0.1,
+test("a scalp with structure inside 1R has no room for the minimum and is refused with the reason", () => {
+  const near = structureTarget({
+    side: "buy", trigger: 100, riskPrice: 1, atrValue: 0.5,
+    bars: tapeWithSpike(60, 100, 40, 100.6, "high"),
   });
-  const risky = buildManagementPlan({
-    spec, mode: "intraday", lots: 1, regimeKind: "trend_up",
-    atrPoints: 200, retraceProbability: 0.8,
-  });
-  assert.ok(
-    risky.breakeven!.triggerR > safe.breakeven!.triggerR,
-    "a likely retrace must push breakeven further out, not scratch the trade",
-  );
+  assert.equal(near.blocked, true);
+  assert.match(near.reason ?? "", /no room for the minimum reward/);
 });
 
-test("partials are dropped when the broker's volume step cannot honour them", () => {
-  // 0.01 lots is the minimum: no legal way to close half of it.
-  const tiny = buildManagementPlan({
-    spec, mode: "intraday", lots: 0.01, regimeKind: "trend_up",
-    atrPoints: 200, retraceProbability: 0.2,
+test("the structure search reads only the side it trades toward", () => {
+  const sell = structureTarget({
+    side: "sell", trigger: 100, riskPrice: 1, atrValue: 0.5,
+    bars: tapeWithSpike(60, 100, 40, 98.5, "low"),
   });
-  assert.equal(tiny.partials.length, 0, "an unachievable ladder must not be sent");
+  assert.ok(Math.abs(sell.rewardRisk - 1.45) < 1e-9, `short rr was ${sell.rewardRisk}`);
 
-  const large = buildManagementPlan({
-    spec, mode: "intraday", lots: 2, regimeKind: "trend_up",
-    atrPoints: 200, retraceProbability: 0.2,
+  const wrongSide = structureTarget({
+    side: "sell", trigger: 100, riskPrice: 1, atrValue: 0.5,
+    bars: tapeWithSpike(60, 100, 40, 101.5, "high"),
   });
-  assert.ok(large.partials.length > 0);
+  assert.equal(wrongSide.rewardRisk, RR_POLICY.scalpMax, "a swing high above is no obstacle to a short");
 });
 
-test("pyramiding always requires a risk-free base and decreasing size", () => {
-  const plan = buildManagementPlan({
-    spec, mode: "swing", lots: 1, regimeKind: "trend_up",
-    atrPoints: 200, retraceProbability: 0.2,
-  });
-  assert.equal(plan.pyramid!.requireBaseAtBreakeven, true);
-  assert.ok(plan.pyramid!.sizeRatio < 1, "adds must be smaller than the base");
-  assert.ok(plan.pyramid!.portfolioRiskCapR <= 1.5);
+test("intraday targets sit at exactly the fixed 2R, measured from the trigger", () => {
+  const decision = run({ mode: "intraday" });
+  assert.ok(decision.plan, decision.rejections.join(" | "));
+  const plan = decision.plan!;
+  const rr = Math.abs(plan.tp[0] - plan.trigger) / Math.abs(plan.trigger - plan.sl);
+  assert.ok(Math.abs(rr - RR_POLICY.fixed) < 1e-9, `intraday RR was ${rr}`);
+});
+
+test("a scalp target lands inside the policy band, and scalps do arm on a real trend", () => {
+  // The earlier version returned early whenever nothing armed, so it could pass
+  // having checked nothing. This one counts the armed scalps and insists on some.
+  let checked = 0;
+  for (let seed = 1; seed <= 40 && checked < 5; seed++) {
+    const bars = randomWalk(400, 1.08, 0.0005, seed * 7 + 3, 0.00025);
+    const series = allTimeframes(() => bars);
+    const decision = run({ series, quote: quoteFrom(series), mode: "scalp" });
+    if (!decision.armed || !decision.plan) continue;
+    checked++;
+    const rr = Math.abs(decision.plan.tp[0] - decision.plan.trigger) / Math.abs(decision.plan.trigger - decision.plan.sl);
+    assert.ok(
+      rr >= RR_POLICY.scalpMin - 1e-9 && rr <= RR_POLICY.scalpMax + 1e-9,
+      `scalp RR ${rr.toFixed(3)} outside [1, 2] (seed ${seed})`,
+    );
+  }
+  assert.ok(checked >= 3, `only ${checked} scalps armed, so the band was barely tested`);
+});
+
+test("the management plan enforces breakeven, extension and a time stop — and nothing it does not enforce", () => {
+  const plan = buildManagementPlan({ spec, mode: "intraday", atrPoints: 200, costR: 0.2 });
+  assert.equal(plan.breakeven!.triggerR, 1);
+  assert.ok(Math.abs(plan.breakeven!.offsetR - 0.25) < 1e-9);
+  assert.equal(plan.extension!.checkAtR, RR_POLICY.checkAtR);
+  assert.equal(plan.extension!.extendToR, RR_POLICY.extendToR);
+  assert.equal(plan.timeStop!.maxHoldMinutes, horizonMinutes("intraday"));
+  for (const dead of ["partials", "trail", "pyramid"]) {
+    assert.equal(dead in plan, false, `${dead} was never executed, so it must not be sent`);
+  }
+});
+
+test("the breakeven offset covers the trade's own cost, clamped to [0.1R, 0.3R]", () => {
+  const offset = (costR: number) =>
+    buildManagementPlan({ spec, mode: "intraday", atrPoints: 200, costR }).breakeven!.offsetR;
+  assert.ok(Math.abs(offset(0) - 0.1) < 1e-9, "a free trade still keeps a small margin");
+  assert.ok(Math.abs(offset(0.2) - 0.25) < 1e-9);
+  assert.ok(Math.abs(offset(5) - 0.3) < 1e-9, "a punitive cost cannot push breakeven past 0.3R");
+});
+
+test("scalps never extend, and their hold is five minutes", () => {
+  const plan = buildManagementPlan({ spec, mode: "scalp", atrPoints: 100, costR: 0.2 });
+  assert.equal(plan.extension, null);
+  assert.equal(plan.timeStop!.maxHoldMinutes, 5);
 });
 
 test("every management plan carries a time stop and execution guards", () => {
-  for (const regimeKind of ["trend_up", "range", "trend_down"]) {
-    const plan = buildManagementPlan({
-      spec, mode: "scalp", lots: 1, regimeKind, atrPoints: 100, retraceProbability: 0.3,
-    });
-    assert.ok(plan.timeStop, `${regimeKind} needs a time stop`);
+  for (const mode of ["scalp", "intraday", "swing"] as const) {
+    const plan = buildManagementPlan({ spec, mode, atrPoints: 100, costR: 0.3 });
+    assert.ok(plan.timeStop, `${mode} needs a time stop`);
     assert.ok(plan.guards.maxSpreadPoints > 0);
   }
 });
@@ -692,8 +745,8 @@ test("a scalp's stop, horizon and report all describe the SAME frame", () => {
   const decision = run({ series, quote: quoteFrom(series), mode: "scalp" });
 
   // The mode's own entry frame, never the fastest scored one.
-  assert.equal(decision.entryTimeframe, "M2", "a scalp is measured on its entry frame");
-  assert.equal(decision.horizonMinutes, 12 * 2, "12 M2 bars is 24 minutes — the number the pane shows");
+  assert.equal(decision.entryTimeframe, "M1", "a scalp is measured on its entry frame");
+  assert.equal(decision.horizonMinutes, 5, "five M1 bars is the five-minute hold the pane shows");
 });
 
 test("the risk unit is never smaller than the round trip that pays for it", () => {
@@ -750,4 +803,44 @@ test("paths that end at the time stop are priced, not written off as losses", ()
   }
   // …and the split is reported, so a refusal can be read rather than guessed at.
   assert.ok(mc.lossProbability + mc.winProbability + mc.timeoutProbability > 0.999);
+});
+
+// ── Noise and unmeasurable inputs ────────────────────────────────────────────
+
+/** A random walk with an optional per-bar drift. With no drift, the market has no edge by construction. */
+function randomWalk(count: number, start: number, sigma: number, seed: number, drift = 0): Bar[] {
+  const rng = makeRng(seed);
+  const bars: Bar[] = [];
+  let price = start;
+  for (let i = 0; i < count; i++) {
+    const open = price;
+    const u1 = Math.max(1e-12, rng());
+    const z = Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * rng());
+    price = open * Math.exp(drift + sigma * z);
+    const high = Math.max(open, price) * (1 + sigma * rng() * 0.5);
+    const low = Math.min(open, price) * (1 - sigma * rng() * 0.5);
+    bars.push([i * 60_000, open, high, low, price, 100]);
+  }
+  return bars;
+}
+
+test("an unmeasurable trading cost is refused, never armed", () => {
+  // NaN compares false against everything, so a NaN cost used to slip past the
+  // expectancy gate. It must be named and refused instead.
+  const decision = run({ spec: { ...spec, commissionPerLot: Number.NaN } });
+  assert.equal(decision.armed, false);
+  assert.ok(
+    decision.rejections.some((r) => /cannot be measured/.test(r)),
+    decision.rejections.join(" | "),
+  );
+});
+
+test("noise does not manufacture an edge: driftless walks arm almost nothing", () => {
+  let armed = 0;
+  for (let seed = 1; seed <= 20; seed++) {
+    const bars = randomWalk(400, 1.08, 0.0005, seed * 7 + 3);
+    const series = allTimeframes(() => bars);
+    if (run({ series, quote: quoteFrom(series), mode: "intraday" }).armed) armed++;
+  }
+  assert.ok(armed <= 2, `${armed}/20 driftless windows armed a plan`);
 });

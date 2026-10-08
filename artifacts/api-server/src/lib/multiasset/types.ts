@@ -440,10 +440,26 @@ export interface CommandResult {
  * produces quotes that look either impossibly fresh or permanently stale.
  */
 export interface SyncClock {
-  /** Seconds the trade server is ahead of UTC. Equals TimeTradeServer() − TimeGMT(). */
+  /**
+   * Seconds the trade server is ahead of UTC. v3.04+ EAs measure this against
+   * the platform server's own clock (learned from the sync response's
+   * `serverTime`), not the machine clock — so the value is the true broker
+   * offset even when the machine running MT5 is misclocked.
+   */
   serverUtcOffsetSeconds: number;
-  /** The terminal's own reading of the current UTC time, in epoch ms. */
+  /**
+   * The terminal's reading of the current UTC time, in epoch ms. v3.04+ EAs
+   * self-correct this against the platform server's clock, so the desk's
+   * measured skew reads ≈0 for a healthy link; the machine's own clock error
+   * is reported separately in `computerClockSkewMs`.
+   */
   terminalUtcMs: number;
+  /**
+   * The terminal MACHINE's own clock vs true UTC, in ms (EA v3.04+). The
+   * honest "sync NTP on this machine" signal — the EA compensates for it, so
+   * desk data stays correct regardless.
+   */
+  computerClockSkewMs?: number;
   /** Human-readable broker timezone label, when the terminal exposes one. */
   label?: string;
   /**
@@ -471,12 +487,34 @@ export interface SyncRequest {
   news?: NewsFeed;
   positions?: Position[];
   results?: CommandResult[];
+  /**
+   * `symbol|timeframe` → bars the terminal holds, reported by EA v3.04+.
+   * Lets the desk ask for history only while the terminal has bars it lacks
+   * (see history.ts) instead of re-demanding a 60-bar target forever.
+   */
+  barsAvailable?: Record<string, number>;
 }
 
 export interface SyncResponse {
+  /**
+   * The platform server's own clock, in epoch ms. The EA (v3.04+) learns the
+   * true broker-vs-UTC offset from this instead of trusting the machine
+   * clock, so its timestamps stay correct even when the machine is misclocked.
+   */
   serverTime: number;
   commands: BridgeCommand[];
+  /**
+   * Legacy whole-batch signal (older EAs re-seed everything when true).
+   * Superseded by `history` for v3.04+ EAs, which re-seed exactly the keys
+   * listed there.
+   */
   needsHistory: boolean;
+  /**
+   * The `symbol|timeframe` keys the desk still needs history for (v3.04+
+   * EAs re-seed exactly these). Computed by history.ts so a series the
+   * terminal cannot fill is never re-demanded.
+   */
+  history?: string[];
   subscriptions: { symbols: string[]; timeframes: Timeframe[] };
   /** Calendar context lets the EA report and display the same safety posture. */
   news: NewsFeed;

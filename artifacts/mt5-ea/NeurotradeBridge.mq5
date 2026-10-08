@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.03                                                     |
+//| Version 3.04                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -99,6 +99,45 @@
 //|     Each instance now identifies itself, so the Desk re-sends      |
 //|     armed plans to a new instance instead of discarding them.      |
 //|                                                                    |
+//| WHAT CHANGED IN v3.04                                             |
+//| 13. TIMESTAMPS NO LONGER TRUST THE MACHINE CLOCK.                  |
+//|     v3.00-3.03 derived the UTC offset from TimeGMT() — the         |
+//|     computer's clock. A machine 51 s behind produced a 51 s skew   |
+//|     warning on the Desk even though the Desk corrected every age.  |
+//|     The EA now LEARNS the true broker-vs-UTC offset from the       |
+//|     platform server's own clock (the `serverTime` field of every    |
+//|     sync response) and converts with that. Quote, candle, news     |
+//|     and expiry timestamps are then correct no matter what the      |
+//|     machine clock says, and the Desk's measured skew reads ~0.     |
+//|     The machine's own clock error is still reported separately     |
+//|     (`clock.computerClockSkewMs`) and printed once in the Experts  |
+//|     log, so "sync NTP" is a calm, actionable note — not a red      |
+//|     dashboard alarm. The Desk's skew correction remains as the      |
+//|     safety net for older EAs.                                      |
+//| 14. HISTORY RE-SEEDS ARE EXACT AND BOUNDED.                        |
+//|     The Desk used to answer `needsHistory: true` on every heartbeat |
+//|     until EVERY selected series held 60 bars, and this EA answered |
+//|     by re-seeding its whole batch — 220 bars x 10 timeframes x 12  |
+//|     symbols, a multi-megabyte JSON built by string concatenation —  |
+//|     on EVERY beat. One series the terminal could never fill (a      |
+//|     young symbol's W1, an unsupported timeframe, a halted          |
+//|     contract) kept that loop alive forever: heartbeats took         |
+//|     seconds, quotes aged past the Desk's freshness gate, every     |
+//|     market showed STALE, and beats that outlived the WebRequest    |
+//|     timeout produced the "Reconnecting - last heartbeat 33s ago"   |
+//|     banner. Now the EA reports how many bars the terminal holds    |
+//|     per series (`barsAvailable`), the Desk asks only for the        |
+//|     `symbol|timeframe` keys it is actually short on (`history`),    |
+//|     and this EA re-seeds exactly those keys. Candle JSON is also    |
+//|     buffered per symbol so building it stays linear.                |
+//| 15. A HUNG SERVER COSTS ONE BEAT, NOT EIGHT.                       |
+//|     WebRequest is synchronous; an 8 s timeout meant one slow or      |
+//|     hung response froze the heartbeat loop for eight seconds. The   |
+//|     timeout is now 3 s, and any heartbeat slower than 1.5 s is      |
+//|     logged to the Experts journal with its duration, so a slow      |
+//|     beat is visible at the source instead of guessed from a stale  |
+//|     board.                                                         |
+//|                                                                    |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -115,7 +154,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "3.03"
+#property version   "3.04"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -248,6 +287,21 @@ string    g_newsCurrencies[];
 string    g_newsCountries[];
 string    g_newsNames[];
 
+// ── Learned UTC reference (v3.04) ────────────────────────────────────────────
+// The trade-server clock vs TRUE UTC, learned from the platform server's own
+// clock (the `serverTime` field of every sync response). Until the first
+// successful sync arrives, the computer clock (TimeGMT) is the fallback —
+// v3.03 behaviour — so a misclocked machine degrades to a skew warning for one
+// beat instead of wrong data forever. Every timestamp this EA emits is
+// converted with this offset, so the Desk's measured skew reads ~0 even when
+// the machine clock is off.
+long      g_brokerUtcOffsetSec   = 0;
+bool      g_brokerClockLearned   = false;
+// The machine's OWN clock vs true UTC, reported separately (`computerClockSkewMs`)
+// so the Desk can say "sync NTP" calmly instead of alarming the dashboard.
+long      g_computerClockSkewMs  = 0;
+bool      g_clockWarningPrinted  = false;
+
 //+------------------------------------------------------------------+
 //| Lifecycle                                                         |
 //+------------------------------------------------------------------+
@@ -277,7 +331,7 @@ int OnInit()
    // ever needed again.
    LoadSavedLink();
 
-   Print("NeurotradeBridge v3.03 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   Print("NeurotradeBridge v3.04 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -318,10 +372,18 @@ void OnTimer()
    // heartbeat by whole seconds. The desk, whose own window was thirty seconds,
    // then announced "Quotes and agent entries are paused" for what was only a
    // slow timer tick.
+   //
+   // v3.04: the beat is timed. A heartbeat slower than 1.5 s is logged with its
+   // duration, so a slow beat (payload build, server response) is visible in
+   // the Experts journal instead of guessed from a stale board.
+   long beatStart = GetTickCount64();
    if(g_token == "")
       TryPair();
    else
       Sync();
+   long beatMs = GetTickCount64() - beatStart;
+   if(beatMs > 1500)
+      Log(StringFormat("heartbeat took %d ms — payload build or server response was slow; quotes may age past the freshness gate", (int)beatMs));
 
    RollDayBaselineIfNeeded();
    RefreshCalendar(false);
@@ -438,7 +500,7 @@ void TryPair()
    body += "\"login\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
    body += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
    body += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
-   body += "\"version\":\"3.03\",";
+   body += "\"version\":\"3.04\",";
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
    body += "\"currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\"},";
    // All broker symbols are discovered once at pairing. This is a catalogue,
@@ -527,7 +589,11 @@ bool HttpPost(const string path, const string body, string &response, const bool
 
    string resultHeaders = "";
    ResetLastError();
-   int status = WebRequest("POST", base + path, headers, 8000, post, result, resultHeaders);
+   // v3.04: WebRequest is synchronous, so the timeout is how long one hung or
+   // slow response can freeze the heartbeat loop. 3 s (was 8 s): the server
+   // answers in tens of milliseconds; anything slower is a fault, and the next
+   // beat retries immediately rather than costing eight seconds of silence.
+   int status = WebRequest("POST", base + path, headers, 3000, post, result, resultHeaders);
    if(status == -1)
    {
       int err = GetLastError();
@@ -579,7 +645,16 @@ bool HttpPost(const string path, const string body, string &response, const bool
 //| survives brokers on any offset and follows DST automatically.    |
 //| In the strategy tester TimeGMT() equals the simulated server      |
 //| time, so the offset is 0 there and nothing changes.              |
+//|                                                                  |
+//| v3.04: the offset is LEARNED from the platform server's own      |
+//| clock (sync response `serverTime`) instead of the machine clock.  |
+//| A machine whose clock is 51 s behind no longer skews every       |
+//| timestamp — the Desk's measured skew reads ~0 because the data   |
+//| genuinely is right. The machine's own error is reported          |
+//| separately as computerClockSkewMs.                               |
 //+------------------------------------------------------------------+
+
+/** Trade-server clock vs the computer clock (pre-v3.04 fallback). */
 int ServerUtcOffsetSeconds()
 {
    long offset = (long)TimeTradeServer() - (long)TimeGMT();
@@ -588,16 +663,27 @@ int ServerUtcOffsetSeconds()
    return (int)offset;
 }
 
+/**
+ * Trade-server clock vs TRUE UTC. Learned from the platform server's clock
+ * once the first sync response arrives; the computer clock is the fallback
+ * until then (one beat of v3.03 behaviour, then self-corrected).
+ */
+long BrokerUtcOffsetSeconds()
+{
+   if(g_brokerClockLearned) return g_brokerUtcOffsetSec;
+   return (long)ServerUtcOffsetSeconds();
+}
+
 /** Trade-server datetime -> true UTC epoch, in milliseconds. */
 long ToUtcMs(const datetime serverTime)
 {
-   return ((long)serverTime - (long)ServerUtcOffsetSeconds()) * 1000;
+   return ((long)serverTime - BrokerUtcOffsetSeconds()) * 1000;
 }
 
 /** Trade-server tick clock (already in ms) -> true UTC epoch, in ms. */
 long TickToUtcMs(const long tickMsc, const long fallbackServerSeconds)
 {
-   if(tickMsc > 0) return tickMsc - (long)ServerUtcOffsetSeconds() * 1000;
+   if(tickMsc > 0) return tickMsc - BrokerUtcOffsetSeconds() * 1000;
    return ToUtcMs((datetime)fallbackServerSeconds);
 }
 
@@ -625,12 +711,16 @@ void Sync()
    // Desk say "your EA is out of date" instead of leaving a stale terminal
    // silently disagreeing with it about the calendar.
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
-   body += "\"version\":\"3.03\",";
+   body += "\"version\":\"3.04\",";
    // Tell the server how this terminal's clock relates to UTC. Combined with
    // the UTC-normalised timestamps below it lets the Desk detect a skewed
-   // clock instead of trusting (or silently mis-trusting) every tick.
-   body += "\"clock\":{\"serverUtcOffsetSeconds\":" + IntegerToString(ServerUtcOffsetSeconds())
+   // clock instead of trusting (or silently mis-trusting) every tick. From
+   // v3.04 the offset is learned from the server's own clock, so a misclocked
+   // MACHINE no longer skews anything; the machine's own error is reported
+   // separately as computerClockSkewMs.
+   body += "\"clock\":{\"serverUtcOffsetSeconds\":" + IntegerToString(BrokerUtcOffsetSeconds())
          + ",\"terminalUtcMs\":" + IntegerToString(NowUtcMs())
+         + ",\"computerClockSkewMs\":" + IntegerToString(g_computerClockSkewMs)
          // The cadence this EA is actually running with. The desk uses it to
          // size its staleness window (12 missed beats, bounded), so a terminal
          // configured with a slow heartbeat is not declared dead on schedule.
@@ -644,6 +734,10 @@ void Sync()
    else
       body += "\"quotes\":" + QuotesJson(batch) + ",";
    body += "\"candles\":" + CandlesJson(batch) + ",";
+   // How many bars the terminal holds per symbol|timeframe. The desk asks for
+   // history only for series it is genuinely short on (see v3.04 note 14), so
+   // one thin series can no longer trigger a full re-seed on every beat.
+   body += "\"barsAvailable\":" + BarsAvailableJson() + ",";
    body += "\"news\":" + NewsJson() + ",";
    body += "\"positions\":" + PositionsJson() + ",";
    body += "\"results\":[" + g_results + "]";
@@ -692,8 +786,112 @@ void Sync()
 
    g_lastOk = NowServer();
    g_results = "";
-   if(JsonBool(response, "needsHistory") == 1) ResetSeeding();
+   // Learn the true UTC offset from the platform server's own clock BEFORE the
+   // next beat builds its timestamps (v3.04, note 13).
+   LearnBrokerClock(response);
+   // Re-seed exactly the series the desk is short on (v3.04, note 14).
+   ApplyHistoryRequest(response);
    ApplyServerResponse(response);
+}
+
+//+------------------------------------------------------------------+
+//| Learn the true UTC offset from the platform server's clock        |
+//| (v3.04, note 13).                                                 |
+//|                                                                   |
+//| Every sync response carries `serverTime` — the platform server's own  |
+//| epoch milliseconds, which is NTP-synced infrastructure time. The      |
+//| difference between TimeTradeServer() and that value is the TRUE      |
+//| broker-vs-UTC offset, independent of this machine's clock. From the   |
+//| next beat every timestamp this EA emits is converted with it, so a    |
+//| machine whose clock is minutes off no longer skews anything.          |
+//+------------------------------------------------------------------+
+void LearnBrokerClock(const string response)
+{
+   long serverMs = (long)JsonNumber(response, "serverTime");
+   if(serverMs <= 0) return;
+   long serverSec = serverMs / 1000;
+   long offset = (long)TimeTradeServer() - serverSec;
+   if(offset > 86400) offset = 86400;
+   if(offset < -86400) offset = -86400;
+   g_brokerUtcOffsetSec = offset;
+   g_brokerClockLearned = true;
+
+   // The machine's OWN clock vs true UTC — reported separately so the Desk
+   // can say so calmly. The data is already correct; this is the "sync NTP"
+   // signal, printed once.
+   long computerSkewMs = (long)TimeGMT() * 1000 - serverMs;
+   g_computerClockSkewMs = computerSkewMs;
+   if(!g_clockWarningPrinted && MathAbs(computerSkewMs) > 5000)
+   {
+      g_clockWarningPrinted = true;
+      Print("NeurotradeBridge: this machine's clock is ", MathAbs(computerSkewMs) / 1000, "s ",
+            computerSkewMs > 0 ? "ahead of" : "behind",
+            " UTC. The EA compensates automatically, so desk prices and times stay correct. ",
+            "Sync the machine's clock (NTP) to keep time-based features inside MT5 exact.");
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Re-seed exactly the series the desk still needs (v3.04, note 14). |
+//|                                                                   |
+//| The server sends `history` — the `symbol|timeframe` keys it is short   |
+//| on — and this EA re-seeds exactly those, instead of re-copying its    |
+//| whole batch. A legacy server (no `history` field) still gets the       |
+//| boolean `needsHistory`, answered with a full ResetSeeding() as before; |
+//| the server bounds that path itself.                                    |
+//+------------------------------------------------------------------+
+void ApplyHistoryRequest(const string response)
+{
+   string keys[];
+   if(JsonStringArray(response, "history", keys))
+   {
+      for(int i = 0; i < ArraySize(keys); i++)
+      {
+         int sep = StringFind(keys[i], "|");
+         if(sep <= 0) continue;
+         string symbol = StringSubstr(keys[i], 0, sep);
+         string tfName = StringSubstr(keys[i], sep + 1);
+         int si = SymbolIndex(symbol);
+         if(si < 0) continue;
+         for(int t = 0; t < TF_COUNT; t++)
+         {
+            if(TF_NAMES[t] == tfName)
+            {
+               g_seeded[SeedIndex(si, t)] = false;
+               break;
+            }
+         }
+      }
+      return;
+   }
+   // Legacy server: boolean only — re-seed the whole batch.
+   if(JsonBool(response, "needsHistory") == 1) ResetSeeding();
+}
+
+/** How many bars the terminal holds per symbol|timeframe (sent every beat). */
+string BarsAvailableJson()
+{
+   string json = "{";
+   bool first = true;
+   for(int s = 0; s < ArraySize(g_symbols); s++)
+   {
+      // One fragment per symbol keeps string building linear in the symbol
+      // count (see note 14 on CandlesJson).
+      string frag = "";
+      for(int t = 0; t < TF_COUNT; t++)
+      {
+         int n = Bars(g_symbols[s], TF_LIST[t]);
+         if(n < 0) n = 0;
+         if(t > 0) frag += ",";
+         frag += "\"" + g_symbols[s] + "|" + TF_NAMES[t] + "\":" + IntegerToString(n);
+      }
+      if(frag == "") continue;
+      if(!first) json += ",";
+      first = false;
+      json += frag;
+   }
+   json += "}";
+   return json;
 }
 
 void ApplyServerResponse(const string json)
@@ -929,6 +1127,14 @@ string CandlesJson(const string &symbols[])
    {
       int sourceIndex = SymbolIndex(symbols[s]);
       if(sourceIndex < 0) continue;
+      // v3.04: build this symbol's fragment separately and append it once.
+      // Appending every bar to the top-level string made string building
+      // quadratic in the bar count — a full re-seed (220 bars x 10 frames x
+      // 12 symbols, ~2 MB) took seconds on the terminal, which aged every
+      // quote past the Desk's freshness gate. Per-symbol fragments keep the
+      // number of large reallocations linear in the symbol count.
+      string frag = "";
+      bool fragFirst = true;
       for(int t = 0; t < TF_COUNT; t++)
       {
          int want = IsSeeded(sourceIndex, t) ? (int)MathMax(2, DeltaBars) : (int)MathMax(60, HistoryBars);
@@ -937,21 +1143,25 @@ string CandlesJson(const string &symbols[])
          int copied = CopyRates(symbols[s], TF_LIST[t], 0, want, rates);
          if(copied <= 0) continue;
          MarkSeeded(sourceIndex, t);
-         if(!first) json += ",";
-         first = false;
-         json += "{\"symbol\":\"" + JsonEscape(symbols[s]) + "\",\"timeframe\":\"" + TF_NAMES[t] + "\",\"bars\":[";
+         if(!fragFirst) frag += ",";
+         fragFirst = false;
+         frag += "{\"symbol\":\"" + JsonEscape(symbols[s]) + "\",\"timeframe\":\"" + TF_NAMES[t] + "\",\"bars\":[";
          for(int b = 0; b < copied; b++)
          {
-            if(b > 0) json += ",";
-            json += "[" + IntegerToString(ToUtcMs(rates[b].time)) + "," +
+            if(b > 0) frag += ",";
+            frag += "[" + IntegerToString(ToUtcMs(rates[b].time)) + "," +
                     DoubleToString(rates[b].open, 10) + "," +
                     DoubleToString(rates[b].high, 10) + "," +
                     DoubleToString(rates[b].low, 10) + "," +
                     DoubleToString(rates[b].close, 10) + "," +
                     IntegerToString((long)rates[b].tick_volume) + "]";
          }
-         json += "]}";
+         frag += "]}";
       }
+      if(frag == "") continue;
+      if(!first) json += ",";
+      first = false;
+      json += frag;
    }
    json += "]";
    return json;

@@ -18,7 +18,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   AlertTriangle,
-  Clock,
   Globe,
   Link2,
   Power,
@@ -90,7 +89,10 @@ export default function Terminal() {
     queryKey: ["desk-instruments"],
     queryFn: deskApi.instruments,
     enabled: Boolean(terminal),
-    refetchInterval: stream.connected ? 20_000 : 3_000,
+    // While the stream is actually delivering prices, polling is just a slow
+    // fallback. The moment data stops flowing (socket open, no events) the
+    // poll drops to 3s so the board reflects reality instead of waiting 20s.
+    refetchInterval: stream.flowing ? 20_000 : 3_000,
   });
   const performance = useQuery({
     queryKey: ["desk-performance"],
@@ -177,7 +179,6 @@ export default function Terminal() {
     [liveInstruments, symbol],
   );
 
-  const feed = state.data?.feed ?? stream.feed;
   const mismatched = liveInstruments.filter((instrument) => instrument.dataStatus === "mismatch");
 
   const toggleMarket = (marketSymbol: string, enabled: boolean) => {
@@ -210,12 +211,12 @@ export default function Terminal() {
           </span>
           {terminal && (
             <span
-              className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${stream.connected ? "border-sky-500/40 bg-sky-500/10 text-sky-300" : "border-zinc-700 text-zinc-500"}`}
-              title={stream.connected ? "Prices are pushed the instant the terminal heartbeats" : "Live stream down — falling back to polling"}
+              className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${stream.flowing ? "border-sky-500/40 bg-sky-500/10 text-sky-300" : "border-zinc-700 text-zinc-500"}`}
+              title={stream.flowing ? "Prices are pushed the instant the terminal heartbeats" : "No fresh prices are arriving — falling back to fast polling"}
               data-testid="stream-status"
             >
-              <span className={`h-1.5 w-1.5 rounded-full ${stream.connected ? "bg-sky-400" : "bg-zinc-600"}`} />
-              {stream.connected ? "STREAM" : "POLL"}
+              <span className={`h-1.5 w-1.5 rounded-full ${stream.flowing ? "bg-sky-400" : "bg-zinc-600"}`} />
+              {stream.flowing ? "STREAM" : "POLL"}
             </span>
           )}
 
@@ -302,12 +303,13 @@ export default function Terminal() {
             </span>
           </div>
         )}
-        {feed?.clockWarning && (
-          <div className="flex gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200">
-            <Clock className="mt-px h-4 w-4 shrink-0" />
-            <span>{feed.clockWarning} Quotes are timestamped in true UTC, so ages shown are corrected.</span>
-          </div>
-        )}
+        {/*
+          Clock health is deliberately NOT a desk-wide alarm any more: the EA
+          (v3.04+) self-corrects its timestamps against the server's clock, so
+          a misclocked terminal machine no longer means wrong data. The
+          machine's own clock error is surfaced calmly in the bridge dialog
+          (Link MT5) with the one action that fixes it — sync NTP.
+        */}
 
         {/*
           Two states, deliberately distinct.

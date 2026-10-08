@@ -74,8 +74,13 @@ test("news gate fails closed when a formerly available feed becomes stale", () =
 
 // ── The next 24 hours of red-folder events ───────────────────────────────────
 //
-// The calendar pane is only useful if it shows what is COMING. It used to list
-// whatever the feed happened to carry, with the window decided in the browser.
+// The calendar pane is only useful if it shows what is COMING — and only
+// believable if it can also explain what ALREADY HAPPENED. The pane used to
+// drop everything more than fifteen minutes old, so on a day whose three
+// red-folder releases were all in the morning the desk answered "0 red-folder
+// events" while the terminal's own calendar showed three. The list therefore
+// carries the trading day: releases from the last twelve hours stay, flagged as
+// passed, and only the 24-hour forward horizon is enforced.
 
 test("the upcoming window is the next 24 hours, in the order they happen", () => {
   const events = [
@@ -83,17 +88,25 @@ test("the upcoming window is the next 24 hours, in the order they happen", () =>
     { id: "soon", time: now + 45 * 60_000, currency: "EUR", country: "EU", name: "ECB", importance: "high" as const },
     { id: "tomorrow", time: now + 30 * 60 * 60_000, currency: "USD", country: "US", name: "NFP", importance: "high" as const },
     { id: "justHappened", time: now - 5 * 60_000, currency: "GBP", country: "UK", name: "CPI", importance: "high" as const },
-    { id: "stale", time: now - 3 * 60 * 60_000, currency: "JPY", country: "JP", name: "BoJ", importance: "high" as const },
+    { id: "thisMorning", time: now - 3 * 60 * 60_000, currency: "JPY", country: "JP", name: "BoJ", importance: "high" as const },
+    { id: "yesterday", time: now - 20 * 60 * 60_000, currency: "USD", country: "US", name: "PPI", importance: "high" as const },
   ];
 
   const upcoming = upcomingRedFolder(events, now);
-  assert.deepEqual(upcoming.map((event) => event.id), ["justHappened", "soon", "later"]);
-  // 30 hours out is outside the 24-hour horizon.
+  assert.deepEqual(upcoming.map((event) => event.id), ["thisMorning", "justHappened", "soon", "later"]);
+  // 30 hours out is outside the 24-hour horizon, and yesterday is outside the
+  // day this list describes.
   assert.ok(!upcoming.some((event) => event.id === "tomorrow"));
+  assert.ok(!upcoming.some((event) => event.id === "yesterday"));
   // Events are stamped with their distance so the UI never recomputes it.
-  assert.equal(upcoming[1]!.inMs, 45 * 60_000);
-  assert.equal(upcoming[1]!.next, true, "the next event is flagged");
-  assert.equal(upcoming[2]!.next, false);
+  const soon = upcoming.find((event) => event.id === "soon")!;
+  assert.equal(soon.inMs, 45 * 60_000);
+  assert.equal(soon.next, true, "the next event is flagged");
+  assert.equal(soon.passed, false);
+  // Released ones are kept but marked, and never carry the "next" flag.
+  const morning = upcoming.find((event) => event.id === "thisMorning")!;
+  assert.equal(morning.passed, true);
+  assert.equal(morning.next, false);
 });
 
 test("an empty calendar yields an empty list, not a fabricated one", () => {

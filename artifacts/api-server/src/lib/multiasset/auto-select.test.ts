@@ -115,6 +115,7 @@ function deskWith(markets: { symbol: string; bars?: Bar[]; spreadPoints?: number
     pairedAt: NOW,
     lastSyncAt: NOW,
     lastSeq: 1,
+    syncIntervalMs: 500,
   };
   desk.account = { ...account };
   desk.news = emptyAvailableNewsFeed(NOW);
@@ -212,6 +213,57 @@ test("when nothing qualifies the closest miss is named", () => {
   assert.equal(desk.plans.size, 0);
 });
 
+/**
+ * THE REPORTED BUG: "the closest market is one that can't trade, while our A+
+ * setups sit right there".
+ *
+ * The desk named `decisions[0]` — the first market in the watchlist order — as
+ * the closest miss. That is a statement about the watchlist, not about the
+ * market: it can point at a setup that failed the quality gate by twenty points
+ * while an A+ setup failed only the economics, which is exactly what the user
+ * was shown (EURUSD.m quality 36.9 "closest", US30.std A+ 83 with E -0.71R).
+ *
+ * The closest miss must be the setup that would trade if ONE gate were relaxed:
+ * an analysis survivor first, ranked by the expectancy that stopped it.
+ */
+test("the closest miss is the best analysis survivor, not the first market scanned", () => {
+  const desk = deskWith([
+    // Scanned first, and hopeless: a dead range that fails on quality.
+    { symbol: "AAAUSD", bars: flat() },
+    // Scanned second, A+ on every analysis gate, refused only on economics:
+    // the same trend as the arming fixture, quoted with a spread wide enough
+    // to make the round trip cost more than the edge it finds.
+    { symbol: "BBBUSD", bars: trendUp(220, 1.08, 0.0006, 0.0002, 12), spreadPoints: 2000 },
+  ]);
+  const outcome = runAutoSelect(desk, NOW);
+  assert.ok(outcome);
+  assert.equal(outcome.record.chosen, null);
+
+  const bbb = outcome.record.ranked.find((row) => row.symbol === "BBBUSD");
+  const aaa = outcome.record.ranked.find((row) => row.symbol === "AAAUSD");
+  assert.ok(bbb && aaa);
+  assert.ok(bbb.score > aaa.score, "the fixture must have BBB as the better setup");
+
+  assert.match(outcome.record.reason, /Closest: BBBUSD/, outcome.record.reason);
+  assert.ok(!/Closest: AAAUSD/.test(outcome.record.reason), outcome.record.reason);
+  // And the table the desk shows is ordered the same way, so the named row is
+  // the row at the top.
+  assert.equal(outcome.record.ranked[0]!.symbol, "BBBUSD");
+});
+
+test("a market skipped for bad data is named, not silently dropped", () => {
+  const desk = deskWith([
+    { symbol: "AAAUSD", bars: trendUp(220, 1.08, 0.0006, 0.0002, 21) },
+    { symbol: "BBBUSD", bars: trendUp(220, 1.08, 0.0006, 0.0002, 22) },
+  ]);
+  // BBBUSD stops ticking long before the pass.
+  desk.quotes.get("BBBUSD")!.ts = NOW - 5 * 60_000;
+  const outcome = runAutoSelect(desk, NOW);
+  assert.ok(outcome);
+  assert.deepEqual(outcome.record.skipped, ["BBBUSD"], "the skipped market must be reported by name");
+  assert.match(outcome.record.reason, /BBBUSD/);
+});
+
 test("auto-trade off means the pass does not run at all", () => {
   const desk = deskWith([{ symbol: "AAAUSD" }]);
   desk.autoTrade = false;
@@ -220,9 +272,26 @@ test("auto-trade off means the pass does not run at all", () => {
   assert.equal(desk.plans.size, 0);
 });
 
-test("a stale terminal stops the pass rather than trading on dead data", () => {
+/**
+ * Two-stage terminal health, and the pass must respect both stages.
+ *
+ * A terminal that misses a few heartbeats is DEGRADED, not gone: every symbol
+ * is still gated on its own quote age, so the desk keeps working and says
+ * "reconnecting" instead of "paused". A single 30-second cliff used to stop the
+ * whole desk — the user saw it as "the MT5 terminal last synced 39s ago …
+ * Quotes and agent entries are paused" on a terminal that was still streaming.
+ * The pass only stops when the terminal is genuinely written off.
+ */
+test("a late heartbeat degrades the desk but does not stop the pass", () => {
+  const desk = deskWith([{ symbol: "AAAUSD", bars: trendUp(220, 1.08, 0.0006, 0.0002, 3) }]);
+  desk.terminal!.lastSyncAt = NOW - 60_000; // well past the old 30 s cliff
+  assert.ok(autoSelectDue(desk, NOW), "a late terminal is still workable");
+  assert.ok(runAutoSelect(desk, NOW), "the pass must run while quotes are individually fresh");
+});
+
+test("a terminal that has genuinely gone silent stops the pass", () => {
   const desk = deskWith([{ symbol: "AAAUSD" }]);
-  desk.terminal!.lastSyncAt = NOW - 60_000;
+  desk.terminal!.lastSyncAt = NOW - 10 * 60_000; // past every window, adaptive included
   assert.equal(autoSelectDue(desk, NOW), false);
   assert.equal(runAutoSelect(desk, NOW), null);
 });

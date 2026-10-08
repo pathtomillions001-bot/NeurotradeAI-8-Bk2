@@ -547,8 +547,15 @@ export function AgentPane({ decision, horizonMinutes, onArm, arming, armError }:
         <div className={`rounded border px-1.5 py-0.5 text-[11px] font-bold ${gradeColor(confluence.grade)}`}>{confluence.grade}</div>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5"><DirectionIcon direction={confluence.direction} /><span className="text-[13px] font-semibold text-zinc-100">{confluence.direction === "none" ? "No bias" : confluence.direction === "up" ? "Long bias" : "Short bias"}</span><span className="font-mono text-[11px] text-zinc-500">{decision.qualityScore.toFixed(0)}/{decision.qualityThreshold.toFixed(0)}</span></div>
+          {/*
+            The horizon is the DECISION's horizon, not the mode's nominal one.
+            It used to be printed from the mode while the simulation ran on the
+            fastest scored frame (12 × M2 = 24 min printed, 12 × S10 = 2 min
+            simulated), so the pane described a trade nobody had analysed.
+          */}
           <p className="mt-0.5 text-[10px] text-zinc-500">
-            Horizon ≈ {horizonMinutes} min · confluence {confluence.score.toFixed(0)}
+            Horizon ≈ {decision.horizonMinutes ?? horizonMinutes} min
+            {decision.entryTimeframe ? ` (${decision.entryTimeframe})` : ""} · confluence {confluence.score.toFixed(0)}
             {decision.evidence ? ` · evidence ${decision.evidence.confidence.toFixed(0)}` : ""}
             {!confluence.higherTimeframeAligned && ` · higher timeframe opposed (−${confluence.contextPenalty.toFixed(0)})`}
           </p>
@@ -557,6 +564,24 @@ export function AgentPane({ decision, horizonMinutes, onArm, arming, armError }:
       <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800"><div className={decision.qualityScore >= decision.qualityThreshold + 10 ? "h-full bg-emerald-500" : decision.qualityScore >= decision.qualityThreshold ? "h-full bg-amber-500" : "h-full bg-zinc-600"} style={{ width: `${Math.min(100, decision.qualityScore)}%` }} /></div>
       {decision.evidence && <EvidenceBlock evidence={decision.evidence} />}
       {monteCarlo && <dl className="grid grid-cols-2 gap-2 sm:grid-cols-4"><Metric label="Win" value={`${(monteCarlo.winProbability * 100).toFixed(0)}%`} /><Metric label="Net E" value={`${monteCarlo.expectancyR >= 0 ? "+" : ""}${monteCarlo.expectancyR.toFixed(2)}R`} tone={monteCarlo.expectancyR > 0 ? "good" : "bad"} /><Metric label="R:R" value={monteCarlo.rewardRisk.toFixed(1)} /><Metric label="Bars" value={monteCarlo.meanBarsToResolve.toFixed(0)} /></dl>}
+      {/*
+        The cost budget, in R. This is the number that decides whether a setup
+        can pay for itself, and it was previously only discoverable by reading
+        a rejection string. `stop widened` is stated explicitly: a risk unit
+        that had to be widened to cover the spread is a fact about the trade,
+        not a footnote.
+      */}
+      {decision.costR !== null && (
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-zinc-800 bg-zinc-900/50 px-2 py-1.5 text-[10px] font-mono text-zinc-400">
+          <span>Cost {(decision.costR * 100).toFixed(0)}% of the risk unit</span>
+          <span className="text-zinc-700">·</span>
+          <span>stop {decision.stopWidened ? "widened to cover it" : "structural"}</span>
+          <span className="text-zinc-700">·</span>
+          <span className={decision.costR <= 0.25 ? "text-emerald-400/80" : "text-amber-300/80"}>
+            {decision.costR <= 0.25 ? "edge can clear it" : "wide for this market"}
+          </span>
+        </div>
+      )}
       <div>
         <p className="mb-1 text-[9px] uppercase tracking-wider text-zinc-600">Timeframe agreement</p>
         <div className="space-y-1">
@@ -642,18 +667,45 @@ export function NewsPane({
       </div>
     );
   }
+  /**
+   * EMPTY IS NOT AN ALL-CLEAR.
+   *
+   * The terminal can (and does) return a successful, empty calendar read while
+   * MT5 is still syncing its economic calendar database. The old pane rendered
+   * that as "No high-impact events in the next 24 hours. The gate stays armed."
+   * — claiming a calm the terminal had never verified, while the broker's own
+   * calendar tab was showing three red-folder releases. `rawCount` is the row
+   * count BEFORE filtering; zero means "no data", and the pane now says so.
+   */
+  const unverified = feed.rawCount === 0 && events.length === 0;
+  const ahead = events.filter((event) => !event.passed);
+  const behind = events.filter((event) => event.passed);
   return (
     <div className="divide-y divide-zinc-900">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 text-[9px] uppercase tracking-wider text-zinc-600">
-        <span className="flex items-center gap-1"><Globe className="h-3 w-3" />Next 24 h · {events.length} red-folder {events.length === 1 ? "event" : "events"}</span>
+        <span className="flex items-center gap-1"><Globe className="h-3 w-3" />Next 24 h · {ahead.length} red-folder {ahead.length === 1 ? "event" : "events"}</span>
+        {behind.length > 0 && <><span className="text-zinc-700">·</span><span>{behind.length} earlier today</span></>}
         <span className="text-zinc-700">·</span>
         <span>{zoneAbbreviation(now, timeZone)} · {timeZone.replace("_", " ")}</span>
       </div>
-      {events.length === 0
-        ? <p className="p-4 text-xs text-zinc-500">No high-impact events in the next 24 hours. The gate stays armed — the calendar is refreshed by the terminal every minute.</p>
-        : events.map((event) => <NewsRow key={event.id} event={event} timeZone={timeZone} />)}
+      {unverified ? (
+        <div className="flex gap-2 p-3 text-[11px] leading-relaxed text-amber-300">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            The terminal returned no calendar rows at all, so "no high-impact events" cannot be confirmed — MT5's economic
+            calendar is most likely still syncing. Compare it with the terminal's own Calendar tab; new entries stay paused
+            until the read succeeds.
+          </span>
+        </div>
+      ) : events.length === 0 ? (
+        <p className="p-4 text-xs text-zinc-500">No high-impact events in the next 24 hours. The gate stays armed — the calendar is refreshed by the terminal every minute.</p>
+      ) : (
+        events.map((event) => <NewsRow key={event.id} event={event} timeZone={timeZone} />)
+      )}
       <p className="flex items-center gap-1.5 px-3 py-2 text-[9px] text-zinc-600">
-        <Clock3 className="h-3 w-3" />Calendar checked {feed.checkedAt ? relativeTime(feed.checkedAt) : "never"} · new entries fail closed if this feed goes stale.
+        <Clock3 className="h-3 w-3" />Calendar checked {feed.checkedAt ? relativeTime(feed.checkedAt) : "never"}
+        {typeof feed.rawCount === "number" && ` · ${feed.rawCount} row${feed.rawCount === 1 ? "" : "s"} read from MT5`}
+        {" "}· new entries fail closed if this feed goes stale.
       </p>
     </div>
   );
@@ -666,15 +718,18 @@ function NewsRow({ event, timeZone }: { event: UpcomingNewsEvent; timeZone: stri
   // The blackout the news gate actually applies starts 30 minutes before a
   // release (20 for a scalp, 20 for a swing). Showing it on the row means the
   // user can see the window closing rather than discovering it in a rejection.
-  const imminent = event.time - now <= 30 * 60_000 && event.time >= now - 15 * 60_000;
+  const imminent = !event.passed && event.time - now <= 30 * 60_000 && event.time >= now - 15 * 60_000;
   return (
-    <div className={`flex gap-2 px-3 py-2 ${event.next ? "bg-red-500/5" : ""}`}>
+    <div className={`flex gap-2 px-3 py-2 ${event.next ? "bg-red-500/5" : event.passed ? "opacity-60" : ""}`}>
       <CalendarDays className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${imminent ? "text-red-400" : "text-red-400/70"}`} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
           <span className="rounded bg-red-500/15 px-1 text-[9px] font-bold text-red-300">{event.currency || "HIGH"}</span>
           <span className="truncate text-[11px] text-zinc-200">{event.name}</span>
           {event.next && <span className="shrink-0 rounded border border-red-500/40 px-1 text-[8px] uppercase tracking-wider text-red-300">next</span>}
+          {/* Released earlier today: it is why the session is quiet, so it stays
+              on the list — greyed, labelled, and not counted as upcoming. */}
+          {event.passed && <span className="shrink-0 rounded border border-zinc-700 px-1 text-[8px] uppercase tracking-wider text-zinc-500">released</span>}
         </div>
         <p className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 text-[9px] text-zinc-500">
           <span className="font-mono text-zinc-400">{local}</span>

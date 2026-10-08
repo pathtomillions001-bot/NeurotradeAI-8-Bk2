@@ -36,6 +36,7 @@
  */
 
 import { evaluate, type AgentDecision } from "./agent";
+import { MODE_MIN_AGREEING_FAMILIES } from "./evidence";
 import { resolveLiveSymbol, terminalIsFresh } from "./live";
 import { armPlan, journal, outcomesFor, type AutoSelectRecord, type DeskState } from "./store";
 import type { TradeMode } from "./types";
@@ -117,6 +118,63 @@ function betterThan(a: AgentDecision, b: AgentDecision): boolean {
 }
 
 /**
+ * How close a candidate came to being tradable — for the "nothing qualified"
+ * report.
+ *
+ * WHY THIS IS NOT JUST `decisions[0]`
+ *
+ * The old code named the FIRST market it had scanned as the "closest" miss,
+ * which is a statement about the watchlist order, not about the market. That is
+ * how a report could read:
+ *
+ *     Closest: EURUSD.m — Quality 36.9 is below the 60.0 required
+ *     US30.std  A+  83   Expectancy after costs is -0.71R … below the minimum
+ *
+ * i.e. it pointed at a setup that failed the QUALITY gate by 23 points while an
+ * A+ setup failed only the expectancy gate. The user is right to call that
+ * broken: the named candidate must be the one that would trade if one gate
+ * were relaxed.
+ *
+ * The rule below is therefore two-tiered:
+ *
+ *   1. setups that cleared every *analysis* gate (direction, quality, evidence
+ *      agreement) but lost on economics — ranked by expectancy, because that is
+ *      the gate that stopped them and the number that has to improve;
+ *   2. everything else — ranked by quality, because those never got as far as
+ *      having a meaningful expectancy.
+ */
+function analysisTier(decision: AgentDecision): 0 | 1 {
+  return analysisSurvivor(decision) ? 0 : 1;
+}
+
+/** True when every gate except the economics was satisfied. */
+function analysisSurvivor(decision: AgentDecision): boolean {
+  if (decision.confluence.direction === "none") return false;
+  if (decision.qualityScore < decision.qualityThreshold) return false;
+  if (
+    decision.evidence &&
+    decision.evidence.direction !== "none" &&
+    decision.evidence.agreeingFamilies < MODE_MIN_AGREEING_FAMILIES[decision.mode]
+  ) {
+    return false;
+  }
+  if (decision.news.blocked) return false;
+  if (!decision.risk.allow) return false;
+  if (decision.monteCarlo === null) return false;
+  return true;
+}
+
+/** Closest-miss ordering: analysis survivors first, then best quality. */
+function closerThan(a: AgentDecision, b: AgentDecision): boolean {
+  const tierA = analysisTier(a);
+  const tierB = analysisTier(b);
+  if (tierA !== tierB) return tierA < tierB;
+  if (tierA === 0) return betterThan(a, b);
+  if (a.qualityScore !== b.qualityScore) return a.qualityScore > b.qualityScore;
+  return a.symbol < b.symbol;
+}
+
+/**
  * Run one automatic best-market pass.
  *
  * Returns null when the pass could not run at all (auto-trade off, stale
@@ -133,13 +191,18 @@ export function runAutoSelect(desk: DeskState, now = Date.now()): AutoSelectOutc
   const mode = desk.mode;
   const candidates = autoSelectCandidates(desk);
   const decisions: AgentDecision[] = [];
+  /** Named so the report never has to say "no data" without saying WHERE. */
+  const skipped: string[] = [];
   let available = 0;
 
   for (const symbol of candidates) {
     const resolved = resolveLiveSymbol(desk, symbol, now);
     // A symbol that is warming, stale or quoting a price that disagrees with
     // its own candles is skipped, never analysed.
-    if (!resolved || !desk.account) continue;
+    if (!resolved || !desk.account) {
+      skipped.push(symbol);
+      continue;
+    }
     available++;
     try {
       decisions.push(
@@ -168,8 +231,10 @@ export function runAutoSelect(desk: DeskState, now = Date.now()): AutoSelectOutc
   const qualified = decisions.filter((decision) => decision.armed && decision.plan);
   qualified.sort((a, b) => (betterThan(a, b) ? -1 : betterThan(b, a) ? 1 : 0));
 
+  // Closest-first for the table as well, so the row the desk names in its
+  // reason is the row at the top of the scan list.
   const ranked = [...decisions]
-    .sort((a, b) => (betterThan(a, b) ? -1 : betterThan(b, a) ? 1 : 0))
+    .sort((a, b) => (closerThan(a, b) ? -1 : closerThan(b, a) ? 1 : 0))
     .slice(0, MAX_RANKED_ROWS)
     .map((decision) => ({
       symbol: decision.symbol,
@@ -180,6 +245,16 @@ export function runAutoSelect(desk: DeskState, now = Date.now()): AutoSelectOutc
     }));
 
   const winner = qualified[0];
+  /**
+   * Named in both branches: an armed report that hides the markets it could not
+   * even look at reads exactly like the pass was broken. Formatting lives here
+   * so the armed and empty branches cannot drift apart.
+   */
+  const skippedNote =
+    skipped.length === 0
+      ? ""
+      : ` ${skipped.length} had no fresh, self-consistent data and were skipped: ` +
+        `${skipped.slice(0, 4).join(", ")}${skipped.length > 4 ? ` and ${skipped.length - 4} more` : ""}.`;
   let record: AutoSelectRecord;
 
   if (winner?.plan) {
@@ -192,12 +267,14 @@ export function runAutoSelect(desk: DeskState, now = Date.now()): AutoSelectOutc
       scanned: available,
       qualified: qualified.length,
       chosen: winner.symbol,
+      skipped,
       reason:
         `Best of ${available} selected market${available === 1 ? "" : "s"}: ${winner.symbol} ` +
         `${winner.plan.side.toUpperCase()} ${winner.plan.lots} lots — ` +
         `quality ${winner.qualityScore.toFixed(1)}, E ${(winner.expectancyR ?? 0).toFixed(2)}R, ` +
         `${(winner.winProbability ?? 0) * 100 > 0 ? `${((winner.winProbability ?? 0) * 100).toFixed(0)}% win` : "win n/a"}` +
-        (runnersUp ? `. Runners-up: ${runnersUp}.` : "."),
+        (runnersUp ? `. Runners-up: ${runnersUp}.` : ".") +
+        skippedNote,
       ranked,
     };
     desk.lastAutoSelect = record;
@@ -210,12 +287,14 @@ export function runAutoSelect(desk: DeskState, now = Date.now()): AutoSelectOutc
     return { record, armedSymbol: winner.symbol, decisions };
   }
 
-  // Nothing qualified. Name the closest miss so the desk is never silently idle.
-  const closest = decisions[0];
+  // Nothing qualified. Name the CLOSEST miss — the setup that would have traded
+  // if one gate were relaxed — never simply the first market scanned.
+  const closest = [...decisions].sort((a, b) => (closerThan(a, b) ? -1 : closerThan(b, a) ? 1 : 0))[0];
+  const closestGrade = closest ? `${closest.confluence.grade}, quality ${closest.qualityScore.toFixed(0)}` : "";
   const reason = closest
-    ? `No qualifying setup in ${available} selected market${available === 1 ? "" : "s"}. ` +
-      `Closest: ${closest.symbol} — ${closest.rejections[0] ?? "quality below threshold."}`
-    : `No selected market has fresh, self-consistent data to analyse yet.`;
+    ? `No qualifying setup in ${available} selected market${available === 1 ? "" : "s"}.${skippedNote} ` +
+      `Closest: ${closest.symbol} (${closestGrade}) — ${closest.rejections[0] ?? closest.sizing?.explanation ?? "quality below threshold."}`
+    : `No selected market has fresh, self-consistent data to analyse yet.${skippedNote}`;
 
   record = {
     at: now,
@@ -224,6 +303,7 @@ export function runAutoSelect(desk: DeskState, now = Date.now()): AutoSelectOutc
     qualified: 0,
     chosen: null,
     reason,
+    skipped,
     ranked,
   };
   desk.lastAutoSelect = record;

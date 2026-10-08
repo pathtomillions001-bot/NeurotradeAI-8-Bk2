@@ -144,17 +144,22 @@ A plan is only armed when **all** hold:
    over the mode's own band only.
 2. Regime is tradeable for the mode.
 3. Monte Carlo **expectancy after costs** ≥ `minEdgeR` (default 0.15 R). The
-   spread and commission are charged inside the simulation, so this is the gate
-   that decides the cost question.
+   spread, commission and slippage are charged inside the simulation — and the
+   risk unit the gate is measured in is floored at four times that round trip
+   (and at 0.8 ATR of the entry frame), so "one R" can always pay for entering.
+   This is the only gate that decides the cost question; the timeout mass and
+   its payoff are preserved in the blended expectancy rather than charged as
+   losses.
 4. Markov persistence of the current favourable state ≥ the mode's floor
    (`DEFAULT_MIN_PERSISTENCE = 0` — advisory by default, since persistence is
    already part of the evidence blend).
 5. Risk governor returns `allow`.
-6. Sizing accepts the plan: lots ≥ broker minimum, margin headroom, and the
-   spread below the **asset class's** `maxSpreadFractionOfStop` ceiling (the
-   live quote's spread is what is measured, and what the fill will pay). A
-   spread wide for its class but still inside the ceiling is carried as a
-   caution, not a rejection.
+6. Sizing accepts the plan: lots ≥ broker minimum, margin headroom, and a
+   reward:risk the plan can honour. Sizing no longer refuses on cost at all —
+   the spread is priced into gate 3 and into the risk unit itself. The only
+   remaining spread number is the EA's fill-time guard
+   (`plan.maxSpreadPoints`, asset-class-scaled), which refuses a *fill* into a
+   spread that has run away from the one the plan was armed on.
 7. The session filter is green and the news gate is open (no red-folder release
    within the blackout, from the same 24-hour window the calendar pane shows).
 

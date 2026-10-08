@@ -224,22 +224,38 @@ test("rejects when widening the stop destroys the reward:risk", () => {
   assert.equal(result.rejection, "reward_risk_too_low");
 });
 
-test("rejects a stop the spread would eat", () => {
+/**
+ * THE COST GATES ARE GONE — AND MUST NOT COME BACK.
+ *
+ * Sizing used to refuse twice on a ratio: `spread / stop > 35%` for forex, and
+ * `(spread + commission) / money risked > 35%`. Both fired on A+ setups the rest
+ * of the desk had approved, and both were redundant: the spread is charged
+ * inside the agent's expectancy (measured net of spread, commission and
+ * slippage) and the risk unit is floored above the round-trip cost there, so a
+ * market whose edge cannot pay for its own spread fails one gate — the one that
+ * prices it — instead of three.
+ *
+ * These tests pin the new contract: sizing REPORTS the cost and never refuses
+ * on it. A refusal here may only ever be about the size of the position, never
+ * about how wide the market quotes.
+ */
+test("a spread that used to be vetoed is now sized and charged, not refused", () => {
   const spec: SymbolSpec = { ...EURUSD, spreadPoints: 40 };
-  // 40-point spread against a 100-point stop = 40%, over forex's 35% ceiling.
+  // 40-point spread against a 100-point stop was 40% — over the old 35% ceiling.
   const result = sizePosition(request({ spec, entry: 1.0845, sl: 1.0835 }));
-  assert.equal(result.ok, false);
-  assert.equal(result.rejection, "spread_too_wide");
-  assert.match(result.explanation, /ceiling for forex/);
+  assert.equal(result.ok, true, result.explanation);
+  assert.ok(result.costMoney > 0, "the spread is still paid for");
+  assert.ok(result.costMoney / result.riskMoney > 0.35, "and it is still 40% of the risk — reported, not refused");
 });
 
-test("the same cost is judged against the symbol's own asset class", () => {
-  // Identical arithmetic — a 40-point spread against a 100-point stop — on two
-  // instruments that quote nothing alike. One ceiling for both is what banned
-  // crypto and index CFDs from the desk.
+test("the same spread is charged identically in R on every asset class", () => {
+  // A 40-point spread against a 100-point stop is the same fraction of the risk
+  // on both instruments. Cost is unit-free once expressed in R, so no asset
+  // class needs its own ceiling — the number is comparable by construction.
   const forex: SymbolSpec = { ...EURUSD, spreadPoints: 40 };
-  const refused = sizePosition(request({ spec: forex, entry: 1.0845, sl: 1.0835 }));
-  assert.equal(refused.rejection, "spread_too_wide");
+  const sized = sizePosition(request({ spec: forex, entry: 1.0845, sl: 1.0835 }));
+  assert.equal(sized.ok, true, sized.explanation);
+  assert.ok(Math.abs(sized.riskPoints - 100) < 1e-6, `${sized.riskPoints}`);
 
   const crypto: SymbolSpec = {
     ...EURUSD,
@@ -258,24 +274,25 @@ test("the same cost is judged against the symbol's own asset class", () => {
   assert.ok(allowed.riskPoints >= 100, "same 100-point stop");
 });
 
-test("an explicit limit still overrides the asset class policy", () => {
+test("an explicit cost limit has no gate left to tighten", () => {
+  // The field is gone from SizingLimits; a caller passing it is ignored rather
+  // than silently re-enabling a veto (extra properties are dropped by the
+  // literal spread below). What must NOT happen is a refusal.
   const crypto: SymbolSpec = { ...EURUSD, symbol: "BTCUSD", assetClass: "crypto", spreadPoints: 40 };
-  const result = sizePosition(
-    request({
-      spec: crypto,
-      entry: 1.0845,
-      sl: 1.0835,
-      limits: { maxSpreadFractionOfStop: 0.1 },
-    }),
-  );
-  assert.equal(result.rejection, "spread_too_wide");
+  const result = sizePosition({
+    ...request({ spec: crypto, entry: 1.0845, sl: 1.0835 }),
+    limits: { minMarginLevelPct: 500, maxRiskPct: 2, minRewardRisk: 1 },
+  });
+  assert.equal(result.rejection, null, result.explanation);
 });
 
-test("rejects when commission eats a third of the risk budget", () => {
+test("punitive commission is charged, never refused", () => {
   const spec: SymbolSpec = { ...EURUSD, commissionPerLot: 60, spreadPoints: 2 };
   const result = sizePosition(request({ spec, entry: 1.0845, sl: 1.0833 }));
-  assert.equal(result.ok, false);
-  assert.equal(result.rejection, "cost_exceeds_edge");
+  assert.equal(result.ok, true, result.explanation);
+  // 60 per lot on a symbol whose point value is 1 is 60 points of commission,
+  // against a 120-point stop: half the risk, and still only reported.
+  assert.ok(result.costMoney / result.riskMoney >= 0.5, `${result.costMoney} / ${result.riskMoney}`);
 });
 
 test("shrinks before refusing when margin is tight, and refuses when it cannot", () => {

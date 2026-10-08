@@ -309,8 +309,22 @@ export default function Terminal() {
           </div>
         )}
 
+        {/*
+          Two states, deliberately distinct.
+
+          A late heartbeat used to flip the whole desk into "paused" — the
+          banner this replaces — for a single missed round trip, which is how a
+          39-second hiccup read to the user as a broken connection. It is not:
+          while the terminal is merely late, every symbol is still checked
+          against its own 8-second quote before anything is analysed or armed,
+          so the desk keeps working and says so. Only the hard state stops work,
+          and it now takes a genuinely dead terminal to reach it.
+        */}
+        {terminal?.degraded && (
+          <div className="flex gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-[11px] leading-relaxed text-sky-200"><RefreshCw className="mt-px h-4 w-4 shrink-0" /><span>Reconnecting to the MT5 terminal — last heartbeat {Math.max(0, Math.round((terminal.lastSyncAgeMs ?? Date.now() - terminal.lastSyncAt) / 1000))}s ago (it reports every {terminal.syncIntervalMs ? `${(terminal.syncIntervalMs / 1000).toFixed(1)}s` : "~1s"}). The desk keeps analysing; every market is still gated on its own quote age, so nothing is traded on a stale price.</span></div>
+        )}
         {terminal?.stale && (
-          <div className="flex gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200"><WifiOff className="mt-px h-4 w-4 shrink-0" /><span>The MT5 terminal last synced {Math.max(0, Math.round((Date.now() - terminal.lastSyncAt) / 1000))}s ago. Quotes and agent entries are paused until it resumes; any displayed account snapshot is explicitly the last terminal update.</span></div>
+          <div className="flex gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200"><WifiOff className="mt-px h-4 w-4 shrink-0" /><span>The MT5 terminal has not synced for {Math.max(0, Math.round((terminal.lastSyncAgeMs ?? Date.now() - terminal.lastSyncAt) / 1000))}s (limit {Math.round((terminal.staleAfterMs ?? 120_000) / 1000)}s). Quotes and agent entries are paused until it resumes; any displayed account snapshot is explicitly the last terminal update.</span></div>
         )}
         {actionError && <div className="flex gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200"><ShieldAlert className="mt-px h-4 w-4 shrink-0" /><span>{actionError}</span></div>}
 
@@ -370,7 +384,7 @@ export default function Terminal() {
               <Pane title="Risk controls"><RiskPane state={state.data!} onResume={(value) => resumeSymbol.mutate(value)} /></Pane>
               <Pane
                 title="Red-folder calendar"
-                right={<span className={`rounded border px-1 py-px text-[8px] uppercase ${state.data?.news.available ? "border-emerald-500/30 text-emerald-300" : "border-amber-500/40 text-amber-300"}`}>{state.data?.news.available ? "MT5 calendar" : "paused"}</span>}
+                right={<span className={`rounded border px-1 py-px text-[8px] uppercase ${state.data?.news.available ? (state.data.news.rawCount === 0 ? "border-amber-500/40 text-amber-300" : "border-emerald-500/30 text-emerald-300") : "border-amber-500/40 text-amber-300"}`}>{state.data?.news.available ? (state.data.news.rawCount === 0 ? "unread" : "MT5 calendar") : "paused"}</span>}
               >
                 <NewsPane
                   feed={state.data?.news ?? { available: false, checkedAt: 0, events: [] }}

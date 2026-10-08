@@ -1,7 +1,7 @@
 /**
  * MetaTrader 5 bridge setup.
  *
- * The EA pairs with a short-lived code and then supplies the broker catalogue,
+ * The EA pairs with a private, reusable code and then supplies the broker catalogue,
  * account snapshot, quotes, bars and high-impact calendar from inside the
  * user's own terminal. No login or password is collected by the platform.
  */
@@ -21,7 +21,7 @@ interface BridgeDialogProps {
 export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogProps) {
   const [copied, setCopied] = useState<"code" | "origin" | null>(null);
   const origin = window.location.origin;
-  const downloadUrl = `${import.meta.env.BASE_URL}downloads/NeurotradeBridge.mq5`;
+  const downloadUrl = `${import.meta.env.BASE_URL}downloads/NeurotradeBridge.mq5?v=3.03`;
   const status = useQuery({
     queryKey: ["bridge-status"],
     queryFn: deskApi.bridgeStatus,
@@ -29,7 +29,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
     enabled: open,
   });
   const pairing = useMutation({ mutationFn: deskApi.pairingCode });
-  const unpair = useMutation({ mutationFn: deskApi.unpair, onSuccess: onChanged });
+  const unpair = useMutation({ mutationFn: deskApi.unpair, onSuccess: () => { pairing.reset(); onChanged(); } });
 
   useEffect(() => {
     if (open && !linked && !pairing.data && !pairing.isPending) pairing.mutate();
@@ -84,13 +84,14 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   persists past {Math.round((status.data.staleAfterMs ?? 120_000) / 1000)}s the desk will pause new entries.
                 </p>
               )}
+              <a href={downloadUrl} download className="inline-flex items-center gap-1.5 text-[11px] text-emerald-300"><Download className="h-3.5 w-3.5" />Download updated bridge v3.03 (compile in MetaEditor)</a>
               {status.data.stale && <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-300">The EA is no longer syncing ({Math.round((status.data.lastSyncAgeMs ?? 0) / 1000)}s, limit {Math.round((status.data.staleAfterMs ?? 120_000) / 1000)}s). It manages existing positions locally but the server will not analyse or open a new trade until the live heartbeat resumes. Check the MT5 Journal, WebRequest allowlist and AutoTrading settings.</p>}
               <button type="button" onClick={() => unpair.mutate()} disabled={unpair.isPending} className="w-full rounded-lg border border-red-500/40 bg-red-500/10 py-2 text-[12px] font-medium text-red-300 transition-colors hover:bg-red-500/20 disabled:opacity-50">{unpair.isPending ? "Unlinking…" : "Unlink terminal and clear live Desk data"}</button>
             </>
           ) : (
             <>
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400">
-                <strong className="font-semibold text-zinc-200">The EA always attaches first.</strong> The new connector does not fail initialization when a code, URL or network is missing. It stays on the chart, prints its connection status in the MT5 Journal and retries pairing safely.
+                <strong className="font-semibold text-zinc-200">The EA always attaches first.</strong> The v3.03 connector does not fail initialization when a code, URL or network is missing. It stays on the chart, prints its connection status in the MT5 Journal and retries pairing safely.
               </div>
               <ol className="space-y-4">
                 <Step n={1} title="Download, copy and compile the EA">
@@ -103,9 +104,9 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p className="mt-2 text-[10px] text-zinc-500">For a deployed application use its public HTTPS origin. Do not use localhost from a remote/VPS terminal.</p>
                 </Step>
                 <Step n={3} title="Set EA inputs and pair">
-                  <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this one-time value into <code className="text-zinc-200">PairingCode</code>:</p>
+                  <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this private, reusable code into <code className="text-zinc-200">PairingCode</code>:</p>
                   <CopyValue value={pairing.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
-                  <p className="mt-2 text-[10px] text-zinc-500">The code is valid for 10 minutes and can only be redeemed once. If it expires, leave the EA attached and reopen this dialog for a fresh code.</p>
+                  <p className="mt-2 text-[10px] text-zinc-500">This code stays valid until you unlink MT5 or generate a replacement. Keep it private. The EA saves its token locally and reconnects after restarts. Run one active bridge per account; other charts remain on standby.</p>
                 </Step>
               </ol>
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">One account, one Desk.</span> An MT5 account can only be linked to a single Desk at a time. If it is already connected in another browser or device, pairing here is refused until that Desk unlinks it — two Desks on one account would trade the same balance against separate risk limits.</p><p className="mt-2"><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>

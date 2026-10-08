@@ -14,8 +14,8 @@ import { pgTable, serial, bigint, text, index, uniqueIndex } from "drizzle-orm/p
  * pairings race on the insert and exactly one wins.
  *
  * Timestamps are epoch milliseconds (BIGINT), not TIMESTAMPTZ, so the
- * idle-claim cutoff is comparable across processes without relying on the
- * database clock agreeing with every application node.
+ * heartbeat diagnostics are comparable across processes. Ownership is only
+ * released by explicit unlink or an intentional account replacement.
  */
 export const mt5AccountClaimsTable = pgTable("mt5_account_claims", {
   id: serial("id").primaryKey(),
@@ -27,7 +27,7 @@ export const mt5AccountClaimsTable = pgTable("mt5_account_claims", {
   /** Browser session that currently owns this account. */
   sessionId: text("session_id").notNull(),
   pairedAtMs: bigint("paired_at_ms", { mode: "number" }).notNull(),
-  /** Refreshed on every EA heartbeat; a claim goes idle when this stops. */
+  /** Refreshed on every EA heartbeat; ownership does not expire when this stops. */
   lastSeenAtMs: bigint("last_seen_at_ms", { mode: "number" }).notNull(),
 }, (t) => [
   uniqueIndex("mt5_account_claims_key").on(t.accountKey),

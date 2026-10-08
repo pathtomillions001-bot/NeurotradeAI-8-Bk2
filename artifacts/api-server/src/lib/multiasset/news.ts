@@ -25,7 +25,7 @@ const NEWS_MAX_AGE_MS = 5 * 60_000;
  * How far ahead the desk's red-folder panel looks.
  *
  * Twenty-four hours, deliberately: it is the window the EA itself fetches from
- * the MT5 calendar (`CalendarValueHistory(now - 15 min, now + 24 h)`), and it is
+ * the MT5 calendar (`CalendarValueHistory(now - 24 h, now + 24 h)`), and it is
  * the horizon over which a trader can actually act on an event — a swing entry
  * planned today must know what releases tomorrow. Events are never dropped for
  * being "too far away"; anything beyond the window is simply not fetched.

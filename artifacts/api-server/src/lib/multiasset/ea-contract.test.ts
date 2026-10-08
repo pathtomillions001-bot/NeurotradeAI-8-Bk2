@@ -301,3 +301,32 @@ test("sizing round-trips through the wire without precision loss", () => {
   const lots = Math.floor(plan.riskMoney / (triggerToStop * 1.0) / 0.01) * 0.01;
   assert.equal(Number(lots.toFixed(2)), plan.lots);
 });
+
+test("v3.03 publishes the actual current EA, not a stale download", () => {
+  const source = readFileSync(path.resolve(import.meta.dirname, "../../../../mt5-ea/NeurotradeBridge.mq5"), "utf8");
+  const download = readFileSync(path.resolve(import.meta.dirname, "../../../../trading-platform/public/downloads/NeurotradeBridge.mq5"), "utf8");
+  assert.equal(download, source);
+  assert.match(source, /#property version\s+"3\.03"/);
+  assert.match(source, /FileOpen\(ConnectorLockFile\(\), FILE_READ \| FILE_WRITE \| FILE_BIN\)/);
+  assert.match(source, /SaveToken\(\)/);
+  assert.match(source, /instanceId/);
+});
+
+test("heartbeat serialization never triggers blocking MT5 history/calendar reads", () => {
+  const source = readFileSync(path.resolve(import.meta.dirname, "../../../../mt5-ea/NeurotradeBridge.mq5"), "utf8");
+  const sync = source.slice(source.indexOf("void Sync()"), source.indexOf("void ApplyServerResponse"));
+  assert.doesNotMatch(sync, /CopyRates\(|CandlesJson\(/);
+  assert.match(sync, /g_cachedCandles/);
+  const news = source.slice(source.indexOf("string NewsJson()"), source.indexOf("bool IsNewsBlackout"));
+  assert.doesNotMatch(news, /RefreshCalendar\(/);
+  assert.match(source, /CalendarValueHistory\(values, now - 24 \* 60 \* 60, now \+ 24 \* 60 \* 60\)/);
+  assert.match(source, /g_rawCount > 0 && detailFailures == 0/);
+});
+
+test("temporary local guards retain plans and confirmations require distinct ticks", () => {
+  const source = readFileSync(path.resolve(import.meta.dirname, "../../../../mt5-ea/NeurotradeBridge.mq5"), "utf8");
+  assert.match(source, /if\(!TradingAllowed\(symbol\)\) continue;/);
+  assert.match(source, /tick\.time_msc != g_plans\[i\]\.lastConfirmTick/);
+  assert.match(source, /NowUtcMs\(\) - TickToUtcMs\(tick\.time_msc, \(long\)tick\.time\) > 8000/);
+  assert.match(source, /NowServer\(\) - g_lastOk > 120/);
+});

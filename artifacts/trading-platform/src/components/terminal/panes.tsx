@@ -659,11 +659,11 @@ export function NewsPane({
 }) {
   const now = Date.now();
   const events = upcoming ?? [];
-  if (!feed.available) {
+  if (!feed.available || !feed.checkedAt || now - feed.checkedAt > 5 * 60_000) {
     return (
       <div className="flex gap-2 p-3 text-[11px] leading-relaxed text-amber-300">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-        <span>{feed.detail || "MT5 economic calendar is unavailable. New entries are paused until it is available."}</span>
+        <span>{!feed.checkedAt || now - feed.checkedAt > 5 * 60_000 ? "MT5 economic calendar has not refreshed within 5 minutes. New entries are paused until a verified refresh arrives." : (feed.detail || "MT5 economic calendar is unavailable. New entries are paused until it is available.")}</span>
       </div>
     );
   }

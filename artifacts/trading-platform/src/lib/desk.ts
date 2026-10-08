@@ -544,7 +544,7 @@ export const deskApi = {
   settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy; timezone: string; timezones: DeskTimezone[] }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
   resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
   projection: (params: { winProbability: number; rewardRisk: number; trades: number }) => request<{ assumptions: Record<string, number>; disciplined: ProjectionResult; martingale: ProjectionResult; note: string }>(`/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`),
-  pairingCode: () => request<{ pairingCode: string; expiresInMs: number }>("/bridge/pairing-code", { method: "POST" }),
+  pairingCode: () => request<{ pairingCode: string; expiresInMs: number | null }>("/bridge/pairing-code", { method: "POST" }),
   bridgeStatus: () => request<{
     linked: boolean;
     login?: number;

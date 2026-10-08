@@ -424,8 +424,8 @@ function EmptyDesk({ onConnect }: { onConnect: () => void }) {
         <button type="button" onClick={onConnect} className="w-full shrink-0 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 sm:w-auto">Set up MT5 bridge</button>
       </div>
       <div className="mt-6 grid gap-3 border-t border-zinc-800 pt-5 sm:grid-cols-3">
-        <InfoStep number="1" title="Download & attach">Attach the resilient Neurotrade MT5 EA (v3 or later) to any chart. It stays attached and retries pairing instead of failing initialization.</InfoStep>
-        <InfoStep number="2" title="Pair securely">Add this platform origin to MT5’s WebRequest allowlist and paste the one-time pairing code. No MT5 password leaves your terminal.</InfoStep>
+        <InfoStep number="1" title="Download & attach">Attach the resilient Neurotrade MT5 EA (v3.03 or later) to any chart. It stays attached and retries pairing instead of failing initialization.</InfoStep>
+        <InfoStep number="2" title="Pair securely">Add this platform origin to MT5’s WebRequest allowlist and paste the private, reusable pairing code. No MT5 password leaves your terminal.</InfoStep>
         <InfoStep number="3" title="Select broker markets">The EA discovers the complete broker catalogue. Choose any number of forex, crypto, indices, stocks, metals, futures or other supported symbols.</InfoStep>
       </div>
     </section>

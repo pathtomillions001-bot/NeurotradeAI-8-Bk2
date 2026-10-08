@@ -169,8 +169,13 @@ Failing any gate produces a *reasoned* no-trade, which the terminal displays.
 ### 3.2 Position sizing is edge-aware
 
 `riskPct = clamp(baseRiskPct × kellyFraction(edge, winProb) × regimeConfidence,
-0.1 %, maxRiskPct)` with fractional Kelly (¼ by default) and a hard 2 % cap.
-Size scales with *measured* edge, never with recent losses.
+0.05 %, min(governor, perTradeBudget))` with fractional Kelly (¼ by default).
+Size scales with *measured* edge and with how confident the regime read is, never
+with recent losses. The per-trade budget is `PER_TRADE_RISK_BUDGET_PCT = 0.5 %`
+of equity and is a **ceiling, not a size**: the risk policy can only tighten it,
+the edge scale may only vote for *less* risk than the governor allows, and the
+broker's indivisible minimum lot is judged against the budget rather than the
+shrunken target (flagged `minLotApplied` when a trade is taken at the minimum).
 
 ---
 

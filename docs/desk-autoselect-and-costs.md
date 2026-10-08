@@ -114,6 +114,45 @@ not a threshold — it is the arithmetic.
   branches — and the lines they printed — are deleted, with tests asserting they
   cannot come back.
 
+### The per-trade risk budget is a ceiling, not a size
+
+**Reported (round three):** *"We also had this block: 'Minimum 0.01 lots would
+risk 1.29 units (0.17% of equity), above the 0.15% budget of 1.14.' Raise the
+budget to 0.5% — but not fixed; the system will decide what to use."*
+
+That message named the wrong number twice over. The `0.15%` was never the
+desk's budget: it was the **adaptive target** — the governor's allowance after
+the edge and regime cuts — and the guard compared the broker's indivisible
+minimum lot against that shrunken target instead of against a budget. An
+account that could afford 0.17% per trade was told it could not trade at all.
+
+- `PER_TRADE_RISK_BUDGET_PCT = 0.5` (`risk.ts`) is the desk's per-trade budget.
+  It is a **ceiling**, and the risk policy in settings can only *tighten* it:
+  `riskCeilingPct = min(0.5%, policy.maxRiskPct)`. A configured value above it
+  lowers nothing and raises nothing.
+- What is actually risked stays **adaptive**. The agent's target is
+  `clamp(governor × edge scale × regime confidence, 0.05%, governor)`, where the
+  governor itself is already inside the budget: fractional Kelly on the blended
+  win probability shrinks it for thin edges, the regime confidence shrinks it in
+  doubt, and the loss ladder shrinks it after losses. Only the ceiling is fixed.
+- `sizing.ts` judges the broker minimum against the **budget**, not the target.
+  If `volumeMin` fits inside the ceiling it is taken and reported
+  (`minLotApplied`, plus *"broker minimum lot taken because the adaptive 0.15%
+  target could not buy less — inside the 0.50% budget"*); if it does not fit it
+  refuses and names the budget: *"above the 0.50% per-trade risk budget of
+  3.80"*.
+- The edge can no longer multiply the risk back up. The scale used to allow
+  `1.5 ×` the governor's number, which meant a "0.5% budget" could trade 0.75%
+  and, worse, a strong signal silently refilled a de-escalation the ladder had
+  just applied. The cap is now **1×**: the edge can only vote for less risk.
+
+The reported account: $760 of equity × 0.5% = $3.80 of budget; the broker's
+0.01 lots risks $1.35 = 0.18%, inside the budget, so the trade is taken. On a
+$200 account the same lot risks 0.67%, which the budget cannot afford, and the
+refusal says so. De-escalation still works inside the budget — verified in
+`agent.test.ts`, where the same market is sized 0.37 → 0.27 → 0.18 lots after
+2 and 3 consecutive losses (0.499% → 0.364% → 0.243% of equity).
+
 Verified on a synthetic EURUSD.m scalp with an 8-point spread and an 8-point-tall
 structural stop (the reported shape): the risk unit is widened to 61 points,
 `costR` is 24%, `entryTimeframe` is M2 with a 24-minute horizon, and the setup

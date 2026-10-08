@@ -91,6 +91,21 @@ export function createRiskState(): RiskState {
 }
 
 /**
+ * The desk's per-trade risk BUDGET, as a percentage of equity.
+ *
+ * This is a ceiling, not a size. The agent decides what to actually risk inside
+ * it — scaled down by the measured edge (fractional Kelly), by how confident
+ * the regime call is, and by the loss ladder below — so most trades risk less
+ * than this. What the number guarantees is the thing a small account actually
+ * needs: a setup is never refused because the adaptive target could not afford
+ * the broker's smallest lot, as long as the smallest lot fits HERE.
+ *
+ * The user's own policy can lower it (`maxRiskPct` in settings); it can never
+ * raise it. Reported on every decision so the desk and the EA agree on it.
+ */
+export const PER_TRADE_RISK_BUDGET_PCT = 0.5;
+
+/**
  * De-escalation ladder. Index = consecutive losses.
  *
  * `riskMultiplier` shrinks size; `scoreBump` raises the confluence bar so only
@@ -172,8 +187,17 @@ export function resetForNewSession(state: RiskState): RiskState {
 
 export interface RiskDecision {
   allow: boolean;
-  /** Risk budget for this trade, after de-escalation and caps. */
+  /**
+   * The adaptive risk target for this trade, after de-escalation and caps.
+   * This is what the desk WOULD risk with the edge it measured.
+   */
   riskPct: number;
+  /**
+   * The per-trade risk ceiling that target works inside, after the user's
+   * policy is applied. `riskPct` is always ≤ this. The difference between the
+   * two is the sizing decision the agent makes below the budget.
+   */
+  riskCeilingPct: number;
   /** Added to the confluence threshold while the desk is out of sync. */
   scoreBump: number;
   reasons: string[];
@@ -277,11 +301,19 @@ export function evaluateRisk(input: {
     );
   }
 
-  const riskPct = clamp(policy.baseRiskPct * ladder.riskMultiplier, 0.05, policy.maxRiskPct);
+  // The budget every trade must live inside. The desk's own ceiling is the hard
+  // bound — a settings value ABOVE it can make the ladder's number no larger,
+  // only the ceiling smaller. The user can therefore only tighten the budget,
+  // never widen it.
+  const riskCeilingPct = Math.min(PER_TRADE_RISK_BUDGET_PCT, policy.maxRiskPct);
+  // The governor's allowance, already expressed inside that budget. The agent
+  // may only shrink it further (edge, regime); nothing downstream may raise it.
+  const riskPct = clamp(policy.baseRiskPct * ladder.riskMultiplier, 0.05, riskCeilingPct);
 
   return {
     allow: breaches.length === 0,
     riskPct,
+    riskCeilingPct,
     scoreBump: ladder.scoreBump,
     reasons,
     breaches,

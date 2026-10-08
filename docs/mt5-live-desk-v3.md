@@ -189,6 +189,14 @@ Rejections quote expectancy *after* spread, commission and swap (`Expectancy aft
 confirmations required, the binding constraint should be the portfolio, not a per-symbol cap of
 one.
 
+The per-trade budget is **0.5% of equity** (`PER_TRADE_RISK_BUDGET_PCT`) and it is a ceiling, not
+a size: the edge (fractional Kelly on the blended win probability), the regime confidence and the
+loss ladder all shrink the amount actually risked, and the edge cap is 1× the governor's number so
+a strong signal can never trade through a de-escalation. The broker's indivisible minimum lot is
+judged against the ceiling rather than the shrunken target, so a `0.17%` minimum lot is executable
+on an account whose adaptive target happened to be `0.15%` — the refusal only stands when even the
+cheapest legal position exceeds the budget, and then it names the budget.
+
 Measured on synthetic data (all three modes, trending / ranging / choppy):
 
 | Regime | Scalp | Day | Swing |

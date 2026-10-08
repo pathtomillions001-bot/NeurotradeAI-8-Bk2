@@ -341,6 +341,80 @@ test("de-escalation shrinks the armed size after losses", () => {
   }
 });
 
+// ── The per-trade risk budget ────────────────────────────────────────────────
+// The desk allows 0.5% of equity per trade. It is a CEILING, not the size: the
+// sizer still decides, from edge and de-escalation, how much of it to use — and
+// the broker's indivisible minimum lot is judged against the ceiling rather than
+// against the (possibly much smaller) adaptive target.
+//
+// This is the reported failure: on a ~$760 account, 0.01 lots risked 0.17% of
+// equity and the old code refused the trade because the adaptive target was
+// 0.15%. An account that could afford 0.17% was told it could not trade at all.
+
+test("the reported minimum-lot refusal no longer blocks an affordable account", () => {
+  const decision = run({
+    account: { equity: 760, freeMargin: 760, dayStartEquity: 760, peakEquity: 760 },
+  });
+
+  assert.equal(decision.armed, true, decision.rejections[0]);
+  assert.ok(
+    decision.sizing!.lots >= spec.volumeMin,
+    `expected at least the broker minimum, got ${decision.sizing!.lots} lots`,
+  );
+  assert.ok(
+    !decision.rejections.some((r) => /Minimum .*lots/.test(r)),
+    `minimum-lot refusal resurfaced: ${decision.rejections.join("; ")}`,
+  );
+  assert.ok(
+    decision.sizing!.effectiveRiskPct <= 0.5 + 1e-9,
+    `risk ${decision.sizing!.effectiveRiskPct}% breached the 0.50% budget`,
+  );
+});
+
+test("the per-trade budget is enforced end to end, and named when it binds", () => {
+  // $200 of equity: the smallest legal lot risks $1.35 = 0.67%, which is inside
+  // the loose 2% policy ceiling but ABOVE the desk's 0.50% per-trade budget.
+  // The refusal must therefore come from the budget, and say so.
+  const decision = run({
+    account: { equity: 200, freeMargin: 200, dayStartEquity: 200, peakEquity: 200 },
+  });
+
+  assert.equal(decision.armed, false);
+  assert.equal(decision.sizing!.ok, false);
+  assert.equal(decision.sizing!.rejection, "below_min_lot");
+  assert.match(decision.rejections.join(" "), /above the 0\.50% per-trade risk budget/);
+});
+
+test("the budget caps risk without fixing it — the ladder still decides the size", () => {
+  const clean = run();
+  assert.equal(clean.armed, true);
+  assert.equal(clean.risk.riskCeilingPct, 0.5);
+  assert.ok(clean.sizing!.effectiveRiskPct <= 0.5 + 1e-9);
+
+  // Three consecutive losses: the governor de-escalates and the same market,
+  // with the same edge, must be taken SMALLER — well inside the budget. That is
+  // only possible because the budget is a ceiling rather than a fixed size.
+  let state = createRiskState();
+  for (let i = 0; i < 3; i++) {
+    state = recordOutcome(state, { symbol: "EURUSD", profit: -20, closedAt: i + 1 });
+  }
+  const after = run({ riskState: state });
+
+  assert.equal(after.armed, true, after.rejections[0]);
+  assert.ok(
+    after.risk.riskPct < clean.risk.riskPct,
+    `governor did not de-escalate: ${clean.risk.riskPct}% -> ${after.risk.riskPct}%`,
+  );
+  assert.ok(
+    after.sizing!.effectiveRiskPct < 0.5 - 1e-9,
+    `de-escalated risk ${after.sizing!.effectiveRiskPct}% still filled the budget`,
+  );
+  assert.ok(
+    after.sizing!.effectiveRiskPct < clean.sizing!.effectiveRiskPct,
+    `size did not shrink: ${clean.sizing!.effectiveRiskPct}% -> ${after.sizing!.effectiveRiskPct}%`,
+  );
+});
+
 // ── Management plan ──────────────────────────────────────────────────────────
 
 test("trending markets trail and allow pyramiding; ranges do neither", () => {

@@ -62,7 +62,24 @@ export interface SizingRequest {
   freeMargin: number;
   /** Margin currently used by open positions, for the post-trade level check. */
   usedMargin: number;
+  /** The adaptive risk target, in percent of equity. Never above the ceiling. */
   riskPct: number;
+  /**
+   * The per-trade risk ceiling this target works inside, in percent of equity.
+   *
+   * THE MINIMUM LOT IS JUDGED AGAINST THIS, NOT AGAINST `riskPct`.
+   *
+   * A broker's smallest position is indivisible, and on a small account it can
+   * cost more than the (possibly edge-shrunk) adaptive target. Refusing there
+   * means refusing a trade the desk's own budget can easily afford — which is
+   * how "Minimum 0.01 lots would risk 1.29 units (0.17% of equity), above the
+   * 0.15% budget" appeared on a $760 account. When the smallest legal lot fits
+   * inside the CEILING, it is taken (and the fact is reported); when it does
+   * not fit even there, the trade is refused and the budget is named.
+   *
+   * Defaults to `limits.maxRiskPct`.
+   */
+  riskCeilingPct?: number;
   leverage: number;
   limits?: Partial<SizingLimits>;
 }
@@ -91,6 +108,8 @@ export interface SizingResult {
   /** Projected margin level (%) once the position is open. */
   projectedMarginLevel: number;
   effectiveRiskPct: number;
+  /** True when the broker's minimum lot was taken inside the risk budget. */
+  minLotApplied: boolean;
   rejection: SizingRejection | null;
   /** Always populated — the terminal shows this verbatim. */
   explanation: string;
@@ -158,6 +177,7 @@ function reject(
     marginRequired: partial.marginRequired ?? 0,
     projectedMarginLevel: partial.projectedMarginLevel ?? 0,
     effectiveRiskPct: 0,
+    minLotApplied: false,
     rejection,
     explanation,
   };
@@ -175,6 +195,12 @@ export function sizePosition(request: SizingRequest): SizingResult {
   if (riskPct <= 0) {
     return reject("invalid_input", "Risk percentage must be greater than zero.");
   }
+  // The ceiling the adaptive target lives inside. Never above the broker-level
+  // hard cap, never below the target itself.
+  const riskCeilingPct = Math.min(
+    Math.max(request.riskCeilingPct ?? limits.maxRiskPct, riskPct),
+    limits.maxRiskPct,
+  );
 
   const long = side === "buy";
   let sl = request.sl;
@@ -225,15 +251,31 @@ export function sizePosition(request: SizingRequest): SizingResult {
   const riskPerLot = riskPoints * pointValue;
   let lots = quantiseVolume(spec, riskBudget / riskPerLot);
 
+  /**
+   * ── The minimum lot, judged against the BUDGET ────────────────────────────
+   *
+   * The adaptive target can be smaller than the broker's smallest trade. The
+   * old code treated that as a refusal, which is the one place rounding up is
+   * *not* a silent over-risk: the ceiling is a number the account can afford by
+   * construction, and the alternative is never taking the trade at all. Above
+   * the ceiling it still refuses — that is the case the guard was written for.
+   */
+  let minLotApplied = false;
   if (lots < spec.volumeMin) {
-    // The broker's smallest trade already risks more than the user allows.
-    // Rounding up here is the most common silent over-risk in retail bots.
     const minRisk = spec.volumeMin * riskPerLot;
-    return reject(
-      "below_min_lot",
-      `Minimum ${spec.volumeMin} lots would risk ${minRisk.toFixed(2)} ${"units"} (${((minRisk / equity) * 100).toFixed(2)}% of equity), above the ${riskPct.toFixed(2)}% budget of ${riskBudget.toFixed(2)}.`,
-      { pointValue, sl, slAdjusted, riskPoints },
-    );
+    const minRiskPct = (minRisk / equity) * 100;
+    if (minRiskPct <= riskCeilingPct + 1e-9) {
+      lots = spec.volumeMin;
+      minLotApplied = true;
+    } else {
+      return reject(
+        "below_min_lot",
+        `Minimum ${spec.volumeMin} lots would risk ${minRisk.toFixed(2)} units (${minRiskPct.toFixed(2)}% of equity), ` +
+          `above the ${riskCeilingPct.toFixed(2)}% per-trade risk budget of ${(equity * (riskCeilingPct / 100)).toFixed(2)}. ` +
+          `The adaptive target was ${riskPct.toFixed(2)}% (${riskBudget.toFixed(2)}).`,
+        { pointValue, sl, slAdjusted, riskPoints },
+      );
+    }
   }
 
   // ── Margin ─────────────────────────────────────────────────────────────────
@@ -279,10 +321,14 @@ export function sizePosition(request: SizingRequest): SizingResult {
     marginRequired,
     projectedMarginLevel,
     effectiveRiskPct: (riskMoney / equity) * 100,
+    minLotApplied,
     rejection: null,
     explanation:
       `${lots} lots — ${riskPoints.toFixed(0)} pts × ${pointValue.toFixed(2)}/pt/lot = ` +
       `${riskMoney.toFixed(2)} at risk (${((riskMoney / equity) * 100).toFixed(2)}% of ${equity.toFixed(2)})` +
+      (minLotApplied
+        ? `; broker minimum lot taken because the adaptive ${riskPct.toFixed(2)}% target could not buy less — inside the ${riskCeilingPct.toFixed(2)}% budget`
+        : "") +
       (slAdjusted ? `; stop widened to the broker minimum of ${spec.stopsLevel} pts` : "") +
       `; cost ${costMoney.toFixed(2)}; margin ${marginRequired.toFixed(2)}.`,
   };

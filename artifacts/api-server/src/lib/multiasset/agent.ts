@@ -184,6 +184,15 @@ export const MIN_COST_COVERAGE = 4;
 const MIN_RISK_ATR = 0.8;
 
 /**
+ * The smallest risk the adaptive sizer may choose, in percent of equity.
+ *
+ * Below this a position is no longer a position — the spread and the commission
+ * dominate it outright. The ceiling lives in `risk.ts`
+ * (`PER_TRADE_RISK_BUDGET_PCT`), because it is a desk-level policy.
+ */
+const MIN_TRADE_RISK_PCT = 0.05;
+
+/**
  * How long an armed plan stays valid, per style.
  *
  * A scalp that has not filled in 60 seconds is no longer the setup that was
@@ -774,19 +783,41 @@ export function evaluate(input: AgentInput): AgentDecision {
   const stopPoints = input.spec.point > 0 ? riskPrice / input.spec.point : 0;
   const maxSpreadPoints = fillSpreadGuard(input.spec, stopPoints, liveSpreadPoints);
 
-  // ── 7. Edge-aware sizing ──────────────────────────────────────────────────
-  // Risk scales with measured edge (fractional Kelly) and with how confident
-  // the regime call is — never with recent losses.
+  // ── 7. Edge-aware sizing inside a real budget ─────────────────────────────
   //
-  // Kelly is driven by the BLENDED win probability: a strategy that looks
-  // great in simulation but has been losing on this desk must shrink, and one
-  // that has been delivering may grow — within the policy ceiling.
+  // THE BUDGET IS A CEILING, NOT A SIZE.
+  //
+  // The desk allows up to 0.5% of equity per trade (`risk.riskCeilingPct`, which
+  // the user can only tighten in settings). What is actually risked is this
+  // agent's call, made from three measured inputs and never from a fixed
+  // number:
+  //
+  //   • the edge       — fractional Kelly on the BLENDED win probability: a
+  //                      strategy that looks great in simulation but has been
+  //                      losing on this desk sizes smaller, one that has been
+  //                      delivering earns its way back toward the governor's
+  //                      allowance (never above it);
+  //   • the regime     — how confident the volatility/trend read is;
+  //   • the loss ladder — the governor's de-escalation after consecutive losses.
+  //
+  // The target is capped at the governor's number, NOT at some multiple of it:
+  // once the budget is a real ceiling, letting a strong edge multiply the risk
+  // back up would quietly undo the de-escalation the ladder exists to apply
+  // (and it would let a "0.5% budget" trade 0.75%). The edge can therefore only
+  // ever vote for LESS risk, which is the safe direction for a multiplier.
+  //
+  // The BUDGET is still handed to sizing, so the broker's indivisible minimum
+  // lot is judged against it rather than against the (possibly much smaller)
+  // target. That is what stops "Minimum 0.01 lots would risk 0.17% of equity,
+  // above the 0.15% budget" refusals on accounts where 0.17% was affordable.
   const kelly = kellyFraction(blendedWinProbability, monteCarlo.rewardRisk, 0.25);
   const edgeScale = clamp(kelly * 10, 0.35, 1.5);
   const riskPct = clamp(
     risk.riskPct * edgeScale * clamp(0.6 + 0.4 * regime.confidence, 0.6, 1),
-    0.05,
-    risk.riskPct * 1.5,
+    MIN_TRADE_RISK_PCT,
+    // The governor's number, and never more than the desk budget — the two can
+    // only differ if a policy was configured above the desk's own ceiling.
+    Math.min(risk.riskPct, risk.riskCeilingPct),
   );
 
   // The trigger is a small displacement beyond the current price in the trade
@@ -819,10 +850,22 @@ export function evaluate(input: AgentInput): AgentDecision {
     freeMargin: input.account.freeMargin,
     usedMargin: input.account.margin,
     riskPct,
+    // The minimum-lot decision is made against the budget, not the target —
+    // see SizingRequest.riskCeilingPct.
+    riskCeilingPct: risk.riskCeilingPct,
     leverage: input.account.leverage,
   });
 
   if (!sizing.ok) rejections.push(sizing.explanation);
+
+  // When the broker's indivisible minimum lot forces more risk than the edge
+  // asked for, say so out loud. The trade is inside the desk budget, but the
+  // user should never have to infer that from the lot size alone.
+  if (sizing.ok && sizing.minLotApplied) {
+    warnings.push(
+      `Broker minimum lot ${sizing.lots} taken: ${sizing.effectiveRiskPct.toFixed(2)}% of equity at risk vs the ${riskPct.toFixed(2)}% adaptive target (per-trade budget ${risk.riskCeilingPct.toFixed(2)}%).`,
+    );
+  }
 
   // ── 8. Arm, or explain ────────────────────────────────────────────────────
   if (rejections.length > 0 || !sizing.ok) {
@@ -976,7 +1019,7 @@ export function evaluate(input: AgentInput): AgentDecision {
       `quality ${qualityScore.toFixed(0)} (${confluence.grade}), ` +
       `${evidence.agreeingFamilies}/${evidence.totalFamilies} families agree, ` +
       `${(blendedWinProbability * 100).toFixed(0)}% win, E ${effectiveExpectancyR.toFixed(2)}R, ` +
-      `risk ${sizing.riskMoney.toFixed(2)}.`,
+      `risk ${sizing.riskMoney.toFixed(2)} (${sizing.effectiveRiskPct.toFixed(2)}% of equity).`,
     evaluatedAt: now,
   };
 }

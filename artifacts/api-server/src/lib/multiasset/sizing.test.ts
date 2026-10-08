@@ -295,6 +295,57 @@ test("punitive commission is charged, never refused", () => {
   assert.ok(result.costMoney / result.riskMoney >= 0.5, `${result.costMoney} / ${result.riskMoney}`);
 });
 
+/**
+ * THE REPORTED REFUSAL:
+ *
+ *   "Minimum 0.01 lots would risk 1.29 units (0.17% of equity), above the 0.15%
+ *    budget of 1.14."
+ *
+ * On a ~$760 account the adaptive target could not buy the broker's smallest
+ * position, and the old code treated that as a hard refusal — an account that
+ * could comfortably afford 0.17% was told it could not trade at all. The
+ * smallest legal lot is indivisible, so it is now judged against the per-trade
+ * BUDGET (0.5%), not against the edge-shrunk target.
+ */
+test("the broker minimum lot is taken when it fits the per-trade budget", () => {
+  const result = sizePosition(
+    request({
+      spec: EURUSD,
+      entry: 1.0845,
+      sl: 1.0833, // 120 points: 0.01 lots risks $1.20 = 0.16% of $760
+      equity: 760,
+      freeMargin: 760,
+      riskPct: 0.15,
+      riskCeilingPct: 0.5,
+    }),
+  );
+  assert.equal(result.ok, true, result.explanation);
+  assert.equal(result.lots, EURUSD.volumeMin);
+  assert.equal(result.minLotApplied, true);
+  assert.ok(result.effectiveRiskPct <= 0.5 + 1e-9, `${result.effectiveRiskPct}%`);
+  // …and the over-risk is stated, not silent.
+  assert.match(result.explanation, /broker minimum lot taken/);
+  assert.match(result.explanation, /0\.50% budget/);
+});
+
+test("a minimum lot that even the budget cannot afford is refused, naming the budget", () => {
+  const result = sizePosition(
+    request({
+      spec: EURUSD,
+      entry: 1.0845,
+      sl: 1.0833, // $1.20 of risk on a $100 account = 1.2%
+      equity: 100,
+      freeMargin: 100,
+      riskPct: 0.15,
+      riskCeilingPct: 0.5,
+    }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.rejection, "below_min_lot");
+  assert.match(result.explanation, /above the 0\.50% per-trade risk budget/);
+  assert.match(result.explanation, /adaptive target was 0\.15%/);
+});
+
 test("shrinks before refusing when margin is tight, and refuses when it cannot", () => {
   // 0.41 lots of EURUSD at 1:500 needs ~$89 margin. Allow only $40 free.
   const shrunk = sizePosition(

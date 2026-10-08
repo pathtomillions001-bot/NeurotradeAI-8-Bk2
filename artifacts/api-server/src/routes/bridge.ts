@@ -11,7 +11,6 @@
 import { Router, type IRouter, type Request } from "express";
 import { randomUUID } from "node:crypto";
 import { logger } from "../lib/logger";
-import { safeSchemaFailureCode } from "@workspace/db";
 import { getBrowserSessionId, linkSessionIdentity } from "../lib/session";
 import {
   acquireConnector,
@@ -91,45 +90,17 @@ const router: IRouter = Router();
 // ── Pairing ──────────────────────────────────────────────────────────────────
 
 router.post("/pairing-code", async (req, res) => {
-  const requestId = randomUUID();
-  let stage = "link_session_identity";
-  try {
-    const sessionId = getBrowserSessionId();
-    await linkSessionIdentity({
-      sessionId,
-      clientId: req.clientId ?? null,
-      cookieId: req.cookies?.neurotrade_session ?? null,
-      tabId: req.isTabSession ? sessionId : null,
-    });
-
-    stage = "persist_pairing_code";
-    const code = await withBridgeLock(sessionId, () =>
-      createPairingCode(sessionId),
-    );
-    if (typeof code !== "string" || !code.trim()) {
-      throw Object.assign(new Error("Pairing-code generator returned an empty value"), {
-        code: "EMPTY_PAIRING_CODE",
-      });
-    }
-    return res.json({ pairingCode: code, expiresInMs: null });
-  } catch (error) {
-    const failureCode = safeSchemaFailureCode(error);
-    logger.error(
-      { requestId, stage, failureCode },
-      "MT5 pairing-code generation failed",
-    );
-    return res.status(503).json({
-      error: {
-        code: failureCode === "SCHEMA_NOT_READY"
-          ? "database_not_ready"
-          : "pairing_code_unavailable",
-        message:
-          "Pairing code generation is temporarily unavailable. Retry in a moment. If it keeps failing, contact support with the request ID. Use only the code displayed after a successful retry.",
-        retryable: true,
-        requestId,
-      },
-    });
-  }
+  const sessionId = getBrowserSessionId();
+  await linkSessionIdentity({
+    sessionId,
+    clientId: req.clientId ?? null,
+    cookieId: req.cookies?.neurotrade_session ?? null,
+    tabId: req.isTabSession ? sessionId : null,
+  });
+  const code = await withBridgeLock(sessionId, () =>
+    createPairingCode(sessionId),
+  );
+  res.json({ pairingCode: code, expiresInMs: null });
 });
 
 /**

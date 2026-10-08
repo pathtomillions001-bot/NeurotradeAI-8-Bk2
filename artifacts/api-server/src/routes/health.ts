@@ -1,28 +1,12 @@
 import { Router, type IRouter } from "express";
 import { HealthCheckResponse } from "@workspace/api-zod";
-import {
-  getSchemaReadiness,
-  isExternalDatabase,
-  pool,
-  safeSchemaFailureCode,
-  schemaReady,
-} from "@workspace/db";
+import { pool, schemaReady } from "@workspace/db";
 import { accountConnectionCount, tickManager } from "../lib/deriv";
 import { logger } from "../lib/logger";
 import { botConsoleIds } from "../lib/bot-catalog";
 import { API_RELEASE } from "../lib/release";
 
 const router: IRouter = Router();
-const MT5_BRIDGE_REQUIRED_COLUMNS = [
-  "session_id",
-  "code_hash",
-  "token_hash",
-  "terminal",
-  "settings",
-  "code_account_key",
-  "connector_id",
-  "connector_seen_ms",
-] as const;
 
 // ── Deriv OAuth client probe (cached 5 minutes) ──────────────────────────────
 //
@@ -145,40 +129,25 @@ router.get("/healthz", async (req, res) => {
     ok: boolean;
     external: boolean;
     tablesMissing: string[];
-    columnsMissing: string[];
-    schemaReadiness: ReturnType<typeof getSchemaReadiness>;
     error?: string;
-  } = {
-    ok: false,
-    external: isExternalDatabase,
-    tablesMissing: [],
-    columnsMissing: [],
-    schemaReadiness: getSchemaReadiness(),
-  };
-  const withTimeout = async <T>(p: Promise<T>, ms: number, label: string): Promise<T> => {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        p,
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(Object.assign(new Error(`${label} timed out`), { code: "DB_HEALTH_TIMEOUT" })), ms);
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  };
+  } = { ok: false, external: false, tablesMissing: [] };
+  const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
+    Promise.race([
+      p,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
+      ),
+    ]);
 
   try {
-    await withTimeout(schemaReady, 3000, "schema bootstrap");
+    await withTimeout(schemaReady, 3000, "schemaReady");
     const { rows } = await withTimeout<{ rows: Array<Record<string, unknown>> }>(
       pool.query(
         `SELECT
           (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'settings') AS settings,
           (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'accounts') AS accounts,
           (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'trades')   AS trades,
-          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive,
-          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'mt5_bridge_links') AS mt5_bridge_links`,
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive`,
       ),
       3000,
       "db healthz query",
@@ -188,38 +157,17 @@ router.get("/healthz", async (req, res) => {
     if (Number(rows[0].accounts) === 0) missing.push("accounts");
     if (Number(rows[0].trades) === 0) missing.push("trades");
     if (Number(rows[0].adaptive) === 0) missing.push("adaptive_thresholds");
-    if (Number(rows[0].mt5_bridge_links) === 0) missing.push("mt5_bridge_links");
-
-    const { rows: bridgeColumns } = await withTimeout<{ rows: Array<{ column_name: string }> }>(
-      pool.query(
-        `SELECT column_name FROM information_schema.columns
-         WHERE table_schema = 'public' AND table_name = 'mt5_bridge_links'`,
-      ),
-      3000,
-      "MT5 bridge schema healthz query",
-    );
-    const presentColumns = new Set(bridgeColumns.map((row) => row.column_name));
-    const columnsMissing = MT5_BRIDGE_REQUIRED_COLUMNS
-      .filter((column) => !presentColumns.has(column))
-      .map((column) => `mt5_bridge_links.${column}`);
-
     dbDiag = {
-      ok: missing.length === 0 && columnsMissing.length === 0,
-      external: isExternalDatabase,
+      ok: missing.length === 0,
+      external: Boolean(process.env.DATABASE_URL),
       tablesMissing: missing,
-      columnsMissing,
-      schemaReadiness: getSchemaReadiness(),
     };
   } catch (err) {
     dbDiag = {
       ok: false,
-      external: isExternalDatabase,
+      external: Boolean(process.env.DATABASE_URL),
       tablesMissing: [],
-      columnsMissing: [],
-      schemaReadiness: getSchemaReadiness(),
-      // Expose only a driver/SQLSTATE identifier, never a connection string,
-      // query parameters, pairing credential or raw database error message.
-      error: safeSchemaFailureCode(err),
+      error: err instanceof Error ? err.message : String(err),
     };
   }
 

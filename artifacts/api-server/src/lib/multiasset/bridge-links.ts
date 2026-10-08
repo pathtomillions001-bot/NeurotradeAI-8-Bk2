@@ -1,9 +1,8 @@
 /** Durable MT5 credentials. Never persist prices or executable orders. */
 import { createHash, randomBytes } from "node:crypto";
-import { pool, schemaReady, waitForSchemaReady } from "@workspace/db";
+import { pool, schemaReady } from "@workspace/db";
 import { getDesk, type DeskState } from "./store";
 
-const PAIRING_SCHEMA_WAIT_MS = 5_000;
 const hash = (value: string) =>
   createHash("sha256").update(value).digest("hex");
 export const bridgeTokenForCode = (code: string) =>
@@ -11,10 +10,7 @@ export const bridgeTokenForCode = (code: string) =>
 export const normalisePairingCode = (code: string) => code.trim().toUpperCase();
 
 export async function createPairingCode(sessionId: string): Promise<string> {
-  // Do not issue credentials until the durable table bootstrap has really
-  // completed. The bounded wait lets direct callers return a controlled 503
-  // while the background DDL retry continues recovering.
-  await waitForSchemaReady(PAIRING_SCHEMA_WAIT_MS);
+  await schemaReady;
   // A reusable code is a credential, not a short PIN. 128 bits of entropy.
   const code = randomBytes(16)
     .toString("hex")

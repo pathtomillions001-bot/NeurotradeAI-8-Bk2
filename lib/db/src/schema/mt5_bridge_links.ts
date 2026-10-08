@@ -1,11 +1,6 @@
 import { pgTable, text, jsonb, bigint } from "drizzle-orm/pg-core";
 
-/**
- * Durable, revocable credentials; never store plaintext pairing codes/tokens.
- * The embedded database bootstrap keeps this column shape current with
- * additive ALTERs so a partial prior migration is repaired without deleting
- * existing token hashes, terminal settings or account claims.
- */
+/** Durable, revocable credentials; never store plaintext pairing codes/tokens. */
 export const mt5BridgeLinksTable = pgTable("mt5_bridge_links", {
   sessionId: text("session_id").primaryKey(),
   codeHash: text("code_hash").notNull().unique(),

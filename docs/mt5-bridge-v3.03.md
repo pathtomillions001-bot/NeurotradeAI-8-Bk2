@@ -111,7 +111,3 @@ API/web build checks run separately.
 availability, or actual broker fills. This Linux sandbox does not contain MT5 or
 MetaEditor. The required terminal/demo smoke test above is a release acceptance
 step, not something the automated source checks can replace.
-
-For the follow-up pairing-code readiness incident, production-evidence limits,
-health checks and safe recovery/deployment steps, see
-[`docs/mt5-pairing-code-recovery.md`](./mt5-pairing-code-recovery.md).

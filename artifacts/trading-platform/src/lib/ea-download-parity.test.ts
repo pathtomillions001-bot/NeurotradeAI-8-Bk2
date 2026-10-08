@@ -53,6 +53,16 @@ test("the downloadable EA is byte-identical to the EA source", () => {
   );
 });
 
+test("EA link writes pass the required file handle to FileWriteString", () => {
+  const source_body = fs.readFileSync(source, "utf8");
+  const writes = [...source_body.matchAll(/\bFileWriteString\s*\(([^;]*?)\)\s*;/g)];
+
+  assert.ok(writes.length > 0, "the EA should persist its link data");
+  for (const [, args] of writes) {
+    assert.match(args, /^\s*handle\s*,/, `FileWriteString must receive its open handle: ${args}`);
+  }
+});
+
 test("the published EA is a build that reports its own version and link", () => {
   const published_body = fs.readFileSync(published, "utf8");
   // The version reported to the Desk must be the one the API expects, or the

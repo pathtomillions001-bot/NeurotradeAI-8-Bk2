@@ -375,7 +375,7 @@ void SaveLink()
    }
    FileWriteString(handle, "v1\n");
    FileWriteString(handle, g_token + "\n");
-   FileWriteString(EffectivePairingCode() + "\n");
+   FileWriteString(handle, EffectivePairingCode() + "\n");
    FileClose(handle);
 }
 

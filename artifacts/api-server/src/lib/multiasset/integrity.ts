@@ -75,12 +75,29 @@ export interface FeedHealth {
  * Smoothed rather than replaced: a single WebRequest round trip is not a
  * precision time measurement, and jitter on one sample should not move the
  * correction the desk applies to every subsequent quote.
+ *
+ * The convergence uses an adaptive alpha: when the new sample is far from the
+ * current estimate (large initial skew or a sudden clock step) the filter
+ * responds quickly (α ≈ 0.6), so the desk stops rejecting good quotes within
+ * two or three heartbeats. Once the estimate has settled it tightens back to
+ * the normal smoothing (α = 0.2) so routine RTT jitter does not ripple into
+ * the staleness gate.
  */
 export function updateClockSkew(desk: DeskState, terminalUtcMs: number, now = Date.now()): number {
   const sample = terminalUtcMs - now;
   if (!Number.isFinite(sample)) return desk.clockSkewMs ?? 0;
   const previous = desk.clockSkewMs;
-  const next = previous === null ? sample : previous * 0.8 + sample * 0.2;
+  if (previous === null) {
+    // First sample — take it as-is.
+    desk.clockSkewMs = Math.round(sample);
+    return desk.clockSkewMs;
+  }
+  // Adaptive alpha: converge fast when the sample is far from the current
+  // estimate (initial skew, clock step), slowly when it is close (jitter).
+  const delta = Math.abs(sample - previous);
+  // 5-second threshold: within that, we assume normal network jitter.
+  const alpha = delta > 5_000 ? 0.6 : 0.2;
+  const next = previous * (1 - alpha) + sample * alpha;
   desk.clockSkewMs = Math.round(next);
   return desk.clockSkewMs;
 }
@@ -96,7 +113,8 @@ export function clockSkewWarning(desk: DeskState): string | null {
   const seconds = Math.round(skew / 1000);
   return (
     `The MT5 terminal's clock is ${Math.abs(seconds)}s ${seconds > 0 ? "ahead of" : "behind"} this server. ` +
-    `Timestamps are being corrected, but quotes will read as ${seconds > 0 ? "fresher" : "older"} than they are.`
+    `Timestamps are being corrected, so quote ages shown are accurate. ` +
+    `${Math.abs(seconds) > 30 ? "Check the VPS or machine running MT5 — a clock this far off will also affect pending-order triggers and economic-calendar times inside the terminal." : ""}`
   );
 }
 

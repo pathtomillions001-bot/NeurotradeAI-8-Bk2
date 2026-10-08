@@ -9,6 +9,7 @@
 
 import { closes } from "./math";
 import { feedHealth, type FeedStatus } from "./integrity";
+import { terminalIsFresh } from "./live";
 import { seriesFor, type DeskState } from "./store";
 import type { AssetClass, Timeframe } from "./types";
 
@@ -102,6 +103,13 @@ export function quoteSnapshot(desk: DeskState, now = Date.now()): DeskInstrument
  *
  * Deliberately small: it is sent once per second per browser, so it carries
  * prices, status and warnings — nothing that can be fetched on demand.
+ *
+ * IMPORTANT: the `stale` flag must use the SAME adaptive window as the REST
+ * `/state` endpoint (`terminalIsFresh` from live.ts). The previous hardcoded
+ * 30 s check caused the SSE stream to report `stale: true` while the REST
+ * API said the terminal was fine — the browser's mode buttons, auto-trade
+ * toggle and analysis queries all gate on this field, so the disagreement
+ * froze the entire Desk the moment one heartbeat was 31 s late.
  */
 export function deskSummary(desk: DeskState, now = Date.now()) {
   return {
@@ -109,7 +117,12 @@ export function deskSummary(desk: DeskState, now = Date.now()) {
     mode: desk.mode,
     autoTrade: desk.autoTrade,
     terminal: desk.terminal
-      ? { login: desk.terminal.login, lastSyncAt: desk.terminal.lastSyncAt, stale: now - desk.terminal.lastSyncAt > 30_000 }
+      ? {
+          login: desk.terminal.login,
+          lastSyncAt: desk.terminal.lastSyncAt,
+          stale: !terminalIsFresh(desk, now),
+          degraded: now - desk.terminal.lastSyncAt > 20_000 && terminalIsFresh(desk, now),
+        }
       : null,
     account: desk.account,
     instruments: quoteSnapshot(desk, now),

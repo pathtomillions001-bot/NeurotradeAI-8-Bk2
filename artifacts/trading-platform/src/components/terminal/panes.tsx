@@ -680,6 +680,27 @@ export function NewsPane({
   const unverified = feed.rawCount === 0 && events.length === 0;
   const ahead = events.filter((event) => !event.passed);
   const behind = events.filter((event) => event.passed);
+
+  /**
+   * ── SAY WHAT WAS READ ─────────────────────────────────────────────────────
+   *
+   * "0 red-folder events" is only meaningful next to the span it describes.
+   * The EA that was being served by the Desk's download button read a
+   * two-hour window and reported nothing about it, so a session with three
+   * red-folder releases still on the terminal's own calendar rendered as "No
+   * high-impact events in the next 24 hours" — a claim for a day the terminal
+   * had never looked at. The covered range is now stated, and when it does not
+   * reach the next 24 hours the pane says that too, instead of quietly
+   * narrowing the promise.
+   */
+  const coveredFrom = typeof feed.windowFromMs === "number" ? feed.windowFromMs : null;
+  const coveredTo = typeof feed.windowToMs === "number" ? feed.windowToMs : null;
+  const coveredLabel =
+    coveredFrom !== null && coveredTo !== null
+      ? `${formatInZone(coveredFrom, timeZone, { hour: "2-digit", minute: "2-digit" })} → ${formatInZone(coveredTo, timeZone, { weekday: "short", hour: "2-digit", minute: "2-digit" })}`
+      : null;
+  const coversNext24h = coveredTo !== null && coveredTo - now >= 20 * 60 * 60_000;
+
   return (
     <div className="divide-y divide-zinc-900">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 pt-2 text-[9px] uppercase tracking-wider text-zinc-600">
@@ -698,13 +719,29 @@ export function NewsPane({
           </span>
         </div>
       ) : events.length === 0 ? (
-        <p className="p-4 text-xs text-zinc-500">No high-impact events in the next 24 hours. The gate stays armed — the calendar is refreshed by the terminal every minute.</p>
+        <div className="p-4 text-xs text-zinc-500">
+          <p>
+            No red-folder releases in the range the terminal read{coveredLabel ? <> (<span className="text-zinc-400">{coveredLabel}</span>)</> : null}.
+            The gate stays armed for new entries — the calendar is re-read by the terminal every minute.
+          </p>
+          {coveredLabel && !coversNext24h && (
+            <p className="mt-2 flex gap-1.5 text-amber-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span>
+                This terminal reports a narrower calendar window than the Desk lists, so a release later in the day would not
+                appear here even though MT5's own Calendar tab shows it. Re-download the EA from this dialog and recompile it in
+                MetaEditor to cover the last 12 h and the next 24 h.
+              </span>
+            </p>
+          )}
+        </div>
       ) : (
         events.map((event) => <NewsRow key={event.id} event={event} timeZone={timeZone} />)
       )}
       <p className="flex items-center gap-1.5 px-3 py-2 text-[9px] text-zinc-600">
         <Clock3 className="h-3 w-3" />Calendar checked {feed.checkedAt ? relativeTime(feed.checkedAt) : "never"}
         {typeof feed.rawCount === "number" && ` · ${feed.rawCount} row${feed.rawCount === 1 ? "" : "s"} read from MT5`}
+        {coveredLabel && ` · covered ${coveredLabel}`}
         {" "}· new entries fail closed if this feed goes stale.
       </p>
     </div>

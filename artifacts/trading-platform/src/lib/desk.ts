@@ -382,6 +382,12 @@ export interface NewsFeed {
   rawCount?: number;
   /** Rows that survived the red-folder filter. */
   redCount?: number;
+  /**
+   * The range (UTC epoch ms) the terminal actually read, when it reports one.
+   * "0 red-folder events" is only meaningful next to the window it describes.
+   */
+  windowFromMs?: number | null;
+  windowToMs?: number | null;
 }
 
 export interface DeskStateResponse {
@@ -544,7 +550,18 @@ export const deskApi = {
   settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy; timezone: string; timezones: DeskTimezone[] }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
   resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
   projection: (params: { winProbability: number; rewardRisk: number; trades: number }) => request<{ assumptions: Record<string, number>; disciplined: ProjectionResult; martingale: ProjectionResult; note: string }>(`/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`),
-  pairingCode: () => request<{ pairingCode: string; expiresInMs: number }>("/bridge/pairing-code", { method: "POST" }),
+  /**
+   * The session's pairing code.
+   *
+   * Issuing is idempotent: the same code comes back until the user unlinks the
+   * terminal or explicitly rotates it, so re-opening the setup dialog can never
+   * invalidate the code the EA is currently retrying with.
+   */
+  pairingCode: (rotate = false) =>
+    request<{ pairingCode: string; expiresInMs: number; reused?: boolean }>("/bridge/pairing-code", {
+      method: "POST",
+      body: JSON.stringify({ rotate }),
+    }),
   bridgeStatus: () => request<{
     linked: boolean;
     login?: number;
@@ -564,6 +581,16 @@ export const deskApi = {
     calendarAgeMs?: number | null;
     clockSkewMs?: number | null;
     lastQuoteAgeMs?: number | null;
+    /**
+     * The link is durable: it survives closing MT5, closing the browser and a
+     * server redeploy. Only "unlink" ends it.
+     */
+    durable?: boolean;
+    /** Version the terminal reported, or null before the first heartbeat. */
+    eaVersion?: string | null;
+    expectedEaVersion?: string;
+    /** True when the connected EA is older than the one the Desk ships. */
+    eaUpdateAvailable?: boolean;
     /**
      * Why the EA's last pairing attempt was refused, or null.
      *

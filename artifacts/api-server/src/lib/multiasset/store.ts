@@ -135,9 +135,34 @@ export interface DeskState {
     server: string;
     company: string;
     bridgeToken: string;
+    /**
+     * EVERY token currently valid for this link.
+     *
+     * A link is a (Desk, account) pair, not a single socket: an MT5 terminal
+     * that restarts, or a second chart running the same EA, presents the same
+     * pairing code again. Rotating the token in that situation made two EA
+     * instances invalidate each other in a loop — one re-paired, the other's
+     * next heartbeat got a 401, it re-paired, and so on, with neither ever
+     * staying connected long enough to receive a command. Adding instead of
+     * replacing means both instances share one link and the outbox still
+     * delivers each command exactly once (drainOutbox removes it).
+     */
+    tokens: string[];
     pairedAt: number;
     lastSyncAt: number;
     lastSeq: number;
+    /**
+     * Identity of the EA instance that produced `lastSeq`.
+     *
+     * `seq` is only meaningful per instance: two instances (or an instance
+     * that restarted) interleave their counters, and comparing them across
+     * instances made the desk believe the terminal had restarted on almost
+     * every beat — which cleared armed plans and silently discarded the
+     * setups the user had just approved.
+     */
+    instanceId: string | null;
+    /** Version the EA reports, so a stale download is visible in the Desk. */
+    eaVersion: string | null;
     /**
      * Heartbeat interval the EA reports, in ms. Zero when it has not said —
      * `live.ts` then falls back to the fixed staleness window.
@@ -337,12 +362,68 @@ export function issueBridgeToken(sessionId: string): string {
   return token;
 }
 
+/**
+ * Re-register a token this process has not seen.
+ *
+ * After a restart or redeploy the mapping is gone but the EA still holds a
+ * valid token and the durable link row still proves it was issued. Adoption is
+ * what turns "the Desk forgot you" into "the next heartbeat reconnects you".
+ */
+export function adoptBridgeToken(token: string, sessionId: string): void {
+  tokenToSession.set(token, sessionId);
+}
+
+/** Live tokens for a desk's link, tolerating state restored by an older build. */
+export function bridgeTokensFor(desk: DeskState): string[] {
+  const terminal = desk.terminal;
+  if (!terminal) return [];
+  const tokens = terminal.tokens ?? (terminal.tokens = []);
+  if (terminal.bridgeToken && !tokens.includes(terminal.bridgeToken)) tokens.push(terminal.bridgeToken);
+  return tokens;
+}
+
+/**
+ * Attach a token to a link without invalidating its siblings, and keep the
+ * primary token pointing at the newest one.
+ */
+export function rememberBridgeToken(desk: DeskState, token: string): void {
+  tokenToSession.set(token, desk.sessionId);
+  if (!desk.terminal) return;
+  const tokens = bridgeTokensFor(desk);
+  if (!tokens.includes(token)) tokens.push(token);
+  desk.terminal.bridgeToken = token;
+  // Bounded: a link cannot accumulate tokens forever.
+  const MAX_TOKENS = 8;
+  while (tokens.length > MAX_TOKENS) {
+    const dropped = tokens.shift();
+    if (dropped) tokenToSession.delete(dropped);
+  }
+}
+
+/** Revoke every token a link holds. Returns the tokens that were revoked. */
+export function revokeBridgeTokens(desk: DeskState): string[] {
+  const tokens = bridgeTokensFor(desk);
+  for (const token of tokens) tokenToSession.delete(token);
+  if (desk.terminal) {
+    desk.terminal.tokens = [];
+    desk.terminal.bridgeToken = "";
+  }
+  return tokens;
+}
+
 export function sessionForToken(token: string): string | null {
   return tokenToSession.get(token) ?? null;
 }
 
 export function revokeBridgeToken(token: string): void {
   tokenToSession.delete(token);
+  for (const desk of desks.values()) {
+    const tokens = desk.terminal?.tokens;
+    if (!tokens) continue;
+    const index = tokens.indexOf(token);
+    if (index >= 0) tokens.splice(index, 1);
+    if (desk.terminal?.bridgeToken === token) desk.terminal.bridgeToken = tokens[0] ?? "";
+  }
 }
 
 // ── Market data ──────────────────────────────────────────────────────────────
@@ -483,6 +564,31 @@ export function cancelPlan(desk: DeskState, planId: string): boolean {
   if (!desk.plans.delete(planId)) return false;
   enqueueCommand(desk, { id: randomUUID(), type: "cancel_plan", planId });
   return true;
+}
+
+/**
+ * Hand every still-valid armed plan back to the terminal.
+ *
+ * WHY: plans live in two places — the Desk's own record and the EA's local
+ * array. When the EA restarts (terminal rebuild, chart reload, VPS reboot) or a
+ * second instance takes over the link, the terminal's copy is gone while the
+ * Desk still shows the setup as armed. Before, that mismatch was never
+ * repaired: the plan sat on screen until it expired untriggered and the user
+ * saw "armed plans but no executions". Re-sending is idempotent — the EA keys
+ * plans by id — so the command simply re-arms the same plan with the same
+ * trigger, stop and target.
+ *
+ * Expired plans are skipped: re-arming a setup whose window has closed would
+ * be trading a stale decision, which is the one thing the Desk never does.
+ */
+export function resendArmedPlans(desk: DeskState, now = Date.now()): number {
+  let sent = 0;
+  for (const plan of desk.plans.values()) {
+    if (plan.expiresAt <= now) continue;
+    enqueueCommand(desk, { id: randomUUID(), type: "arm_plan", plan });
+    sent++;
+  }
+  return sent;
 }
 
 /** Drop plans past their TTL. The EA independently enforces the same expiry. */

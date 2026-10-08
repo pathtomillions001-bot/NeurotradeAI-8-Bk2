@@ -52,6 +52,10 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - `artifacts/api-server/src/routes/bots.ts` — `/api/bots` routes (catalogue, status, scan, start, stop)
 - `artifacts/trading-platform/src/pages/bots.tsx` — AI Bot Arena page
 - `artifacts/trading-platform/src/components/bot-console.tsx` — per-bot deploy console
+- `artifacts/api-server/src/lib/multiasset/bridge-links.ts` — the MT5 bridge's durable layer: pairing codes and bearer links in Postgres (tokens stored hashed, sliding TTL, explicit revocation), so a restart reconnects instead of stranding the terminal on a dead code
+- `artifacts/api-server/src/routes/bridge.ts` — MT5 bridge API (`/pairing-code` is idempotent until unlink, `/pair` adds to a link instead of rotating it, `/sync` rehydrates a Desk from the durable link, reports EA version skew)
+- `artifacts/mt5-ea/NeurotradeBridge.mq5` — the EA the Desk ships (v3.03); also served verbatim from `artifacts/trading-platform/public/downloads/`, with a parity test
+- `docs/mt5-bridge-durable-link.md` — why the link is durable, what the calendar window covers, and how the 401 loop happened
 - `artifacts/api-server/src/lib/deriv.ts` — Deriv WebSocket API client + market definitions
 - `artifacts/trading-platform/src/` — React frontend (pages, components, hooks)
 
@@ -96,6 +100,9 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - **Connect**: Deriv API token connection screen
 
 - **Historical Twin-Rail design (removed before the current manual-trading change)**: paired-contract execution is not an available trading path in the current app.
+
+- **An MT5 link ends only when the user says so.** Pairing codes and bearer tokens are persisted (`mt5_pairing_codes`, `mt5_bridge_links`; tokens hashed), the EA saves the same link inside the terminal's common Files folder, and `/api/bridge/sync` rebuilds a Desk whose process memory was lost. Closing MT5, closing the browser or redeploying the API all reconnect by themselves, a 401 is printed once and retried slowly instead of every 5 seconds, and `seq` is tracked per EA instance so a second chart re-receives armed plans rather than being read as a terminal restart. See `docs/mt5-bridge-durable-link.md`.
+- **The news pane states the window it read.** The EA fetches `[now − 12 h, now + 24 h]` — the same span the Desk lists — and publishes `windowFromMs`/`windowToMs` with `rawCount`/`redCount`, so "0 red-folder events" can never again be rendered as an all-clear for a day the terminal never looked at. A build-time parity test keeps the downloadable EA identical to `artifacts/mt5-ea/`.
 
 ## User preferences
 

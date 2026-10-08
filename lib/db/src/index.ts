@@ -5,6 +5,7 @@ import pg from "pg";
 import fs from "node:fs";
 import path from "node:path";
 import * as schema from "./schema";
+import { createSchemaBootstrap } from "./schema-readiness";
 
 const { Pool } = pg;
 
@@ -19,6 +20,21 @@ CREATE TABLE IF NOT EXISTS mt5_bridge_links (
   connector_id TEXT,
   connector_seen_ms BIGINT NOT NULL DEFAULT 0
 );
+-- Additive repair for a partially-created/older pairing table. Do not drop or
+-- rewrite credential rows: existing token hashes, terminal settings and claims
+-- must survive a retry/redeploy. New code hashes are always set by the insert.
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS code_hash TEXT;
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS token_hash TEXT;
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS terminal JSONB;
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS settings JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS code_account_key TEXT;
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS connector_id TEXT;
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS connector_seen_ms BIGINT NOT NULL DEFAULT 0;
+-- Keep the uniqueness guarantees required by durable, session-scoped pairing.
+-- These names match PostgreSQL's implicit indexes on the fresh-table constraints.
+CREATE UNIQUE INDEX IF NOT EXISTS mt5_bridge_links_pkey ON mt5_bridge_links (session_id);
+CREATE UNIQUE INDEX IF NOT EXISTS mt5_bridge_links_code_hash_key ON mt5_bridge_links (code_hash);
+CREATE UNIQUE INDEX IF NOT EXISTS mt5_bridge_links_token_hash_key ON mt5_bridge_links (token_hash);
 
 CREATE TABLE IF NOT EXISTS accounts (
   id SERIAL PRIMARY KEY,
@@ -328,25 +344,18 @@ const useExternalPostgres = Boolean(
     !process.env.DATABASE_URL.includes("pglite")
 );
 
+/** True only for a PostgreSQL connection; `pglite:memory` is local/test storage. */
+export const isExternalDatabase = useExternalPostgres;
+
 let poolInstance: any;
 let pgliteInstance: PGlite | null = null;
 let dbInstance: NodePgDatabase<typeof schema>;
 
 /**
- * Resolves once the idempotent INIT_DDL has been applied (or definitively
- * attempted) against the backing database. Callers that need tables/columns
- * to exist should await this before their first query.
- *
- * WHY: on Railway the API runtime container has no pnpm/drizzle-kit, so the
- * previous "run drizzle-kit push at boot" strategy silently failed and every
- * settings/accounts/markets query died with `relation "settings" does not
- * exist`. Running the CREATE TABLE IF NOT EXISTS DDL directly over the pool
- * guarantees the schema exists regardless of build tooling availability.
+ * The API runtime applies this embedded DDL directly; schemaReady below only
+ * resolves after every statement succeeds. The retryable readiness helper
+ * keeps transient database outages from being mistaken for a successful boot.
  */
-let resolveSchemaReady!: () => void;
-export const schemaReady: Promise<void> = new Promise<void>((resolve) => {
-  resolveSchemaReady = resolve;
-});
 
 if (useExternalPostgres) {
   // Railway / managed Postgres. Prefer DATABASE_URL from the plugin.
@@ -407,46 +416,28 @@ async function applySchemaDdl(): Promise<void> {
 }
 
 /**
- * Keep retrying the DDL until it succeeds, then resolve schemaReady.
- *
- * WHY a retry loop: the first boot attempt can hit a transient Postgres outage
- * (on Railway a simultaneous redeploy produced `connect ETIMEDOUT …:5432` for
- * minutes). A one-shot DDL then left the schema permanently missing even after
- * the network recovered, so settings/accounts/markets stayed broken until a
- * manual redeploy. Retrying in the background self-heals as soon as Postgres
- * answers.
+ * Keep retrying the idempotent/additive DDL until it succeeds. `schemaReady`
+ * now means exactly that: the full schema apply completed successfully. A
+ * transient outage leaves it pending while the retry loop heals the database;
+ * request handlers use bounded waits and return 503 rather than hanging.
  */
-let ddlSucceeded = false;
-async function ddlRetryLoop(): Promise<void> {
-  let attempt = 0;
-  while (!ddlSucceeded) {
-    attempt++;
-    try {
-      await applySchemaDdl();
-      ddlSucceeded = true;
-      console.log(
-        attempt === 1
-          ? "[db] Initial DDL applied"
-          : `[db] Initial DDL applied after ${attempt} attempts`,
-      );
-      resolveSchemaReady();
-    } catch (err) {
-      if (attempt === 1) resolveSchemaReady(); // don't block routes on a dead DB
-      const waitMs = Math.min(30_000, 5_000 * attempt);
-      console.error(
-        `[db] DDL attempt ${attempt} failed — retrying in ${Math.round(waitMs / 1000)}s:`,
-        err instanceof Error ? err.message : err,
-      );
-      await new Promise((r) => setTimeout(r, waitMs));
-    }
-  }
-}
-void ddlRetryLoop().catch((err) => {
-  console.error("[db] DDL retry loop crashed:", err);
-  resolveSchemaReady();
+const schemaBootstrap = createSchemaBootstrap({
+  apply: applySchemaDdl,
+  retryDelayMs: (attempt) => Math.min(30_000, 5_000 * attempt),
+  onFailure: ({ attempt, failureCode, retryInMs }) => {
+    console.error(
+      `[db] DDL attempt ${attempt} failed (${failureCode}) — retrying in ${Math.round(retryInMs / 1000)}s`,
+    );
+  },
 });
+schemaBootstrap.start();
+
+export const schemaReady = schemaBootstrap.ready;
+export const getSchemaReadiness = schemaBootstrap.status;
+export const waitForSchemaReady = schemaBootstrap.waitForReady;
 
 export const pool = poolInstance;
 export const db = dbInstance;
 
 export * from "./schema";
+export * from "./schema-readiness";

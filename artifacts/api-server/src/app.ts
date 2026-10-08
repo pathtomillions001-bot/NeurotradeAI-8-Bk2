@@ -4,6 +4,7 @@ import cookieParser from "cookie-parser";
 import pinoHttp from "pino-http";
 import { execSync } from "child_process";
 import { resolve } from "path";
+import { randomUUID } from "node:crypto";
 import router from "./routes";
 import { logger } from "./lib/logger";
 import { loadPersistedToken } from "./routes/auth";
@@ -15,7 +16,14 @@ import { loadRecoveryStateFromDb, resumeEngineIfEnabled, forceDayReset } from ".
 import { registerMidnightCallback, scheduleNextMidnight } from "./lib/tz";
 import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confidence";
 import { startTradeReconciler } from "./lib/trade-reconciler";
-import { pool, db, marketWinRatesTable, schemaReady } from "@workspace/db";
+import {
+  getSchemaReadiness,
+  pool,
+  db,
+  marketWinRatesTable,
+  safeSchemaFailureCode,
+  schemaReady,
+} from "@workspace/db";
 import { browserSession } from "./lib/session";
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables or columns are missing. */
@@ -64,7 +72,10 @@ async function bootstrapDb() {
       } catch (pushErr) {
         // Embedded PGlite has no DATABASE_URL for drizzle-kit; the explicit
         // ALTER TABLE statements below still apply the missing columns.
-        logger.error({ err: pushErr }, "DB schema push unavailable — applying fallback column migrations");
+        logger.error(
+          { failureCode: safeSchemaFailureCode(pushErr) },
+          "DB schema push unavailable — applying fallback column migrations",
+        );
       }
     }
 
@@ -101,11 +112,35 @@ async function bootstrapDb() {
     for (const statement of sessionMigrations) await pool.query(statement);
     logger.info("Browser-session data isolation schema verified");
   } catch (err) {
-    logger.error({ err }, "DB bootstrap failed — continuing, routes will surface errors");
+    logger.error(
+      { failureCode: safeSchemaFailureCode(err) },
+      "DB bootstrap failed — continuing, routes will surface errors",
+    );
   }
 }
 
 const dbReady = bootstrapDb();
+const DB_READY_TIMEOUT_MS = 5_000;
+
+function waitForDatabaseBootstrap(timeoutMs: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(Object.assign(new Error("Database bootstrap deadline elapsed"), { code: "DB_NOT_READY" })),
+      timeoutMs,
+    );
+    dbReady.then(
+      () => {
+        clearTimeout(timeout);
+        resolve();
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
+}
+
 const app: Express = express();
 app.set("trust proxy", 1);
 
@@ -142,12 +177,29 @@ app.use("/api/bridge", express.json({ limit: "12mb" }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 // Never let an API request race a production schema migration during startup.
-app.use(async (_req, res, next) => {
+// The health endpoint deliberately bypasses this gate so it can report the
+// schema retry state while the database is unavailable. All other requests get
+// a bounded, structured 503 rather than hanging or hitting a partial schema.
+app.use(async (req, res, next) => {
+  if (req.path === "/api/healthz") return next();
   try {
-    await dbReady;
-    next();
+    await waitForDatabaseBootstrap(DB_READY_TIMEOUT_MS);
+    return next();
   } catch {
-    res.status(503).json({ error: "Database initialization is still unavailable" });
+    const requestId = randomUUID();
+    const readiness = getSchemaReadiness();
+    logger.warn(
+      { requestId, schemaReadiness: readiness },
+      "Database bootstrap did not finish before request readiness deadline",
+    );
+    return res.status(503).json({
+      error: {
+        code: "database_not_ready",
+        message: "The database is still initializing. Retry in a few seconds.",
+        retryable: true,
+        requestId,
+      },
+    });
   }
 });
 

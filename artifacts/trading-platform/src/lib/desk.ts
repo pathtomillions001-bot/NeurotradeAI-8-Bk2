@@ -6,6 +6,8 @@
  * chart series for presentation.
  */
 
+import { deskApiErrorFromResponse, parsePairingCodeResponse } from "./pairing-code";
+
 const BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
 export function deskUrl(path: string): string {
   return `${BASE}/api${path}`;
@@ -508,15 +510,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
   });
   if (!response.ok) {
-    let message = `${response.status} ${response.statusText}`;
+    let body: unknown;
     try {
-      const body = await response.json();
-      if (body?.error) message = body.error;
-      if (Array.isArray(body?.rejections) && body.rejections.length > 0) message = `${message}: ${body.rejections[0]}`;
+      body = await response.json();
     } catch {
-      // non-JSON response
+      // Some older Express defaults return HTML; retain a safe status fallback.
     }
-    throw new Error(message);
+    throw deskApiErrorFromResponse(response.status, response.statusText, body);
   }
   return (await response.json()) as T;
 }
@@ -544,7 +544,10 @@ export const deskApi = {
   settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy; timezone: string; timezones: DeskTimezone[] }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
   resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
   projection: (params: { winProbability: number; rewardRisk: number; trades: number }) => request<{ assumptions: Record<string, number>; disciplined: ProjectionResult; martingale: ProjectionResult; note: string }>(`/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`),
-  pairingCode: () => request<{ pairingCode: string; expiresInMs: number | null }>("/bridge/pairing-code", { method: "POST" }),
+  pairingCode: async () =>
+    parsePairingCodeResponse(
+      await request<unknown>("/bridge/pairing-code", { method: "POST" }),
+    ),
   bridgeStatus: () => request<{
     linked: boolean;
     login?: number;

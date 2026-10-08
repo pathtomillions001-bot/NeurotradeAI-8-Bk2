@@ -43,6 +43,7 @@ import {
 } from "@/components/terminal/panes";
 import { BridgeDialog } from "@/components/terminal/bridge-dialog";
 import { useDeskStream } from "@/hooks/use-desk-stream";
+import { DESK_PREVIEW, previewDeskApi } from "@/lib/desk-preview";
 import {
   DEFAULT_DESK_TIMEZONE,
   MODE_ANALYSIS_LABEL,
@@ -56,6 +57,8 @@ import {
 const REFRESH_MS = 5_000;
 
 export default function Terminal() {
+  // Sandbox-only simulated broker feed (lib/desk-preview.ts). Production always uses `deskApi`.
+  const api = DESK_PREVIEW ? previewDeskApi : deskApi;
   const queryClient = useQueryClient();
   const [symbol, setSymbol] = useState("");
   const [bridgeOpen, setBridgeOpen] = useState(false);
@@ -63,7 +66,7 @@ export default function Terminal() {
 
   const state = useQuery({
     queryKey: ["desk-state"],
-    queryFn: deskApi.state,
+    queryFn: api.state,
     refetchInterval: REFRESH_MS,
   });
   const terminal = state.data?.terminal ?? null;
@@ -77,17 +80,17 @@ export default function Terminal() {
   // Quotes, account, positions and plans are pushed on every terminal
   // heartbeat. The polled `state` query is the fallback and the source of
   // everything that does not change tick-by-tick.
-  const stream = useDeskStream(Boolean(terminal));
+  const stream = useDeskStream(Boolean(terminal) && !DESK_PREVIEW);
 
   const markets = useQuery({
     queryKey: ["desk-markets"],
-    queryFn: deskApi.markets,
+    queryFn: api.markets,
     enabled: Boolean(terminal),
     refetchInterval: 30_000,
   });
   const instruments = useQuery({
     queryKey: ["desk-instruments"],
-    queryFn: deskApi.instruments,
+    queryFn: api.instruments,
     enabled: Boolean(terminal),
     // While the stream is actually delivering prices, polling is just a slow
     // fallback. The moment data stops flowing (socket open, no events) the
@@ -96,19 +99,19 @@ export default function Terminal() {
   });
   const performance = useQuery({
     queryKey: ["desk-performance"],
-    queryFn: deskApi.performance,
+    queryFn: api.performance,
     enabled: Boolean(terminal),
     refetchInterval: 30_000,
   });
   const analysis = useQuery({
     queryKey: ["desk-analysis", symbol, mode],
-    queryFn: () => deskApi.analysis(symbol, mode),
+    queryFn: () => api.analysis(symbol, mode),
     enabled: terminalLive && Boolean(symbol),
     refetchInterval: 20_000,
   });
   const scan = useQuery({
     queryKey: ["desk-scan", mode, selectedMarkets],
-    queryFn: () => deskApi.scan(mode),
+    queryFn: () => api.scan(mode),
     enabled: terminalLive && selectedMarkets.length > 0,
     refetchInterval: 30_000,
   });
@@ -134,7 +137,7 @@ export default function Terminal() {
   }, [queryClient]);
 
   const settings = useMutation({
-    mutationFn: (patch: Record<string, unknown>) => deskApi.settings(patch),
+    mutationFn: (patch: Record<string, unknown>) => api.settings(patch),
     onSuccess: () => {
       setActionError(null);
       invalidateDesk();
@@ -142,7 +145,7 @@ export default function Terminal() {
     onError: (error: Error) => setActionError(error.message),
   });
   const arm = useMutation({
-    mutationFn: () => deskApi.arm(symbol, mode),
+    mutationFn: () => api.arm(symbol, mode),
     onSuccess: () => {
       setActionError(null);
       invalidateDesk();
@@ -150,21 +153,21 @@ export default function Terminal() {
     onError: (error: Error) => setActionError(error.message),
   });
   const flatten = useMutation({
-    mutationFn: () => deskApi.flatten("Manual Desk kill switch"),
+    mutationFn: () => api.flatten("Manual Desk kill switch"),
     onSuccess: invalidateDesk,
     onError: (error: Error) => setActionError(error.message),
   });
   const closePosition = useMutation({
-    mutationFn: (ticket: number) => deskApi.closePosition(ticket),
+    mutationFn: (ticket: number) => api.closePosition(ticket),
     onSuccess: invalidateDesk,
     onError: (error: Error) => setActionError(error.message),
   });
   const resumeSymbol = useMutation({
-    mutationFn: (value: string) => deskApi.resumeSymbol(value),
+    mutationFn: (value: string) => api.resumeSymbol(value),
     onSuccess: invalidateDesk,
   });
   const cancelPlan = useMutation({
-    mutationFn: (id: string) => deskApi.cancelPlan(id),
+    mutationFn: (id: string) => api.cancelPlan(id),
     onSuccess: invalidateDesk,
   });
 
@@ -188,8 +191,10 @@ export default function Terminal() {
     settings.mutate({ watchlist: next });
   };
 
-  const sourceLabel = !terminal ? "MT5 REQUIRED" : terminal.stale ? "MT5 STALE" : !account ? "MT5 WARMING" : "MT5 LIVE";
-  const sourceClass = !terminal || !account
+  const sourceLabel = DESK_PREVIEW ? "SANDBOX PREVIEW" : !terminal ? "MT5 REQUIRED" : terminal.stale ? "MT5 STALE" : !account ? "MT5 WARMING" : "MT5 LIVE";
+  const sourceClass = DESK_PREVIEW
+    ? "border-violet-400/40 bg-violet-500/10 text-violet-200"
+    : !terminal || !account
     ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
     : terminal.stale
       ? "border-red-500/40 bg-red-500/10 text-red-300"
@@ -472,46 +477,21 @@ function CountBadge({ children, tone }: { children: React.ReactNode; tone?: "cya
 
 function EmptyDesk({ onConnect }: { onConnect: () => void }) {
   return (
-    <section className="relative mx-auto max-w-4xl overflow-hidden rounded-3xl border border-white/[0.08] bg-zinc-950/70 p-6 shadow-[0_20px_60px_-20px_rgba(0,0,0,0.7)] backdrop-blur-xl sm:p-10">
-      <div className="pointer-events-none absolute -right-24 -top-24 h-72 w-72 rounded-full bg-cyan-400/10 blur-3xl" />
-      <div className="pointer-events-none absolute -bottom-28 -left-16 h-64 w-64 rounded-full bg-emerald-500/10 blur-3xl" />
-      <div className="relative flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-start gap-4">
-          <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-400/25 to-emerald-500/10 ring-1 ring-inset ring-cyan-300/30">
-            <Link2 className="h-6 w-6 text-cyan-300" />
-          </div>
-          <div className="min-w-0">
-            <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-cyan-300/80">Standby</p>
-            <h2 className="mt-1 text-xl font-semibold tracking-tight text-zinc-50 sm:text-2xl">Connect MT5 to bring the Desk online</h2>
-            <p className="mt-2 max-w-xl text-sm leading-relaxed text-zinc-400">
-              No balance, price, position, scanner result or agent decision is shown until your MetaTrader 5 terminal provides it. The Desk runs only on your broker’s live data.
-            </p>
-          </div>
-        </div>
-        <button
-          type="button"
-          onClick={onConnect}
-          className="group inline-flex w-full shrink-0 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-400 to-emerald-400 px-5 py-2.5 text-sm font-semibold text-zinc-950 shadow-[0_0_30px_-6px_rgba(34,211,238,0.6)] transition-transform hover:-translate-y-px sm:w-auto"
-        >
-          Set up MT5 bridge
-          <span className="transition-transform group-hover:translate-x-0.5">→</span>
-        </button>
+    <section className="mx-auto max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-sm sm:p-8">
+      <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-emerald-500/30 bg-emerald-500/10"><Link2 className="h-6 w-6 text-emerald-400" /></div>
+        <div className="min-w-0 flex-1"><h2 className="text-lg font-semibold text-zinc-100">Connect MT5 to start the Desk</h2><p className="mt-1 max-w-xl text-sm leading-relaxed text-zinc-400">No balance, price, position, scanner result or agent decision is shown until your MetaTrader 5 terminal provides it. The Desk only works with your broker’s live terminal data.</p></div>
+        <button type="button" onClick={onConnect} className="w-full shrink-0 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 sm:w-auto">Set up MT5 bridge</button>
       </div>
-      <ol className="relative mt-8 grid gap-3 border-t border-white/[0.06] pt-6 sm:grid-cols-3">
-        <InfoStep number="01" title="Download & attach">Attach the resilient Neurotrade MT5 EA (v3 or later) to any chart. It stays attached and retries pairing instead of failing initialization.</InfoStep>
-        <InfoStep number="02" title="Pair securely">Add this platform origin to MT5’s WebRequest allowlist and paste the one-time pairing code. No MT5 password leaves your terminal.</InfoStep>
-        <InfoStep number="03" title="Select broker markets">The EA discovers the complete broker catalogue. Choose any number of forex, crypto, indices, stocks, metals, futures or other supported symbols.</InfoStep>
-      </ol>
+      <div className="mt-6 grid gap-3 border-t border-zinc-800 pt-5 sm:grid-cols-3">
+        <InfoStep number="1" title="Download & attach">Attach the resilient Neurotrade MT5 EA (v3 or later) to any chart. It stays attached and retries pairing instead of failing initialization.</InfoStep>
+        <InfoStep number="2" title="Pair securely">Add this platform origin to MT5’s WebRequest allowlist and paste the one-time pairing code. No MT5 password leaves your terminal.</InfoStep>
+        <InfoStep number="3" title="Select broker markets">The EA discovers the complete broker catalogue. Choose any number of forex, crypto, indices, stocks, metals, futures or other supported symbols.</InfoStep>
+      </div>
     </section>
   );
 }
 
 function InfoStep({ number, title, children }: { number: string; title: string; children: React.ReactNode }) {
-  return (
-    <li className="group rounded-2xl border border-white/[0.06] bg-white/[0.02] p-4 transition-colors hover:border-cyan-400/20 hover:bg-white/[0.035]">
-      <span className="font-mono text-[11px] font-semibold text-cyan-300/80">{number}</span>
-      <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
-      <p className="mt-1.5 text-xs leading-relaxed text-zinc-500">{children}</p>
-    </li>
-  );
+  return <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3"><span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-[10px] font-semibold text-emerald-300">{number}</span><h3 className="mt-2 text-xs font-semibold text-zinc-200">{title}</h3><p className="mt-1 text-[11px] leading-relaxed text-zinc-500">{children}</p></div>;
 }

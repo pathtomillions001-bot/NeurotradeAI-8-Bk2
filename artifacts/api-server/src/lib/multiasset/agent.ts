@@ -18,7 +18,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { atr, clamp, closes, hashSeed, lastSwing, logReturns, swings } from "./math";
+import { atr, clamp, closes, hashSeed, lastSwing, logReturns } from "./math";
 import { fillSpreadGuard, slippageAllowancePoints } from "./asset-costs";
 import {
   scoreConfluence,
@@ -30,8 +30,7 @@ import { buildEvidence, MODE_MIN_AGREEING_FAMILIES, type EvidenceResult } from "
 import { markovFromPrices, directionalPersistence, sampleConfidence } from "./markov";
 import { betaPosterior, blendProbability, garchVolatility } from "./analytics";
 import { assessRegime, isRegimeTradeable } from "./regime";
-import { simulateTrade, type MonteCarloResult } from "./montecarlo";
-import { shrinkDrift } from "./quant";
+import { bestTarget, simulateTrade, type MonteCarloResult } from "./montecarlo";
 import { evaluateRisk, type RiskDecision, type RiskPolicy, type RiskState } from "./risk";
 import { kellyFraction, pointValuePerLot, priceToPoints, sizePosition, type SizingResult } from "./sizing";
 import { assessNewsGate, type NewsGate } from "./news";
@@ -135,14 +134,13 @@ export interface AgentDecision {
  * Entry timeframe used for stop placement and horizons, per style.
  *
  * These sit inside each mode's analysis band by construction:
- *   scalp → M1 (inside S10–M3). The scalp hold is five minutes, and the
- *            horizon is counted in entry-frame bars, so the frame has to be
- *            one minute for the hold to be five bars. M2 would make it 2.5.
+ *   scalp → M2 (inside S10–M3; the 2-minute frame is where a scalp stop has
+ *            enough range to survive a spread but is still a scalp's stop)
  *   intraday → M15 (the middle of M5–M30)
  *   swing → H1 (the fast end of H1–W1, where a swing stop belongs)
  */
 const ENTRY_TIMEFRAME: Record<TradeMode, Timeframe> = {
-  scalp: "M1",
+  scalp: "M2",
   intraday: "M15",
   swing: "H1",
 };
@@ -334,116 +332,79 @@ export function structuralStop(
 }
 
 /**
- * The reward policy the Desk trades to.
+ * Build the management plan.
  *
- * This is a rule, not a search result. The old target search picked the best
- * expectancy over 1R–4R, and under any positive drift the answer was always the
- * farthest multiple. The policy below is what the user specified:
- *
- *   • scalp: the target is the nearest opposing structure, clamped to the band
- *     [scalpMin, scalpMax]. The floor is a hard requirement, not a clamp: a
- *     structure closer than the floor means no 1:1 room, so there is no trade.
- *   • intraday and swing: a fixed target at `fixed` R, always.
- *   • extension (intraday and swing): at `checkAtR` — before the fixed target can
- *     fill — the trend is checked. If it still favours the trade the target moves
- *     to `extendToR` and the stop to +`lockR`. The check has to come before the
- *     target because the broker closes the trade the instant the target prints.
- */
-export const RR_POLICY = {
-  scalpMin: 1,
-  scalpMax: 2,
-  fixed: 2,
-  checkAtR: 1.8,
-  extendToR: 3,
-  lockR: 1,
-  emaPeriod: 50,
-} as const;
-
-/** How many entry-frame bars the scalp target looks back over for structure. */
-const STRUCTURE_LOOKBACK = 120;
-
-/**
- * Where a scalp's target sits, in R, measured from the trigger.
- *
- * Outcomes:
- *   • no opposing swing ahead, or the nearest one beyond the cap → the cap;
- *   • the nearest one inside the cap → just short of it (a tenth of an ATR);
- *   • the nearest one inside the floor → blocked, with the reason.
- */
-export function structureTarget(input: {
-  bars: Bar[];
-  side: "buy" | "sell";
-  trigger: number;
-  riskPrice: number;
-  atrValue: number;
-}): { rewardRisk: number; blocked: boolean; level: number | null; reason: string | null } {
-  const { bars, side, trigger, riskPrice, atrValue } = input;
-  const cap = RR_POLICY.scalpMax;
-  const floor = RR_POLICY.scalpMin;
-  const atCap = { rewardRisk: cap, blocked: false, level: null, reason: null };
-  if (!(riskPrice > 0)) return atCap;
-
-  // A buy's target is an opposing swing HIGH above the trigger; a sell's, a swing LOW below it.
-  const kind = side === "buy" ? "high" : "low";
-  let level: number | null = null;
-  for (const swing of swings(bars.slice(-STRUCTURE_LOOKBACK), 2)) {
-    if (swing.kind !== kind) continue;
-    const ahead = side === "buy" ? swing.price > trigger : swing.price < trigger;
-    if (!ahead) continue;
-    if (level === null || Math.abs(swing.price - trigger) < Math.abs(level - trigger)) level = swing.price;
-  }
-  if (level === null) return atCap;
-
-  const distanceR = Math.abs(level - trigger) / riskPrice;
-  if (distanceR >= cap) return atCap;
-
-  const blockedReason =
-    `Nearest structure sits ${distanceR.toFixed(2)}R ahead, inside the ${floor}:1 minimum — ` +
-    `there is no room for the minimum reward.`;
-  if (distanceR < floor) return { rewardRisk: 0, blocked: true, level, reason: blockedReason };
-
-  const buffer = atrValue > 0 ? atrValue * 0.1 : 0;
-  const rewardRisk = (Math.abs(level - trigger) - buffer) / riskPrice;
-  if (rewardRisk < floor) return { rewardRisk: 0, blocked: true, level, reason: blockedReason };
-  return { rewardRisk, blocked: false, level, reason: null };
-}
-
-/**
- * Build the management plan the EA enforces after the fill.
- *
- * Policy v3.05, in one place:
- *   • breakeven — once progress reaches 1R, the stop moves to entry plus an offset
- *     that covers this trade's own round-trip cost;
- *   • extension — intraday and swing only; see RR_POLICY;
- *   • time stop — the position is closed once it has been open for its horizon.
- *
- * Partial closes, trailing stops and pyramiding are not part of the policy and
- * are not emitted. The EA never executed them, so they were dead configuration.
+ * Thresholds are regime-dependent, not fixed: a trending market is given room
+ * and a trailing stop, a range is banked earlier at the band edge. Partial
+ * ladders are feasibility-checked against the broker's volume step, because a
+ * 50% close of 0.01 lots is not a legal order.
  */
 export function buildManagementPlan(input: {
   spec: SymbolSpec;
   mode: TradeMode;
+  lots: number;
+  regimeKind: string;
   atrPoints: number;
-  /** Round-trip cost as a fraction of the risk unit, measured at the trigger. */
-  costR: number;
+  retraceProbability: number;
 }): ManagementPlan {
-  const { spec, mode, atrPoints, costR } = input;
+  const { spec, mode, lots, regimeKind, atrPoints, retraceProbability } = input;
+  const trending = regimeKind === "trend_up" || regimeKind === "trend_down";
+
+  // A partial is only real if the remaining and closed slices are both legal
+  // volumes. Otherwise the ladder silently fails at the broker.
+  const step = spec.volumeStep > 0 ? spec.volumeStep : 0.01;
+  const canSplit = (pct: number) => {
+    const slice = lots * (pct / 100);
+    const quantised = Math.floor(slice / step + 1e-9) * step;
+    return quantised >= spec.volumeMin && lots - quantised >= spec.volumeMin;
+  };
+
+  const desired = trending
+    ? [
+        { atR: 1.5, closePct: 35 },
+        { atR: 3.0, closePct: 25 },
+      ]
+    : [
+        { atR: 1.0, closePct: 50 },
+        { atR: 1.8, closePct: 25 },
+      ];
+  const partials = desired.filter((p) => canSplit(p.closePct));
+
+  // Breakeven is only scheduled once the simulated probability of coming back
+  // to entry is low. Blind BE-at-1R scratches winners on volatile symbols.
+  const breakeven =
+    retraceProbability <= 0.35
+      ? { triggerR: trending ? 1.2 : 1.0, offsetR: 0.2, structureBuffer: true }
+      : { triggerR: trending ? 1.8 : 1.5, offsetR: 0.1, structureBuffer: true };
+
   return {
-    breakeven: {
-      triggerR: 1,
-      offsetR: clamp(costR + 0.05, 0.1, 0.3),
+    breakeven,
+    partials,
+    // Trail in trends (let winners run); hard TP in ranges.
+    trail: trending
+      ? {
+          mode: "atr_chandelier",
+          period: 14,
+          mult: mode === "scalp" ? 2.0 : 2.5,
+          activateAtR: 1.2,
+          stepPoints: Math.max(5, Math.round(atrPoints * 0.1)),
+        }
+      : null,
+    // Pyramiding is allowed only in a confirmed trend, only once the base is
+    // risk-free, and never above the original portfolio risk budget.
+    pyramid: trending
+      ? {
+          maxAdds: mode === "swing" ? 2 : 1,
+          addAtR: 1.5,
+          sizeRatio: 0.5,
+          requireBaseAtBreakeven: true,
+          portfolioRiskCapR: 1.5,
+        }
+      : null,
+    timeStop: {
+      noProgressBars: mode === "scalp" ? 15 : 25,
+      timeframe: ENTRY_TIMEFRAME[mode],
     },
-    extension:
-      mode === "scalp"
-        ? null
-        : {
-            checkAtR: RR_POLICY.checkAtR,
-            extendToR: RR_POLICY.extendToR,
-            lockR: RR_POLICY.lockR,
-            emaPeriod: RR_POLICY.emaPeriod,
-            timeframe: ENTRY_TIMEFRAME[mode],
-          },
-    timeStop: { maxHoldMinutes: horizonMinutes(mode) },
     guards: {
       // Derived from the asset class and the stop, exactly like the plan-level
       // guard the EA enforces, so the two can never disagree.
@@ -639,11 +600,6 @@ export function evaluate(input: AgentInput): AgentDecision {
   // allowance for slippage. Slippage is scaled by asset class — a crypto CFD
   // does not fill like a major FX pair.
   const costPrice = (liveSpreadPoints + commissionPoints + slippagePoints) * input.spec.point;
-  // A cost that cannot be measured cannot be netted off an edge. Refuse, do not
-  // guess: a NaN here would otherwise slip past every comparison below.
-  if (!Number.isFinite(costPrice)) {
-    return fail(["The trading cost of this symbol cannot be measured from its specification."]);
-  }
 
   // ── 3d. Regime and stop ───────────────────────────────────────────────────
   const regime = assessRegime(entrySeries.bars);
@@ -690,15 +646,8 @@ export function evaluate(input: AgentInput): AgentDecision {
         `is not a risk unit — it is the spread, charged twice.`,
     );
   }
-  // The trigger is the price the EA fires at. The trigger sits a fraction of an
-  // ATR beyond the quote, so the risk unit, the target and the expectancy are all
-  // measured from the trigger — the same price the position is actually opened at.
-  const triggerOffset = stop.atrValue * (input.mode === "scalp" ? 0.08 : 0.12);
-  const trigger = side === "buy" ? entry + triggerOffset : entry - triggerOffset;
-  const invalidate = side === "buy" ? entry - stop.atrValue * 0.6 : entry + stop.atrValue * 0.6;
-  const riskPrice = Math.abs(trigger - sl);
-  if (!(riskPrice > 0)) return fail(["Stop placement produced a zero-distance risk unit at the trigger."]);
-  const costR = costPrice / riskPrice;
+  const riskPrice = Math.abs(entry - sl);
+  const costR = riskPrice > 0 ? costPrice / riskPrice : 0;
 
   // ── 4. Markov persistence — one vote, not a veto ──────────────────────────
   const price = closes(entrySeries.bars);
@@ -717,53 +666,28 @@ export function evaluate(input: AgentInput): AgentDecision {
     );
   }
 
-  // ── 5. Target policy, then the Monte Carlo gate ──────────────────────────
-  //
-  // The target is a RULE (see RR_POLICY), not a search result. The simulation is
-  // no longer asked which target to pick. It answers one question — does this
-  // trade have an edge after costs at the target the policy set — and the gate
-  // below judges that answer.
+  // ── 5. Monte Carlo target search ──────────────────────────────────────────
   const returns = logReturns(price);
   const seed = hashSeed(`${input.symbol}|${input.mode}|${entrySeries.timeframe}|${entrySeries.bars.length}`);
 
-  let rewardRisk: number = RR_POLICY.fixed;
-  if (input.mode === "scalp") {
-    const target = structureTarget({
-      bars: entrySeries.bars,
-      side,
-      trigger,
-      riskPrice,
-      atrValue: stop.atrValue,
-    });
-    if (target.blocked && target.reason) return fail([target.reason], evidence, qualityScore);
-    rewardRisk = target.rewardRisk;
-  }
-  const tp = side === "buy" ? trigger + rewardRisk * riskPrice : trigger - rewardRisk * riskPrice;
-
   // Volatility for the simulation: the regime's own step volatility, widened
-  // toward the GARCH one-step-ahead estimate. Volatility clusters, and a gate
-  // judged on a calm day's sigma is a gate that gets run over.
+  // toward the GARCH one-step-ahead estimate. Volatility clusters, and a
+  // target searched on a calm day's sigma is a target that gets run over.
   const garchSigma = garchVolatility(returns);
   const simulationVolatility = Math.max(
     regime.stepVolatility,
     garchSigma > 0 ? Math.min(garchSigma, regime.stepVolatility * 2.5) : regime.stepVolatility,
   );
 
-  // Drift: the measured drift, blended with the Markov view by how much data backs
-  // the model, then SHRUNK toward zero by its own t-statistic. The desk used to
-  // extrapolate the recent trend at full strength, which is what made every
-  // target look like the farthest one.
-  const blendedDrift = regime.drift * (0.5 + 0.5 * modelConfidence);
-  const drift = shrinkDrift(blendedDrift, regime.stepVolatility, regime.driftSamples);
-
-  // Simulated from the TRIGGER, the price the EA fills at, so the entry, the risk
-  // unit and the target all describe the same trade.
-  const monteCarlo = simulateTrade({
-    entry: trigger,
+  const search = bestTarget({
+    entry,
+    // The RISK UNIT the gate is measured in — the widened stop, not the raw
+    // structural one. Target multiples are searched off this distance.
     sl,
-    tp,
     side,
-    drift,
+    // Blend the measured drift with the Markov view, scaled by how much data
+    // backs the model. With little history the simulation leans on raw drift.
+    drift: regime.drift * (0.5 + 0.5 * modelConfidence),
     volatility: simulationVolatility,
     horizon,
     returns,
@@ -771,6 +695,9 @@ export function evaluate(input: AgentInput): AgentDecision {
     paths: 3000,
     seed,
   });
+
+  if (!search) return fail(["Monte Carlo could not evaluate this setup."]);
+  const monteCarlo = search.result;
 
   // ── 5b. Bayesian blend of simulated and realised win probability ──────────
   // The simulation assumes the model is right. The desk's own history is the
@@ -825,9 +752,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     timeoutProbability * monteCarlo.timeoutMeanR -
     costRFromModel;
 
-  // Fail closed: a NaN expectancy compares false against everything, so the
-  // test must name the finite case explicitly rather than rely on `<`.
-  if (!Number.isFinite(effectiveExpectancyR) || effectiveExpectancyR < minEdgeR) {
+  if (effectiveExpectancyR < minEdgeR) {
     rejections.push(
       `Expectancy after costs is ${effectiveExpectancyR.toFixed(2)}R (model ${monteCarlo.expectancyR.toFixed(2)}R, ` +
         `gross ${monteCarlo.grossExpectancyR.toFixed(2)}R, ${(monteCarlo.lossProbability * 100).toFixed(0)}% stop / ` +
@@ -895,6 +820,14 @@ export function evaluate(input: AgentInput): AgentDecision {
     Math.min(risk.riskPct, risk.riskCeilingPct),
   );
 
+  // The trigger is a small displacement beyond the current price in the trade
+  // direction: the EA fires when the market confirms the move rather than at
+  // whatever price happened to exist when the server finished thinking.
+  const triggerOffset = stop.atrValue * (input.mode === "scalp" ? 0.08 : 0.12);
+  const trigger = side === "buy" ? entry + triggerOffset : entry - triggerOffset;
+  const invalidate =
+    side === "buy" ? entry - stop.atrValue * 0.6 : entry + stop.atrValue * 0.6;
+
   // Size against the TRIGGER, not the current quote.
   //
   // The stop is structural and fixed, so firing at the trigger puts the fill
@@ -912,7 +845,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     side,
     entry: trigger,
     sl,
-    tp,
+    tp: search.tp,
     equity: input.account.equity,
     freeMargin: input.account.freeMargin,
     usedMargin: input.account.margin,
@@ -964,8 +897,30 @@ export function evaluate(input: AgentInput): AgentDecision {
     };
   }
 
+  // Probability of coming back to entry before the target, used to decide how
+  // early breakeven may be scheduled.
+  const retrace = simulateTrade({
+    entry: search.tp > entry ? entry + riskPrice : entry - riskPrice,
+    sl: entry,
+    tp: search.tp,
+    side,
+    drift: regime.drift,
+    volatility: simulationVolatility,
+    horizon,
+    returns,
+    paths: 1500,
+    seed: seed ^ 0x5bf03635,
+  }).lossProbability;
+
   const atrPoints = priceToPoints(input.spec, stop.atrValue);
-  const management = buildManagementPlan({ spec: input.spec, mode: input.mode, atrPoints, costR });
+  const management = buildManagementPlan({
+    spec: input.spec,
+    mode: input.mode,
+    lots: sizing.lots,
+    regimeKind: regime.kind,
+    atrPoints,
+    retraceProbability: retrace,
+  });
 
   const plan: ArmedPlan = {
     id: randomUUID(),
@@ -977,7 +932,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     confirmTicks: input.mode === "scalp" ? 2 : 1,
     invalidate,
     sl: sizing.sl,
-    tp: [tp],
+    tp: [search.tp],
     lots: sizing.lots,
     riskMoney: sizing.riskMoney,
     riskPoints: sizing.riskPoints,

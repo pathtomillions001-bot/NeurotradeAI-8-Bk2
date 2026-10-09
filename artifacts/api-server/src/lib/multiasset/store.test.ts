@@ -23,7 +23,6 @@ import {
   issueBridgeToken,
   journal,
   reconcilePositions,
-  recordDealClose,
   requeueStaleCommands,
   resetDesk,
   revokeBridgeToken,
@@ -32,7 +31,7 @@ import {
   startNewTradingDay,
   upsertCandles,
 } from "./store";
-import type { AccountSnapshot, ArmedPlan, Bar, ClosedDealReport, ManagementPlan, Position } from "./types";
+import type { AccountSnapshot, ArmedPlan, Bar, ManagementPlan, Position } from "./types";
 
 let counter = 0;
 function freshDesk() {
@@ -43,7 +42,9 @@ function freshDesk() {
 
 const management: ManagementPlan = {
   breakeven: null,
-  extension: null,
+  partials: [],
+  trail: null,
+  pyramid: null,
   timeStop: null,
   guards: { maxSpreadPoints: 20, newsBlackoutMin: 10, flatBeforeSessionClose: false },
 };
@@ -359,84 +360,3 @@ test("journal entries carry a kind, timestamp and id", () => {
   assert.ok(entry.ts > 0);
   assert.deepEqual(entry.detail, { reason: "test" });
 });
-
-// ── Closed trades from the terminal's own deal report ────────────────────────
-
-function deal(positionId: number, overrides: Partial<ClosedDealReport> = {}): ClosedDealReport {
-  return {
-    dealTicket: positionId * 10 + 1,
-    positionId,
-    symbol: "EURUSD",
-    side: "buy",
-    volume: 0.1,
-    openPrice: 1.085,
-    closePrice: 1.09,
-    openTime: 1_000_000,
-    closeTime: 1_000_000 + 12 * 60_000,
-    profit: 50,
-    commission: -1.4,
-    swap: 0,
-    reason: "tp",
-    planId: "plan-a",
-    initialRiskMoney: 25,
-    initialRiskPoints: 120,
-    mfeR: 2.1,
-    maeR: -0.3,
-    ...overrides,
-  };
-}
-
-test("a terminal close is recorded once, with its commission, reason and excursions", () => {
-  const desk = freshDesk();
-  reconcilePositions(desk, [position(7)], { inferCloses: false });
-  desk.positionModes.set(7, "intraday");
-
-  const trade = recordDealClose(desk, deal(7));
-  assert.ok(trade, "the first report of a deal is recorded");
-  assert.equal(trade!.source, "deal");
-  assert.equal(trade!.exitReason, "tp");
-  assert.equal(trade!.mode, "intraday", "the mode comes from the position that was opened");
-  // Net = profit + swap + commission = 50 + 0 − 1.4 = 48.6, over 25 of risk.
-  assert.ok(Math.abs(trade!.rMultiple! - 48.6 / 25) < 1e-9);
-  assert.equal(trade!.mfeR, 2.1);
-  assert.equal(trade!.holdMinutes, 12);
-  assert.equal(desk.closedTrades.length, 1);
-});
-
-test("a re-sent deal is ignored: an unacknowledged close cannot double-count", () => {
-  const desk = freshDesk();
-  recordDealClose(desk, deal(8));
-  const again = recordDealClose(desk, deal(8));
-  assert.equal(again, null);
-  assert.equal(desk.closedTrades.length, 1);
-  assert.equal(desk.outcomes.size, 1);
-});
-
-test("with deal reporting on, a vanished position is not also inferred as a close", () => {
-  // The bug this guards against: a position that disappears is closed by a deal
-  // that arrives on its own. Inferring it too would record the trade twice.
-  const desk = freshDesk();
-  reconcilePositions(desk, [position(1), position(2)], { inferCloses: false });
-  const { closed } = reconcilePositions(desk, [position(1)], { inferCloses: false });
-  assert.equal(closed.length, 1, "the vanished position is still reported");
-  assert.equal(desk.closedTrades.length, 0, "but nothing is recorded from the disappearance");
-
-  recordDealClose(desk, deal(2));
-  assert.equal(desk.closedTrades.length, 1, "the deal is the one record of the trade");
-});
-
-test("without deal reporting, a vanished position is still recorded, and labelled as inferred", () => {
-  const desk = freshDesk();
-  reconcilePositions(desk, [position(3, "EURUSD", 12)]);
-  reconcilePositions(desk, []);
-  assert.equal(desk.closedTrades.length, 1);
-  assert.equal(desk.closedTrades[0].source, "inferred");
-  assert.equal(desk.closedTrades[0].exitReason, "unknown");
-});
-
-test("an unknown risk unit leaves the R multiple null rather than zero", () => {
-  const desk = freshDesk();
-  const trade = recordDealClose(desk, deal(9, { initialRiskMoney: null }));
-  assert.equal(trade!.rMultiple, null, "a missing risk unit is not a zero-R trade");
-});
-

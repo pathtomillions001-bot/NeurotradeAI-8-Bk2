@@ -205,8 +205,8 @@ on, it:
    enforces), then quality,
 5. arms exactly one: the best. The EA then watches the trigger locally, opens
    the position and manages it from the plan's `management` block — break-even
-   with the target extension for intraday and swing, and the time stop — exactly as for a
-   hand-armed plan.
+   with a structure buffer, two partial exits, the ATR chandelier trail, the
+   time stop — exactly as for a hand-armed plan.
 
 Cadence is per mode: scalp 15 s, day 30 s, swing 60 s. It is **not** a trade
 count: the binding limits stay risk-based (open positions, per-symbol cap,

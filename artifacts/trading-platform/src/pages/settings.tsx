@@ -8,7 +8,7 @@ import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { TrendingUp, TrendingDown, Hash, Equal, DollarSign, Percent } from "lucide-react";
+import { DollarSign, Percent } from "lucide-react";
 import {
   OVER_PAYOUTS,
   UNDER_PAYOUTS,
@@ -19,6 +19,14 @@ import {
   exactRecoveryStake,
   roundRecoveryStakeUp,
 } from "@/lib/payouts";
+import { AutonomousContractSetEditor } from "@/components/autonomous-contract-set-editor";
+import {
+  contractSetError,
+  decodeContractSet,
+  encodeContractSet,
+  firstDigitOf,
+  type AutonomousContractSpec,
+} from "@/lib/autonomous-contracts";
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
@@ -48,40 +56,23 @@ function NumInput({ value, onChange, min, max, step = 1, suffix, disabled }: {
   );
 }
 
-// Contract type groups — what the AI engine trades
-const CONTRACT_GROUPS = [
-  {
-    id: "riseFall",
-    label: "Rise & Fall",
-    icon: <TrendingUp className="w-4 h-4" />,
-    desc: "Tick-to-tick momentum. Price ends higher (Rise = CALL) or lower (Fall = PUT) than entry at contract expiry.",
-    types: ["CALL", "PUT"],
-    color: "indigo",
-  },
-  {
-    id: "overUnder",
-    label: "Over & Under (Digits)",
-    icon: <Hash className="w-4 h-4" />,
-    desc: "Last digit of price. AI picks optimal barrier from live digit analysis.",
-    types: ["DIGITOVER", "DIGITUNDER"],
-    color: "emerald",
-  },
-  {
-    id: "evenOdd",
-    label: "Even & Odd (Digits)",
-    icon: <TrendingDown className="w-4 h-4" />,
-    desc: "Last digit parity. AI analyses digit frequency, chi-square bias and streak patterns to find edge.",
-    types: ["DIGITEVEN", "DIGITODD"],
-    color: "violet",
-  },
-  {
-    id: "matchDiff",
-    label: "Matches & Differs (Digits)",
-    icon: <Equal className="w-4 h-4" />,
-    desc: "Predict whether the last digit will match (MATCH) or differ from (DIFF) a specific digit. AI picks the hottest digit to match and coldest digit to differ from for positive EV.",
-    types: ["DIGITMATCH", "DIGITDIFF"],
-    color: "rose",
-  },
+// Default contract sets, used only before the server has answered. The server
+// always returns the sets the engine actually trades.
+const DEFAULT_NORMAL_CONTRACTS: AutonomousContractSpec[] = [
+  { type: "CALL", digit: -1 },
+  { type: "PUT", digit: -1 },
+  { type: "DIGITOVER", digit: 1 },
+  { type: "DIGITUNDER", digit: 8 },
+  { type: "DIGITEVEN", digit: -1 },
+  { type: "DIGITODD", digit: -1 },
+];
+const DEFAULT_RECOVERY_CONTRACTS: AutonomousContractSpec[] = [
+  { type: "CALL", digit: -1 },
+  { type: "PUT", digit: -1 },
+  { type: "DIGITOVER", digit: 3 },
+  { type: "DIGITUNDER", digit: 6 },
+  { type: "DIGITEVEN", digit: -1 },
+  { type: "DIGITODD", digit: -1 },
 ];
 
 export default function Settings() {
@@ -108,18 +99,15 @@ export default function Settings() {
     recoveryMethod: "split" as "split" | "instant",
     recoveryMultiplier: 1.62,
     maxRecoverySteps: 3,
-    normalOverDigit: 1,
-    normalUnderDigit: 8,
-    recoveryOverDigit: 3,
-    recoveryUnderDigit: 6,
     scanAllMarkets: true,
     paperTradeMode: false,
     requirePositiveEv: true,
     minConfidenceThreshold: 50,
     loopIntervalSec: 15,
-    preferredContractTypes: ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
     preferredCategories: ["synthetic"],
     allowedMarkets: [] as string[],
+    normalContracts: DEFAULT_NORMAL_CONTRACTS,
+    recoveryContracts: DEFAULT_RECOVERY_CONTRACTS,
   });
 
   useEffect(() => {
@@ -142,47 +130,41 @@ export default function Settings() {
         recoveryMethod: ((settings as any).recoveryMethod ?? "split") as "split" | "instant",
         recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.62,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
-        normalOverDigit: (settings as any).normalOverDigit ?? 1,
-        normalUnderDigit: (settings as any).normalUnderDigit ?? 8,
-        recoveryOverDigit: (settings as any).recoveryOverDigit ?? 3,
-        recoveryUnderDigit: (settings as any).recoveryUnderDigit ?? 6,
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
         minConfidenceThreshold: (settings as any).minConfidenceThreshold ?? 50,
         loopIntervalSec: (settings as any).loopIntervalSec ?? 15,
-        preferredContractTypes: settings.preferredContractTypes.length > 0
-          ? settings.preferredContractTypes.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)
-          : ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "DIGITMATCH", "DIGITDIFF"],
         preferredCategories: (settings as any).preferredCategories?.length > 0
           ? (settings as any).preferredCategories
           : ["synthetic"],
         allowedMarkets: (settings as any).allowedMarkets ?? [],
+        normalContracts: decodeContractSet(settings.autonomousNormalContracts).length > 0
+          ? decodeContractSet(settings.autonomousNormalContracts)
+          : DEFAULT_NORMAL_CONTRACTS,
+        recoveryContracts: decodeContractSet(settings.autonomousRecoveryContracts).length > 0
+          ? decodeContractSet(settings.autonomousRecoveryContracts)
+          : DEFAULT_RECOVERY_CONTRACTS,
       });
     }
   }, [settings]);
 
   const set = (key: string, val: unknown) => setForm((prev) => ({ ...prev, [key]: val }));
 
-  // Toggle entire contract group
-  const toggleGroup = (types: string[]) => {
-    setForm((prev) => {
-      const allActive = types.every(t => prev.preferredContractTypes.includes(t));
-      if (allActive) {
-        // Deactivate group — but don't allow empty
-        const next = prev.preferredContractTypes.filter(t => !types.includes(t));
-        return { ...prev, preferredContractTypes: next.length > 0 ? next : prev.preferredContractTypes };
-      } else {
-        return {
-          ...prev,
-          preferredContractTypes: [...new Set([...prev.preferredContractTypes, ...types])],
-        };
-      }
-    });
-  };
-
   const handleSave = () => {
-    updateSettings.mutate({ data: { ...form } as any }, {
+    const { normalContracts, recoveryContracts, ...rest } = form;
+    const setError = contractSetError(normalContracts, "Normal") ?? contractSetError(recoveryContracts, "Recovery");
+    if (setError) {
+      toast.error(setError);
+      return;
+    }
+    updateSettings.mutate({
+      data: {
+        ...rest,
+        autonomousNormalContracts: encodeContractSet(normalContracts),
+        autonomousRecoveryContracts: encodeContractSet(recoveryContracts),
+      } as any,
+    }, {
       onSuccess: (saved: any) => {
         // Update settings cache directly so the toggles reflect immediately.
         // IMPORTANT: must use the actual query key from the orval hook (["/api/settings"]),
@@ -209,17 +191,33 @@ export default function Settings() {
 
   // UI examples use the canonical fallback schedule. At execution time the
   // server asks Deriv for a live $1 proposal and only falls back to these values.
-  const recoveryOverPayout = OVER_PAYOUTS[form.recoveryOverDigit] ?? OVER_PAYOUTS[3];
-  const recoveryUnderPayout = UNDER_PAYOUTS[form.recoveryUnderDigit] ?? UNDER_PAYOUTS[6];
-  const normalOverPayout = OVER_PAYOUTS[form.normalOverDigit] ?? OVER_PAYOUTS[1];
-  const normalUnderPayout = UNDER_PAYOUTS[form.normalUnderDigit] ?? UNDER_PAYOUTS[8];
+  // Example barriers come from the sets: the first Over/Under in each set. A set
+  // with no Over or Under simply shows no example for that side.
+  const recoveryOverDigit = firstDigitOf(form.recoveryContracts, "DIGITOVER");
+  const recoveryUnderDigit = firstDigitOf(form.recoveryContracts, "DIGITUNDER");
+  const normalOverDigit = firstDigitOf(form.normalContracts, "DIGITOVER") ?? 1;
+  const normalUnderDigit = firstDigitOf(form.normalContracts, "DIGITUNDER") ?? 8;
   const exampleBaseStake = form.riskAmountType === "percentage" && account
     ? Math.max(0.35, Number(account.balance) * form.riskAmountValue / 100)
     : Math.max(0.35, form.riskAmountValue);
-  const overExampleTarget = exampleBaseStake * (normalOverPayout - 1);
-  const underExampleTarget = exampleBaseStake * (normalUnderPayout - 1);
-  const overInstantExample = roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, overExampleTarget, recoveryOverPayout));
-  const underInstantExample = roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, underExampleTarget, recoveryUnderPayout));
+  const normalOverPayout = OVER_PAYOUTS[normalOverDigit] ?? OVER_PAYOUTS[1];
+  const normalUnderPayout = UNDER_PAYOUTS[normalUnderDigit] ?? UNDER_PAYOUTS[8];
+  const recoveryExamples = [
+    recoveryOverDigit === null ? null : {
+      side: `OVER ${recoveryOverDigit}`,
+      normal: `OVER ${normalOverDigit}`,
+      payout: OVER_PAYOUTS[recoveryOverDigit] ?? OVER_PAYOUTS[3],
+      target: exampleBaseStake * (normalOverPayout - 1),
+    },
+    recoveryUnderDigit === null ? null : {
+      side: `UNDER ${recoveryUnderDigit}`,
+      normal: `UNDER ${normalUnderDigit}`,
+      payout: UNDER_PAYOUTS[recoveryUnderDigit] ?? UNDER_PAYOUTS[6],
+      target: exampleBaseStake * (normalUnderPayout - 1),
+    },
+  ]
+    .filter((e): e is NonNullable<typeof e> => e !== null)
+    .map((e) => ({ ...e, instant: roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, e.target, e.payout)) }));
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
@@ -453,22 +451,10 @@ export default function Settings() {
                       Target profit comes from the original normal trade. Live payout is used at execution; the values below use the fallback schedule.
                     </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {[
-                        {
-                          side: `OVER ${form.recoveryOverDigit}`,
-                          normal: `OVER ${form.normalOverDigit}`,
-                          payout: recoveryOverPayout,
-                          target: overExampleTarget,
-                          instant: overInstantExample,
-                        },
-                        {
-                          side: `UNDER ${form.recoveryUnderDigit}`,
-                          normal: `UNDER ${form.normalUnderDigit}`,
-                          payout: recoveryUnderPayout,
-                          target: underExampleTarget,
-                          instant: underInstantExample,
-                        },
-                      ].map((example) => (
+                      {recoveryExamples.length === 0 && (
+                        <p className="text-[10px] text-muted-foreground sm:col-span-2">Add an Over or Under contract to the recovery set to see stake examples.</p>
+                      )}
+                      {recoveryExamples.map((example) => (
                         <div key={example.side} className="rounded-lg bg-background/50 border border-border/60 p-2.5 space-y-1">
                           <div className="flex justify-between text-[10px]">
                             <span className="font-medium text-foreground">{example.side}</span>
@@ -516,34 +502,42 @@ export default function Settings() {
         </CardContent>
       </Card>
 
-      {/* Over/Under Digit Configuration */}
+      {/* Normal market contracts — what the engine trades outside recovery */}
       <Card className="bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Over/Under Digit Barriers</CardTitle>
+          <CardTitle className="text-base">Normal Market Contracts</CardTitle>
           <CardDescription className="text-xs">
-            The AI only trades these exact digit barriers — one pair for normal trading and one pair during recovery. Auto recovery recalculates the exact stake from the selected contract's live payout; no multiplier is needed.
+            The contracts the engine may trade when it is not recovering. Pick any mix (up to 8). Each Over, Under, Matches and Differs carries its own digit, and Matches or Differs can use auto to let the engine pick the digit from the live tape.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Normal — OVER digit" description="Barrier for DIGITOVER outside recovery. Default: OVER 1 (~80% win rate, lower payout).">
-            <NumInput value={form.normalOverDigit} onChange={(v) => set("normalOverDigit", v)} min={0} max={8} />
-          </SettingRow>
-          <SettingRow label="Normal — UNDER digit" description="Barrier for DIGITUNDER outside recovery. Default: UNDER 8 (~80% win rate, lower payout).">
-            <NumInput value={form.normalUnderDigit} onChange={(v) => set("normalUnderDigit", v)} min={1} max={9} />
-          </SettingRow>
-          <SettingRow
-            label="Recovery — OVER digit"
-            description={`Barrier for DIGITOVER while recovering. Fallback payout ${recoveryOverPayout.toFixed(2)}× total return; a live proposal is used for the actual Auto stake.`}
-          >
-            <NumInput value={form.recoveryOverDigit} onChange={(v) => { set("recoveryOverDigit", v); }} min={0} max={8} />
-          </SettingRow>
-          <SettingRow
-            label="Recovery — UNDER digit"
-            description={`Barrier for DIGITUNDER while recovering. Fallback payout ${recoveryUnderPayout.toFixed(2)}× total return; a live proposal is used for the actual Auto stake.`}
-          >
-            <NumInput value={form.recoveryUnderDigit} onChange={(v) => { set("recoveryUnderDigit", v); }} min={1} max={9} />
-          </SettingRow>
-          <div className="mt-3 rounded-lg border border-border/60 bg-secondary/10 p-2.5">
+          <AutonomousContractSetEditor
+            testId="normal-contracts"
+            title="Normal contracts"
+            description="Used for every normal trade."
+            specs={form.normalContracts}
+            onChange={(next) => set("normalContracts", next)}
+          />
+        </CardContent>
+      </Card>
+
+      {/* Recovery contracts — chosen independently of normal */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recovery Contracts</CardTitle>
+          <CardDescription className="text-xs">
+            The contracts the engine may trade while recovering a loss. This set is independent of the normal set, so you can trade Even in normal markets and Matches in recovery. Recovery stakes are sized from the live payout of the contract the engine picks.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <AutonomousContractSetEditor
+            testId="recovery-contracts"
+            title="Recovery contracts"
+            description="Used for every recovery trade."
+            specs={form.recoveryContracts}
+            onChange={(next) => set("recoveryContracts", next)}
+          />
+          <div className="rounded-lg border border-border/60 bg-secondary/10 p-2.5">
             <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">$1 fallback payout reference</p>
             <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
               {Object.entries(OVER_PAYOUTS).map(([digit, payout]) => (
@@ -554,65 +548,9 @@ export default function Settings() {
               ))}
             </div>
           </div>
-          <div className="mt-2 p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
+          <div className="p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
             <p><strong className="text-foreground">Payout meaning:</strong> values are the total returned after a win, including the initial stake. Auto recovery uses only the net portion (payout − 1).</p>
             <p>Other fallback payouts: Even/Odd <strong className="text-foreground">{EVEN_ODD_PAYOUT.toFixed(2)}×</strong> · Rise/Fall <strong className="text-foreground">{RISE_FALL_PAYOUT.toFixed(2)}×</strong> · Matches <strong className="text-foreground">{MATCH_PAYOUT.toFixed(2)}×</strong> · Differs <strong className="text-foreground">{DIFF_PAYOUT.toFixed(2)}×</strong>.</p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* AI Engine Contract Mode */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">AI Engine Contract Mode</CardTitle>
-          <CardDescription className="text-xs">
-            Choose which contract types the engine trades. The AI picks the best market and optimal parameters for each selected type — no manual barriers or directions needed.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-1 gap-3">
-            {CONTRACT_GROUPS.map((group) => {
-              const active = group.types.every(t => form.preferredContractTypes.includes(t));
-              const partial = !active && group.types.some(t => form.preferredContractTypes.includes(t));
-              return (
-                <button
-                  key={group.id}
-                  onClick={() => toggleGroup(group.types)}
-                  className={`w-full flex items-start gap-3 p-4 rounded-xl text-left border transition-all ${
-                    active
-                      ? "bg-primary/10 border-primary/40"
-                      : partial
-                      ? "bg-amber-500/5 border-amber-500/30"
-                      : "bg-secondary/30 border-border hover:border-border/80"
-                  }`}
-                >
-                  <div className={`p-2 rounded-lg mt-0.5 ${active ? "bg-primary/20 text-primary" : "bg-secondary text-muted-foreground"}`}>
-                    {group.icon}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className={`font-semibold text-sm ${active ? "text-primary" : "text-foreground"}`}>{group.label}</span>
-                      {active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-medium">Active</span>}
-                      {partial && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-medium">Partial</span>}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{group.desc}</p>
-                    <div className="flex gap-1.5 mt-2">
-                      {group.types.map(t => (
-                        <span key={t} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${form.preferredContractTypes.includes(t) ? "bg-primary/10 border-primary/30 text-primary" : "bg-secondary border-border text-muted-foreground"}`}>{t.replace("DIGIT", "").replace("OVER", "OVER").replace("UNDER", "UNDER")}</span>
-                      ))}
-                    </div>
-                  </div>
-                  <div className={`w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center mt-1 ${active ? "bg-primary border-primary" : "border-border"}`}>
-                    {active && <div className="w-2 h-2 rounded-full bg-white" />}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-          <div className="p-3 bg-secondary/20 rounded-lg text-xs text-muted-foreground space-y-1">
-            <p><strong className="text-foreground">All selected (recommended)</strong> — AI picks the best contract type for each opportunity across all categories</p>
-            <p><strong className="text-foreground">Selective mode</strong> — restricts the engine to your chosen contract categories only</p>
-            <p><strong className="text-foreground">OVER/UNDER</strong> — AI analyses live digit distribution per tick and selects the most favourable barrier automatically</p>
           </div>
         </CardContent>
       </Card>

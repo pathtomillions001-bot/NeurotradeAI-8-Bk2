@@ -863,6 +863,10 @@ export const ToggleAutonomousEngineResponse = zod.object({
 /**
  * @summary Get user risk profile and trading settings
  */
+export const getSettingsResponseAutonomousNormalContractsMax = 8;
+
+export const getSettingsResponseAutonomousRecoveryContractsMax = 8;
+
 export const getSettingsResponseBotRecoveryMarkupMin = 0;
 export const getSettingsResponseBotRecoveryMarkupMax = 100;
 
@@ -898,6 +902,8 @@ export const GetSettingsResponse = zod.object({
   "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "allowedMarkets": zod.array(zod.string()).optional(),
+  "autonomousNormalContracts": zod.array(zod.string()).max(getSettingsResponseAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
+  "autonomousRecoveryContracts": zod.array(zod.string()).max(getSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
   "botRecoveryMarkup": zod.number().min(getSettingsResponseBotRecoveryMarkupMin).max(getSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
@@ -907,6 +913,10 @@ export const GetSettingsResponse = zod.object({
 /**
  * @summary Update risk profile and trading settings
  */
+export const updateSettingsBodyAutonomousNormalContractsMax = 8;
+
+export const updateSettingsBodyAutonomousRecoveryContractsMax = 8;
+
 export const updateSettingsBodyBotRecoveryMarkupMin = 0;
 export const updateSettingsBodyBotRecoveryMarkupMax = 100;
 
@@ -941,10 +951,16 @@ export const UpdateSettingsBody = zod.object({
   "recoveryMethod": zod.enum(['split', 'instant']).optional(),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "allowedMarkets": zod.array(zod.string()).optional(),
+  "autonomousNormalContracts": zod.array(zod.string()).max(updateSettingsBodyAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
+  "autonomousRecoveryContracts": zod.array(zod.string()).max(updateSettingsBodyAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
   "botRecoveryMarkup": zod.number().min(updateSettingsBodyBotRecoveryMarkupMin).max(updateSettingsBodyBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
+
+export const updateSettingsResponseAutonomousNormalContractsMax = 8;
+
+export const updateSettingsResponseAutonomousRecoveryContractsMax = 8;
 
 export const updateSettingsResponseBotRecoveryMarkupMin = 0;
 export const updateSettingsResponseBotRecoveryMarkupMax = 100;
@@ -981,6 +997,8 @@ export const UpdateSettingsResponse = zod.object({
   "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "allowedMarkets": zod.array(zod.string()).optional(),
+  "autonomousNormalContracts": zod.array(zod.string()).max(updateSettingsResponseAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
+  "autonomousRecoveryContracts": zod.array(zod.string()).max(updateSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
   "botRecoveryMarkup": zod.number().min(updateSettingsResponseBotRecoveryMarkupMin).max(updateSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')

@@ -39,6 +39,16 @@ export interface TradingSettingsInput {
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
   allowedMarkets?: string[];
+  /**
+     * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.
+     * @maxItems 8
+     */
+  autonomousNormalContracts?: string[];
+  /**
+     * Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.
+     * @maxItems 8
+     */
+  autonomousRecoveryContracts?: string[];
   riskAmountType?: TradingSettingsInputRiskAmountType;
   riskAmountValue?: number;
   /**

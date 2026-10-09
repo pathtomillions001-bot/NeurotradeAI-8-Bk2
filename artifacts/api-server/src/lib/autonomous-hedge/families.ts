@@ -1,21 +1,23 @@
 /**
  * Autonomous engine — which contracts the 1-tick contest may consider (pure).
  *
- * Settings decide the contract families and the Over/Under barriers exactly as
- * before: normal uses the normal pair, recovery uses the recovery pair. Within
- * those settings the ranker chooses the winner. Matches/Differs use the
- * market's data-driven digit (most/least frequent), as Nexus does.
+ * The user picks the normal and recovery contract sets independently (see
+ * contract-sets.ts). The engine ranks only the set for the current mode, so a
+ * recovery trade can use Matches while a normal trade uses Even. Matches and
+ * Differs use the chosen digit, or the market's data-driven digit when the
+ * user picked auto.
  */
 
 import type { HedgeFamilySpec, HedgeMode } from "./hedge-analysis";
+import {
+  contractSetFor,
+  familySpecsForSet,
+  legacyContractSets,
+  type AutonomousContractSets,
+  type LegacyContractInput,
+} from "./contract-sets";
 
-export interface FamilySettings {
-  preferredContractTypes: string[];
-  normalOverDigit: number;
-  normalUnderDigit: number;
-  recoveryOverDigit: number;
-  recoveryUnderDigit: number;
-}
+export type FamilySettings = LegacyContractInput;
 
 /** Normalise RISE/FALL to CALL/PUT and drop duplicates and unknown types. */
 export function normalizePreferredTypes(types: string[]): string[] {
@@ -24,24 +26,17 @@ export function normalizePreferredTypes(types: string[]): string[] {
   return [...new Set(mapped)].filter((t) => known.has(t));
 }
 
+/**
+ * Family specs for one mode. Pass the user's `sets` when they are known. Without
+ * them, the set is derived from the legacy settings, which is the behaviour an
+ * account had before the contract sets existed.
+ */
 export function familySpecsFor(input: {
   settings: FamilySettings;
   mode: HedgeMode;
   digitEnabled: boolean;
+  sets?: AutonomousContractSets;
 }): HedgeFamilySpec[] {
-  const { settings, mode, digitEnabled } = input;
-  const types = new Set(normalizePreferredTypes(settings.preferredContractTypes));
-  const specs: HedgeFamilySpec[] = [];
-  if (types.has("CALL")) specs.push({ type: "CALL", barrier: -1 });
-  if (types.has("PUT")) specs.push({ type: "PUT", barrier: -1 });
-  if (!digitEnabled) return specs;
-  const over = mode === "RECOVERY" ? settings.recoveryOverDigit : settings.normalOverDigit;
-  const under = mode === "RECOVERY" ? settings.recoveryUnderDigit : settings.normalUnderDigit;
-  if (types.has("DIGITOVER")) specs.push({ type: "DIGITOVER", barrier: over });
-  if (types.has("DIGITUNDER")) specs.push({ type: "DIGITUNDER", barrier: under });
-  if (types.has("DIGITEVEN")) specs.push({ type: "DIGITEVEN", barrier: -1 });
-  if (types.has("DIGITODD")) specs.push({ type: "DIGITODD", barrier: -1 });
-  if (types.has("DIGITMATCH")) specs.push({ type: "DIGITMATCH", barrier: -1 });
-  if (types.has("DIGITDIFF")) specs.push({ type: "DIGITDIFF", barrier: -1 });
-  return specs;
+  const sets = input.sets ?? legacyContractSets(input.settings);
+  return familySpecsForSet(contractSetFor(sets, input.mode), input.digitEnabled);
 }

@@ -15,6 +15,7 @@ import { AUTONOMOUS_HEDGE_PREFIX } from "./constants";
 import { runWithSession } from "../session";
 import { logger } from "../logger";
 import * as recoveryEngine from "../agents/recovery-engine";
+import { getFallbackPayout } from "../payouts";
 
 export type TradeRowPatch = Partial<typeof tradesTable.$inferInsert>;
 
@@ -63,7 +64,27 @@ export async function loadClaimedContractIds(sessionId: string, since: Date): Pr
   return new Set(rows.map((r) => r.derivContractId).filter((v): v is string => Boolean(v)));
 }
 
-/** Settle a row while it is `open` or `error` (the reconciler's scope). */
+/**
+ * Payout multiplier the recovery ledger records for an autonomous row.
+ *
+ * It is the quote stored at buy time. A loss must carry the same multiplier as
+ * a win: the recovery reducer turns a lost normal trade into a target profit of
+ * stake × (payout − 1), so a loss recorded with 1 erases the target and sizes
+ * the next recovery stake smaller than the NeuroAI FAB and the bots size it.
+ * Rows bought before the quote was stored fall back to the canonical schedule,
+ * never to 1.
+ */
+export function ledgerEntryPayout(
+  entryPayout: number | null | undefined,
+  contract: string,
+  barrier: number | null | undefined,
+): number {
+  if (typeof entryPayout === "number" && Number.isFinite(entryPayout) && entryPayout > 1) {
+    return entryPayout;
+  }
+  const fallback = getFallbackPayout(contract, barrier ?? null);
+  return Number.isFinite(fallback) && fallback > 1 ? fallback : 1;
+}
 
 export interface SettlementOutcome {
   won: boolean;
@@ -71,7 +92,12 @@ export interface SettlementOutcome {
   /** Stake actually paid for the contract (buy price). */
   cost: number;
   contract: string;
-  /** Ledger payout multiplier: (buy + profit) / buy when won, 1 otherwise. */
+  /**
+   * Payout multiplier quoted when the contract was bought (total return incl.
+   * stake). Passed on WIN and on LOSS: a lost normal trade's target profit is
+   * stake × (payout − 1), and the shared ladder sizes recovery from it. Build
+   * it with `ledgerEntryPayout` — never pass 1 for a loss.
+   */
   payout: number;
   maxRecoverySteps: number;
 }

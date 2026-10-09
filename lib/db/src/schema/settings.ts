@@ -42,6 +42,10 @@ export const settingsTable = pgTable("settings", {
   // Default 10 % matches the original fixed behaviour; users can adjust it
   // from Risk Management settings. Never read by the shared engine recovery.
   botRecoveryMarkup: numeric("bot_recovery_markup", { precision: 5, scale: 2 }).notNull().default("10"),
+  // Autonomous engine: the contract sets the user chose for normal and for
+  // recovery trades (JSON array of {type, digit}). Empty = legacy settings.
+  autonomousNormalContracts: text("autonomous_normal_contracts").notNull().default(""),
+  autonomousRecoveryContracts: text("autonomous_recovery_contracts").notNull().default(""),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [

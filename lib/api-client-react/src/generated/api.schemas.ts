@@ -259,6 +259,9 @@ export const TradeInputDurationUnit = {
   d: 'd',
 } as const;
 
+/**
+ * One contract per request. Quantity and order arrays are not supported.
+ */
 export interface TradeInput {
   symbol: string;
   contractType: string;
@@ -460,6 +463,32 @@ export interface EngineToggleInput {
   running: boolean;
 }
 
+export type AutonomousContractSpecType = typeof AutonomousContractSpecType[keyof typeof AutonomousContractSpecType];
+
+
+export const AutonomousContractSpecType = {
+  CALL: 'CALL',
+  PUT: 'PUT',
+  RISE: 'RISE',
+  FALL: 'FALL',
+  DIGITOVER: 'DIGITOVER',
+  DIGITUNDER: 'DIGITUNDER',
+  DIGITEVEN: 'DIGITEVEN',
+  DIGITODD: 'DIGITODD',
+  DIGITMATCH: 'DIGITMATCH',
+  DIGITDIFF: 'DIGITDIFF',
+} as const;
+
+export interface AutonomousContractSpec {
+  type: AutonomousContractSpecType;
+  /**
+     * Over (0-8) / Under (1-9) barrier, Matches / Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.
+     * @minimum -1
+     * @maximum 9
+     */
+  digit: number;
+}
+
 export type TradingSettingsRiskProfile = typeof TradingSettingsRiskProfile[keyof typeof TradingSettingsRiskProfile];
 
 
@@ -542,6 +571,16 @@ export interface TradingSettings {
   riskAmountType?: TradingSettingsRiskAmountType;
   riskAmountValue?: number;
   /**
+     * Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.
+     * @maxItems 8
+     */
+  autonomousNormalContracts?: AutonomousContractSpec[];
+  /**
+     * Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.
+     * @maxItems 8
+     */
+  autonomousRecoveryContracts?: AutonomousContractSpec[];
+  /**
      * Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
      * @minimum 0
      * @maximum 100
@@ -606,6 +645,16 @@ export interface TradingSettingsInput {
   allowedMarkets?: string[];
   riskAmountType?: TradingSettingsInputRiskAmountType;
   riskAmountValue?: number;
+  /**
+     * Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.
+     * @maxItems 8
+     */
+  autonomousNormalContracts?: AutonomousContractSpec[];
+  /**
+     * Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.
+     * @maxItems 8
+     */
+  autonomousRecoveryContracts?: AutonomousContractSpec[];
   /**
      * Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
      * @minimum 0

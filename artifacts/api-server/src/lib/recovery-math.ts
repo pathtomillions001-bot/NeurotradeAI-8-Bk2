@@ -114,6 +114,30 @@ export function calculateExactRecoveryStake(
  * more than 2×, so all normal-payout families (Rise/Fall, Even/Odd, Differs,
  * conservative Over/Under) keep exactly the numbers they had before.
  */
+/**
+ * Payout multiplier the shared recovery ledger receives for a SETTLED trade.
+ *
+ * This is the one rule every engine follows (NeuroAI FAB records its quoted
+ * `best.payout` for wins AND losses). The loss case matters most: a lost
+ * normal trade's quoted payout becomes the recovery target profit via
+ * `recoveryTargetProfitFor`. Recording 1 on a loss silently zeroes that target
+ * and shrinks the recovery stake, so losses must carry the quoted payout too.
+ *
+ * - won, with a known buy price: the realised multiplier (buy + profit) / buy
+ * - lost (or won without a buy price): the quoted multiplier, or 1 if unknown
+ */
+export function ledgerPayoutFor(input: {
+  won: boolean;
+  buyPrice: number;
+  profit: number;
+  quotedPayout: number;
+}): number {
+  if (input.won && input.buyPrice > 0) {
+    return Math.round(((input.buyPrice + input.profit) / input.buyPrice) * 1000) / 1000;
+  }
+  return Number.isFinite(input.quotedPayout) && input.quotedPayout > 1 ? input.quotedPayout : 1;
+}
+
 export const MAX_TARGET_PROFIT_PER_BASE_STAKE = 1;
 
 /** Target profit recorded for a lost normal trade — capped at one base stake. */

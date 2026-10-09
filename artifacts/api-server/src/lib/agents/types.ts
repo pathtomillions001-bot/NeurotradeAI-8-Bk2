@@ -68,6 +68,16 @@ export interface ProductRecommendation {
 // ── Scan context ──────────────────────────────────────────────────────────────
 // Passed to every agent so each can use the same raw data without fetching twice.
 
+/**
+ * One contract the autonomous engine may trade, chosen by the user for either
+ * the normal or the recovery set. `digit` is the Over/Under barrier, the
+ * Matches/Differs digit (-1 = auto from the live tape), and -1 for Even/Odd/Rise/Fall.
+ */
+export interface AutonomousContractSpec {
+  type: string;
+  digit: number;
+}
+
 export interface TradingSettings {
   riskAmountType: "fixed" | "percentage"; // how stake is sized
   riskAmountValue: number;                // fixed $ amount OR percentage value
@@ -91,6 +101,13 @@ export interface TradingSettings {
   recoveryMultiplier: number;
   recoveryAutoMode: boolean;
   maxRecoverySteps: number;
+  /**
+   * Autonomous engine: the contracts the user chose for normal trades and for
+   * recovery trades, independently. Empty / absent falls back to the legacy
+   * preferredContractTypes + barrier pair, so existing settings keep working.
+   */
+  autonomousNormalContracts?: AutonomousContractSpec[];
+  autonomousRecoveryContracts?: AutonomousContractSpec[];
 }
 
 export interface DailyStats {

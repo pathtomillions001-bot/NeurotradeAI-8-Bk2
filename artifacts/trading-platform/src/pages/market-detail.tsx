@@ -17,8 +17,8 @@ import { MATCH_PAYOUT, DIFF_PAYOUT } from "@/lib/payouts";
 import { pipSizeForSymbol } from "@/lib/pip-size";
 import { withTabSession } from "@/lib/tab-session";
 
-// ── AI Trade Panel ────────────────────────────────────────────────────────────
-// Unified recommendation panel synced to all 3 contract types + agent intelligence
+// ── Market Trade Panels ───────────────────────────────────────────────────────
+// Statistical signal panels for the supported contract families.
 
 function TierBadge({ tier }: { tier: 1 | 2 | 0 }) {
   if (tier === 1) return <span className="text-[8px] font-bold px-1.5 py-0.5 rounded bg-green-500/15 text-green-400 border border-green-500/20">SAFE</span>;
@@ -81,9 +81,8 @@ function DigitBar({ digit, count, pct, hot, cold, barrier, contractType }: {
 }
 
 // ── Rise/Fall trend analysis panel ────────────────────────────────────────────
-function RiseFallPanel({ trendStats, agentData, onTrade }: {
+function RiseFallPanel({ trendStats, onTrade }: {
   trendStats: any;
-  agentData?: { probUp: number; probDown: number; weightedScore: number; shouldTrade: boolean; recommendedDuration: number };
   onTrade: (type: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
 }) {
   if (!trendStats) return null;
@@ -96,28 +95,14 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
     bias = "neutral",
   } = trendStats;
 
-  // Blend 9-agent direction probabilities (65%) with statistical win prob (35%)
-  const agentProbUp = agentData?.probUp ?? null;
-  const agentProbDown = agentData?.probDown ?? null;
-  const risingPct = agentProbUp !== null
-    ? Math.round(agentProbUp * 100 * 0.65 + (winProb?.rise ?? 50) * 0.35)
-    : winProb?.rise ?? 50;
-  const fallingPct = agentProbDown !== null
-    ? Math.round(agentProbDown * 100 * 0.65 + (winProb?.fall ?? 50) * 0.35)
-    : winProb?.fall ?? 50;
-
-  // Agent-driven recommendation overrides statistical signals when available
-  const isRiseRecommended = agentData
-    ? (agentData.probUp > 0.52 && agentData.shouldTrade && agentData.probUp >= agentData.probDown)
-    : recommendRise;
-  const isFallRecommended = agentData
-    ? (agentData.probDown > 0.52 && agentData.shouldTrade && agentData.probDown > agentData.probUp)
-    : recommendFall;
+  const risingPct = Math.round(winProb?.rise ?? 50);
+  const fallingPct = Math.round(winProb?.fall ?? 50);
+  const isRiseRecommended = recommendRise;
+  const isFallRecommended = recommendFall;
+  const duration = 5;
   const isHotStreak = hotStreak >= 3;
   const rsiOverbought = rsi > 70;
   const rsiOversold   = rsi < 30;
-  const agentDuration = agentData?.recommendedDuration ?? 5;
-  const wscore = agentData?.weightedScore ?? 0;
 
   return (
     <Card className="bg-card">
@@ -138,7 +123,7 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
         {/* Main action buttons */}
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onTrade("CALL", "up", undefined, agentDuration)}
+            onClick={() => onTrade("CALL", "up", undefined, duration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isRiseRecommended ? "border-green-500/60 bg-green-500/10" : "border-border bg-secondary/30 hover:border-green-500/30"
             }`}
@@ -146,11 +131,11 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
             <ArrowUp className={`w-6 h-6 mb-1.5 ${isRiseRecommended ? "text-green-400" : "text-muted-foreground"}`} />
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Rise</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${isRiseRecommended ? "text-green-400" : "text-foreground"}`}>{risingPct.toFixed(0)}%</div>
-            <div className="text-[9px] text-muted-foreground">{agentProbUp !== null ? "9-agent win prob" : "win probability"}</div>
-            {isRiseRecommended && <Badge className="mt-1.5 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">AI FAVOURS · {agentDuration}t</Badge>}
+            <div className="text-[9px] text-muted-foreground">statistical win probability</div>
+            {isRiseRecommended && <Badge className="mt-1.5 text-[9px] bg-green-500/20 text-green-400 border-green-500/30">TREND FAVOURS · {duration}t</Badge>}
           </button>
           <button
-            onClick={() => onTrade("PUT", "down", undefined, agentDuration)}
+            onClick={() => onTrade("PUT", "down", undefined, duration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isFallRecommended ? "border-red-500/60 bg-red-500/10" : "border-border bg-secondary/30 hover:border-red-500/30"
             }`}
@@ -158,17 +143,10 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
             <ArrowDown className={`w-6 h-6 mb-1.5 ${isFallRecommended ? "text-red-400" : "text-muted-foreground"}`} />
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Fall</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${isFallRecommended ? "text-red-400" : "text-foreground"}`}>{fallingPct.toFixed(0)}%</div>
-            <div className="text-[9px] text-muted-foreground">{agentProbDown !== null ? "9-agent win prob" : "win probability"}</div>
-            {isFallRecommended && <Badge className="mt-1.5 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">AI FAVOURS · {agentDuration}t</Badge>}
+            <div className="text-[9px] text-muted-foreground">statistical win probability</div>
+            {isFallRecommended && <Badge className="mt-1.5 text-[9px] bg-red-500/20 text-red-400 border-red-500/30">TREND FAVOURS · {duration}t</Badge>}
           </button>
         </div>
-
-        {/* AI recommendation hint */}
-        {agentData && (
-          <div className="text-[8px] text-muted-foreground px-1">
-            Optimal duration: {agentDuration}t · click Rise or Fall to auto-fill stake &amp; ticks
-          </div>
-        )}
 
         {/* Multi-window frequency table — matching EvenOdd style */}
         <div className="grid grid-cols-2 gap-1.5 text-center">
@@ -227,9 +205,9 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
           </div>
         </div>
 
-        {/* AI Signal summary */}
+        {/* Statistical signal summary */}
         <div className="p-2 rounded-lg bg-secondary/20 border border-border text-xs text-muted-foreground">
-          <span className="text-foreground font-medium">AI Signal: </span>
+          <span className="text-foreground font-medium">Trend signal: </span>
           {isRiseRecommended
             ? `RISE recommended — ${rsiOversold ? `RSI oversold (${rsi})` : recentFallPct > 65 ? `mean-reversion after ${recentFallPct}% recent falls` : `${risePct}% long-run rise bias`}`
             : isFallRecommended
@@ -244,9 +222,8 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
 }
 
 // ── Even / Odd analysis panel ──────────────────────────────────────────────────
-function EvenOddPanel({ digitStats, agentData, onTrade }: {
+function EvenOddPanel({ digitStats, onTrade }: {
   digitStats: any;
-  agentData?: { weightedScore: number; shouldTrade: boolean; recommendedDuration: number };
   onTrade: (type: string, dir: "up" | "down", barrier?: number, duration?: number) => void;
 }) {
   if (!digitStats) return (
@@ -301,11 +278,9 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
   // Streak reversal label
   const isStrongStreak = streak >= 4;
   const reversalSide = streakType === "even" ? "ODD" : "EVEN";
+  const duration = 5;
 
-  const agentDuration = agentData?.recommendedDuration ?? 5;
-  const wscore = agentData?.weightedScore ?? 0;
-
-  // Primary win probabilities driven by Markov chain (part of agent pipeline)
+  // Primary win probabilities driven by the Markov chain.
   const evenWinPct = (markovNextEvenProb * 100);
   const oddWinPct  = ((1 - markovNextEvenProb) * 100);
 
@@ -328,7 +303,7 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
         {/* Trade buttons */}
         <div className="grid grid-cols-2 gap-2">
           <button
-            onClick={() => onTrade("DIGITEVEN", "up", undefined, agentDuration)}
+            onClick={() => onTrade("DIGITEVEN", "up", undefined, duration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isEvenRecommended ? "border-cyan-500/60 bg-cyan-500/10" : "border-border bg-secondary/30 hover:border-cyan-500/30"
             }`}
@@ -337,10 +312,10 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">EVEN</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${isEvenRecommended ? "text-cyan-400" : "text-foreground"}`}>{evenWinPct.toFixed(1)}%</div>
             <div className="text-[9px] text-muted-foreground">Markov probability</div>
-            {isEvenRecommended && <Badge className="mt-1.5 text-[9px] bg-cyan-500/20 text-cyan-400 border-cyan-500/30">AI FAVOURS · {agentDuration}t</Badge>}
+            {isEvenRecommended && <Badge className="mt-1.5 text-[9px] bg-cyan-500/20 text-cyan-400 border-cyan-500/30">MARKOV FAVOURS · {duration}t</Badge>}
           </button>
           <button
-            onClick={() => onTrade("DIGITODD", "down", undefined, agentDuration)}
+            onClick={() => onTrade("DIGITODD", "down", undefined, duration)}
             className={`flex flex-col items-center p-4 rounded-xl border-2 transition-all hover:scale-[1.02] active:scale-100 cursor-pointer ${
               isOddRecommended ? "border-violet-500/60 bg-violet-500/10" : "border-border bg-secondary/30 hover:border-violet-500/30"
             }`}
@@ -349,16 +324,9 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
             <div className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">ODD</div>
             <div className={`text-2xl font-mono font-bold mt-1 ${isOddRecommended ? "text-violet-400" : "text-foreground"}`}>{oddWinPct.toFixed(1)}%</div>
             <div className="text-[9px] text-muted-foreground">Markov probability</div>
-            {isOddRecommended && <Badge className="mt-1.5 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">AI FAVOURS · {agentDuration}t</Badge>}
+            {isOddRecommended && <Badge className="mt-1.5 text-[9px] bg-violet-500/20 text-violet-400 border-violet-500/30">MARKOV FAVOURS · {duration}t</Badge>}
           </button>
         </div>
-
-        {/* AI recommendation hint */}
-        {agentData && (
-          <div className="text-[8px] text-muted-foreground px-1">
-            Optimal duration: {agentDuration}t · click Even or Odd to auto-fill stake &amp; ticks
-          </div>
-        )}
 
         {/* Multi-window frequency table — fixed labels (always 20 / 50 / 100) */}
         <div className="grid grid-cols-3 gap-1.5 text-center">
@@ -758,75 +726,8 @@ export default function MarketDetail() {
         </CardContent>
       </Card>
 
-      {/* Extract 13-agent outputs from coordinator recommendation */}
-      {(() => {
-        const agentOutputs = (rec as any)?.agentOutputs ?? {};
-        const dirAgent = agentOutputs?.direction?.data ?? agentOutputs?.riseFallAgent?.data;
-        const durationAgent = agentOutputs?.durationOptimizer?.data ?? agentOutputs?.executionTiming?.data;
-        const agentRecommendedDuration = durationAgent?.duration ?? (rec as any)?.recommendedDuration ?? 5;
-
-        // Use the rise-fall agent's own score to decide if Rise/Fall should be
-        // highlighted. Previously this used masterAgent?.shouldTrade which was
-        // always undefined (confidenceFusion.data has no shouldTrade field), so
-        // no AI highlights ever appeared. Now we check the riseFallAgent score
-        // directly — score ≥ 63 ("buy" threshold) means the agent has an edge.
-        const rfAgent = agentOutputs?.riseFallAgent ?? agentOutputs?.direction;
-        const rfScore = rfAgent?.score ?? 0;
-        const rfShouldTrade = rfScore >= 63;
-
-        const rfAgentData = dirAgent ? {
-          probUp: dirAgent.probUp ?? 0.5,
-          probDown: dirAgent.probDown ?? 0.5,
-          weightedScore: rfScore,
-          shouldTrade: rfShouldTrade,
-          recommendedDuration: agentRecommendedDuration,
-        } : undefined;
-
-        // Even/Odd: use the overall shouldTrade from the recommendation when the
-        // recommended contract is an Even/Odd type, otherwise use digitProbability
-        // agent score for gating.
-        const overallShouldTrade = !!(rec as any)?.shouldTrade;
-        const overallContractType = (rec as any)?.contractType ?? "";
-        const isEOContract = overallContractType === "DIGITEVEN" || overallContractType === "DIGITODD";
-        const digitAgent = agentOutputs?.digitProbability ?? agentOutputs?.digitDistribution;
-        const digitScore = digitAgent?.score ?? 0;
-        const eoShouldTrade = isEOContract ? overallShouldTrade : digitScore >= 60;
-
-        const eoAgentData = (digitAgent || overallShouldTrade) ? {
-          weightedScore: digitScore,
-          shouldTrade: eoShouldTrade,
-          recommendedDuration: agentRecommendedDuration,
-        } : undefined;
-
-        // All 13 agent keys with human-readable names
-        const AGENT_META: Array<{ key: string; label: string; icon: string }> = [
-          { key: "marketScanner",       label: "Market Scanner",      icon: "📡" },
-          { key: "tickIntelligence",    label: "Tick Intelligence",   icon: "🕐" },
-          { key: "digitProbability",    label: "Digit Probability",   icon: "🔢" },
-          { key: "riseFallAgent",       label: "Rise/Fall Model",     icon: "📈" },
-          { key: "marketRegime",        label: "Market Regime",       icon: "🌊" },
-          { key: "executionTiming",     label: "Execution Timing",    icon: "⏱" },
-          { key: "confidenceFusion",    label: "Confidence Fusion",   icon: "🧠" },
-          { key: "recoveryIntelligence",label: "Recovery Intel",      icon: "🛡" },
-          { key: "riskIntelligence",    label: "Risk Intelligence",   icon: "⚠" },
-          { key: "portfolioManager",    label: "Portfolio Manager",   icon: "💼" },
-          { key: "learningAgent",       label: "Learning Agent",      icon: "🎓" },
-          { key: "patternDiscovery",    label: "Pattern Discovery",   icon: "🔍" },
-          { key: "tradeExplainability", label: "Trade Explainability",icon: "💡" },
-        ];
-
-        const agentCards = AGENT_META.filter(a => agentOutputs[a.key]);
-
-        return (
-          <>
-            {/* Rise & Fall Analysis — 13-agent driven win probabilities */}
-            <RiseFallPanel trendStats={trendStats} agentData={rfAgentData} onTrade={openTradeDialog} />
-            {/* Even & Odd Analysis — only for digit markets */}
-            {isDigitMarket && <EvenOddPanel digitStats={digitStats} agentData={eoAgentData} onTrade={openTradeDialog} />}
-
-          </>
-        );
-      })()}
+      <RiseFallPanel trendStats={trendStats} onTrade={openTradeDialog} />
+      {isDigitMarket && <EvenOddPanel digitStats={digitStats} onTrade={openTradeDialog} />}
 
       {/* Digit Analysis (OVER/UNDER) — only for digit markets */}
       {isDigitMarket && !digitStats && (

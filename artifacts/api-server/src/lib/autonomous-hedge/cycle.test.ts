@@ -33,7 +33,7 @@ function context(): HedgeContext {
   };
 }
 
-function fakeHost(sessionId: string) {
+function fakeHost(sessionId: string, suppliedContext: HedgeContext = context()) {
   const counters = { canExecute: 0, loadContext: 0 };
   const emitted: Array<{ event: string; data: Record<string, unknown> }> = [];
   const published: HedgePublish[] = [];
@@ -45,7 +45,7 @@ function fakeHost(sessionId: string) {
     stop: (reason) => { stops.push(reason); },
     emit: (event, data) => { emitted.push({ event, data }); },
     publish: (patch) => { published.push(patch); },
-    loadContext: async () => { counters.loadContext++; await new Promise((r) => setTimeout(r, 30)); return context(); },
+    loadContext: async () => { counters.loadContext++; await new Promise((r) => setTimeout(r, 30)); return suppliedContext; },
     afterSettlement: () => undefined,
   };
   return { host, counters, emitted, published, stops };
@@ -94,5 +94,34 @@ describe("autonomous 1-tick cycle (tick-driven, coalesced)", () => {
     runWithSession(sessionId, () => requestHedgeCycle(host));
     await settle(() => emitted.length > 0 || stops.length > 0, 1000);
     assert.equal(emitted.some((e) => e.event === "trade_started" || e.event === "trade_completed"), false);
+  });
+
+  it("lets the cooldown setting bypass only the consecutive-loss pause", async () => {
+    const disabledSession = randomUUID();
+    const disabledContext = context();
+    disabledContext.settings.cooldownEnabled = false;
+    disabledContext.daily.consecutiveLosses = disabledContext.consecutiveLossLimit;
+    const disabled = fakeHost(disabledSession, disabledContext);
+    runWithSession(disabledSession, () => requestHedgeCycle(disabled.host));
+    await settle(() => disabled.counters.loadContext > 0);
+    assert.deepEqual(disabled.stops, [], "disabling cooldown should not stop on the streak threshold");
+
+    const enabledSession = randomUUID();
+    const enabledContext = context();
+    // Omitted settings preserve the historical default: cooldown enabled.
+    enabledContext.daily.consecutiveLosses = enabledContext.consecutiveLossLimit;
+    const enabled = fakeHost(enabledSession, enabledContext);
+    runWithSession(enabledSession, () => requestHedgeCycle(enabled.host));
+    await settle(() => enabled.stops.length > 0);
+    assert.match(enabled.stops[0], /consecutive losses/i, "the default-enabled cooldown still stops at the limit");
+
+    const dailyStopSession = randomUUID();
+    const dailyStopContext = context();
+    dailyStopContext.settings.cooldownEnabled = false;
+    dailyStopContext.daily.profit = -dailyStopContext.settings.dailyLossLimit;
+    const dailyStop = fakeHost(dailyStopSession, dailyStopContext);
+    runWithSession(dailyStopSession, () => requestHedgeCycle(dailyStop.host));
+    await settle(() => dailyStop.stops.length > 0);
+    assert.match(dailyStop.stops[0], /daily loss limit/i, "disabling cooldown must not disable other hard risk stops");
   });
 });

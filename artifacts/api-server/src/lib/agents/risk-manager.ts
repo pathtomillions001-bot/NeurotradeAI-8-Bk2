@@ -53,7 +53,7 @@ export function computeRiskDecision(
     return hardStop(`Daily loss limit $${settings.dailyLossLimit} reached (lost $${Math.abs(daily.profit).toFixed(2)} today)`);
   }
 
-  if (daily.consecutiveLosses >= settings.consecutiveLossLimit) {
+  if (settings.cooldownEnabled !== false && daily.consecutiveLosses >= settings.consecutiveLossLimit) {
     return hardStop(`${daily.consecutiveLosses} consecutive losses — mandatory cooldown`);
   }
 

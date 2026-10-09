@@ -2,12 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Brain, Target, AlertTriangle, CheckCircle2, XCircle,
-  Lightbulb, Activity, BarChart3, Shield, Zap, TrendingUp, TrendingDown,
-  ArrowRight, Cpu, Eye,
+  Lightbulb, Activity, BarChart3, Shield, Zap, Eye,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Progress } from "@/components/ui/progress";
 
 // ── Data hooks ────────────────────────────────────────────────────────────────
 
@@ -43,14 +41,6 @@ function useThresholds() {
   });
 }
 
-function useEngineStatus() {
-  return useQuery({
-    queryKey: ["engine-status-intel"],
-    queryFn: () => fetch("/api/ai/engine/status").then(r => r.json()),
-    refetchInterval: 10_000, staleTime: 5_000, refetchOnWindowFocus: true,
-  });
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function pct(n: number | null | undefined) {
@@ -64,21 +54,6 @@ function confLabel(a: string) {
   if (a === "too_low")  return { text: "Underconfident", cls: "border-yellow-500/40 text-yellow-400" };
   return                       { text: "Calibrated",     cls: "border-green-500/40 text-green-400" };
 }
-
-const AGENT_DISPLAY: Record<string, string> = {
-  marketScanner:        "Market Scanner",
-  tickIntelligence:     "Tick Intelligence",
-  digitProbability:     "Digit Probability",
-  riseFallAgent:        "Rise/Fall Model",
-  marketRegime:         "Market Regime",
-  executionTiming:      "Execution Timing",
-  confidenceFusion:     "Confidence Fusion",
-  recoveryIntelligence: "Recovery Intel",
-  riskIntelligence:     "Risk Intelligence",
-  portfolioManager:     "Portfolio Manager",
-  learningAgent:        "Learning Agent",
-  patternDiscovery:     "Pattern Discovery",
-};
 
 // ── KPI bar ───────────────────────────────────────────────────────────────────
 
@@ -197,7 +172,7 @@ function EngineHealth({ status, summary }: { status: any; summary: any }) {
           <p className="text-[10px] uppercase tracking-wider text-muted-foreground font-medium mb-2">Active Thresholds</p>
           <div className="grid grid-cols-3 gap-2 text-center">
             {[
-              { label: "Min Score",  value: minScore, unit: "pts", tip: "Minimum agent consensus to trade" },
+              { label: "Min Score",  value: minScore, unit: "pts", tip: "Minimum signal score to trade" },
               { label: "Min EV",     value: minEV,    unit: "%",   tip: "Minimum expected value to trade" },
               { label: "Win Rate",   value: recentWR, unit: "",    tip: "Recent session win rate" },
             ].map(t => (
@@ -234,12 +209,6 @@ function EngineHealth({ status, summary }: { status: any; summary: any }) {
                 </div>
               </div>
             ))}
-            {summary && (
-              <div className="flex justify-between text-[10px] text-muted-foreground pt-1 border-t border-border/60">
-                <span>Avg agent agreement</span>
-                <span className="font-mono font-semibold text-foreground">{summary.avgAgentAgreement}/100</span>
-              </div>
-            )}
           </div>
         )}
 
@@ -247,72 +216,6 @@ function EngineHealth({ status, summary }: { status: any; summary: any }) {
           <p className="text-[10px] text-muted-foreground italic border-t border-border pt-2">
             Dynamic calibration activates after 10 trades.
           </p>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-// ── Agent accuracy ranking ────────────────────────────────────────────────────
-
-function AgentAccuracy({ status }: { status: any }) {
-  const agents: any[] = (status?.agentStats ?? []).filter((a: any) => a.samples > 0);
-
-  return (
-    <Card className="bg-card border-border h-full">
-      <CardHeader className="pb-3">
-        <CardTitle className="text-sm font-semibold flex items-center gap-2">
-          <Cpu className="w-4 h-4 text-primary" />
-          Agent Performance Ranking
-          {agents.length > 0 && (
-            <span className="ml-auto text-[10px] text-muted-foreground font-normal">{agents.length} active</span>
-          )}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {agents.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-8 gap-2">
-            <Cpu className="w-7 h-7 text-muted-foreground/25" />
-            <p className="text-xs text-muted-foreground text-center">
-              Agent accuracy data builds up after your first trades.
-            </p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {[...agents]
-              .sort((a: any, b: any) => b.accuracy - a.accuracy)
-              .map((agent: any, i: number) => {
-                const name = AGENT_DISPLAY[agent.agentId] ?? agent.agentId.replace(/([A-Z])/g, " $1").trim();
-                const acc: number = agent.accuracy;
-                const color = acc > 60 ? "text-green-400" : acc > 48 ? "text-yellow-400" : "text-red-400";
-                const barColor = acc > 60 ? "bg-green-500" : acc > 48 ? "bg-yellow-500" : "bg-red-500";
-                return (
-                  <motion.div
-                    key={agent.agentId}
-                    initial={{ opacity: 0, x: -8 }}
-                    animate={{ opacity: 1, x: 0 }}
-                    transition={{ delay: i * 0.03 }}
-                    className="flex items-center gap-2.5"
-                  >
-                    <span className="text-[9px] text-muted-foreground/50 font-mono w-4 shrink-0 text-right">{i + 1}</span>
-                    <span className="text-[10px] text-muted-foreground flex-1 truncate min-w-0">{name}</span>
-                    <div className="w-24 h-1.5 bg-secondary rounded-full overflow-hidden shrink-0">
-                      <div className={`h-full rounded-full ${barColor} transition-all`} style={{ width: `${acc}%` }} />
-                    </div>
-                    <span className={`text-[10px] font-mono font-semibold w-9 text-right shrink-0 ${color}`}>
-                      {acc}%
-                    </span>
-                    <span className="text-[9px] text-muted-foreground/50 w-10 text-right shrink-0">
-                      {agent.samples}t
-                    </span>
-                  </motion.div>
-                );
-              })}
-            <p className="text-[10px] text-muted-foreground pt-1.5 border-t border-border/50 flex items-center gap-1">
-              <TrendingUp className="w-3 h-3" />
-              Accurate agents get higher weight in future trade decisions
-            </p>
-          </div>
         )}
       </CardContent>
     </Card>
@@ -560,7 +463,6 @@ export default function Intelligence() {
   const { data: reportsData,    isLoading: reportsLoading }    = useRecentReports();
   const { data: missedData,     isLoading: missedLoading }     = useRecentMissed();
   const { data: thresholdsData, isLoading: thresholdsLoading } = useThresholds();
-  const { data: engineData }                                    = useEngineStatus();
 
   const summary       = summaryData?.summary;
   const missedSummary = summaryData?.missedSummary;
@@ -617,13 +519,9 @@ export default function Intelligence() {
         <KpiBar summary={summary} missed={missedSummary} tradesAnalyzed={tradesAnalyzed} />
       )}
 
-      {/* ── Row 2: Engine health + Agent accuracy ranking ───────────────── */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-        <EngineHealth
-          status={dynamicStatus}
-          summary={summary}
-        />
-        <AgentAccuracy status={dynamicStatus} />
+      {/* ── Engine health and calibration ───────────────────────────────── */}
+      <div className="grid grid-cols-1 gap-5">
+        <EngineHealth status={dynamicStatus} summary={summary} />
       </div>
 
       {/* ── Row 3: Last 5 trades · Patterns · Rejected trades ──────────── */}

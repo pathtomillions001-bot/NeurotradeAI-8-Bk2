@@ -80,6 +80,8 @@ export interface TradingSettings {
   dailyLossLimit: number;
   dailyTarget: number;
   consecutiveLossLimit: number;
+  /** Whether consecutive-loss stops trigger an automatic cooldown pause. */
+  cooldownEnabled?: boolean;
   maxDrawdown: number;
   requirePositiveEv: boolean;
   paperTradeMode: boolean;

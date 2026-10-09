@@ -6,8 +6,10 @@ import { tickManager, AUTOMATED_DERIV_MARKETS, getLiveBalance, getMarketInfo, an
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis } from "../lib/agent-coordinator";
-import { requestHedgeCycle, resetHedgeSession, type HedgeContext, type HedgeHost, type HedgePublish } from "../lib/autonomous-hedge/cycle";
+import { buildHedgePreview, getHedgeMemory, requestHedgeCycle, resetHedgeSession, type HedgeContext, type HedgeHost, type HedgePublish } from "../lib/autonomous-hedge/cycle";
 import { normalizePreferredTypes } from "../lib/autonomous-hedge/families";
+import { HEDGE_DURATION_TICKS } from "../lib/autonomous-hedge/constants";
+import { recoveryEscalation } from "../lib/autonomous-hedge/recovery-risk";
 import { resolveContractSets } from "../lib/autonomous-hedge/contract-sets";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
@@ -165,8 +167,6 @@ interface EngineInstance {
   cooldownResumeTimer: ReturnType<typeof setTimeout> | null;
   /** Consecutive-loss streak, mirrored from the recovery ledger. */
   sessionLossCount: number;
-  /** Agent scores from the last cycle, keyed by agentId. */
-  lastAgentScores: Record<string, number>;
 }
 
 const enginesBySession = new Map<string, EngineInstance>();
@@ -187,28 +187,11 @@ function getEngine(sessionId: string): EngineInstance {
       cooldownUntil: null,
       cooldownResumeTimer: null,
       sessionLossCount: 0,
-      lastAgentScores: {},
     };
     enginesBySession.set(sessionId, engine);
   }
   return engine;
 }
-
-// The autonomous engine runs 14 agents (lib/autonomous-hedge/agents). Names and
-// score keys are paired by index; keys are the agentIds those agents report.
-const AGENT_NAMES = [
-  "Market Scanner", "Tick Intelligence", "Digit Probability", "Rise/Fall Model",
-  "Market Regime", "Execution Timing", "Confidence Fusion", "Recovery Intelligence",
-  "Duration Optimizer", "Portfolio Manager", "Risk Intelligence", "Learning Agent",
-  "Pattern Discovery", "Trade Explainability",
-];
-
-const AGENT_SCORE_KEYS = [
-  "marketScanner", "tickIntelligence", "digitProbability", "riseFallAgent",
-  "marketRegime", "executionTiming", "confidenceFusion", "recoveryIntelligence",
-  "durationOptimizer", "portfolioManager", "riskIntelligence", "learningAgent",
-  "patternDiscovery", "tradeExplainability",
-];
 
 // ── Settings builders ─────────────────────────────────────────────────────────
 
@@ -245,6 +228,7 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     dailyLossLimit:         s ? Number(s.dailyLossLimit) : 30,
     dailyTarget:            s ? Number(s.dailyTarget) : 50,
     consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
+    cooldownEnabled:        s?.cooldownEnabled ?? true,
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
     paperTradeMode:         s?.paperTradeMode ?? false,
@@ -492,6 +476,33 @@ async function syncLiveBalance(
   } catch { /* ignore */ }
 }
 
+/** Cancel an active cooldown immediately when the account disables it in Settings. */
+export function applyCooldownSettingUpdate(
+  sessionId: string,
+  settings: typeof settingsTable.$inferSelect,
+): void {
+  if (settings.cooldownEnabled) return;
+  const engine = enginesBySession.get(sessionId);
+  if (!engine || (!engine.cooldownResumeTimer && !engine.cooldownUntil)) return;
+
+  if (engine.cooldownResumeTimer) clearTimeout(engine.cooldownResumeTimer);
+  engine.cooldownResumeTimer = null;
+  engine.cooldownUntil = null;
+  broadcastEngineSSE(engine, "cooldown_disabled", { ts: Date.now() });
+
+  // The engine remained enabled in settings while it was waiting. Continue the
+  // same session now, preserving its recovery streak and tournament memory.
+  if (settings.autonomousEnabled && !engine.running) {
+    engine.running = true;
+    engine.mode = "autonomous";
+    engine.stopReasons = [];
+    engine.nextScanIn = null;
+    engine.loopIntervalSec = settings.loopIntervalSec || engine.loopIntervalSec;
+    broadcastEngineSSE(engine, "engine_started", { reason: "cooldown_disabled" });
+    requestHedgeCycle(hedgeHostFor(engine));
+  }
+}
+
 // ── Autonomous engine host (tick-driven 1-tick cycle) ─────────────────────────
 //
 // The cycle itself lives in lib/autonomous-hedge/cycle.ts. This section binds
@@ -529,7 +540,6 @@ function hedgeHostFor(engine: EngineInstance): HedgeHost {
       if (patch.sessionLossCount !== undefined) engine.sessionLossCount = patch.sessionLossCount;
       if (patch.tradesExecutedToday !== undefined) engine.tradesExecutedToday = patch.tradesExecutedToday;
       if (patch.lastTradeTime !== undefined) engine.lastTradeTime = patch.lastTradeTime;
-      if (patch.lastAgentScores !== undefined) engine.lastAgentScores = patch.lastAgentScores;
       if (patch.nextScanIn !== undefined) engine.nextScanIn = patch.nextScanIn;
     },
     loadContext: () => loadHedgeContext(engine),
@@ -667,18 +677,6 @@ async function buildRecommendationPayload(sessionId: string, symbol: string, mar
     generatedAt: new Date().toISOString(),
   };
 }
-
-// ── Engine agent status (from the last autonomous cycle) ──────────────────────
-function engineAgentStatuses(engine: EngineInstance) {
-  const now = new Date().toISOString();
-  return AGENT_SCORE_KEYS.map((key, i) => ({
-    name: AGENT_NAMES[i],
-    isActive: engine.running,
-    lastRun: now,
-    confidence: engine.lastAgentScores[key] ?? 0,
-  }));
-}
-
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
 
@@ -852,6 +850,60 @@ function buildRecoveryPayload(visible = true) {
   };
 }
 
+router.get("/engine/preview", async (req, res): Promise<void> => {
+  const engine = getEngine(req.sessionId);
+  const preview = await runWithSession(req.sessionId, async () => {
+    recoveryEngine.setPersistenceSession(req.sessionId);
+    const ctx = await loadHedgeContext(engine);
+    const ledger = recoveryEngine.getState();
+    const mode = recoveryEngine.isInRecovery() ? "RECOVERY" as const : "NORMAL" as const;
+    const lossRun = ledger.streakLossCount;
+    const escalation = recoveryEscalation(lossRun, ledger.recoveryStep);
+    const result = buildHedgePreview(ctx, mode, getHedgeMemory(req.sessionId), lossRun, escalation);
+    const stake = result.risk.recommendedStake;
+    const markets = result.rankedRows.map((row, index) => {
+      const market = getMarketInfo(row.symbol);
+      return {
+        symbol: row.symbol,
+        displayName: market?.displayName ?? row.symbol,
+        group: row.group,
+        contractType: row.contract,
+        recommendedContractType: row.contract,
+        barrier: row.barrier >= 0 ? row.barrier : null,
+        digitBarrier: row.barrier >= 0 ? row.barrier : null,
+        qualityScore: Math.round(row.score * 100) / 100,
+        confidenceScore: Math.round(row.lowerBound * 100),
+        winProbability: Math.round(row.probability * 10000) / 100,
+        expectedValue: Math.round(row.ev * stake * 100) / 100,
+        stake,
+        recommendedDuration: HEDGE_DURATION_TICKS,
+        payoutMultiplier: row.payout,
+        // Quick Strike is user-driven when the engine is off. Respect each
+        // candidate's market/risk gate here, but don't require the autonomous
+        // recovery-confirmation counter (the read-only preview must not mutate it).
+        shouldTrade: !result.risk.hardStop && row.eligible,
+        regime: mode.toLowerCase(),
+        samples: row.samples,
+        rank: index + 1,
+      };
+    });
+    return {
+      mode,
+      markets,
+      marketsScanned: result.marketsScanned,
+      best: result.decision ? {
+        symbol: result.decision.best.symbol,
+        contractType: result.decision.best.contract,
+        barrier: result.decision.best.barrier >= 0 ? result.decision.best.barrier : null,
+        eligible: result.decision.eligible,
+        reason: result.decision.reason,
+      } : null,
+      stopReason: result.risk.hardStopReason ?? null,
+    };
+  });
+  res.json(preview);
+});
+
 router.get("/engine/status", async (req, res): Promise<void> => {
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
@@ -865,7 +917,6 @@ router.get("/engine/status", async (req, res): Promise<void> => {
 
   res.json({
     isRunning: engine.running, mode: engine.running ? engine.mode : "manual",
-    agentStatuses: engineAgentStatuses(engine),
     tradesExecutedToday: todayTrades.length,
     currentMarket: engine.currentMarket,
     nextScanIn: engine.running ? engine.nextScanIn : null,
@@ -936,7 +987,6 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
 
   res.json({
     isRunning: engine.running, mode: engine.mode,
-    agentStatuses: engineAgentStatuses(engine),
     tradesExecutedToday: engine.tradesExecutedToday, currentMarket: engine.currentMarket,
     nextScanIn: engine.nextScanIn, stopReasons: engine.stopReasons, loopIntervalSec: engine.loopIntervalSec,
     lastTradeTime: engine.lastTradeTime?.toISOString() ?? null,

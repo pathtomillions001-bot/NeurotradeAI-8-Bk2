@@ -52,7 +52,6 @@ import {
   journal,
   pruneDeselectedSymbols,
   reconcilePositions,
-  recordDealClose,
   rememberBridgeToken,
   requeueStaleCommands,
   resendArmedPlans,
@@ -84,9 +83,7 @@ import {
   type AccountSnapshot,
   type AssetClass,
   type Bar,
-  type ClosedDealReport,
   type CommandResult,
-  type ExitReason,
   type HighImpactNewsEvent,
   type MarketCatalogEntry,
   type NewsFeed,
@@ -118,7 +115,7 @@ const router: IRouter = Router();
  * WebRequest timeout, beat-duration logging, and timestamps self-corrected
  * against this server's clock (`serverTime`) instead of the machine clock.
  */
-export const EXPECTED_EA_VERSION = "3.05";
+export const EXPECTED_EA_VERSION = "3.04";
 
 interface PendingPairing {
   code: string;
@@ -578,59 +575,6 @@ function parsePosition(raw: unknown): Position | null {
   };
 }
 
-const EXIT_REASONS: readonly ExitReason[] = [
-  "sl",
-  "breakeven_stop",
-  "tp",
-  "time_stop",
-  "manual",
-  "expert",
-  "stop_out",
-  "other",
-  "unknown",
-];
-
-/**
- * A closed-position report from the terminal. Strict where the books depend on
- * it: a deal without a ticket or a symbol cannot be deduplicated or attributed,
- * so it is dropped rather than recorded. Anything unknown is named `unknown`
- * instead of guessed.
- */
-function parseClosedDeal(raw: unknown): ClosedDealReport | null {
-  if (!raw || typeof raw !== "object") return null;
-  const r = raw as Record<string, unknown>;
-  const dealTicket = Math.round(num(r.dealTicket, NaN));
-  const positionId = Math.round(num(r.positionId, NaN));
-  const symbol = String(r.symbol ?? "");
-  if (!Number.isFinite(dealTicket) || dealTicket <= 0) return null;
-  if (!Number.isFinite(positionId) || positionId <= 0 || !symbol) return null;
-  const optional = (value: unknown): number | null =>
-    value === null || value === undefined || value === "" || !Number.isFinite(Number(value))
-      ? null
-      : Number(value);
-  const reason = EXIT_REASONS.includes(r.reason as ExitReason) ? (r.reason as ExitReason) : "unknown";
-  return {
-    dealTicket,
-    positionId,
-    symbol,
-    side: r.side === "sell" ? "sell" : "buy",
-    volume: num(r.volume),
-    openPrice: num(r.openPrice),
-    closePrice: num(r.closePrice),
-    openTime: num(r.openTime, 0),
-    closeTime: num(r.closeTime, 0),
-    profit: num(r.profit),
-    commission: num(r.commission),
-    swap: num(r.swap),
-    reason,
-    planId: typeof r.planId === "string" && r.planId.length > 0 ? r.planId : null,
-    initialRiskMoney: optional(r.initialRiskMoney),
-    initialRiskPoints: optional(r.initialRiskPoints),
-    mfeR: optional(r.mfeR),
-    maeR: optional(r.maeR),
-  };
-}
-
 function parseQuote(raw: unknown): Quote | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -999,42 +943,16 @@ router.post("/sync", async (req, res) => {
   const news = parseNewsFeed(body.news);
   if (news) desk.news = news;
 
-  // Closed trades, as the terminal reports them. Authoritative when present: the
-  // terminal's own close record carries commission, the exit reason and the
-  // excursions. A deal already recorded is skipped by its ticket, so an EA that
-  // re-sends an unacknowledged close cannot double-count it.
-  const reportsDeals = Array.isArray(body.closedDeals);
-  if (reportsDeals) {
-    for (const raw of body.closedDeals as unknown[]) {
-      const deal = parseClosedDeal(raw);
-      if (!deal) continue;
-      const trade = recordDealClose(desk, deal, now);
-      if (!trade) continue;
-      const net = trade.profit + trade.swap + trade.commission;
-      desk.riskState = recordOutcome(desk.riskState, { symbol: trade.symbol, profit: net, closedAt: now }, desk.policy);
-      const rText = trade.rMultiple === null ? "" : ` · ${trade.rMultiple >= 0 ? "+" : ""}${trade.rMultiple.toFixed(2)}R`;
-      journal(desk, "execution", trade.symbol, `Position #${deal.positionId} closed (${deal.reason}): ${net >= 0 ? "+" : ""}${net.toFixed(2)}${rText}.`, {
-        consecutiveLosses: desk.riskState.consecutiveLosses,
-        dealTicket: deal.dealTicket,
-      });
-      if (desk.riskState.haltedUntilNextSession) {
-        journal(desk, "risk", null, desk.riskState.haltReason ?? "Desk halted.");
-      }
-    }
-  }
-
   if (Array.isArray(body.positions)) {
     const positions = (body.positions as unknown[])
       .map(parsePosition)
       .filter((position): position is Position => position !== null);
-    // With deal reports, a vanished position is NOT a close: its deal arrives on
-    // its own, and inferring it here too would count the trade twice.
-    const { opened, closed } = reconcilePositions(desk, positions, { inferCloses: !reportsDeals });
+    const { opened, closed } = reconcilePositions(desk, positions);
 
     for (const position of opened) {
       journal(desk, "execution", position.symbol, `Position #${position.ticket} opened: ${position.side} ${position.volume} @ ${position.openPrice}.`);
     }
-    for (const position of reportsDeals ? [] : closed) {
+    for (const position of closed) {
       const net = position.profit + position.swap + position.commission;
       desk.riskState = recordOutcome(desk.riskState, { symbol: position.symbol, profit: net, closedAt: now }, desk.policy);
       journal(desk, "execution", position.symbol, `Position #${position.ticket} closed: ${net >= 0 ? "+" : ""}${net.toFixed(2)}.`, {

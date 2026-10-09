@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.05                                                     |
+//| Version 3.04                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -99,22 +99,6 @@
 //|     Each instance now identifies itself, so the Desk re-sends      |
 //|     armed plans to a new instance instead of discarding them.      |
 //|                                                                    |
-//| WHAT CHANGED IN v3.05                                            |
-//| 14. POST-FILL MANAGEMENT IS ENFORCED BY THE TERMINAL.            |
-//|     v3.04 dropped each plan at the fill, so one breakeven step   |
-//|     was the only management that ever ran. Partials, the time    |
-//|     stop and the trail were computed by the desk and ignored.    |
-//|     Each filled position now keeps a record of its plan: a       |
-//|     breakeven (once), an extension at checkAtR when the trend    |
-//|     still favours the trade, and a time stop. Progress is measured|
-//|     against the ORIGINAL risk, so a stop moved to breakeven cannot|
-//|     inflate it. The records survive a restart (common folder).   |
-//| 15. CLOSED TRADES ARE REPORTED FROM THE TERMINAL'S OWN RECORDS.  |
-//|     closedDeals carries each closed position's realised P&L,     |
-//|     commission, exit reason and excursions. It is re-sent until the|
-//|     desk acknowledges it, so a lost response cannot lose a trade.|
-//|     A vanished position no longer counts as a close on its own.  |
-//|                                                                  |
 //| WHAT CHANGED IN v3.04                                             |
 //| 13. TIMESTAMPS NO LONGER TRUST THE MACHINE CLOCK.                  |
 //|     v3.00-3.03 derived the UTC offset from TimeGMT() — the         |
@@ -170,7 +154,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "3.05"
+#property version   "3.04"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -231,13 +215,9 @@ struct ArmedPlan
    int    confirmCount;
    double beTriggerR;
    double beOffsetR;
-   long   maxHoldSec;
-   bool   extEnabled;
-   double checkAtR;
-   double extendToR;
-   double lockR;
-   int    emaPeriod;
-   string tfName;
+   double trailMult;
+   double trailActivateR;
+   bool   trailEnabled;
    bool   active;
 };
 
@@ -245,506 +225,6 @@ CTrade trade;
 ArmedPlan g_plans[MAX_PLANS];
 string    g_seenCmds[MAX_SEEN_CMDS];
 int       g_seenCount = 0;
-
-//+------------------------------------------------------------------+
-//| Post-fill management (v3.05)                                      |
-//|                                                                  |
-//| When an order fills, the plan that produced it is finished, so   |
-//| its management settings move into a per-ticket record. The record |
-//| lives until the position has closed AND the desk has acknowledged |
-//| that close. Everything the desk promised after the fill is         |
-//| enforced here:                                                    |
-//|   breakeven  once progress reaches triggerR, the stop moves to     |
-//|              entry + offsetR, once                                 |
-//|   extension  at checkAtR, if the trend still favours the trade,    |
-//|              the target moves to extendToR and the stop to +lockR |
-//|   time stop  the position is closed when its hold is exhausted     |
-//| Progress is measured against the ORIGINAL risk, so a stop moved    |
-//| to breakeven does not make a trade look further in profit.         |
-//+------------------------------------------------------------------+
-#define MAX_MANAGED            64
-#define DEAL_LOOKBACK_SECONDS  (2 * 24 * 60 * 60)
-#define DEAL_SCAN_THROTTLE_MS  2000
-#define DEALS_PER_BEAT         50
-#define MANAGED_FILE_VERSION   "v2"
-
-// extendState: 0 = decision pending, 1 = declined (fixed target stands), 2 = applied.
-struct ManagedPosition
-{
-   bool     active;
-   ulong    ticket;
-   string   planId;
-   string   symbol;
-   bool     isBuy;
-   double   entry;
-   double   riskPrice;
-   double   riskMoney;
-   double   beTriggerR;
-   double   beOffsetR;
-   bool     beDone;
-   long     maxHoldSec;
-   datetime openTime;
-   bool     extEnabled;
-   double   checkAtR;
-   double   extendToR;
-   double   lockR;
-   int      emaPeriod;
-   string   tfName;
-   int      extendState;
-   double   mfeR;
-   double   maeR;
-   ulong    closeDeal;
-   string   closeReason;
-   datetime lastSeen;
-};
-
-ManagedPosition g_managed[MAX_MANAGED];
-ulong    g_dealWatermark = 0;   // highest close deal the desk has acknowledged
-ulong    g_pendingDealMax = 0;  // highest deal included in the body being sent
-ulong    g_lastDealScanMs = 0;
-bool     g_managedDirty = false;
-bool     g_managedLoaded = false;
-
-string ManagedFileName()
-{
-   return "NeurotradeBridge_managed_" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ".txt";
-}
-
-int FindManaged(const ulong ticket)
-{
-   for(int i = 0; i < MAX_MANAGED; i++)
-      if(g_managed[i].active && g_managed[i].ticket == ticket) return i;
-   return -1;
-}
-
-int FreeManagedSlot()
-{
-   for(int i = 0; i < MAX_MANAGED; i++)
-      if(!g_managed[i].active) return i;
-   return -1;
-}
-
-/** Write every live record and the deal watermark, so a restart resumes management. */
-void SaveManagedState()
-{
-   ResetLastError();
-   int handle = FileOpen(ManagedFileName(), FILE_COMMON | FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if(handle == INVALID_HANDLE)
-   {
-      Log("Could not save managed-position state (" + IntegerToString(GetLastError()) +
-          "). Open positions keep their stops, but breakeven, extension and time stop will not survive a restart.");
-      return;
-   }
-   FileWriteString(handle, MANAGED_FILE_VERSION + "\n");
-   FileWriteString(handle, "W|" + IntegerToString((long)g_dealWatermark) + "\n");
-   for(int i = 0; i < MAX_MANAGED; i++)
-   {
-      if(!g_managed[i].active) continue;
-      string line = "R|" + IntegerToString((long)g_managed[i].ticket) + "|" + g_managed[i].planId + "|" +
-         g_managed[i].symbol + "|" + (g_managed[i].isBuy ? "1" : "0") + "|" +
-         DoubleToString(g_managed[i].entry, 10) + "|" + DoubleToString(g_managed[i].riskPrice, 10) + "|" +
-         DoubleToString(g_managed[i].riskMoney, 2) + "|" + DoubleToString(g_managed[i].beTriggerR, 4) + "|" +
-         DoubleToString(g_managed[i].beOffsetR, 4) + "|" + (g_managed[i].beDone ? "1" : "0") + "|" +
-         IntegerToString(g_managed[i].maxHoldSec) + "|" + IntegerToString((long)g_managed[i].openTime) + "|" +
-         (g_managed[i].extEnabled ? "1" : "0") + "|" + DoubleToString(g_managed[i].checkAtR, 4) + "|" +
-         DoubleToString(g_managed[i].extendToR, 4) + "|" + DoubleToString(g_managed[i].lockR, 4) + "|" +
-         IntegerToString(g_managed[i].emaPeriod) + "|" + g_managed[i].tfName + "|" +
-         IntegerToString(g_managed[i].extendState) + "|" + DoubleToString(g_managed[i].mfeR, 4) + "|" +
-         DoubleToString(g_managed[i].maeR, 4) + "|" + IntegerToString((long)g_managed[i].closeDeal) + "|" +
-         g_managed[i].closeReason + "|" + IntegerToString((long)g_managed[i].lastSeen) + "\n";
-      FileWriteString(handle, line);
-   }
-   FileClose(handle);
-   g_managedDirty = false;
-}
-
-/** Restore records after a restart. With no file, the watermark starts past existing history. */
-void LoadManagedState()
-{
-   if(g_managedLoaded) return;
-   g_managedLoaded = true;
-   string name = ManagedFileName();
-   ResetLastError();
-   if(!FileIsExist(name, FILE_COMMON))
-   {
-      InitialiseDealWatermark();
-      return;
-   }
-   int handle = FileOpen(name, FILE_COMMON | FILE_READ | FILE_TXT | FILE_ANSI);
-   if(handle == INVALID_HANDLE)
-   {
-      InitialiseDealWatermark();
-      return;
-   }
-   string version = FileReadString(handle);
-   if(version != MANAGED_FILE_VERSION)
-   {
-      FileClose(handle);
-      InitialiseDealWatermark();
-      return;
-   }
-   while(!FileIsEnding(handle))
-   {
-      string line = FileReadString(handle);
-      string parts[];
-      int n = StringSplit(line, '|', parts);
-      if(n < 2) continue;
-      if(parts[0] == "W")
-      {
-         g_dealWatermark = (ulong)StringToInteger(parts[1]);
-         continue;
-      }
-      if(parts[0] != "R" || n < 25) continue;
-      int slot = FreeManagedSlot();
-      if(slot < 0) break;
-      g_managed[slot].active = true;
-      g_managed[slot].ticket = (ulong)StringToInteger(parts[1]);
-      g_managed[slot].planId = parts[2];
-      g_managed[slot].symbol = parts[3];
-      g_managed[slot].isBuy = parts[4] == "1";
-      g_managed[slot].entry = StringToDouble(parts[5]);
-      g_managed[slot].riskPrice = StringToDouble(parts[6]);
-      g_managed[slot].riskMoney = StringToDouble(parts[7]);
-      g_managed[slot].beTriggerR = StringToDouble(parts[8]);
-      g_managed[slot].beOffsetR = StringToDouble(parts[9]);
-      g_managed[slot].beDone = parts[10] == "1";
-      g_managed[slot].maxHoldSec = StringToInteger(parts[11]);
-      g_managed[slot].openTime = (datetime)StringToInteger(parts[12]);
-      g_managed[slot].extEnabled = parts[13] == "1";
-      g_managed[slot].checkAtR = StringToDouble(parts[14]);
-      g_managed[slot].extendToR = StringToDouble(parts[15]);
-      g_managed[slot].lockR = StringToDouble(parts[16]);
-      g_managed[slot].emaPeriod = (int)StringToInteger(parts[17]);
-      g_managed[slot].tfName = parts[18];
-      g_managed[slot].extendState = (int)StringToInteger(parts[19]);
-      g_managed[slot].mfeR = StringToDouble(parts[20]);
-      g_managed[slot].maeR = StringToDouble(parts[21]);
-      g_managed[slot].closeDeal = (ulong)StringToInteger(parts[22]);
-      g_managed[slot].closeReason = parts[23];
-      g_managed[slot].lastSeen = (datetime)StringToInteger(parts[24]);
-   }
-   FileClose(handle);
-}
-
-/**
- * First attach with no saved state: history that predates the desk must not be
- * reported as new trades, so the watermark starts at the newest existing deal.
- */
-void InitialiseDealWatermark()
-{
-   datetime now = TimeCurrent();
-   if(!HistorySelect(now - DEAL_LOOKBACK_SECONDS, now + 60)) return;
-   ulong top = 0;
-   int total = HistoryDealsTotal();
-   for(int i = 0; i < total; i++)
-   {
-      ulong deal = HistoryDealGetTicket(i);
-      if(deal > top) top = deal;
-   }
-   g_dealWatermark = top;
-   g_managedDirty = true;
-}
-
-/** Value at risk to the stop, in account currency. 0 when it cannot be priced. */
-double RiskMoneyFor(const string symbol, const bool isBuy, const double volume, const double entry, const double sl)
-{
-   if(sl <= 0 || volume <= 0 || entry <= 0) return 0;
-   double profit = 0;
-   ENUM_ORDER_TYPE type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
-   if(!OrderCalcProfit(type, symbol, volume, entry, sl, profit)) return 0;
-   return MathAbs(profit);
-}
-
-/** The position an armed plan just opened: the newest unregistered one on its symbol. */
-void RegisterManagedFill(const ArmedPlan &plan)
-{
-   ulong newest = 0;
-   datetime newestTime = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      string symbol = PositionGetSymbol(i);
-      if(symbol == "" || symbol != plan.symbol) continue;
-      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
-      if(FindManaged(ticket) >= 0) continue;
-      datetime when = (datetime)PositionGetInteger(POSITION_TIME);
-      if(newest == 0 || when >= newestTime)
-      {
-         newest = ticket;
-         newestTime = when;
-      }
-   }
-   if(newest == 0 || !PositionSelectByTicket(newest))
-   {
-      Log("Filled, but the new position could not be found to attach its management (" + plan.symbol + ").");
-      return;
-   }
-   int slot = FreeManagedSlot();
-   if(slot < 0)
-   {
-      Log("No free slot for managed positions; #" + IntegerToString((long)newest) + " runs on its stop alone.");
-      return;
-   }
-   ManagedPosition m;
-   m.active = true;
-   m.ticket = newest;
-   m.planId = plan.id;
-   m.symbol = PositionGetString(POSITION_SYMBOL);
-   m.isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
-   m.entry = PositionGetDouble(POSITION_PRICE_OPEN);
-   double sl = PositionGetDouble(POSITION_SL);
-   m.riskPrice = MathAbs(m.entry - sl);
-   m.riskMoney = RiskMoneyFor(m.symbol, m.isBuy, PositionGetDouble(POSITION_VOLUME), m.entry, sl);
-   m.beTriggerR = plan.beTriggerR;
-   m.beOffsetR = plan.beOffsetR;
-   m.beDone = false;
-   m.maxHoldSec = plan.maxHoldSec;
-   m.openTime = (datetime)PositionGetInteger(POSITION_TIME);
-   m.extEnabled = plan.extEnabled;
-   m.checkAtR = plan.checkAtR;
-   m.extendToR = plan.extendToR;
-   m.lockR = plan.lockR;
-   m.emaPeriod = plan.emaPeriod;
-   m.tfName = plan.tfName;
-   m.extendState = 0;
-   m.mfeR = 0;
-   m.maeR = 0;
-   m.closeDeal = 0;
-   m.closeReason = "";
-   m.lastSeen = TimeCurrent();
-   if(m.riskPrice <= 0)
-      Log("WARNING: #" + IntegerToString((long)newest) + " has no stop, so its progress cannot be measured.");
-   g_managed[slot] = m;
-   g_managedDirty = true;
-   SaveManagedState();
-}
-
-/**
- * A position this EA did not register: its state file is gone, or it was opened
- * before v3.05. It is managed with the legacy breakeven defaults. It has no time
- * stop or extension, because the plan that set them is no longer known.
- */
-int AdoptPosition(const ulong ticket)
-{
-   if(!PositionSelectByTicket(ticket)) return -1;
-   int slot = FreeManagedSlot();
-   if(slot < 0) return -1;
-   ManagedPosition m;
-   m.active = true;
-   m.ticket = ticket;
-   m.planId = "";
-   m.symbol = PositionGetString(POSITION_SYMBOL);
-   m.isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
-   m.entry = PositionGetDouble(POSITION_PRICE_OPEN);
-   double sl = PositionGetDouble(POSITION_SL);
-   m.riskPrice = MathAbs(m.entry - sl);
-   m.riskMoney = RiskMoneyFor(m.symbol, m.isBuy, PositionGetDouble(POSITION_VOLUME), m.entry, sl);
-   m.beTriggerR = 1.0;
-   m.beOffsetR = 0.2;
-   m.beDone = false;
-   m.maxHoldSec = 0;
-   m.openTime = (datetime)PositionGetInteger(POSITION_TIME);
-   m.extEnabled = false;
-   m.checkAtR = 0;
-   m.extendToR = 0;
-   m.lockR = 0;
-   m.emaPeriod = 0;
-   m.tfName = "";
-   m.extendState = 2;
-   m.mfeR = 0;
-   m.maeR = 0;
-   m.closeDeal = 0;
-   m.closeReason = "";
-   m.lastSeen = TimeCurrent();
-   g_managed[slot] = m;
-   g_managedDirty = true;
-   Log("Adopted #" + IntegerToString((long)ticket) + " with the default breakeven; it was not opened by a plan this terminal still holds.");
-   return slot;
-}
-
-ENUM_TIMEFRAMES TimeframeFromName(const string name)
-{
-   for(int i = 0; i < TF_COUNT; i++)
-      if(TF_NAMES[i] == name) return TF_LIST[i];
-   return PERIOD_M15;
-}
-
-/**
- * Is the trend still in the trade's favour? The last closed bar must sit on the
- * trade's side of an EMA that has been moving that way for the last five bars.
- * It is computed from iClose, so no indicator handle is needed. A missing bar
- * means the trend cannot be confirmed, which counts as not favourable.
- */
-bool TrendStillFavourable(const string symbol, const bool isBuy, const ENUM_TIMEFRAMES tf, const int period)
-{
-   if(period < 2) return false;
-   const int lag = 5;
-   int seedEnd = period * 3 + lag + 1;
-   double alpha = 2.0 / (period + 1.0);
-   double sum = 0;
-   for(int s = seedEnd; s > seedEnd - period; s--)
-   {
-      double c = iClose(symbol, tf, s);
-      if(c <= 0) return false;
-      sum += c;
-   }
-   double ema = sum / period;
-   double emaNow = 0;
-   double emaLag = 0;
-   for(int s = seedEnd - period; s >= 1; s--)
-   {
-      double c = iClose(symbol, tf, s);
-      if(c <= 0) return false;
-      ema = alpha * c + (1.0 - alpha) * ema;
-      if(s == 1) emaNow = ema;
-      if(s == 1 + lag) emaLag = ema;
-   }
-   double last = iClose(symbol, tf, 1);
-   if(last <= 0) return false;
-   return isBuy ? (last > emaNow && emaNow > emaLag) : (last < emaNow && emaNow < emaLag);
-}
-
-/**
- * Closed positions since the watermark, as the terminal's own records. Each
- * position is reported ONCE, from its last OUT deal, with its whole-trade P&L.
- * `topDeal` returns the highest deal reported; it becomes the watermark only
- * after the desk acknowledges the response.
- */
-string ClosedDealsJson(ulong &topDeal)
-{
-   topDeal = 0;
-   datetime now = TimeCurrent();
-   if(!HistorySelect(now - DEAL_LOOKBACK_SECONDS, now + 60)) return "[]";
-   ulong candidates[];
-   int count = 0;
-   int total = HistoryDealsTotal();
-   for(int i = 0; i < total && count < DEALS_PER_BEAT; i++)
-   {
-      ulong deal = HistoryDealGetTicket(i);
-      if(deal == 0 || deal <= g_dealWatermark) continue;
-      if((int)HistoryDealGetInteger(deal, DEAL_MAGIC) != MagicNumber) continue;
-      long entry = HistoryDealGetInteger(deal, DEAL_ENTRY);
-      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY) continue;
-      ArrayResize(candidates, count + 1);
-      candidates[count] = deal;
-      count++;
-   }
-   string json = "[";
-   bool first = true;
-   for(int k = 0; k < count; k++)
-   {
-      string item = ClosedDealJson(candidates[k]);
-      if(item == "") continue;
-      if(!first) json += ",";
-      first = false;
-      json += item;
-      if(candidates[k] > topDeal) topDeal = candidates[k];
-   }
-   json += "]";
-   return json;
-}
-
-/** One closed position as JSON, or "" if it is not the final close of its position. */
-string ClosedDealJson(const ulong outDeal)
-{
-   long positionId = HistoryDealGetInteger(outDeal, DEAL_POSITION_ID);
-   if(positionId <= 0) return "";
-   string symbol = HistoryDealGetString(outDeal, DEAL_SYMBOL);
-   if(!HistorySelectByPosition(positionId)) return "";
-
-   double profit = 0;
-   double commission = 0;
-   double swap = 0;
-   double openPrice = 0;
-   double volume = 0;
-   datetime openTime = 0;
-   long openType = -1;
-   bool isLast = true;
-   int total = HistoryDealsTotal();
-   for(int j = 0; j < total; j++)
-   {
-      ulong d = HistoryDealGetTicket(j);
-      if(d == 0) continue;
-      profit += HistoryDealGetDouble(d, DEAL_PROFIT);
-      commission += HistoryDealGetDouble(d, DEAL_COMMISSION);
-      swap += HistoryDealGetDouble(d, DEAL_SWAP);
-      long entry = HistoryDealGetInteger(d, DEAL_ENTRY);
-      if(entry == DEAL_ENTRY_IN && openType < 0)
-      {
-         openType = HistoryDealGetInteger(d, DEAL_TYPE);
-         openPrice = HistoryDealGetDouble(d, DEAL_PRICE);
-         openTime = (datetime)HistoryDealGetInteger(d, DEAL_TIME);
-         volume = HistoryDealGetDouble(d, DEAL_VOLUME);
-      }
-      if((entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY) && d > outDeal) isLast = false;
-   }
-   if(!isLast) return "";
-
-   double closePrice = HistoryDealGetDouble(outDeal, DEAL_PRICE);
-   datetime closeTime = (datetime)HistoryDealGetInteger(outDeal, DEAL_TIME);
-   string side = (openType == DEAL_TYPE_SELL) ? "sell" : "buy";
-   long reasonCode = HistoryDealGetInteger(outDeal, DEAL_REASON);
-   string reason = "other";
-   if(reasonCode == DEAL_REASON_SL) reason = "sl";
-   else if(reasonCode == DEAL_REASON_TP) reason = "tp";
-   else if(reasonCode == DEAL_REASON_SO) reason = "stop_out";
-   else if(reasonCode == DEAL_REASON_EXPERT) reason = "expert";
-   else if(reasonCode == DEAL_REASON_CLIENT || reasonCode == DEAL_REASON_MOBILE || reasonCode == DEAL_REASON_WEB) reason = "manual";
-
-   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   string planId = "";
-   double riskMoney = 0;
-   double riskPoints = 0;
-   double mfe = 0;
-   double mae = 0;
-   int slot = FindManaged((ulong)positionId);
-   if(slot >= 0)
-   {
-      planId = g_managed[slot].planId;
-      riskMoney = g_managed[slot].riskMoney;
-      if(point > 0) riskPoints = g_managed[slot].riskPrice / point;
-      if(g_managed[slot].closeReason != "") reason = g_managed[slot].closeReason;
-      else if(reason == "sl" && g_managed[slot].beDone) reason = "breakeven_stop";
-      mfe = g_managed[slot].mfeR;
-      mae = g_managed[slot].maeR;
-      g_managed[slot].closeDeal = outDeal;
-      g_managedDirty = true;
-   }
-
-   string json = "{";
-   json += "\"dealTicket\":" + IntegerToString((long)outDeal) + ",";
-   json += "\"positionId\":" + IntegerToString(positionId) + ",";
-   json += "\"symbol\":\"" + JsonEscape(symbol) + "\",";
-   json += "\"side\":\"" + side + "\",";
-   json += "\"volume\":" + DoubleToString(volume, 4) + ",";
-   json += "\"openPrice\":" + DoubleToString(openPrice, 10) + ",";
-   json += "\"closePrice\":" + DoubleToString(closePrice, 10) + ",";
-   json += "\"openTime\":" + IntegerToString(ToUtcMs(openTime)) + ",";
-   json += "\"closeTime\":" + IntegerToString(ToUtcMs(closeTime)) + ",";
-   json += "\"profit\":" + DoubleToString(profit, 2) + ",";
-   json += "\"commission\":" + DoubleToString(commission, 2) + ",";
-   json += "\"swap\":" + DoubleToString(swap, 2) + ",";
-   json += "\"reason\":\"" + reason + "\",";
-   json += "\"planId\":\"" + JsonEscape(planId) + "\",";
-   json += "\"initialRiskMoney\":" + (riskMoney > 0 ? DoubleToString(riskMoney, 2) : "null") + ",";
-   json += "\"initialRiskPoints\":" + (riskPoints > 0 ? DoubleToString(riskPoints, 2) : "null") + ",";
-   json += "\"mfeR\":" + DoubleToString(mfe, 4) + ",";
-   json += "\"maeR\":" + DoubleToString(mae, 4) + "}";
-   return json;
-}
-
-/** The desk has stored these closes: advance the watermark and release their records. */
-void AckClosedDeals(const ulong upTo)
-{
-   if(upTo <= g_dealWatermark) return;
-   g_dealWatermark = upTo;
-   for(int i = 0; i < MAX_MANAGED; i++)
-      if(g_managed[i].active && g_managed[i].closeDeal != 0 && g_managed[i].closeDeal <= upTo)
-         g_managed[i].active = false;
-   g_managedDirty = true;
-   SaveManagedState();
-}
-
 
 string    g_token = "";
 long      g_seq = 0;
@@ -850,9 +330,8 @@ int OnInit()
    // paired, the very first heartbeat continues the connection and no code is
    // ever needed again.
    LoadSavedLink();
-   LoadManagedState();
 
-   Print("NeurotradeBridge v3.05 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   Print("NeurotradeBridge v3.04 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -870,7 +349,6 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   SaveManagedState();
    Print("NeurotradeBridge: stopped (reason ", reason, ").");
 }
 
@@ -1022,7 +500,7 @@ void TryPair()
    body += "\"login\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
    body += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
    body += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
-   body += "\"version\":\"3.05\",";
+   body += "\"version\":\"3.04\",";
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
    body += "\"currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\"},";
    // All broker symbols are discovered once at pairing. This is a catalogue,
@@ -1233,7 +711,7 @@ void Sync()
    // Desk say "your EA is out of date" instead of leaving a stale terminal
    // silently disagreeing with it about the calendar.
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
-   body += "\"version\":\"3.05\",";
+   body += "\"version\":\"3.04\",";
    // Tell the server how this terminal's clock relates to UTC. Combined with
    // the UTC-normalised timestamps below it lets the Desk detect a skewed
    // clock instead of trusting (or silently mis-trusting) every tick. From
@@ -1261,17 +739,6 @@ void Sync()
    // one thin series can no longer trigger a full re-seed on every beat.
    body += "\"barsAvailable\":" + BarsAvailableJson() + ",";
    body += "\"news\":" + NewsJson() + ",";
-   // Closed trades from the terminal's own records. Scanned at most every two
-   // seconds; the same deals are re-sent until the desk acknowledges them.
-   g_pendingDealMax = 0;
-   string deals = "[]";
-   ulong nowMs = GetTickCount64();
-   if(nowMs - g_lastDealScanMs >= DEAL_SCAN_THROTTLE_MS)
-   {
-      g_lastDealScanMs = nowMs;
-      deals = ClosedDealsJson(g_pendingDealMax);
-   }
-   body += "\"closedDeals\":" + deals + ",";
    body += "\"positions\":" + PositionsJson() + ",";
    body += "\"results\":[" + g_results + "]";
    body += "}";
@@ -1319,7 +786,6 @@ void Sync()
 
    g_lastOk = NowServer();
    g_results = "";
-   AckClosedDeals(g_pendingDealMax);
    // Learn the true UTC offset from the platform server's own clock BEFORE the
    // next beat builds its timestamps (v3.04, note 13).
    LearnBrokerClock(response);
@@ -1746,17 +1212,7 @@ string PositionsJson()
       json += "\"tp\":" + DoubleToString(PositionGetDouble(POSITION_TP), 10) + ",";
       json += "\"profit\":" + DoubleToString(PositionGetDouble(POSITION_PROFIT), 2) + ",";
       json += "\"swap\":" + DoubleToString(PositionGetDouble(POSITION_SWAP), 2) + ",";
-      json += "\"commission\":0";
-      // Open-position commission stays 0: the close's own deal carries the whole of it.
-      int managedSlot = FindManaged((ulong)PositionGetInteger(POSITION_TICKET));
-      if(managedSlot >= 0 && g_managed[managedSlot].riskMoney > 0)
-      {
-         double pointSize = SymbolInfoDouble(symbol, SYMBOL_POINT);
-         json += ",\"initialRiskMoney\":" + DoubleToString(g_managed[managedSlot].riskMoney, 2);
-         if(pointSize > 0)
-            json += ",\"initialRiskPoints\":" + DoubleToString(g_managed[managedSlot].riskPrice / pointSize, 2);
-      }
-      json += ",\"comment\":\"" + JsonEscape(PositionGetString(POSITION_COMMENT)) + "\"}";
+      json += "\"commission\":0}";
    }
    json += "]";
    return json;
@@ -2006,7 +1462,6 @@ void ExecutePlan(const int index, const double referencePrice)
       double slip = point > 0 ? MathAbs(fill - referencePrice) / point : 0;
       AddResult(g_plans[index].id, "filled", (long)trade.ResultOrder(), fill, slip, "");
       Log("FILLED " + symbol + " " + (g_plans[index].isBuy ? "BUY" : "SELL") + " " + DoubleToString(lots, 2));
-      RegisterManagedFill(g_plans[index]);
    }
    else
    {
@@ -2033,111 +1488,47 @@ void ManageOpenPositions()
       if(symbol == "") continue;
       if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
       ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
-      int slot = FindManaged(ticket);
-      if(slot < 0) slot = AdoptPosition(ticket);
-      if(slot < 0) continue;
-      g_managed[slot].lastSeen = TimeCurrent();
-
       bool isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
-      double entry = g_managed[slot].entry;
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
       double sl = PositionGetDouble(POSITION_SL);
       double tp = PositionGetDouble(POSITION_TP);
-      double riskPrice = g_managed[slot].riskPrice;
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-      int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-      if(point <= 0 || riskPrice <= 0) continue;
+      if(point <= 0 || sl == 0) continue;
 
       MqlTick tick;
       if(!SymbolInfoTick(symbol, tick)) continue;
-      // The price a close would fill at: the bid for a long, the ask for a short.
       double current = isBuy ? tick.bid : tick.ask;
-      double progressR = (isBuy ? current - entry : entry - current) / riskPrice;
-      if(progressR > g_managed[slot].mfeR) g_managed[slot].mfeR = progressR;
-      if(progressR < g_managed[slot].maeR) g_managed[slot].maeR = progressR;
+      double riskPoints = MathAbs(entry - sl) / point;
+      if(riskPoints <= 0) continue;
+      double movePoints = (isBuy ? current - entry : entry - current) / point;
+      double progressR = movePoints / riskPoints;
 
-      // Time stop: the hold is exhausted, so close at market. Retried if the close fails.
-      if(g_managed[slot].maxHoldSec > 0 &&
-         TimeCurrent() - g_managed[slot].openTime >= g_managed[slot].maxHoldSec)
+      ArmedPlan plan;
+      bool hasPlan = FindPlanForSymbol(symbol, plan);
+      double beTrigger = hasPlan && plan.beTriggerR > 0 ? plan.beTriggerR : 1.0;
+      double beOffset = hasPlan ? plan.beOffsetR : 0.2;
+      double newSl = sl;
+      if(progressR >= beTrigger)
       {
-         if(trade.PositionClose(ticket))
-         {
-            g_managed[slot].closeReason = "time_stop";
-            g_managedDirty = true;
-            Log("Time stop: closed #" + IntegerToString((long)ticket) + " after " +
-                IntegerToString(g_managed[slot].maxHoldSec / 60) + " min.");
-         }
-         else Log("Time stop on #" + IntegerToString((long)ticket) + " failed; retrying on the next beat.");
-         continue;
+         double candidate = isBuy ? entry + beOffset * riskPoints * point : entry - beOffset * riskPoints * point;
+         if((isBuy && candidate > newSl) || (!isBuy && candidate < newSl)) newSl = candidate;
       }
-
-      // Breakeven: once, when progress reaches the trigger. The stop only ever tightens.
-      if(!g_managed[slot].beDone && g_managed[slot].beTriggerR > 0 && progressR >= g_managed[slot].beTriggerR)
+      if(hasPlan && plan.trailEnabled && progressR >= plan.trailActivateR)
       {
-         double candidate = isBuy ? entry + g_managed[slot].beOffsetR * riskPrice
-                                  : entry - g_managed[slot].beOffsetR * riskPrice;
-         double newSl = sl;
-         if(isBuy ? candidate > sl : candidate < sl) newSl = candidate;
-         if(newSl == sl)
+         double atr = AtrValue(symbol, PERIOD_M15, 14);
+         if(atr > 0)
          {
-            g_managed[slot].beDone = true;
-            g_managedDirty = true;
-         }
-         else if(RespectsStopLevel(symbol, isBuy, current, newSl) &&
-                 ModifyPositionByTicket(ticket, symbol, NormalizeDouble(newSl, digits), tp))
-         {
-            g_managed[slot].beDone = true;
-            g_managedDirty = true;
-            sl = newSl;
-            Log("Breakeven: #" + IntegerToString((long)ticket) + " stop moved to entry " +
-                DoubleToString(g_managed[slot].beOffsetR, 2) + "R.");
+            double candidate = isBuy ? current - atr * plan.trailMult : current + atr * plan.trailMult;
+            if((isBuy && candidate > newSl) || (!isBuy && candidate < newSl)) newSl = candidate;
          }
       }
-
-      // Extension: decided once, at checkAtR. The target moves out only while the
-      // trend still favours the trade; otherwise the fixed target stands.
-      if(g_managed[slot].extEnabled && g_managed[slot].extendState == 0 &&
-         progressR >= g_managed[slot].checkAtR)
+      if(newSl != sl && RespectsStopLevel(symbol, isBuy, current, newSl))
       {
-         if(TrendStillFavourable(symbol, isBuy, TimeframeFromName(g_managed[slot].tfName), g_managed[slot].emaPeriod))
-         {
-            double newTp = isBuy ? entry + g_managed[slot].extendToR * riskPrice
-                                 : entry - g_managed[slot].extendToR * riskPrice;
-            double lock = isBuy ? entry + g_managed[slot].lockR * riskPrice
-                                : entry - g_managed[slot].lockR * riskPrice;
-            double newSl = sl;
-            if(isBuy ? lock > sl : lock < sl) newSl = lock;
-            if(ModifyPositionByTicket(ticket, symbol, NormalizeDouble(newSl, digits), NormalizeDouble(newTp, digits)))
-            {
-               g_managed[slot].extendState = 2;
-               g_managedDirty = true;
-               Log("Extension: #" + IntegerToString((long)ticket) + " trend still favours the trade; target to " +
-                   DoubleToString(g_managed[slot].extendToR, 1) + "R.");
-            }
-         }
-         else
-         {
-            g_managed[slot].extendState = 1;
-            g_managedDirty = true;
-            Log("Extension declined: #" + IntegerToString((long)ticket) + " trend no longer favours the trade.");
-         }
+         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         ModifyPositionByTicket(ticket, symbol, NormalizeDouble(newSl, digits), tp);
       }
    }
-
-   // A record whose position is gone and whose close was never reported is released
-   // after an hour. Its deal would have appeared within that time.
-   for(int k = 0; k < MAX_MANAGED; k++)
-   {
-      if(!g_managed[k].active || g_managed[k].closeDeal != 0) continue;
-      if(PositionSelectByTicket(g_managed[k].ticket)) continue;
-      if(TimeCurrent() - g_managed[k].lastSeen > 3600)
-      {
-         g_managed[k].active = false;
-         g_managedDirty = true;
-      }
-   }
-   if(g_managedDirty) SaveManagedState();
 }
-
 
 bool ModifyPositionByTicket(const ulong ticket, const string symbol, const double sl, const double tp)
 {
@@ -2223,25 +1614,14 @@ void ArmPlanFromJson(const string obj, const string commandId)
    g_plans[slot].confirmCount = 0;
    string management = JsonObject(plan, "management");
    string breakeven = JsonObject(management, "breakeven");
-   string extension = JsonObject(management, "extension");
-   string timeStop = JsonObject(management, "timeStop");
+   string trail = JsonObject(management, "trail");
    g_plans[slot].beTriggerR = JsonNumber(breakeven, "triggerR");
    g_plans[slot].beOffsetR = JsonNumber(breakeven, "offsetR");
+   g_plans[slot].trailMult = JsonNumber(trail, "mult");
+   g_plans[slot].trailActivateR = JsonNumber(trail, "activateAtR");
+   g_plans[slot].trailEnabled = trail != "";
    if(g_plans[slot].beTriggerR <= 0) g_plans[slot].beTriggerR = 1.0;
-   g_plans[slot].maxHoldSec = (long)(JsonNumber(timeStop, "maxHoldMinutes") * 60.0);
-   g_plans[slot].checkAtR = JsonNumber(extension, "checkAtR");
-   g_plans[slot].extendToR = JsonNumber(extension, "extendToR");
-   g_plans[slot].lockR = JsonNumber(extension, "lockR");
-   g_plans[slot].emaPeriod = (int)JsonNumber(extension, "emaPeriod");
-   g_plans[slot].tfName = JsonString(extension, "timeframe");
-   // An extension is honoured only when it is coherent: the decision must come
-   // before the extended target, and the trend needs a real EMA. Otherwise the
-   // plan keeps its fixed target.
-   g_plans[slot].extEnabled = extension != ""
-      && g_plans[slot].checkAtR > 0
-      && g_plans[slot].extendToR > g_plans[slot].checkAtR
-      && g_plans[slot].emaPeriod >= 2
-      && g_plans[slot].lockR >= 0;
+   if(g_plans[slot].trailMult <= 0) g_plans[slot].trailMult = 2.5;
    g_plans[slot].active = true;
    AddResult(commandId, "done", 0, 0, 0, "");
 }

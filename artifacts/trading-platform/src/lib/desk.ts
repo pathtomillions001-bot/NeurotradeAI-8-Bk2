@@ -30,9 +30,9 @@ export type TradeMode = "scalp" | "intraday" | "swing";
 export const DEFAULT_DESK_TIMEZONE = "Africa/Nairobi";
 
 export const TRADE_MODES: { id: TradeMode; label: string; blurb: string }[] = [
-  { id: "scalp", label: "Scalp", blurb: "M1 entries · ~5 min hold · target 1:1 to 1:2" },
-  { id: "intraday", label: "Day", blurb: "5–30min bands · ~6 h hold · 1:2, extends to 1:3 in a trend" },
-  { id: "swing", label: "Swing", blurb: "1h–weekly bands · multi-day hold · 1:2, extends to 1:3 in a trend" },
+  { id: "scalp", label: "Scalp", blurb: "10s–3min band · ~25 min horizon" },
+  { id: "intraday", label: "Day", blurb: "5–30min band · ~6 hour horizon" },
+  { id: "swing", label: "Swing", blurb: "1h–weekly band · multi-day horizon" },
 ];
 
 /**

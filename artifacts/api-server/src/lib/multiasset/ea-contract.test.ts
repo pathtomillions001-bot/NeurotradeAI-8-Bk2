@@ -125,10 +125,20 @@ function samplePlan(): ArmedPlan {
     expiresAt: 1791372196872,
     createdAt: 1791371596872,
     management: {
-      breakeven: { triggerR: 1, offsetR: 0.1 },
-      extension: { checkAtR: 1.8, extendToR: 3, lockR: 1, emaPeriod: 50, timeframe: "M15" },
-      timeStop: { maxHoldMinutes: 360 },
-      guards: { maxSpreadPoints: 24, newsBlackoutMin: 30, flatBeforeSessionClose: false },
+      breakeven: { triggerR: 1.2, offsetR: 0.2, structureBuffer: true },
+      partials: [
+        { atR: 1.5, closePct: 35 },
+        { atR: 3, closePct: 25 },
+      ],
+      trail: { mode: "atr_chandelier", period: 14, mult: 2.5, activateAtR: 1.2, stepPoints: 5 },
+      pyramid: {
+        maxAdds: 1,
+        addAtR: 1.5,
+        sizeRatio: 0.5,
+        requireBaseAtBreakeven: true,
+        portfolioRiskCapR: 1.5,
+      },
+      timeStop: { noProgressBars: 25, timeframe: "M15" },
     },
   } as ArmedPlan;
 }
@@ -186,63 +196,36 @@ test("EA reads every armed-plan field the server sends", () => {
   assert.equal(jsonNumber(nested, "confirmTicks"), plan.confirmTicks);
 });
 
-test("EA reads the nested management plan: breakeven, extension and time stop", () => {
+test("EA reads the nested management plan", () => {
   const plan = samplePlan();
   const raw = JSON.stringify(sampleResponse([{ id: "cmd-1", type: "arm_plan", plan }]));
   const nested = jsonObject(splitCommands(raw)[0] as string, "plan");
 
   const mgmt = jsonObject(nested, "management");
   const breakeven = jsonObject(mgmt, "breakeven");
-  const extension = jsonObject(mgmt, "extension");
-  const timeStop = jsonObject(mgmt, "timeStop");
+  const trail = jsonObject(mgmt, "trail");
 
   assert.notEqual(mgmt, "");
-  assert.equal(jsonNumber(breakeven, "triggerR"), 1);
-  assert.equal(jsonNumber(breakeven, "offsetR"), 0.1);
-  assert.equal(jsonNumber(extension, "checkAtR"), 1.8);
-  assert.equal(jsonNumber(extension, "extendToR"), 3);
-  assert.equal(jsonNumber(extension, "lockR"), 1);
-  assert.equal(jsonNumber(extension, "emaPeriod"), 50);
-  assert.equal(jsonString(extension, "timeframe"), "M15");
-  assert.equal(jsonNumber(timeStop, "maxHoldMinutes"), 360);
+  assert.equal(jsonNumber(breakeven, "triggerR"), 1.2);
+  assert.equal(jsonNumber(breakeven, "offsetR"), 0.2);
+  assert.equal(jsonNumber(trail, "mult"), 2.5);
+  assert.equal(jsonNumber(trail, "activateAtR"), 1.2);
+
+  // "mult" also appears nowhere above trail — but if it ever did, the scoped
+  // read must still win. Guard against a flat search regression.
+  assert.notEqual(jsonNumber(trail, "mult"), jsonNumber(breakeven, "mult"));
 });
 
-test("a plan with no extension is read as extension disabled, not as checkAtR=0", () => {
+test("a plan with no trail is read as trailing disabled, not as mult=0", () => {
   const plan = samplePlan();
-  plan.management.extension = null;
+  delete (plan.management as { trail?: unknown }).trail;
   const raw = JSON.stringify(sampleResponse([{ id: "cmd-1", type: "arm_plan", plan }]));
   const nested = jsonObject(splitCommands(raw)[0] as string, "plan");
-  const extension = jsonObject(jsonObject(nested, "management"), "extension");
+  const trail = jsonObject(jsonObject(nested, "management"), "trail");
 
-  // The EA keys `extEnabled` off the object's presence. An empty string here is
-  // what makes that work.
-  assert.equal(extension, "");
-});
-
-test("a plan with no time stop is read as no time stop, not as a zero-minute stop", () => {
-  const plan = samplePlan();
-  plan.management.timeStop = null;
-  const raw = JSON.stringify(sampleResponse([{ id: "cmd-1", type: "arm_plan", plan }]));
-  const nested = jsonObject(splitCommands(raw)[0] as string, "plan");
-  const timeStop = jsonObject(jsonObject(nested, "management"), "timeStop");
-
-  // The EA computes maxHoldSec = minutes × 60 and treats 0 as "no time stop".
-  assert.equal(timeStop, "");
-});
-
-test("the EA declares the version the server expects", () => {
-  // An EA that reports a different version is flagged as out of date, so the two
-  // must move together. The heartbeat must also report the version it declares.
-  const ea = readFileSync(
-    path.resolve(import.meta.dirname, "../../../../mt5-ea/NeurotradeBridge.mq5"),
-    "utf8",
-  );
-  const bridge = readFileSync(path.resolve(import.meta.dirname, "../../routes/bridge.ts"), "utf8");
-  const declared = /#property version\s+"([\d.]+)"/.exec(ea)?.[1];
-  const expected = /export const EXPECTED_EA_VERSION = "([\d.]+)"/.exec(bridge)?.[1];
-  assert.ok(declared && expected, "both version strings are present");
-  assert.equal(declared, expected);
-  assert.ok(ea.includes(`\\"version\\":\\"${expected}\\"`), "the sync body reports the declared version");
+  // The EA keys `trailEnabled` off the object's presence. An empty string here
+  // is what makes that work.
+  assert.equal(trail, "");
 });
 
 test("EA reads the limit flags it gates trading on", () => {

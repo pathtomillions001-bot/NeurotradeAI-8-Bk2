@@ -205,60 +205,54 @@ re-confirmed*, at normal or reduced size. It never means a larger stake.
 
 ---
 
-## 5. Trade policy and post-fill management (EA v3.05)
+## 5. Trade management
 
-The server attaches a `ManagementPlan` to every armed plan. Since v3.05 the EA
-enforces every element of it; before v3.05 the plan was dropped at the fill, so
-only one breakeven step ever ran.
+The server attaches a `ManagementPlan` to every position; the EA enforces it
+locally on each tick.
 
 ```jsonc
 {
-  "breakeven": { "triggerR": 1.0, "offsetR": 0.1 },
-  "extension": { "checkAtR": 1.8, "extendToR": 3.0, "lockR": 1.0,
-                 "emaPeriod": 50, "timeframe": "M15" },   // intraday and swing; null for scalp
-  "timeStop":  { "maxHoldMinutes": 5 },
+  "ticket": 128374,
+  "breakeven": { "triggerR": 1.0, "offsetR": 0.2, "structureBuffer": true },
+  "partials":  [ { "atR": 1.0, "closePct": 50 }, { "atR": 2.0, "closePct": 25 } ],
+  "trail":     { "mode": "atr_chandelier", "period": 14, "mult": 2.5,
+                 "activateAtR": 1.2, "stepPoints": 20 },
+  "pyramid":   { "maxAdds": 2, "addAtR": 1.5, "sizeRatio": 0.5,
+                 "requireBaseAtBreakeven": true, "portfolioRiskCapR": 1.5 },
+  "timeStop":  { "noProgressBars": 20, "timeframe": "M5" },
   "guards":    { "maxSpreadPoints": 18, "newsBlackoutMin": 15, "flatBeforeSessionClose": true }
 }
 ```
 
-**Targets** (`RR_POLICY` in `lib/multiasset/agent.ts`), always measured from the trigger:
+Policy, not folklore:
 
-* **Scalp:** entry on M1, hold at most 5 minutes. The target is the nearest opposing
-  structure, clamped to 1R–2R. With no structure inside 2R the target is 2R. Structure
-  inside 1R leaves no room for the minimum, so the setup is refused with that reason.
-* **Intraday and swing:** a fixed 2R. The target moves to 3R only when the trend still
-  favours the trade at 1.8R (see the extension rule below).
+* **Breakeven** is placed behind structure (last swing ± ATR buffer), and only
+  once Monte Carlo P(retrace to entry) falls below 35 %. Blind BE-at-1R turns
+  winners into scratches on volatile symbols.
+* **Partials** fire when the marginal expectancy of holding that slice turns
+  negative. Trend regime → take less off; range regime → bank more.
+* **Trail vs fixed TP** is chosen by regime: persistent trend → chandelier
+  trail (let it run); mean-reverting → hard TP at the band edge.
+* **Pyramiding** requires the base at breakeven, uses decreasing size, and
+  **never raises total portfolio risk above the original budget**.
+* **Time stop** closes trades that are not working, freeing margin.
 
-**What the EA enforces** (`ManageOpenPositions` in `NeurotradeBridge.mq5`):
+Every decision is journaled with its inputs so the backtester can later ask
+"did BE-at-1R actually help on XAUUSD in the London session?" per symbol, per
+regime, per session — and the thresholds are tuned from that evidence.
 
-* **Breakeven**, once, when progress reaches `triggerR`. The stop moves to entry plus
-  `offsetR`, and it only ever tightens.
-* **Extension**, decided once at `checkAtR`. If the last closed bar sits on the trade's
-  side of an EMA that has been rising (falling for shorts) over five bars, the target
-  moves to `extendToR` and the stop to `+lockR`. Otherwise the fixed target stands. The
-  check fires at 1.8R, not 2R, because the broker target sits at 2R and would close the
-  trade before a check at 2R could run.
-* **Time stop**, when the hold is exhausted: a market close, retried if it fails.
+### 5.1 Broker-reality constraints handled
 
-Progress is always measured against the **original** risk, so a stop moved to breakeven
-cannot make a trade look further in profit than it is.
+* **Netting vs hedging** account mode is reported by the EA; pyramiding merges
+  into an averaged position under netting and the plan adapts.
+* **FIFO** brokers: partial closes target the oldest ticket first.
+* **Minimum partial volume**: a 50 % close of 0.01 lots is impossible, so the
+  partial ladder is feasibility-checked against `volumeStep` and degrades to a
+  single exit when it cannot be honoured.
+* **Freeze level / modify rejection**: the EA retries with backoff and reports
+  failures; the server never assumes a modify succeeded.
 
-**What was removed.** Partial exits, the ATR chandelier trail, and pyramiding were
-computed by the server and then ignored by the EA. They are gone from the plan rather
-than left as promises. Re-adding any of them needs the EA to enforce it first.
-
-**Expectancy gate.** The gate evaluates the policy target from the fill price, with the
-drift estimate shrunk toward zero by t²/(t²+9), where t is the drift's t-statistic over the
-regime's own window (`driftSamples` returns, not the full history). On zero-drift random walks
-the complete gate armed an intraday plan in 1 of 40 windows and a swing plan in 3 of 40, and a
-scalp in none. The Beta prior is unchanged.
-
-**Measurement.** Each closed position is reported by the terminal from its own deal
-record (`closedDeals`), with commission, the exit reason (stop, breakeven stop, target,
-time stop, manual), the initial risk in account currency, and the excursions in R. A
-close is recorded once, keyed by deal ticket, so a re-sent report cannot double-count. An
-EA that does not report deals still has its vanished positions recorded, labelled
-`inferred` and kept distinct, because the last floating P&L is an approximation.
+---
 
 ## 6. Bridge protocol
 
@@ -348,40 +342,6 @@ The system is built so that "no edge here today" is a valid, visible answer.
 A desk that always finds a reason to trade is the failure mode.
 
 ---
-
-## 9. Quant metrics and the walk-forward replay
-
-**Metrics** (`lib/multiasset/quant.ts`). Given realised R multiples, the module returns
-expectancy with a seeded bootstrap 95% interval, t-statistic, Sortino, per-trade and
-annualised Sharpe, and maximum drawdown in percent at a stated risk per trade. The Sharpe
-is annualised over the span the record covers, and the drawdown uses the desk's base risk,
-which is `0.5%` by default. Both assumptions are returned in `metrics.basis`.
-`GET /api/desk/performance` returns these under `metrics`, by mode and by exit reason. The
-existing keys are unchanged.
-
-**Replay** (`lib/multiasset/backtest.ts`, CLI in `backtest-cli.ts`). It calls the same
-`evaluate()` the live desk calls, and it manages each fill with the EA's rules. Usage:
-
-```bash
-pnpm --filter @workspace/api-server backtest -- \
-  --csv data/EURUSD_M1.csv --spec data/EURUSD.spec.json --mode intraday \
-  --spread-points 10 --slippage-points 2 --commission-per-lot 3.5 --out result.json
-```
-
-Guarantees the tests check:
-
-* A decision at M1 bar *k* sees only bars whose period closed by the close of bar *k*.
-  The forming bar of every timeframe is excluded.
-* Changing every bar after a cut-off cannot change any decision, or any trade closed,
-  before it. The test rewrites the future and compares.
-* A plan fills from the bar after it is armed. A stop and a target touched in the same
-  bar resolve to the stop.
-* The Beta prior sees only trades already closed.
-
-Limits, stated plainly: no historical bars, spreads or fills from a broker are in this
-repository, so the replay cannot show profitability. It does not model the news calendar,
-the daily-loss and loss-streak halts, or real intrabar paths. Its output is a check on the
-logic over one history, with the costs supplied, and not a forecast.
 
 ## Corrections found during bridge integration
 

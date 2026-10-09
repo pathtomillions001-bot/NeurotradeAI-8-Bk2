@@ -8,6 +8,7 @@ import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis } from "../lib/agent-coordinator";
 import { requestHedgeCycle, resetHedgeSession, type HedgeContext, type HedgeHost, type HedgePublish } from "../lib/autonomous-hedge/cycle";
 import { normalizePreferredTypes } from "../lib/autonomous-hedge/families";
+import { resolveContractSets } from "../lib/autonomous-hedge/contract-sets";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { getRecentReports, getIntelligenceSummary } from "../lib/agents/trade-intelligence";
@@ -551,6 +552,19 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
 
   const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
   const tradingSettings = buildTradingSettings(settings, normalizePreferredTypes(rawPreferred));
+  // The contract sets the user chose for normal and recovery trades. A set that was
+  // never saved is derived from the legacy settings above.
+  const contractSets = resolveContractSets({
+    normal: settings?.autonomousNormalContracts,
+    recovery: settings?.autonomousRecoveryContracts,
+    legacy: {
+      preferredContractTypes: normalizePreferredTypes(rawPreferred),
+      normalOverDigit: tradingSettings.normalOverDigit,
+      normalUnderDigit: tradingSettings.normalUnderDigit,
+      recoveryOverDigit: tradingSettings.recoveryOverDigit,
+      recoveryUnderDigit: tradingSettings.recoveryUnderDigit,
+    },
+  });
   if (settings?.loopIntervalSec) engine.loopIntervalSec = settings.loopIntervalSec;
 
   const allowedMarketSymbols: string[] | null =
@@ -596,6 +610,7 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
     allowedMarketSymbols,
     paperTradeMode: tradingSettings.paperTradeMode,
     daily,
+    contractSets,
   };
 }
 

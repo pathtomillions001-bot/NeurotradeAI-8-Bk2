@@ -37,6 +37,7 @@ import {
 import {
   claimUnsettledRow,
   isAutonomousHedgeRow,
+  ledgerEntryPayout,
   loadClaimedContractIds,
   settleAutonomousRow,
 } from "./autonomous-hedge/ledger";
@@ -66,8 +67,11 @@ interface UnsettledRow {
   sessionId: string;
   symbol: string;
   contractType: string;
+  barrier: number | null;
   stake: string;
   derivContractId: string | null;
+  /** Payout quoted at buy time (autonomous rows). Null on legacy rows. */
+  entryPayout: string | null;
   agentReasoning: string | null;
   createdAt: Date;
 }
@@ -145,9 +149,12 @@ export async function settleAutonomousRows(
 
     const { buy, sell, profit, won } = settledProfit(tx as DerivTx);
     const txContractId = tx.contract_id != null ? String(tx.contract_id) : row.derivContractId;
-    const payoutMultiplier = won && buy > 0
-      ? Math.round(((buy + profit) / buy) * 1000) / 1000
-      : 1;
+    // The quote the row was bought at, on win AND loss (see ledgerEntryPayout).
+    const payoutMultiplier = ledgerEntryPayout(
+      row.entryPayout == null ? null : Number(row.entryPayout),
+      row.contractType,
+      row.barrier,
+    );
     const settlement = await settleAutonomousRow(
       sessionId,
       row.id,
@@ -188,8 +195,10 @@ export async function reconcileUnsettledTrades(): Promise<number> {
         sessionId: tradesTable.sessionId,
         symbol: tradesTable.symbol,
         contractType: tradesTable.contractType,
+        barrier: tradesTable.barrier,
         stake: tradesTable.stake,
         derivContractId: tradesTable.derivContractId,
+        entryPayout: tradesTable.entryPayout,
         agentReasoning: tradesTable.agentReasoning,
         createdAt: tradesTable.createdAt,
       })

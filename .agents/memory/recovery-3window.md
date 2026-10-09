@@ -28,7 +28,7 @@ The old path used the full tournament with quality floor ≥ 50, regime gate for
 - CALL/PUT: consistent price trend (first-half and second-half both same direction) in all 3 price windows
 
 **MATCH/DIFF selection during recovery:**
-Same as normal recovery logic — DIGITMATCH for first 3 consecutive recovery attempts, DIGITDIFF fallback after `consecutiveMatchLosses >= 3`.
+Recovery uses the contract set the user chose for recovery (Settings → Recovery Contracts). There is no automatic DIGITMATCH→DIGITDIFF switch after consecutive Matches losses; that fallback was removed, and the `consecutiveMatchLosses` counter was removed with it.
 
 **Markets:**
 Same `contractCompatibleMarkets` as the normal path — no market switching. `cooledDownSymbols` already filtered. Per-symbol cooldown safety net checked before execution.

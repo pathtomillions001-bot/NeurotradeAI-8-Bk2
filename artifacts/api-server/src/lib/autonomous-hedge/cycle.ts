@@ -46,8 +46,15 @@ import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { familySpecsFor } from "./families";
+import type { AutonomousContractSets } from "./contract-sets";
 import { runAutonomousHedgeAgents, type HedgeAgentInput } from "./agents";
-import { claimOpenRow, loadClaimedContractIds, loadOpenAutonomousRows, settleAutonomousRow } from "./ledger";
+import {
+  claimOpenRow,
+  ledgerEntryPayout,
+  loadClaimedContractIds,
+  loadOpenAutonomousRows,
+  settleAutonomousRow,
+} from "./ledger";
 import {
   pickUniquePurchase,
   portfolioAsTransaction,
@@ -69,6 +76,11 @@ export interface HedgeContext {
   allowedMarketSymbols: string[] | null;
   paperTradeMode: boolean;
   daily: DailyStats;
+  /**
+   * The normal and recovery contract sets the user chose. Absent means the
+   * engine derives them from `settings` (the legacy behaviour).
+   */
+  contractSets?: AutonomousContractSets;
 }
 
 export interface HedgePublish {
@@ -332,7 +344,12 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     // Live trades never rely on simulated prices. Paper mode may use either.
     if (!tape.live && !ctx.paperTradeMode) continue;
     tapes.push(tape);
-    const specs = familySpecsFor({ settings: ctx.settings, mode, digitEnabled: market.digitEnabled });
+    const specs = familySpecsFor({
+      settings: ctx.settings,
+      mode,
+      digitEnabled: market.digitEnabled,
+      sets: ctx.contractSets,
+    });
     rows.push(...buildMarketCandidates({
       symbol: market.symbol,
       group: hedgeGroupIndex(market.symbol),
@@ -595,6 +612,9 @@ async function executeDecision(
     stake: String(stake),
     direction,
     status: "open",
+    // The quote this trade is sized and recorded on. Kept on the row so the
+    // reconciler can settle it with the same target profit if it has to.
+    entryPayout: Number.isFinite(payout) && payout > 1 ? String(payout) : null,
     aiConfidence: String(Math.round(b.probability * 10000) / 100),
     aiRiskScore: String(riskScore),
     isAutonomous: true,
@@ -693,7 +713,6 @@ async function executeDecision(
   }
 
   const actualPayout = result.won ? buyPrice + result.profit : 0;
-  const ledgerPayout = result.won && buyPrice > 0 ? Math.round(((buyPrice + result.profit) / buyPrice) * 1000) / 1000 : 1;
   const settlement = await settleAutonomousRow(
     sessionId,
     openRow.id,
@@ -705,7 +724,11 @@ async function executeDecision(
       exitPrice: String(result.sellPrice || buyPrice),
       closedAt: new Date(),
     },
-    { won: result.won, profit: result.profit, cost: buyPrice, contract: b.contract, payout: ledgerPayout, maxRecoverySteps: ctx.settings.maxRecoverySteps },
+    {
+      won: result.won, profit: result.profit, cost: buyPrice, contract: b.contract,
+      payout: ledgerEntryPayout(payout, b.contract, barrier),
+      maxRecoverySteps: ctx.settings.maxRecoverySteps,
+    },
   );
   if (settlement === "deferred") {
     // The ledger could not be made durable, so the row stays open and the exposure gate holds.

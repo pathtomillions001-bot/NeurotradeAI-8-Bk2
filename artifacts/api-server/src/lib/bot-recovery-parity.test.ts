@@ -128,7 +128,6 @@ describe("bot ↔ main-app recovery parity", () => {
       remainingTargetProfit: 7.93,
       originPayoutMultiplier: MATCH_PAYOUT,
       resetDate: getLocalTodayKey(),
-      consecutiveMatchLosses: 0,
     });
     recoveryEngine.loadState(stale);
 

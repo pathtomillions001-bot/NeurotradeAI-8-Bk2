@@ -5,6 +5,14 @@ import { eq } from "drizzle-orm";
 import { UpdateSettingsBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
+import {
+  encodeContractSet,
+  legacyBarriersFrom,
+  preferredTypesFromSets,
+  resolveContractSets,
+  validateContractSet,
+  type AutonomousContractSets,
+} from "../lib/autonomous-hedge/contract-sets";
 
 const router = Router();
 
@@ -16,7 +24,23 @@ async function getOrCreateSettings(sessionId: string) {
   return created;
 }
 
+/** The contract sets the autonomous engine actually trades (saved, or derived from legacy). */
+function effectiveContractSets(s: typeof settingsTable.$inferSelect): AutonomousContractSets {
+  return resolveContractSets({
+    normal: s.autonomousNormalContracts,
+    recovery: s.autonomousRecoveryContracts,
+    legacy: {
+      preferredContractTypes: s.preferredContractTypes.split(",").filter(Boolean),
+      normalOverDigit: s.normalOverDigit,
+      normalUnderDigit: s.normalUnderDigit,
+      recoveryOverDigit: s.recoveryOverDigit,
+      recoveryUnderDigit: s.recoveryUnderDigit,
+    },
+  });
+}
+
 function formatSettings(s: typeof settingsTable.$inferSelect) {
+  const sets = effectiveContractSets(s);
   return {
     id: s.id,
     riskProfile: s.riskProfile,
@@ -50,6 +74,8 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
     botRecoveryMarkup: Number((s as any).botRecoveryMarkup ?? 10),
+    autonomousNormalContracts: encodeContractSet(sets.normal),
+    autonomousRecoveryContracts: encodeContractSet(sets.recovery),
   };
 }
 
@@ -65,6 +91,18 @@ router.put("/", async (req, res): Promise<void> => {
     logger.error({ issues: parseResult.error.issues }, "Settings validation failed");
     res.status(400).json({ error: "Invalid settings", details: parseResult.error.issues });
     return;
+  }
+
+  // Contract sets: each one must hold 1–8 legal contracts when it is sent.
+  const setInputs: { normal?: string[]; recovery?: string[] } = {};
+  for (const [which, raw] of [["normal", parseResult.data.autonomousNormalContracts], ["recovery", parseResult.data.autonomousRecoveryContracts]] as const) {
+    if (raw === undefined) continue;
+    const checked = validateContractSet(raw, which);
+    if ("error" in checked) {
+      res.status(400).json({ error: "Invalid settings", details: [{ path: [`autonomous${which === "normal" ? "Normal" : "Recovery"}Contracts`], message: checked.error }] });
+      return;
+    }
+    setInputs[which] = encodeContractSet(checked.specs);
   }
 
   try {
@@ -110,6 +148,31 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).riskAmountType !== undefined) (updateData as any).riskAmountType = (updates as any).riskAmountType;
   if ((updates as any).riskAmountValue !== undefined) (updateData as any).riskAmountValue = String((updates as any).riskAmountValue);
   if ((updates as any).botRecoveryMarkup !== undefined) (updateData as any).botRecoveryMarkup = String((updates as any).botRecoveryMarkup);
+
+    // The saved contract sets are authoritative. The legacy fields that other
+    // engines read are kept in step with them, so every engine stays consistent.
+    if (setInputs.normal || setInputs.recovery) {
+      if (setInputs.normal) updateData.autonomousNormalContracts = setInputs.normal.join(",");
+      if (setInputs.recovery) updateData.autonomousRecoveryContracts = setInputs.recovery.join(",");
+      const effective = resolveContractSets({
+        normal: setInputs.normal ?? settings.autonomousNormalContracts,
+        recovery: setInputs.recovery ?? settings.autonomousRecoveryContracts,
+        legacy: {
+          preferredContractTypes: settings.preferredContractTypes.split(",").filter(Boolean),
+          normalOverDigit: settings.normalOverDigit,
+          normalUnderDigit: settings.normalUnderDigit,
+          recoveryOverDigit: settings.recoveryOverDigit,
+          recoveryUnderDigit: settings.recoveryUnderDigit,
+        },
+      });
+      updateData.preferredContractTypes = preferredTypesFromSets(effective).join(",");
+      const normalBarriers = legacyBarriersFrom(effective.normal);
+      const recoveryBarriers = legacyBarriersFrom(effective.recovery);
+      if (setInputs.normal && normalBarriers.over !== undefined) updateData.normalOverDigit = normalBarriers.over;
+      if (setInputs.normal && normalBarriers.under !== undefined) updateData.normalUnderDigit = normalBarriers.under;
+      if (setInputs.recovery && recoveryBarriers.over !== undefined) updateData.recoveryOverDigit = recoveryBarriers.over;
+      if (setInputs.recovery && recoveryBarriers.under !== undefined) updateData.recoveryUnderDigit = recoveryBarriers.under;
+    }
 
     const [updated] = await db.update(settingsTable)
       .set(updateData)

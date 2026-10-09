@@ -182,7 +182,6 @@ describe("main autonomous engine recordOutcome", () => {
     assert.equal(state.remainingTargetProfit, 0);
     assert.equal(state.targetProfit, 0);
     assert.equal(state.streakLossCount, 0);
-    assert.equal(state.consecutiveMatchLosses, 0);
     assert.equal(recoveryEngine.isInRecovery(), false);
     const nextStake = recoveryEngine.getDynamicRecoveryStake(0.7, 500, 1000, 1.4, 0.8, "moderate");
     assert.equal(nextStake, 0.7);
@@ -264,7 +263,6 @@ describe("main autonomous engine recordOutcome", () => {
       remainingTargetProfit: 0.01,
       originPayoutMultiplier: 1.4,
       resetDate: recoveryEngine.getState().resetDate,
-      consecutiveMatchLosses: 0,
     }));
     assert.equal(recoveryEngine.isInRecovery(), false);
     assert.equal(recoveryEngine.getState().unrecoveredAmount, 0);

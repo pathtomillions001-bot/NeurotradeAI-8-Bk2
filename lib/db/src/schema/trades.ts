@@ -13,6 +13,10 @@ export const tradesTable = pgTable("trades", {
   direction: text("direction").notNull(),
   status: text("status").notNull().default("open"),
   payout: numeric("payout", { precision: 20, scale: 2 }),
+  // Payout multiplier quoted when an autonomous row was bought (total return
+  // incl. stake). Stored so the recovery ledger can size the lost trade's
+  // target profit even when the settlement arrives later from the reconciler.
+  entryPayout: numeric("entry_payout", { precision: 20, scale: 6 }),
   profit: numeric("profit", { precision: 20, scale: 2 }),
   entryPrice: numeric("entry_price", { precision: 20, scale: 6 }),
   exitPrice: numeric("exit_price", { precision: 20, scale: 6 }),

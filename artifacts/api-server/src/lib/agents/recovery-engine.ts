@@ -57,7 +57,6 @@ export interface RecoveryState {
   remainingTargetProfit:    number;       // leftover optional sizing target — never a completion condition
   originPayoutMultiplier:   number;       // total-return multiplier of that original normal trade
   resetDate:                string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
-  consecutiveMatchLosses:   number;       // DIGITMATCH losses in a row while in recovery — triggers DIFF fallback at ≥3
   /**
    * Epoch ms when the CURRENT recovery episode began (0 = not in recovery).
    *
@@ -90,7 +89,6 @@ function freshState(): RecoveryState {
     remainingTargetProfit:    0,
     originPayoutMultiplier:   1,
     resetDate:                todayKey(),
-    consecutiveMatchLosses:   0,
     recoveryStartedAt:        0,
   };
 }
@@ -451,7 +449,6 @@ export function reduceRecoveryOutcome(
   payoutMultiplier = 1,
 ): RecoveryState {
   let next = { ...current };
-  const isMatch = contractType === "DIGITMATCH";
 
   if (won) {
     if (next.inRecovery) {
@@ -472,7 +469,6 @@ export function reduceRecoveryOutcome(
         // A partial win breaks the loss streak, but recovery stays active until
         // the remaining loss debt itself is repaid.
         next.streakLossCount = 0;
-        next.consecutiveMatchLosses = 0;
       }
     }
   } else {
@@ -497,23 +493,12 @@ export function reduceRecoveryOutcome(
       // engine, the FAB and every specialist bot on identical numbers.
       next.targetProfit             = recoveryTargetProfitFor(stakeUsed, originPayout);
       next.remainingTargetProfit    = next.targetProfit;
-      // If the very first loss was a MATCH trade, start the counter
-      next.consecutiveMatchLosses   = isMatch ? 1 : 0;
     } else {
       const cap                = maxRecoverySteps > 0 ? maxRecoverySteps : 3;
       next.recoveryStep       = Math.min(next.recoveryStep + 1, cap);
       next.unrecoveredAmount  = addMoney(next.unrecoveredAmount, stakeUsed);
       next.streakLossCount++;
       next.streakStartAmount  = addMoney(next.streakStartAmount, stakeUsed);
-      // Track consecutive MATCH losses during recovery for the DIFF fallback gate.
-      // Reset to 0 when any non-MATCH trade loses (we're already on a DIFF attempt).
-      if (isMatch) {
-        next.consecutiveMatchLosses++;
-      } else {
-        // A non-MATCH loss during recovery — reset the MATCH counter so the next
-        // recovery cycle restarts with MATCH before falling back to DIFF again.
-        next.consecutiveMatchLosses = 0;
-      }
     }
   }
 
@@ -596,7 +581,6 @@ export function loadState(json: string): void {
         originPayoutMultiplier:   1,
         // Legacy per-family rows predate this feature — always treat as "not today".
         resetDate:                "",
-        consecutiveMatchLosses:   0,
         recoveryStartedAt:        0,
       });
       if (!inRecovery) replaceState(freshState());
@@ -628,8 +612,6 @@ export function loadState(json: string): void {
       // pre-existing carry-over debt from before this feature existed is cleared
       // immediately on load rather than silently resurrected.
       resetDate:                typeof parsed.resetDate === "string" ? parsed.resetDate : "",
-      // New field — default to 0 for rows saved before this feature existed
-      consecutiveMatchLosses:   Number(parsed.consecutiveMatchLosses) || 0,
       // Rows persisted before this field existed get "now" so a live recovery
       // is not treated as having just started (which would re-impose the
       // strictest threshold) nor as infinitely old.

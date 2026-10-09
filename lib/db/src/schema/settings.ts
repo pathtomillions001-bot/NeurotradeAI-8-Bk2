@@ -42,6 +42,12 @@ export const settingsTable = pgTable("settings", {
   // Default 10 % matches the original fixed behaviour; users can adjust it
   // from Risk Management settings. Never read by the shared engine recovery.
   botRecoveryMarkup: numeric("bot_recovery_markup", { precision: 5, scale: 2 }).notNull().default("10"),
+  // Autonomous engine contract sets (Nexus-style): "TYPE:digit" entries,
+  // comma-separated, one set for normal trades and one for recovery trades.
+  // Empty = derive from the legacy preferredContractTypes + barrier columns, so
+  // an account that never saved the new sets keeps its current behaviour.
+  autonomousNormalContracts: text("autonomous_normal_contracts").notNull().default(""),
+  autonomousRecoveryContracts: text("autonomous_recovery_contracts").notNull().default(""),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 }, (t) => [

@@ -7,7 +7,7 @@ import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis } from "../lib/agent-coordinator";
 import { requestHedgeCycle, resetHedgeSession, type HedgeContext, type HedgeHost, type HedgePublish } from "../lib/autonomous-hedge/cycle";
-import { normalizePreferredTypes } from "../lib/autonomous-hedge/families";
+import { normalizePreferredTypes, parseStoredContractSet } from "../lib/autonomous-hedge/families";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { getRecentReports, getIntelligenceSummary } from "../lib/agents/trade-intelligence";
@@ -259,6 +259,9 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     recoveryMultiplier:     s ? Number(s.recoveryMultiplier ?? 1.5) : 1.5,
     recoveryAutoMode:       s?.recoveryAutoMode ?? true,
     maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
+    // Autonomous engine: the user's separate normal and recovery contract sets.
+    autonomousNormalContracts:   parseStoredContractSet(s?.autonomousNormalContracts),
+    autonomousRecoveryContracts: parseStoredContractSet(s?.autonomousRecoveryContracts),
   };
 }
 

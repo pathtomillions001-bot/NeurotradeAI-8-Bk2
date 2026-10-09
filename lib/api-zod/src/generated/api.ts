@@ -863,6 +863,16 @@ export const ToggleAutonomousEngineResponse = zod.object({
 /**
  * @summary Get user risk profile and trading settings
  */
+export const getSettingsResponseAutonomousNormalContractsItemDigitMin = -1;
+export const getSettingsResponseAutonomousNormalContractsItemDigitMax = 9;
+
+export const getSettingsResponseAutonomousNormalContractsMax = 8;
+
+export const getSettingsResponseAutonomousRecoveryContractsItemDigitMin = -1;
+export const getSettingsResponseAutonomousRecoveryContractsItemDigitMax = 9;
+
+export const getSettingsResponseAutonomousRecoveryContractsMax = 8;
+
 export const getSettingsResponseBotRecoveryMarkupMin = 0;
 export const getSettingsResponseBotRecoveryMarkupMax = 100;
 
@@ -900,6 +910,14 @@ export const GetSettingsResponse = zod.object({
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
+  "autonomousNormalContracts": zod.array(zod.object({
+  "type": zod.enum(['CALL', 'PUT', 'RISE', 'FALL', 'DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF']),
+  "digit": zod.number().min(getSettingsResponseAutonomousNormalContractsItemDigitMin).max(getSettingsResponseAutonomousNormalContractsItemDigitMax).describe('Over (0-8) \/ Under (1-9) barrier, Matches \/ Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.')
+})).max(getSettingsResponseAutonomousNormalContractsMax).optional().describe('Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.'),
+  "autonomousRecoveryContracts": zod.array(zod.object({
+  "type": zod.enum(['CALL', 'PUT', 'RISE', 'FALL', 'DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF']),
+  "digit": zod.number().min(getSettingsResponseAutonomousRecoveryContractsItemDigitMin).max(getSettingsResponseAutonomousRecoveryContractsItemDigitMax).describe('Over (0-8) \/ Under (1-9) barrier, Matches \/ Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.')
+})).max(getSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.'),
   "botRecoveryMarkup": zod.number().min(getSettingsResponseBotRecoveryMarkupMin).max(getSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 
@@ -907,6 +925,16 @@ export const GetSettingsResponse = zod.object({
 /**
  * @summary Update risk profile and trading settings
  */
+export const updateSettingsBodyAutonomousNormalContractsItemDigitMin = -1;
+export const updateSettingsBodyAutonomousNormalContractsItemDigitMax = 9;
+
+export const updateSettingsBodyAutonomousNormalContractsMax = 8;
+
+export const updateSettingsBodyAutonomousRecoveryContractsItemDigitMin = -1;
+export const updateSettingsBodyAutonomousRecoveryContractsItemDigitMax = 9;
+
+export const updateSettingsBodyAutonomousRecoveryContractsMax = 8;
+
 export const updateSettingsBodyBotRecoveryMarkupMin = 0;
 export const updateSettingsBodyBotRecoveryMarkupMax = 100;
 
@@ -943,8 +971,26 @@ export const UpdateSettingsBody = zod.object({
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
+  "autonomousNormalContracts": zod.array(zod.object({
+  "type": zod.enum(['CALL', 'PUT', 'RISE', 'FALL', 'DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF']),
+  "digit": zod.number().min(updateSettingsBodyAutonomousNormalContractsItemDigitMin).max(updateSettingsBodyAutonomousNormalContractsItemDigitMax).describe('Over (0-8) \/ Under (1-9) barrier, Matches \/ Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.')
+})).max(updateSettingsBodyAutonomousNormalContractsMax).optional().describe('Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.'),
+  "autonomousRecoveryContracts": zod.array(zod.object({
+  "type": zod.enum(['CALL', 'PUT', 'RISE', 'FALL', 'DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF']),
+  "digit": zod.number().min(updateSettingsBodyAutonomousRecoveryContractsItemDigitMin).max(updateSettingsBodyAutonomousRecoveryContractsItemDigitMax).describe('Over (0-8) \/ Under (1-9) barrier, Matches \/ Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.')
+})).max(updateSettingsBodyAutonomousRecoveryContractsMax).optional().describe('Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.'),
   "botRecoveryMarkup": zod.number().min(updateSettingsBodyBotRecoveryMarkupMin).max(updateSettingsBodyBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
+
+export const updateSettingsResponseAutonomousNormalContractsItemDigitMin = -1;
+export const updateSettingsResponseAutonomousNormalContractsItemDigitMax = 9;
+
+export const updateSettingsResponseAutonomousNormalContractsMax = 8;
+
+export const updateSettingsResponseAutonomousRecoveryContractsItemDigitMin = -1;
+export const updateSettingsResponseAutonomousRecoveryContractsItemDigitMax = 9;
+
+export const updateSettingsResponseAutonomousRecoveryContractsMax = 8;
 
 export const updateSettingsResponseBotRecoveryMarkupMin = 0;
 export const updateSettingsResponseBotRecoveryMarkupMax = 100;
@@ -983,6 +1029,14 @@ export const UpdateSettingsResponse = zod.object({
   "allowedMarkets": zod.array(zod.string()).optional(),
   "riskAmountType": zod.enum(['fixed', 'percentage']).optional(),
   "riskAmountValue": zod.number().optional(),
+  "autonomousNormalContracts": zod.array(zod.object({
+  "type": zod.enum(['CALL', 'PUT', 'RISE', 'FALL', 'DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF']),
+  "digit": zod.number().min(updateSettingsResponseAutonomousNormalContractsItemDigitMin).max(updateSettingsResponseAutonomousNormalContractsItemDigitMax).describe('Over (0-8) \/ Under (1-9) barrier, Matches \/ Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.')
+})).max(updateSettingsResponseAutonomousNormalContractsMax).optional().describe('Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.'),
+  "autonomousRecoveryContracts": zod.array(zod.object({
+  "type": zod.enum(['CALL', 'PUT', 'RISE', 'FALL', 'DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF']),
+  "digit": zod.number().min(updateSettingsResponseAutonomousRecoveryContractsItemDigitMin).max(updateSettingsResponseAutonomousRecoveryContractsItemDigitMax).describe('Over (0-8) \/ Under (1-9) barrier, Matches \/ Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.')
+})).max(updateSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.'),
   "botRecoveryMarkup": zod.number().min(updateSettingsResponseBotRecoveryMarkupMin).max(updateSettingsResponseBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 

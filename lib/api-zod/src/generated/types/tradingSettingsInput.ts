@@ -5,6 +5,7 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { AutonomousContractSpec } from './autonomousContractSpec';
 import type { TradingSettingsInputRecoveryMethod } from './tradingSettingsInputRecoveryMethod';
 import type { TradingSettingsInputRiskAmountType } from './tradingSettingsInputRiskAmountType';
 import type { TradingSettingsInputRiskProfile } from './tradingSettingsInputRiskProfile';
@@ -41,6 +42,16 @@ export interface TradingSettingsInput {
   allowedMarkets?: string[];
   riskAmountType?: TradingSettingsInputRiskAmountType;
   riskAmountValue?: number;
+  /**
+     * Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.
+     * @maxItems 8
+     */
+  autonomousNormalContracts?: AutonomousContractSpec[];
+  /**
+     * Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.
+     * @maxItems 8
+     */
+  autonomousRecoveryContracts?: AutonomousContractSpec[];
   /**
      * Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.
      * @minimum 0

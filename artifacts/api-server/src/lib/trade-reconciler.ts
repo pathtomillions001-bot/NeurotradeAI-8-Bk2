@@ -27,6 +27,7 @@ import { fetchDerivProfitTable } from "./deriv";
 import { logger } from "./logger";
 import { runWithSession } from "./session";
 import * as recoveryEngine from "./agents/recovery-engine";
+import { ledgerPayoutFor } from "./recovery-math";
 import { AUTONOMOUS_HEDGE_PREFIX } from "./autonomous-hedge/constants";
 import {
   matchAutonomousRows,
@@ -67,6 +68,8 @@ interface UnsettledRow {
   symbol: string;
   contractType: string;
   stake: string;
+  /** Quoted payout stored on the open row (autonomous rows); null when unknown. */
+  payout?: string | null;
   derivContractId: string | null;
   agentReasoning: string | null;
   createdAt: Date;
@@ -145,9 +148,9 @@ export async function settleAutonomousRows(
 
     const { buy, sell, profit, won } = settledProfit(tx as DerivTx);
     const txContractId = tx.contract_id != null ? String(tx.contract_id) : row.derivContractId;
-    const payoutMultiplier = won && buy > 0
-      ? Math.round(((buy + profit) / buy) * 1000) / 1000
-      : 1;
+    const payoutMultiplier = ledgerPayoutFor({
+      won, buyPrice: buy, profit, quotedPayout: Number(row.payout ?? 0),
+    });
     const settlement = await settleAutonomousRow(
       sessionId,
       row.id,
@@ -189,6 +192,7 @@ export async function reconcileUnsettledTrades(): Promise<number> {
         symbol: tradesTable.symbol,
         contractType: tradesTable.contractType,
         stake: tradesTable.stake,
+        payout: tradesTable.payout,
         derivContractId: tradesTable.derivContractId,
         agentReasoning: tradesTable.agentReasoning,
         createdAt: tradesTable.createdAt,

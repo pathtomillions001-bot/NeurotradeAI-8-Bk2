@@ -8,28 +8,50 @@ import { motion } from "framer-motion";
 import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { TrendingUp, TrendingDown, Hash, Equal, DollarSign, Percent } from "lucide-react";
-import {
-  OVER_PAYOUTS,
-  UNDER_PAYOUTS,
-  EVEN_ODD_PAYOUT,
-  RISE_FALL_PAYOUT,
-  MATCH_PAYOUT,
-  DIFF_PAYOUT,
-  exactRecoveryStake,
-  roundRecoveryStakeUp,
-} from "@/lib/payouts";
+import { Plus, X, DollarSign, Percent } from "lucide-react";
 
-function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-start justify-between gap-4 py-3 border-b border-border/50 last:border-0">
-      <div className="flex-1 min-w-0">
-        <div className="font-medium text-sm">{label}</div>
-        {description && <div className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{description}</div>}
-      </div>
-      <div className="flex-shrink-0">{children}</div>
-    </div>
-  );
+/**
+ * Autonomous engine settings.
+ *
+ * Normal trades and recovery trades each have their own contract set. The user
+ * picks any mix (Rise/Fall, Over/Under with a barrier, Even/Odd, Matches/Differs
+ * with a digit or auto) for each set, independently. The engine trades only
+ * what is in the set for the current mode. Recovery sizing is unchanged.
+ */
+
+type ContractType = "CALL" | "PUT" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD" | "DIGITMATCH" | "DIGITDIFF";
+interface ContractSpec { type: ContractType; digit: number }
+
+const CONTRACT_INFO: Record<ContractType, { label: string; needsDigit: boolean; allowsAuto: boolean; min: number; max: number; legacy: string }> = {
+  CALL: { label: "Rise", needsDigit: false, allowsAuto: false, min: -1, max: -1, legacy: "CALL" },
+  PUT: { label: "Fall", needsDigit: false, allowsAuto: false, min: -1, max: -1, legacy: "PUT" },
+  DIGITEVEN: { label: "Even", needsDigit: false, allowsAuto: false, min: -1, max: -1, legacy: "DIGITEVEN" },
+  DIGITODD: { label: "Odd", needsDigit: false, allowsAuto: false, min: -1, max: -1, legacy: "DIGITODD" },
+  DIGITOVER: { label: "Over", needsDigit: true, allowsAuto: false, min: 0, max: 8, legacy: "DIGITOVER" },
+  DIGITUNDER: { label: "Under", needsDigit: true, allowsAuto: false, min: 1, max: 9, legacy: "DIGITUNDER" },
+  DIGITMATCH: { label: "Matches", needsDigit: false, allowsAuto: true, min: 0, max: 9, legacy: "DIGITMATCH" },
+  DIGITDIFF: { label: "Differs", needsDigit: false, allowsAuto: true, min: 0, max: 9, legacy: "DIGITDIFF" },
+};
+
+const CONTRACT_TYPES = Object.keys(CONTRACT_INFO) as ContractType[];
+const MAX_PER_SET = 8;
+
+const DEFAULT_NORMAL: ContractSpec[] = [
+  { type: "CALL", digit: -1 }, { type: "PUT", digit: -1 },
+  { type: "DIGITOVER", digit: 1 }, { type: "DIGITUNDER", digit: 8 },
+  { type: "DIGITEVEN", digit: -1 }, { type: "DIGITODD", digit: -1 },
+];
+
+function specLabel(spec: ContractSpec): string {
+  const info = CONTRACT_INFO[spec.type];
+  if (info.needsDigit) return `${info.label} ${spec.digit}`;
+  if (info.allowsAuto) return spec.digit < 0 ? `${info.label} auto` : `${info.label} ${spec.digit}`;
+  return info.label;
+}
+
+function specKey(spec: ContractSpec): string {
+  const info = CONTRACT_INFO[spec.type];
+  return `${spec.type}:${info.needsDigit || info.allowsAuto ? spec.digit : -1}`;
 }
 
 function NumInput({ value, onChange, min, max, step = 1, suffix, disabled }: {
@@ -48,41 +70,126 @@ function NumInput({ value, onChange, min, max, step = 1, suffix, disabled }: {
   );
 }
 
-// Contract type groups — what the AI engine trades
-const CONTRACT_GROUPS = [
-  {
-    id: "riseFall",
-    label: "Rise & Fall",
-    icon: <TrendingUp className="w-4 h-4" />,
-    desc: "Tick-to-tick momentum. Price ends higher (Rise = CALL) or lower (Fall = PUT) than entry at contract expiry.",
-    types: ["CALL", "PUT"],
-    color: "indigo",
-  },
-  {
-    id: "overUnder",
-    label: "Over & Under (Digits)",
-    icon: <Hash className="w-4 h-4" />,
-    desc: "Last digit of price. AI picks optimal barrier from live digit analysis.",
-    types: ["DIGITOVER", "DIGITUNDER"],
-    color: "emerald",
-  },
-  {
-    id: "evenOdd",
-    label: "Even & Odd (Digits)",
-    icon: <TrendingDown className="w-4 h-4" />,
-    desc: "Last digit parity. AI analyses digit frequency, chi-square bias and streak patterns to find edge.",
-    types: ["DIGITEVEN", "DIGITODD"],
-    color: "violet",
-  },
-  {
-    id: "matchDiff",
-    label: "Matches & Differs (Digits)",
-    icon: <Equal className="w-4 h-4" />,
-    desc: "Predict whether the last digit will match (MATCH) or differ from (DIFF) a specific digit. AI picks the hottest digit to match and coldest digit to differ from for positive EV.",
-    types: ["DIGITMATCH", "DIGITDIFF"],
-    color: "rose",
-  },
-];
+function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-start justify-between gap-4 py-3 border-b border-border/50 last:border-0">
+      <div className="flex-1 min-w-0">
+        <div className="font-medium text-sm">{label}</div>
+        {description && <div className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{description}</div>}
+      </div>
+      <div className="flex-shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/** A single set (normal or recovery): chips for what is chosen, plus an add row. */
+function ContractSetEditor({ title, hint, specs, onChange, testId }: {
+  title: string; hint: string; specs: ContractSpec[]; onChange: (next: ContractSpec[]) => void; testId: string;
+}) {
+  const [pickType, setPickType] = useState<ContractType>("DIGITOVER");
+  const [pickDigit, setPickDigit] = useState(1);
+  const [auto, setAuto] = useState(true);
+  const info = CONTRACT_INFO[pickType];
+  const digitVisible = info.needsDigit || (info.allowsAuto && !auto);
+
+  const add = () => {
+    if (specs.length >= MAX_PER_SET) {
+      toast.error(`At most ${MAX_PER_SET} contracts per set`);
+      return;
+    }
+    const digit = info.needsDigit || (info.allowsAuto && !auto) ? pickDigit : -1;
+    if (digitVisible && (!Number.isInteger(digit) || digit < info.min || digit > info.max)) {
+      toast.error(`${info.label}: digit must be ${info.min}–${info.max}`);
+      return;
+    }
+    const next: ContractSpec = { type: pickType, digit };
+    if (specs.some((s) => specKey(s) === specKey(next))) {
+      toast.info(`${specLabel(next)} is already in this set`);
+      return;
+    }
+    onChange([...specs, next]);
+  };
+
+  return (
+    <div className="space-y-2" data-testid={testId}>
+      <div className="flex flex-wrap gap-1.5 min-h-[28px]">
+        {specs.length === 0 && <span className="text-xs text-amber-400">Add at least one contract — this mode will not trade without one.</span>}
+        {specs.map((spec) => (
+          <span key={specKey(spec)} className="inline-flex items-center gap-1 rounded-full border border-primary/40 bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary">
+            {specLabel(spec)}
+            <button
+              type="button"
+              aria-label={`Remove ${specLabel(spec)}`}
+              onClick={() => onChange(specs.filter((s) => specKey(s) !== specKey(spec)))}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              <X className="w-3 h-3" />
+            </button>
+          </span>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Select value={pickType} onValueChange={(v) => {
+          const t = v as ContractType;
+          setPickType(t);
+          if (CONTRACT_INFO[t].needsDigit) setPickDigit(CONTRACT_INFO[t].min);
+        }}>
+          <SelectTrigger aria-label={`${title} contract`} className="w-32 h-8 bg-secondary/50 text-xs"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            {CONTRACT_TYPES.map((t) => <SelectItem key={t} value={t}>{CONTRACT_INFO[t].label}</SelectItem>)}
+          </SelectContent>
+        </Select>
+        {info.allowsAuto && (
+          <button
+            type="button"
+            onClick={() => setAuto((v) => !v)}
+            aria-pressed={auto}
+            className={`h-8 px-2.5 rounded-md border text-xs font-medium ${auto ? "border-primary/40 bg-primary/10 text-primary" : "border-border bg-secondary/40 text-muted-foreground"}`}
+            title="Auto: the engine picks the digit from the live tape (most frequent for Matches, least for Differs)"
+          >
+            auto
+          </button>
+        )}
+        {digitVisible && (
+          <Input
+            type="number" aria-label={`${title} digit`}
+            value={pickDigit} min={info.min} max={info.max} step={1}
+            onChange={(e) => setPickDigit(Number(e.target.value))}
+            className="w-20 h-8 text-right font-mono text-xs bg-secondary/50"
+          />
+        )}
+        <Button type="button" size="sm" variant="secondary" onClick={add} aria-label={`Add to ${title}`} className="h-8 gap-1 text-xs">
+          <Plus className="w-3.5 h-3.5" /> Add
+        </Button>
+        <span className="text-[11px] text-muted-foreground ml-auto">{specs.length}/{MAX_PER_SET}</span>
+      </div>
+      <p className="text-[11px] text-muted-foreground leading-relaxed">{hint}</p>
+    </div>
+  );
+}
+
+/** Legacy settings → the two sets, so existing users see exactly what they had. */
+function legacySet(types: string[], over: number, under: number): ContractSpec[] {
+  const out: ContractSpec[] = [];
+  for (const t of types) {
+    const ct = t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t;
+    if (ct === "DIGITOVER") out.push({ type: "DIGITOVER", digit: over });
+    else if (ct === "DIGITUNDER") out.push({ type: "DIGITUNDER", digit: under });
+    else if (CONTRACT_INFO[ct as ContractType]) out.push({ type: ct as ContractType, digit: -1 });
+  }
+  return out.length > 0 ? out : DEFAULT_NORMAL;
+}
+
+function normalizeStored(list: unknown): ContractSpec[] | null {
+  if (!Array.isArray(list) || list.length === 0) return null;
+  const out: ContractSpec[] = [];
+  for (const e of list as any[]) {
+    const raw = e?.type === "RISE" ? "CALL" : e?.type === "FALL" ? "PUT" : e?.type;
+    if (!CONTRACT_INFO[raw as ContractType]) continue;
+    out.push({ type: raw as ContractType, digit: typeof e.digit === "number" ? e.digit : -1 });
+  }
+  return out.length > 0 ? out : null;
+}
 
 export default function Settings() {
   const { data: settings, isLoading } = useGetSettings();
@@ -94,138 +201,129 @@ export default function Settings() {
     riskProfile: "moderate" as "conservative" | "moderate" | "aggressive",
     riskAmountType: "fixed" as "fixed" | "percentage",
     riskAmountValue: 1,
+    maxTradeStake: 500,
     dailyTarget: 50,
     dailyLossLimit: 30,
     maxDrawdown: 10,
     consecutiveLossLimit: 3,
     cooldownMinutes: 30,
-    marketRotationAfter: 5,
-    tradeDurationSec: 5,
-    maxTradeStake: 500,
-    autonomousEnabled: false,
+    paperTradeMode: false,
+    requirePositiveEv: true,
+    minConfidenceThreshold: 50,
+    loopIntervalSec: 15,
     recoveryMode: false,
     recoveryAutoMode: true,
     recoveryMethod: "split" as "split" | "instant",
     recoveryMultiplier: 1.62,
     maxRecoverySteps: 3,
+    normalContracts: DEFAULT_NORMAL,
+    recoveryContracts: DEFAULT_NORMAL,
+    // Legacy fields — kept so the saved row stays complete for other engines.
     normalOverDigit: 1,
     normalUnderDigit: 8,
     recoveryOverDigit: 3,
     recoveryUnderDigit: 6,
+    tradeDurationSec: 5,
+    marketRotationAfter: 5,
+    autonomousEnabled: false,
     scanAllMarkets: true,
-    paperTradeMode: false,
-    requirePositiveEv: true,
-    minConfidenceThreshold: 50,
-    loopIntervalSec: 15,
-    preferredContractTypes: ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"],
     preferredCategories: ["synthetic"],
     allowedMarkets: [] as string[],
   });
 
   useEffect(() => {
-    if (settings) {
-      setForm({
-        riskProfile: settings.riskProfile as any,
-        riskAmountType: ((settings as any).riskAmountType ?? "fixed") as "fixed" | "percentage",
-        riskAmountValue: (settings as any).riskAmountValue ?? 1,
-        dailyTarget: settings.dailyTarget,
-        dailyLossLimit: settings.dailyLossLimit,
-        maxDrawdown: settings.maxDrawdown,
-        consecutiveLossLimit: settings.consecutiveLossLimit,
-        cooldownMinutes: (settings as any).cooldownMinutes ?? 30,
-        marketRotationAfter: settings.marketRotationAfter,
-        tradeDurationSec: (settings as any).tradeDurationSec ?? 5,
-        maxTradeStake: (settings as any).maxTradeStake ?? 500,
-        autonomousEnabled: settings.autonomousEnabled,
-        recoveryMode: (settings as any).recoveryMode ?? false,
-        recoveryAutoMode: (settings as any).recoveryAutoMode ?? true,
-        recoveryMethod: ((settings as any).recoveryMethod ?? "split") as "split" | "instant",
-        recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.62,
-        maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
-        normalOverDigit: (settings as any).normalOverDigit ?? 1,
-        normalUnderDigit: (settings as any).normalUnderDigit ?? 8,
-        recoveryOverDigit: (settings as any).recoveryOverDigit ?? 3,
-        recoveryUnderDigit: (settings as any).recoveryUnderDigit ?? 6,
-        scanAllMarkets: (settings as any).scanAllMarkets ?? true,
-        paperTradeMode: (settings as any).paperTradeMode ?? false,
-        requirePositiveEv: (settings as any).requirePositiveEv ?? true,
-        minConfidenceThreshold: (settings as any).minConfidenceThreshold ?? 50,
-        loopIntervalSec: (settings as any).loopIntervalSec ?? 15,
-        preferredContractTypes: settings.preferredContractTypes.length > 0
-          ? settings.preferredContractTypes.map((t: string) => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v: string, i: number, a: string[]) => a.indexOf(v) === i)
-          : ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD", "DIGITMATCH", "DIGITDIFF"],
-        preferredCategories: (settings as any).preferredCategories?.length > 0
-          ? (settings as any).preferredCategories
-          : ["synthetic"],
-        allowedMarkets: (settings as any).allowedMarkets ?? [],
-      });
-    }
+    if (!settings) return;
+    const s = settings as any;
+    const normalOver = s.normalOverDigit ?? 1;
+    const normalUnder = s.normalUnderDigit ?? 8;
+    const recOver = s.recoveryOverDigit ?? 3;
+    const recUnder = s.recoveryUnderDigit ?? 6;
+    const legacyTypes: string[] = (settings.preferredContractTypes ?? []).length > 0
+      ? settings.preferredContractTypes
+      : ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+    setForm({
+      riskProfile: settings.riskProfile as any,
+      riskAmountType: (s.riskAmountType ?? "fixed") as "fixed" | "percentage",
+      riskAmountValue: s.riskAmountValue ?? 1,
+      maxTradeStake: s.maxTradeStake ?? 500,
+      dailyTarget: settings.dailyTarget,
+      dailyLossLimit: settings.dailyLossLimit,
+      maxDrawdown: settings.maxDrawdown,
+      consecutiveLossLimit: settings.consecutiveLossLimit,
+      cooldownMinutes: s.cooldownMinutes ?? 30,
+      paperTradeMode: s.paperTradeMode ?? false,
+      requirePositiveEv: s.requirePositiveEv ?? true,
+      minConfidenceThreshold: s.minConfidenceThreshold ?? 50,
+      loopIntervalSec: s.loopIntervalSec ?? 15,
+      recoveryMode: s.recoveryMode ?? false,
+      recoveryAutoMode: s.recoveryAutoMode ?? true,
+      recoveryMethod: (s.recoveryMethod ?? "split") as "split" | "instant",
+      recoveryMultiplier: s.recoveryMultiplier ?? 1.62,
+      maxRecoverySteps: s.maxRecoverySteps ?? 3,
+      normalContracts: normalizeStored(s.autonomousNormalContracts) ?? legacySet(legacyTypes, normalOver, normalUnder),
+      recoveryContracts: normalizeStored(s.autonomousRecoveryContracts) ?? legacySet(legacyTypes, recOver, recUnder),
+      normalOverDigit: normalOver,
+      normalUnderDigit: normalUnder,
+      recoveryOverDigit: recOver,
+      recoveryUnderDigit: recUnder,
+      tradeDurationSec: s.tradeDurationSec ?? 5,
+      marketRotationAfter: settings.marketRotationAfter,
+      autonomousEnabled: settings.autonomousEnabled,
+      scanAllMarkets: s.scanAllMarkets ?? true,
+      preferredCategories: s.preferredCategories?.length > 0 ? s.preferredCategories : ["synthetic"],
+      allowedMarkets: s.allowedMarkets ?? [],
+    });
   }, [settings]);
 
   const set = (key: string, val: unknown) => setForm((prev) => ({ ...prev, [key]: val }));
 
-  // Toggle entire contract group
-  const toggleGroup = (types: string[]) => {
-    setForm((prev) => {
-      const allActive = types.every(t => prev.preferredContractTypes.includes(t));
-      if (allActive) {
-        // Deactivate group — but don't allow empty
-        const next = prev.preferredContractTypes.filter(t => !types.includes(t));
-        return { ...prev, preferredContractTypes: next.length > 0 ? next : prev.preferredContractTypes };
-      } else {
-        return {
-          ...prev,
-          preferredContractTypes: [...new Set([...prev.preferredContractTypes, ...types])],
-        };
-      }
-    });
-  };
-
   const handleSave = () => {
-    updateSettings.mutate({ data: { ...form } as any }, {
+    // Keep the legacy shared fields consistent with the sets the user picked.
+    const types = [...new Set([...form.normalContracts, ...form.recoveryContracts].map((c) => CONTRACT_INFO[c.type].legacy))];
+    const firstOver = form.normalContracts.find((c) => c.type === "DIGITOVER");
+    const firstUnder = form.normalContracts.find((c) => c.type === "DIGITUNDER");
+    const recOver = form.recoveryContracts.find((c) => c.type === "DIGITOVER");
+    const recUnder = form.recoveryContracts.find((c) => c.type === "DIGITUNDER");
+    const { normalContracts, recoveryContracts, ...rest } = form;
+    const payload = {
+      ...rest,
+      preferredContractTypes: types,
+      normalOverDigit: firstOver?.digit ?? form.normalOverDigit,
+      normalUnderDigit: firstUnder?.digit ?? form.normalUnderDigit,
+      recoveryOverDigit: recOver?.digit ?? form.recoveryOverDigit,
+      recoveryUnderDigit: recUnder?.digit ?? form.recoveryUnderDigit,
+      autonomousNormalContracts: normalContracts,
+      autonomousRecoveryContracts: recoveryContracts,
+    };
+    updateSettings.mutate({ data: payload as any }, {
       onSuccess: (saved: any) => {
-        // Update settings cache directly so the toggles reflect immediately.
-        // IMPORTANT: must use the actual query key from the orval hook (["/api/settings"]),
-        // not a hand-rolled key — mismatch causes the form to revert to stale data on re-render.
+        // IMPORTANT: use the orval query key so the form does not revert to stale data.
         const settingsKey = getGetSettingsQueryKey();
         queryClient.setQueryData(settingsKey, saved);
-        // Invalidate all data that depends on settings (contract types, market rankings, etc.)
-        // The server will also broadcast SSE "settings_updated" to all open tabs/dashboard
         queryClient.invalidateQueries({ queryKey: settingsKey });
         queryClient.invalidateQueries({ queryKey: ["markets-top-signals"] });
         queryClient.invalidateQueries({ queryKey: ["markets", "ranked-all"] });
         queryClient.invalidateQueries({ queryKey: ["/api/markets/top"] });
         queryClient.invalidateQueries({ queryKey: ["getAiEngineStatus"] });
-        toast.success("Settings saved — engine and market data updated");
+        toast.success("Settings saved");
       },
       onError: (err: any) => {
-        const msg = err?.data?.error || err?.message || "Failed to save settings";
-        toast.error(msg);
+        toast.error(err?.data?.error || err?.message || "Failed to save settings");
       },
     });
   };
 
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
-  // UI examples use the canonical fallback schedule. At execution time the
-  // server asks Deriv for a live $1 proposal and only falls back to these values.
-  const recoveryOverPayout = OVER_PAYOUTS[form.recoveryOverDigit] ?? OVER_PAYOUTS[3];
-  const recoveryUnderPayout = UNDER_PAYOUTS[form.recoveryUnderDigit] ?? UNDER_PAYOUTS[6];
-  const normalOverPayout = OVER_PAYOUTS[form.normalOverDigit] ?? OVER_PAYOUTS[1];
-  const normalUnderPayout = UNDER_PAYOUTS[form.normalUnderDigit] ?? UNDER_PAYOUTS[8];
   const exampleBaseStake = form.riskAmountType === "percentage" && account
     ? Math.max(0.35, Number(account.balance) * form.riskAmountValue / 100)
     : Math.max(0.35, form.riskAmountValue);
-  const overExampleTarget = exampleBaseStake * (normalOverPayout - 1);
-  const underExampleTarget = exampleBaseStake * (normalUnderPayout - 1);
-  const overInstantExample = roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, overExampleTarget, recoveryOverPayout));
-  const underInstantExample = roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, underExampleTarget, recoveryUnderPayout));
 
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
       <div>
-        <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground mt-1 text-sm">The AI engine learns autonomously — configure risk and trade mode only.</p>
+        <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Autonomous Engine Settings</h1>
+        <p className="text-muted-foreground mt-1 text-sm">Pick what the engine trades in normal mode and what it trades while recovering. Each set is independent.</p>
       </div>
 
       {account && (
@@ -235,14 +333,48 @@ export default function Settings() {
         </div>
       )}
 
-      {/* Risk Profile */}
+      {/* Contracts — normal */}
       <Card className="bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Risk Profile</CardTitle>
-          <CardDescription className="text-xs">Core risk configuration applied to all trades.</CardDescription>
+          <CardTitle className="text-base">Normal Contracts</CardTitle>
+          <CardDescription className="text-xs">What the engine may trade when it is not recovering.</CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Profile Preset" description="Affects stake sizing multiplier.">
+          <ContractSetEditor
+            title="Normal"
+            testId="normal-contracts"
+            specs={form.normalContracts}
+            onChange={(next) => set("normalContracts", next)}
+            hint="Over and Under need a barrier (Over 0–8, Under 1–9). Matches and Differs can use a fixed digit or auto (the engine reads the tape). Even, Odd, Rise and Fall have no barrier."
+          />
+        </CardContent>
+      </Card>
+
+      {/* Contracts — recovery */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recovery Contracts</CardTitle>
+          <CardDescription className="text-xs">What the engine may trade while recovering a loss. This set is independent of the normal set — pick any mix.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <ContractSetEditor
+            title="Recovery"
+            testId="recovery-contracts"
+            specs={form.recoveryContracts}
+            onChange={(next) => set("recoveryContracts", next)}
+            hint="The engine ranks only the contracts you pick here. It does not switch contract types on its own during recovery."
+          />
+        </CardContent>
+      </Card>
+
+      {/* Stake & risk */}
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Stake &amp; Risk</CardTitle>
+          <CardDescription className="text-xs">How much each normal trade risks.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <SettingRow label="Risk Profile" description="Affects the stake sizing multiplier.">
             <Select value={form.riskProfile} onValueChange={(v) => set("riskProfile", v)}>
               <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
               <SelectContent>
@@ -252,7 +384,7 @@ export default function Settings() {
               </SelectContent>
             </Select>
           </SettingRow>
-          <SettingRow label="Risk Amount Type" description="Choose how you specify the amount to risk per trade.">
+          <SettingRow label="Risk Amount Type" description="Fixed dollars or a percentage of balance.">
             <div className="flex rounded-lg overflow-hidden border border-border">
               <button
                 onClick={() => set("riskAmountType", "fixed")}
@@ -270,7 +402,7 @@ export default function Settings() {
           </SettingRow>
           <SettingRow
             label={form.riskAmountType === "fixed" ? "Risk Amount" : "Risk Percentage"}
-            description={form.riskAmountType === "fixed" ? "Fixed dollar amount to risk per trade." : "Percentage of current balance to risk per trade."}
+            description={form.riskAmountType === "fixed" ? "Dollar stake for a normal trade." : `Percent of balance (≈ $${exampleBaseStake.toFixed(2)} now).`}
           >
             <NumInput
               value={form.riskAmountValue}
@@ -281,139 +413,52 @@ export default function Settings() {
               suffix={form.riskAmountType === "fixed" ? "$" : "%"}
             />
           </SettingRow>
-          <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
+          <SettingRow label="Max Stake Per Trade" description="Hard cap on any single trade, including recovery.">
             <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
           </SettingRow>
-          {/* NOTE: the AI Bot Recovery Markup intentionally does NOT live here.
-              It is a bot-only setting, editable from the AI Bot section
-              (bot deploy console). The main autonomous engine and the NeuroAI
-              Quantum FAB use their own recovery logic. */}
         </CardContent>
       </Card>
 
-      {/* Daily Limits */}
+      {/* Recovery ladder */}
       <Card className="bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Daily Limits</CardTitle>
-          <CardDescription className="text-xs">Engine auto-stops when these are hit.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow label="Daily Profit Target" description="Stop once this daily profit is achieved.">
-            <NumInput value={form.dailyTarget} onChange={(v) => set("dailyTarget", v)} min={1} max={100000} step={1} suffix="$" />
-          </SettingRow>
-          <SettingRow label="Daily Loss Limit" description="Stop if total daily loss hits this.">
-            <NumInput value={form.dailyLossLimit} onChange={(v) => set("dailyLossLimit", v)} min={1} max={100000} step={1} suffix="$" />
-          </SettingRow>
-          <SettingRow label="Max Drawdown" description="Stop if portfolio drops by this %.">
-            <NumInput value={form.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} min={1} max={50} step={0.5} suffix="%" />
-          </SettingRow>
-          <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
-            <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
-          </SettingRow>
-          <SettingRow label="Cooldown Duration" description="Minutes before engine auto-resumes after a consecutive-loss stop.">
-            <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
-          </SettingRow>
-        </CardContent>
-      </Card>
-
-      {/* Engine Configuration */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Engine Configuration</CardTitle>
-          <CardDescription className="text-xs">Core AI engine parameters that control how and when the engine trades.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow
-            label="Paper Trade Mode"
-            description="Log all trades to the journal without sending real orders to Deriv. Use to test strategies with zero risk. Turn off to go live."
-          >
-            <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
-          </SettingRow>
-          <SettingRow
-            label="Require Positive EV"
-            description="Only trade when the engine calculates a positive expected value. Disabling allows more trade attempts but may reduce win rate."
-          >
-            <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
-          </SettingRow>
-          <SettingRow
-            label="Min Confidence Threshold"
-            description="Minimum AI confidence score (0–100) required before placing a trade. Higher = fewer trades, better quality."
-          >
-            <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={30} max={95} step={1} suffix="%" />
-          </SettingRow>
-          <SettingRow
-            label="Scan Interval"
-            description="How often the autonomous engine scans markets for opportunities."
-          >
-            <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={120} step={1} suffix="s" />
-          </SettingRow>
-          {form.paperTradeMode && (
-            <div className="mt-2 p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
-              <strong>Paper Trade Mode is ON</strong> — no real orders will be sent to Deriv. All trades are simulated in the journal.
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Recovery Mode */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Recovery Mode</CardTitle>
+          <CardTitle className="text-base">Recovery Ladder</CardTitle>
           <CardDescription className="text-xs">
-            When enabled, after a loss the engine escalates stake size to recover the lost amount. Recovery is tracked as a single global state — it returns to normal as soon as accumulated loss debt is fully repaid. Optional target profit is used only to size an ideal recovery stake and never keeps recovery active.
+            After a loss, the engine sizes the next stake to recover the outstanding debt. Recovery ends as soon as the debt is repaid. Optional target profit only sizes the stake and never keeps recovery active.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Enable Recovery Mode" description="Automatically increase stake after a loss to recover.">
+          <SettingRow label="Enable Recovery Mode" description="Increase the stake after a loss to recover it.">
             <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
           </SettingRow>
 
           {form.recoveryMode && (
             <>
-              {/* Auto / Manual mode selector */}
               <div className="mt-3 mb-1">
-                <div className="text-xs font-medium text-foreground mb-2">Recovery Calculator Mode</div>
+                <div className="text-xs font-medium text-foreground mb-2">Recovery Calculator</div>
                 <div className="flex rounded-lg overflow-hidden border border-border w-full">
                   <button
                     onClick={() => set("recoveryAutoMode", true)}
                     className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors ${form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
                   >
-                    <span className="font-semibold">Auto</span>
-                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>AI computes exact stake</span>
+                    Auto
+                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>Engine computes the stake from the live payout</span>
                   </button>
                   <button
                     onClick={() => set("recoveryAutoMode", false)}
                     className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors border-l border-border ${!form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
                   >
-                    <span className="font-semibold">Manual</span>
-                    <span className={`text-[10px] ${!form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>Set your own multiplier</span>
+                    Manual
+                    <span className={`text-[10px] ${!form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>Your own multiplier</span>
                   </button>
                 </div>
-                {form.recoveryAutoMode ? (
-                  <div className="mt-2 p-2.5 bg-primary/5 border border-primary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
-                    <p>
-                      <span className="text-primary font-medium">Auto mode — no multiplier: </span>
-                      exact stake = (accumulated loss debt + optional original target profit) ÷ (live payout − 1). Recovery still ends the moment debt is cleared, even if the optional target is missed.
-                    </p>
-                    <p>
-                      Payout includes the returned stake, so only payout − 1 is available as profit.
-                      Instant targets full clearance in one win; Split never stakes more than one normal base stake per attempt.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="mt-2 p-2.5 bg-secondary/20 border border-border rounded-lg text-[11px] text-muted-foreground">
-                    <span className="text-foreground font-medium">Manual mode: </span>
-                    Your multiplier is used as entered with no payout calibration or hidden range. It compounds after each recovery loss until Max Recovery Steps.
-                  </div>
-                )}
               </div>
 
-              {/* Recovery Method — available in both modes */}
               <SettingRow
                 label="Recovery Method"
                 description={form.recoveryAutoMode
-                  ? "Auto Split caps every attempt at one normal base stake and carries remaining debt forward. Auto Instant sizes the stake to try to clear debt plus the optional target profit in one win. Missing the target by a cent does not keep recovery active."
-                  : "Manual Split uses your compounded multiplier as a cap on the exact target. Manual Instant uses your compounded multiplier stake directly. No automatic payout multiplier is substituted."}
+                  ? "Split caps each attempt at one normal base stake and carries the rest forward. Instant sizes one attempt to clear the debt in one win."
+                  : "Split caps the manual ladder at the exact target. Instant uses the manual ladder directly."}
               >
                 <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
                   <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
@@ -424,204 +469,88 @@ export default function Settings() {
                 </Select>
               </SettingRow>
 
-              {/* Recovery Multiplier — manual mode only */}
               {!form.recoveryAutoMode && (
                 <SettingRow
                   label="Recovery Multiplier"
-                  description={`Used exactly as entered and compounded by recovery step: Step 1 = ×${form.recoveryMultiplier}, Step 2 = ×${Math.pow(form.recoveryMultiplier, 2).toFixed(2)}, Step 3 = ×${Math.pow(form.recoveryMultiplier, 3).toFixed(2)}. Auto mode never reads this value.`}
+                  description={`Used as entered, compounding per recovery step: step 1 ×${form.recoveryMultiplier}, step 2 ×${Math.pow(form.recoveryMultiplier, 2).toFixed(2)}, step 3 ×${Math.pow(form.recoveryMultiplier, 3).toFixed(2)}.`}
                 >
                   <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} step={0.01} suffix="×" />
                 </SettingRow>
               )}
 
-              {/* Max Recovery Steps — available in both modes */}
               <SettingRow
                 label="Max Recovery Steps"
                 description={form.recoveryAutoMode
-                  ? "Maximum recovery-loss step recorded by the engine. Auto stake still recalculates from live debt and payout; it never adds a fixed multiplier."
-                  : "Maximum exponent for your manual multiplier. Recovery continues after this step, but the multiplier stops compounding further."}
+                  ? "Recovery-loss step the engine records. Auto stakes still come from live debt and payout."
+                  : "Exponent limit for your manual multiplier. The multiplier stops compounding here."}
               >
                 <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
               </SettingRow>
-
-              {/* Recovery calculation preview */}
-              <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
-                {form.recoveryAutoMode ? (
-                  <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Auto recovery — ${exampleBaseStake.toFixed(2)} normal-loss example</div>
-                    <div className="text-[10px] text-muted-foreground mb-3">
-                      Target profit comes from the original normal trade. Live payout is used at execution; the values below use the fallback schedule.
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {[
-                        {
-                          side: `OVER ${form.recoveryOverDigit}`,
-                          normal: `OVER ${form.normalOverDigit}`,
-                          payout: recoveryOverPayout,
-                          target: overExampleTarget,
-                          instant: overInstantExample,
-                        },
-                        {
-                          side: `UNDER ${form.recoveryUnderDigit}`,
-                          normal: `UNDER ${form.normalUnderDigit}`,
-                          payout: recoveryUnderPayout,
-                          target: underExampleTarget,
-                          instant: underInstantExample,
-                        },
-                      ].map((example) => (
-                        <div key={example.side} className="rounded-lg bg-background/50 border border-border/60 p-2.5 space-y-1">
-                          <div className="flex justify-between text-[10px]">
-                            <span className="font-medium text-foreground">{example.side}</span>
-                            <span className="font-mono text-amber-400">{example.payout.toFixed(2)}× payout</span>
-                          </div>
-                          <p className="text-[9px] text-muted-foreground">
-                            ${exampleBaseStake.toFixed(2)} {example.normal} loss + ${example.target.toFixed(2)} original target
-                          </p>
-                          <div className="flex justify-between text-[10px] pt-1">
-                            <span>Instant exact</span>
-                            <span className="font-mono font-bold text-amber-300">${example.instant.toFixed(2)}</span>
-                          </div>
-                          <div className="flex justify-between text-[10px]">
-                            <span>Split next stake</span>
-                            <span className="font-mono font-bold text-amber-300">${Math.min(exampleBaseStake, example.instant).toFixed(2)} max</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-[9px] text-muted-foreground/60 mt-2">
-                      Deriv's $0.35 minimum and your Max Stake Per Trade remain hard execution limits.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Manual multiplier ladder (× base stake)</div>
-                    <div className="text-[10px] text-muted-foreground mb-2">
-                      No auto-calibration. The multiplier compounds after a recovery loss and freezes at Max Recovery Steps.
-                    </div>
-                    <div className="flex gap-3 flex-wrap">
-                      {Array.from({ length: form.maxRecoverySteps }, (_, i) => i + 1).map((step) => (
-                        <div key={step} className="text-center">
-                          <div className="text-[10px] text-muted-foreground">Step {step}</div>
-                          <div className="text-xs font-mono font-bold text-amber-400">
-                            {form.recoveryMethod === "split" ? "≤" : ""}×{Math.pow(form.recoveryMultiplier, step).toFixed(2)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
             </>
           )}
         </CardContent>
       </Card>
 
-      {/* Over/Under Digit Configuration */}
+      {/* Engine */}
       <Card className="bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Over/Under Digit Barriers</CardTitle>
-          <CardDescription className="text-xs">
-            The AI only trades these exact digit barriers — one pair for normal trading and one pair during recovery. Auto recovery recalculates the exact stake from the selected contract's live payout; no multiplier is needed.
-          </CardDescription>
+          <CardTitle className="text-base">Engine</CardTitle>
+          <CardDescription className="text-xs">When and how the engine trades.</CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Normal — OVER digit" description="Barrier for DIGITOVER outside recovery. Default: OVER 1 (~80% win rate, lower payout).">
-            <NumInput value={form.normalOverDigit} onChange={(v) => set("normalOverDigit", v)} min={0} max={8} />
+          <SettingRow label="Paper Trade Mode" description="Simulate every trade in the journal. No real orders are sent to Deriv.">
+            <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
           </SettingRow>
-          <SettingRow label="Normal — UNDER digit" description="Barrier for DIGITUNDER outside recovery. Default: UNDER 8 (~80% win rate, lower payout).">
-            <NumInput value={form.normalUnderDigit} onChange={(v) => set("normalUnderDigit", v)} min={1} max={9} />
+          <SettingRow label="Require Positive EV" description="Only trade when the expected value is positive.">
+            <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
           </SettingRow>
-          <SettingRow
-            label="Recovery — OVER digit"
-            description={`Barrier for DIGITOVER while recovering. Fallback payout ${recoveryOverPayout.toFixed(2)}× total return; a live proposal is used for the actual Auto stake.`}
-          >
-            <NumInput value={form.recoveryOverDigit} onChange={(v) => { set("recoveryOverDigit", v); }} min={0} max={8} />
+          <SettingRow label="Min Confidence" description="Minimum confidence (0–100) before a trade is placed.">
+            <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={30} max={95} step={1} suffix="%" />
           </SettingRow>
-          <SettingRow
-            label="Recovery — UNDER digit"
-            description={`Barrier for DIGITUNDER while recovering. Fallback payout ${recoveryUnderPayout.toFixed(2)}× total return; a live proposal is used for the actual Auto stake.`}
-          >
-            <NumInput value={form.recoveryUnderDigit} onChange={(v) => { set("recoveryUnderDigit", v); }} min={1} max={9} />
+          <SettingRow label="Scan Interval" description="How often the engine scans markets when it is not reacting to ticks.">
+            <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={120} step={1} suffix="s" />
           </SettingRow>
-          <div className="mt-3 rounded-lg border border-border/60 bg-secondary/10 p-2.5">
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">$1 fallback payout reference</p>
-            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
-              {Object.entries(OVER_PAYOUTS).map(([digit, payout]) => (
-                <div key={digit} className="rounded bg-background/60 px-1.5 py-1 text-center">
-                  <div className="text-[9px] text-muted-foreground">O{digit} / U{9 - Number(digit)}</div>
-                  <div className="text-[10px] font-mono text-foreground">{payout.toFixed(2)}×</div>
-                </div>
-              ))}
+          {form.paperTradeMode && (
+            <div className="mt-2 p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
+              <strong>Paper Trade Mode is ON</strong> — no real orders will be sent to Deriv.
             </div>
-          </div>
-          <div className="mt-2 p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
-            <p><strong className="text-foreground">Payout meaning:</strong> values are the total returned after a win, including the initial stake. Auto recovery uses only the net portion (payout − 1).</p>
-            <p>Other fallback payouts: Even/Odd <strong className="text-foreground">{EVEN_ODD_PAYOUT.toFixed(2)}×</strong> · Rise/Fall <strong className="text-foreground">{RISE_FALL_PAYOUT.toFixed(2)}×</strong> · Matches <strong className="text-foreground">{MATCH_PAYOUT.toFixed(2)}×</strong> · Differs <strong className="text-foreground">{DIFF_PAYOUT.toFixed(2)}×</strong>.</p>
-          </div>
+          )}
         </CardContent>
       </Card>
 
-      {/* AI Engine Contract Mode */}
+      {/* Daily limits */}
       <Card className="bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">AI Engine Contract Mode</CardTitle>
-          <CardDescription className="text-xs">
-            Choose which contract types the engine trades. The AI picks the best market and optimal parameters for each selected type — no manual barriers or directions needed.
-          </CardDescription>
+          <CardTitle className="text-base">Daily Limits</CardTitle>
+          <CardDescription className="text-xs">The engine stops when any of these is hit.</CardDescription>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid grid-cols-1 gap-3">
-            {CONTRACT_GROUPS.map((group) => {
-              const active = group.types.every(t => form.preferredContractTypes.includes(t));
-              const partial = !active && group.types.some(t => form.preferredContractTypes.includes(t));
-              return (
-                <button
-                  key={group.id}
-                  onClick={() => toggleGroup(group.types)}
-                  className={`w-full flex items-start gap-3 p-4 rounded-xl text-left border transition-all ${
-                    active
-                      ? "bg-primary/10 border-primary/40"
-                      : partial
-                      ? "bg-amber-500/5 border-amber-500/30"
-                      : "bg-secondary/30 border-border hover:border-border/80"
-                  }`}
-                >
-                  <div className={`p-2 rounded-lg mt-0.5 ${active ? "bg-primary/20 text-primary" : "bg-secondary text-muted-foreground"}`}>
-                    {group.icon}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className={`font-semibold text-sm ${active ? "text-primary" : "text-foreground"}`}>{group.label}</span>
-                      {active && <span className="text-[10px] px-1.5 py-0.5 rounded bg-primary/20 text-primary font-medium">Active</span>}
-                      {partial && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-medium">Partial</span>}
-                    </div>
-                    <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed">{group.desc}</p>
-                    <div className="flex gap-1.5 mt-2">
-                      {group.types.map(t => (
-                        <span key={t} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${form.preferredContractTypes.includes(t) ? "bg-primary/10 border-primary/30 text-primary" : "bg-secondary border-border text-muted-foreground"}`}>{t.replace("DIGIT", "").replace("OVER", "OVER").replace("UNDER", "UNDER")}</span>
-                      ))}
-                    </div>
-                  </div>
-                  <div className={`w-5 h-5 rounded-full border-2 flex-shrink-0 flex items-center justify-center mt-1 ${active ? "bg-primary border-primary" : "border-border"}`}>
-                    {active && <div className="w-2 h-2 rounded-full bg-white" />}
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-          <div className="p-3 bg-secondary/20 rounded-lg text-xs text-muted-foreground space-y-1">
-            <p><strong className="text-foreground">All selected (recommended)</strong> — AI picks the best contract type for each opportunity across all categories</p>
-            <p><strong className="text-foreground">Selective mode</strong> — restricts the engine to your chosen contract categories only</p>
-            <p><strong className="text-foreground">OVER/UNDER</strong> — AI analyses live digit distribution per tick and selects the most favourable barrier automatically</p>
-          </div>
+        <CardContent>
+          <SettingRow label="Daily Profit Target" description="Stop once this profit is reached.">
+            <NumInput value={form.dailyTarget} onChange={(v) => set("dailyTarget", v)} min={1} max={100000} step={1} suffix="$" />
+          </SettingRow>
+          <SettingRow label="Daily Loss Limit" description="Stop if the day's loss reaches this.">
+            <NumInput value={form.dailyLossLimit} onChange={(v) => set("dailyLossLimit", v)} min={1} max={100000} step={1} suffix="$" />
+          </SettingRow>
+          <SettingRow label="Max Drawdown" description="Stop if the portfolio drops by this percentage.">
+            <NumInput value={form.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} min={1} max={50} step={0.5} suffix="%" />
+          </SettingRow>
+          <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
+            <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
+          </SettingRow>
+          <SettingRow label="Cooldown" description="Minutes before the engine resumes after a consecutive-loss stop.">
+            <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
+          </SettingRow>
         </CardContent>
       </Card>
 
       <div className="flex justify-end pt-2">
-        <Button onClick={handleSave} disabled={updateSettings.isPending} className="w-full sm:w-48">
-          {updateSettings.isPending ? "Saving…" : "Save All Settings"}
+        <Button onClick={handleSave} disabled={updateSettings.isPending || form.normalContracts.length === 0 || form.recoveryContracts.length === 0} className="w-full sm:w-48">
+          {updateSettings.isPending ? "Saving…" : "Save Settings"}
         </Button>
       </div>
+      {(form.normalContracts.length === 0 || form.recoveryContracts.length === 0) && (
+        <p className="text-right text-[11px] text-amber-400">Each set needs at least one contract before you can save.</p>
+      )}
     </motion.div>
   );
 }

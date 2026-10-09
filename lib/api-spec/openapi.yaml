@@ -1090,6 +1090,19 @@ components:
         running:
           type: boolean
 
+    AutonomousContractSpec:
+      type: object
+      required: [type, digit]
+      properties:
+        type:
+          type: string
+          enum: [CALL, PUT, RISE, FALL, DIGITOVER, DIGITUNDER, DIGITEVEN, DIGITODD, DIGITMATCH, DIGITDIFF]
+        digit:
+          type: integer
+          minimum: -1
+          maximum: 9
+          description: Over (0-8) / Under (1-9) barrier, Matches / Differs digit (0-9, -1 = auto). Ignored for Even, Odd, Rise and Fall.
+
     TradingSettings:
       type: object
       required: [id, riskProfile, maxRiskPerTrade, dailyTarget, dailyLossLimit, maxDrawdown, consecutiveLossLimit, minConfidenceThreshold, marketRotationAfter, preferredContractTypes, preferredCategories, autonomousEnabled, loopIntervalSec, recoveryMode, recoveryMultiplier, maxRecoverySteps, scanAllMarkets, tradeDurationSec, maxTradeStake]
@@ -1186,6 +1199,18 @@ components:
           enum: [fixed, percentage]
         riskAmountValue:
           type: number
+        autonomousNormalContracts:
+          type: array
+          maxItems: 8
+          description: Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.
+          items:
+            $ref: "#/components/schemas/AutonomousContractSpec"
+        autonomousRecoveryContracts:
+          type: array
+          maxItems: 8
+          description: Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.
+          items:
+            $ref: "#/components/schemas/AutonomousContractSpec"
         botRecoveryMarkup:
           type: number
           minimum: 0
@@ -1265,6 +1290,18 @@ components:
           enum: [fixed, percentage]
         riskAmountValue:
           type: number
+        autonomousNormalContracts:
+          type: array
+          maxItems: 8
+          description: Autonomous engine — contracts the user chose for NORMAL trades (independent of recovery). Empty = legacy settings.
+          items:
+            $ref: "#/components/schemas/AutonomousContractSpec"
+        autonomousRecoveryContracts:
+          type: array
+          maxItems: 8
+          description: Autonomous engine — contracts the user chose for RECOVERY trades (independent of normal). Empty = legacy settings.
+          items:
+            $ref: "#/components/schemas/AutonomousContractSpec"
         botRecoveryMarkup:
           type: number
           minimum: 0

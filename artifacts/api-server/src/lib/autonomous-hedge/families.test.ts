@@ -39,3 +39,55 @@ describe("autonomous families", () => {
     assert.deepEqual(specs, [{ type: "DIGITMATCH", barrier: -1 }, { type: "DIGITDIFF", barrier: -1 }]);
   });
 });
+
+describe("autonomous families — user-chosen sets per mode", () => {
+  const base = { ...settings, preferredContractTypes: ["CALL"] };
+
+  it("normal and recovery trade independent user sets (Even normal, Matches recovery)", () => {
+    const withSets = {
+      ...base,
+      autonomousNormalContracts: [{ type: "DIGITEVEN", digit: -1 }],
+      autonomousRecoveryContracts: [{ type: "DIGITMATCH", digit: -1 }],
+    };
+    assert.deepEqual(familySpecsFor({ settings: withSets, mode: "NORMAL", digitEnabled: true }),
+      [{ type: "DIGITEVEN", barrier: -1 }]);
+    assert.deepEqual(familySpecsFor({ settings: withSets, mode: "RECOVERY", digitEnabled: true }),
+      [{ type: "DIGITMATCH", barrier: -1 }]);
+  });
+
+  it("each user entry keeps its own barrier, so two Overs can differ by digit", () => {
+    const specs = familySpecsFor({
+      settings: { ...base, autonomousNormalContracts: [{ type: "DIGITOVER", digit: 1 }, { type: "DIGITOVER", digit: 3 }] },
+      mode: "NORMAL",
+      digitEnabled: true,
+    });
+    assert.deepEqual(specs, [{ type: "DIGITOVER", barrier: 1 }, { type: "DIGITOVER", barrier: 3 }]);
+  });
+
+  it("drops out-of-range digits, duplicates and digit contracts on markets without a digit tape", () => {
+    const set = [
+      { type: "DIGITOVER", digit: 9 },   // Over 9 is impossible
+      { type: "DIGITUNDER", digit: 0 },  // Under 0 is impossible
+      { type: "DIGITEVEN", digit: -1 },
+      { type: "DIGITEVEN", digit: 5 },   // duplicate of Even
+      { type: "RISE", digit: -1 },       // maps to CALL
+    ];
+    assert.deepEqual(
+      familySpecsFor({ settings: { ...base, autonomousNormalContracts: set }, mode: "NORMAL", digitEnabled: true }),
+      [{ type: "DIGITEVEN", barrier: -1 }, { type: "CALL", barrier: -1 }],
+    );
+    assert.deepEqual(
+      familySpecsFor({ settings: { ...base, autonomousNormalContracts: set }, mode: "NORMAL", digitEnabled: false }),
+      [{ type: "CALL", barrier: -1 }],
+    );
+  });
+
+  it("falls back to the legacy shared list when a mode's set is empty", () => {
+    const legacy = familySpecsFor({
+      settings: { ...base, preferredContractTypes: ["DIGITOVER"], autonomousRecoveryContracts: [] },
+      mode: "RECOVERY",
+      digitEnabled: true,
+    });
+    assert.deepEqual(legacy, [{ type: "DIGITOVER", barrier: 4 }]);
+  });
+});

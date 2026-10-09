@@ -5,6 +5,7 @@ import { eq } from "drizzle-orm";
 import { UpdateSettingsBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { broadcastSSE } from "../lib/sse";
+import { parseStoredContractSet, serializeContractSet } from "../lib/autonomous-hedge/families";
 
 const router = Router();
 
@@ -50,6 +51,8 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
     botRecoveryMarkup: Number((s as any).botRecoveryMarkup ?? 10),
+    autonomousNormalContracts: parseStoredContractSet(s.autonomousNormalContracts),
+    autonomousRecoveryContracts: parseStoredContractSet(s.autonomousRecoveryContracts),
   };
 }
 
@@ -110,6 +113,8 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).riskAmountType !== undefined) (updateData as any).riskAmountType = (updates as any).riskAmountType;
   if ((updates as any).riskAmountValue !== undefined) (updateData as any).riskAmountValue = String((updates as any).riskAmountValue);
   if ((updates as any).botRecoveryMarkup !== undefined) (updateData as any).botRecoveryMarkup = String((updates as any).botRecoveryMarkup);
+  if ((updates as any).autonomousNormalContracts !== undefined) (updateData as any).autonomousNormalContracts = serializeContractSet((updates as any).autonomousNormalContracts);
+  if ((updates as any).autonomousRecoveryContracts !== undefined) (updateData as any).autonomousRecoveryContracts = serializeContractSet((updates as any).autonomousRecoveryContracts);
 
     const [updated] = await db.update(settingsTable)
       .set(updateData)

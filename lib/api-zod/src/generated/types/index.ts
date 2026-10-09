@@ -19,6 +19,8 @@ export * from './aiInsightType';
 export * from './aiRecommendation';
 export * from './aiRecommendationDirection';
 export * from './apiError';
+export * from './autonomousContractSpec';
+export * from './autonomousContractSpecType';
 export * from './confidenceByOutcome';
 export * from './dailySummary';
 export * from './derivAccount';

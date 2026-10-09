@@ -25,6 +25,7 @@ import { computeRiskDecision } from "../agents/risk-manager";
 import type { DailyStats, ScanContext, TradingSettings } from "../agents/types";
 import type { RiskDecision } from "../agents/risk-manager";
 import { resolveRecoveryPayout } from "../recovery-payout";
+import { ledgerPayoutFor } from "../recovery-math";
 import {
   AUTOMATED_DERIV_MARKETS,
   executeLiveTrade,
@@ -599,6 +600,9 @@ async function executeDecision(
     aiRiskScore: String(riskScore),
     isAutonomous: true,
     agentReasoning: reasoningBase,
+    // The quoted payout is kept on the open row so the reconciler can record a
+    // lost trade with the same ledger payout if this engine is interrupted.
+    payout: payout > 1 ? String(payout) : null,
     duration: HEDGE_DURATION_TICKS,
     durationUnit: HEDGE_DURATION_UNIT,
   }).returning();
@@ -693,7 +697,8 @@ async function executeDecision(
   }
 
   const actualPayout = result.won ? buyPrice + result.profit : 0;
-  const ledgerPayout = result.won && buyPrice > 0 ? Math.round(((buyPrice + result.profit) / buyPrice) * 1000) / 1000 : 1;
+  // Losses carry the quoted payout into the ledger (it sets the recovery target).
+  const ledgerPayout = ledgerPayoutFor({ won: result.won, buyPrice, profit: result.profit, quotedPayout: payout });
   const settlement = await settleAutonomousRow(
     sessionId,
     openRow.id,

@@ -42,7 +42,18 @@ const DERIV_ERROR_CODE_TEXT: Record<string, string> = {
   InvalidToken: "Session expired — please reconnect your Deriv account",
   DisabledClient: "This Deriv account is disabled for API trading",
   InsufficientFund: "Insufficient balance for this stake",
+  InsufficientBalance: "Insufficient balance for this stake",
   InputValidationFailed: "Deriv rejected the trade parameters",
+  // Stage decides which of these two meanings applies — see lib/trade-rejection.ts.
+  // Displayed text stays honest for both: the quote was not turned into a contract.
+  InvalidContractProposal:
+    "Deriv did not accept that quote for purchase — no contract was created, the engine re-quotes",
+  UnknownContract: "Deriv does not offer that contract to this account on that market",
+  InvalidSymbol: "Deriv does not offer that market to this account",
+  InvalidBarrier: "That barrier is not available for this contract on this market",
+  MarketClosed: "That market is closed right now",
+  ContractBuyValidationError: "Deriv rejected these contract parameters for this account",
+  SelfExclusion: "This Deriv account is self-excluded from trading",
 };
 
 // ── Parsing helpers ───────────────────────────────────────────────────────────

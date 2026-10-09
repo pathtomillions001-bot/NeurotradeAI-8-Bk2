@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import {
   closeAccountConnections,
+  DerivTradeError,
   executeLiveTrade,
   getAccountConnection,
   isRetryableDerivError,
@@ -107,6 +108,98 @@ describe("single-contract execution", () => {
     });
     await assert.rejects(executeLiveTrade(token, params), /Rate limit on purchase/);
     assert.equal(sent.filter((m) => m.buy).length, 1);
+  });
+
+  // ── The "Unknown contract proposal" handoff ─────────────────────────────────
+  // Deriv answers a `buy` whose proposal ID it does not know with
+  // InvalidContractProposal / "Unknown contract proposal". That rejection is
+  // proof no contract exists, so the purchase is completed once against a FRESH
+  // quote. It is the one rejection that may be re-quoted; every other one still
+  // fails on the first attempt.
+  it("completes the single purchase once when the proposal id is rejected as unknown", async () => {
+    let quotes = 0;
+    let buys = 0;
+    const sent = fakeTransport((m) => {
+      if (m.proposal) {
+        quotes += 1;
+        return { msg_type: "proposal", proposal: { id: `proposal-${quotes}`, ask_price: 1, payout: 1.63 } };
+      }
+      buys += 1;
+      return buys === 1
+        ? { msg_type: "buy", error: { code: "InvalidContractProposal", message: "Unknown contract proposal" } }
+        : purchase;
+    });
+
+    const result = await executeLiveTrade(token, params);
+
+    assert.equal(result.contractId, 1234, "the trade the caller asked for is placed exactly once");
+    assert.equal(sent.filter((m) => m.proposal).length, 2, "one stale quote, one fresh quote");
+    const buyMessages = sent.filter((m) => m.buy);
+    assert.equal(buyMessages.length, 2, "the refused purchase placed nothing, so one more is allowed");
+    assert.deepEqual(
+      buyMessages.map((m) => m.buy),
+      ["proposal-1", "proposal-2"],
+      "the retry buys the FRESH proposal id, never the refused one",
+    );
+  });
+
+  it("never sends a third purchase when the fresh quote is refused the same way", async () => {
+    let quotes = 0;
+    const sent = fakeTransport((m) => m.proposal
+      ? { msg_type: "proposal", proposal: { id: `proposal-${++quotes}`, ask_price: 1, payout: 1.63 } }
+      : { msg_type: "buy", error: { code: "InvalidContractProposal", message: "Unknown contract proposal" } });
+
+    const err = await executeLiveTrade(token, params).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    assert.ok(err instanceof DerivTradeError);
+    assert.equal(err.stage, "buy");
+    assert.equal(err.code, "InvalidContractProposal");
+    assert.equal(err.kind, "unknown-proposal");
+    assert.equal(err.symbol, params.symbol);
+    assert.equal(err.contractType, params.contractType);
+    assert.match(err.message, /Unknown contract proposal/);
+    assert.equal(sent.filter((m) => m.buy).length, 2, "exactly one re-quote — never an unbounded retry loop");
+  });
+
+  it("never buys a proposal the account itself was refused, and says why", async () => {
+    // The SAME broker text out of `proposal` means this account is not offered
+    // that contract: retrying would fail identically on every tick.
+    const sent = fakeTransport(() => ({
+      msg_type: "proposal",
+      error: { code: "InvalidContractProposal", message: "Unknown contract proposal" },
+    }));
+
+    const err = await executeLiveTrade(token, params).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    assert.ok(err instanceof DerivTradeError);
+    assert.equal(err.stage, "proposal");
+    assert.equal(err.kind, "contract-unavailable");
+    assert.equal(sent.length, 1, "no re-quote");
+    assert.equal(sent.filter((m) => m.buy).length, 0);
+  });
+
+  it("keeps the broker code on an account-level refusal", async () => {
+    const sent = fakeTransport(() => ({
+      msg_type: "proposal",
+      error: { code: "InsufficientBalance", message: "Insufficient balance" },
+    }));
+
+    const caught = await executeLiveTrade(token, params).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
+    assert.ok(caught instanceof DerivTradeError);
+    assert.equal(caught.kind, "account-blocked");
+    assert.equal(caught.stage, "proposal");
+    assert.match(caught.message, /Deriv code InsufficientBalance/);
+    assert.equal(sent.filter((m) => m.buy).length, 0);
   });
 
   for (const [unit, factor] of [["seconds", 1], ["milliseconds", 1000]] as const) {

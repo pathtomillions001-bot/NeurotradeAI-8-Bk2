@@ -27,6 +27,11 @@ import { DigitTape, type DigitSnapshot } from "./digit-tape";
 import { logger } from "./logger";
 import { RISE_FALL_PAYOUT } from "./payouts";
 import {
+  classifyDerivRejection,
+  type DerivRejectionKind,
+  type DerivRejectionStage,
+} from "./trade-rejection";
+import {
   describeDerivHttpFailure,
   isTransientDerivFailure,
 } from "./friendly-error";
@@ -1808,6 +1813,13 @@ class DerivAccountConnection extends EventEmitter {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelay = 1_000;
+  /**
+   * Increments each time a socket opens. A Deriv proposal ID only exists inside
+   * the session that created it, so `executeLiveTrade` reads this before and
+   * after quoting to know whether a rejected purchase died because the pooled
+   * socket re-handshook (a new OTP session) mid-flight.
+   */
+  private sessionCount = 0;
   private lastPongMs = Date.now();
   private connecting: Promise<void> | null = null;
   private closed = false;
@@ -1825,6 +1837,11 @@ class DerivAccountConnection extends EventEmitter {
 
   isOpen(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /** Identity of the current trading session (changes on every reconnect). */
+  get sessionSeq(): number {
+    return this.sessionCount;
   }
 
   /** Swap in a freshly refreshed Bearer token without dropping the socket. */
@@ -1999,6 +2016,9 @@ class DerivAccountConnection extends EventEmitter {
       }, 15_000);
 
       ws.on("open", () => {
+        // A new OTP session: every proposal ID quoted on the previous one is now
+        // unknown to the broker, and purchases referencing them are rejected.
+        this.sessionCount += 1;
         this.reconnectDelay = 1_000;
         this.emit("open");
         this.lastPongMs = Date.now();
@@ -3163,12 +3183,109 @@ export class TradeOutcomeUnknownError extends Error {
 }
 
 /**
+ * A rejection Deriv returned as an ERROR response to `proposal` or `buy`, so
+ * nothing was placed. It keeps the broker's own words and adds the three things
+ * a caller needs in order to react correctly:
+ *
+ *  - `code`  — the Deriv error code the raw text used to throw away
+ *  - `stage` — which request was rejected ("proposal" vs "buy")
+ *  - `kind`  — the classification from lib/trade-rejection.ts
+ *
+ * Plus the contract that was refused, so an engine can quarantine that exact
+ * candidate instead of hammering it on the next tick.
+ */
+export class DerivTradeError extends Error {
+  readonly stage: DerivRejectionStage;
+  readonly code: string;
+  readonly kind: DerivRejectionKind;
+  /** The broker's own text, without the appended code — safe to re-describe. */
+  readonly brokerMessage: string;
+  readonly symbol: string;
+  readonly contractType: string;
+  readonly barrier?: number | string;
+  readonly stake: number;
+  readonly currency: string;
+
+  constructor(input: {
+    stage: "proposal" | "buy";
+    code?: string | null;
+    message?: string | null;
+    params: {
+      symbol: string;
+      contractType: string;
+      stake: number;
+      currency: string;
+      barrier?: number | string;
+    };
+  }) {
+    const code = String(input.code ?? "").trim();
+    const brokerText = String(input.message ?? "").trim() || "Trade rejected by Deriv";
+    super(code ? `${brokerText} (Deriv code ${code})` : brokerText);
+    this.name = "DerivTradeError";
+    this.stage = input.stage;
+    this.code = code;
+    this.brokerMessage = brokerText;
+    this.kind = classifyDerivRejection({ stage: input.stage, code, message: input.message ?? null });
+    this.symbol = input.params.symbol;
+    this.contractType = input.params.contractType;
+    this.barrier = input.params.barrier;
+    this.stake = input.params.stake;
+    this.currency = input.params.currency;
+  }
+}
+
+/**
+ * How many EXTRA quotes one purchase may need after Deriv rejects the buy with
+ * "Unknown contract proposal" (an ID the receiving session does not know).
+ *
+ * That rejection is proof no contract exists, so re-quoting and buying the fresh
+ * ID once completes the ONE purchase the caller asked for — it is not a repeated
+ * buy. Any other rejection (including a transient one such as RateLimit) is
+ * still thrown immediately: only the quote→purchase handoff is retried.
+ */
+const BUY_HANDOFF_REQUOTES = 1;
+
+/** Never quote while the account socket is throttled: the buy would be sent against a stale quote. */
+const SEND_WINDOW_MAX_WAIT_MS = 6_000;
+const SEND_WINDOW_POLL_MS = 150;
+
+/**
+ * Wait out a rate-limit pause BEFORE quoting.
+ *
+ * The pooled account socket paces sends at 10 msg/s and pauses everything for
+ * 4 s whenever Deriv reports a rate limit — the journal, settlement pollers and
+ * balance syncs share that queue. A quote taken just before a pause means the
+ * purchase leaves seconds later, and by then Deriv no longer knows the proposal
+ * ID: `InvalidContractProposal` / "Unknown contract proposal". Waiting first
+ * keeps quote and purchase inside the same unthrottled window.
+ */
+async function awaitSendWindow(bearerToken: string, accountId: string): Promise<void> {
+  const connection = getAccountConnection(bearerToken, accountId);
+  if (!connection.isRateLimitPaused()) return;
+  logger.warn(
+    { accountId },
+    "executeLiveTrade: account socket is rate-limit paused — waiting before quoting so the purchase is not sent against a stale quote",
+  );
+  const deadline = Date.now() + SEND_WINDOW_MAX_WAIT_MS;
+  while (connection.isRateLimitPaused() && Date.now() < deadline) {
+    await sleep(SEND_WINDOW_POLL_MS);
+  }
+}
+
+/**
  * Execute a live trade using the new OTP-authenticated WebSocket flow:
  *  1. POST /accounts/{accountId}/otp → OTP WS URL
  *  2. Connect to OTP URL (no authorize message)
  *  3. Send `proposal` with `underlying_symbol`
  *  4. On proposal response, send `buy` with the proposal ID
  *  5. On buy confirmation, resolve with contract details
+ *
+ * The proposal ID only exists inside the session that issued it, and only until
+ * it goes stale, so step 4 is wrapped: if Deriv answers "Unknown contract
+ * proposal" the ID died between the two requests and the trade is quoted again
+ * ONCE, on the session that will receive the purchase. Every other rejection is
+ * thrown as-is (a `DerivTradeError`, carrying code + stage + contract), and an
+ * unacknowledged buy stays a `TradeOutcomeUnknownError` that is never repeated.
  */
 export async function executeLiveTrade(
   bearerToken: string,
@@ -3213,60 +3330,111 @@ export async function executeLiveTrade(
     return proposalParams;
   };
 
-  // Quote over the account's PERSISTENT socket. A throttled quote is retried
-  // with backoff instead of failing the trade; only a hard rejection settles it.
-  let proposalMsg: any = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    proposalMsg = await accountRequest(
-      bearerToken, accountId, { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
+  let handoffRequotes = 0;
+
+  for (;;) {
+    await awaitSendWindow(bearerToken, accountId);
+
+    // Quote over the account's PERSISTENT socket. A throttled quote is retried
+    // with backoff instead of failing the trade; only a hard rejection settles it.
+    let proposalMsg: any = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      proposalMsg = await accountRequest(
+        bearerToken, accountId, { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
+      );
+      if (proposalMsg && !proposalMsg.error) break;
+      if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
+      if (attempt === 3) break;
+      const backoffMs = 600 * 2 ** (attempt - 1);
+      logger.warn(
+        { backoffMs, attempt, derivError: proposalMsg?.error },
+        "executeLiveTrade: transient quote error — re-quoting",
+      );
+      await sleep(backoffMs);
+    }
+
+    if (!proposalMsg) {
+      throw new Error("Trade execution timeout — Deriv did not answer the quote request.");
+    }
+    if (proposalMsg.error) {
+      logger.error(
+        { derivError: proposalMsg.error, stage: "proposal", symbol: params.symbol, contractType: params.contractType },
+        "executeLiveTrade: Deriv error",
+      );
+      throw new DerivTradeError({
+        stage: "proposal",
+        code: proposalMsg.error.code,
+        message: proposalMsg.error.message,
+        params,
+      });
+    }
+    if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
+      throw new Error("Deriv returned an unexpected response to the quote request.");
+    }
+
+    const proposalId = String(proposalMsg.proposal.id);
+    const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
+    // The session this ID belongs to. A purchase answered by a DIFFERENT session
+    // is rejected as unknown no matter how fresh the quote was.
+    const quotedOnSession = getAccountConnection(bearerToken, accountId).sessionSeq;
+    logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
+
+    // Once the buy has been SENT, a missing or malformed reply means the purchase
+    // may still have happened. That is a different outcome from a rejection, so it
+    // is raised as TradeOutcomeUnknownError and the caller must not treat the trade
+    // as never placed.
+    // A rejected request promise means the message was never sent (no connection
+    // or send failure), so it propagates unchanged as a definite "not placed".
+    const buyMsg = await accountRequest(
+      bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
     );
-    if (proposalMsg && !proposalMsg.error) break;
-    if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
-    if (attempt === 3) break;
-    const backoffMs = 600 * 2 ** (attempt - 1);
-    logger.warn(
-      { backoffMs, attempt, derivError: proposalMsg?.error },
-      "executeLiveTrade: transient quote error — re-quoting",
-    );
-    await sleep(backoffMs);
-  }
+    if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");
+    if (buyMsg.error) {
+      const rejection = {
+        stage: "buy" as const,
+        code: buyMsg.error.code ?? null,
+        message: buyMsg.error.message ?? null,
+      };
+      const kind = classifyDerivRejection(rejection);
+      if (kind === "unknown-proposal" && handoffRequotes < BUY_HANDOFF_REQUOTES) {
+        handoffRequotes += 1;
+        // Diagnose which of the two mechanisms broke the handoff: a replaced
+        // session, or a quote that simply outlived its validity window.
+        const sessionChanged =
+          getAccountConnection(bearerToken, accountId).sessionSeq !== quotedOnSession;
+        logger.warn(
+          {
+            accountId,
+            symbol: params.symbol,
+            contractType: params.contractType,
+            barrier: params.barrier,
+            proposalId,
+            sessionChanged,
+            derivError: buyMsg.error,
+          },
+          sessionChanged
+            ? "executeLiveTrade: the trading session was replaced between quote and purchase — re-quoting on the live session"
+            : "executeLiveTrade: the proposal ID was unknown when the purchase arrived — re-quoting once",
+        );
+        continue; // one fresh quote, one fresh purchase — the rejected buy placed nothing
+      }
+      logger.error(
+        { derivError: buyMsg.error, stage: "buy", symbol: params.symbol, contractType: params.contractType, kind, requoted: handoffRequotes },
+        "executeLiveTrade: Deriv rejected the purchase",
+      );
+      throw new DerivTradeError({ ...rejection, params });
+    }
+    if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
+      throw new TradeOutcomeUnknownError("Deriv returned an unexpected response to the buy request.");
+    }
 
-  if (!proposalMsg) {
-    throw new Error("Trade execution timeout — Deriv did not answer the quote request.");
+    return {
+      contractId: buyMsg.buy.contract_id,
+      buyPrice: Number(buyMsg.buy.buy_price),
+      entrySpot: Number(buyMsg.buy.start_time ?? 0),
+      longcode: buyMsg.buy.longcode ?? "",
+    };
   }
-  if (proposalMsg.error) {
-    logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
-    throw new Error(proposalMsg.error.message ?? "Trade rejected by Deriv");
-  }
-  if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
-    throw new Error("Deriv returned an unexpected response to the quote request.");
-  }
-
-  const proposalId = String(proposalMsg.proposal.id);
-  const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
-  logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
-
-  // Once the buy has been SENT, a missing or malformed reply means the purchase
-  // may still have happened. That is a different outcome from a rejection, so it
-  // is raised as TradeOutcomeUnknownError and the caller must not treat the trade
-  // as never placed.
-  // A rejected request promise means the message was never sent (no connection
-  // or send failure), so it propagates unchanged as a definite "not placed".
-  const buyMsg = await accountRequest(
-    bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
-  );
-  if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");
-  if (buyMsg.error) throw new Error(buyMsg.error.message ?? "Trade rejected by Deriv");
-  if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
-    throw new TradeOutcomeUnknownError("Deriv returned an unexpected response to the buy request.");
-  }
-
-  return {
-    contractId: buyMsg.buy.contract_id,
-    buyPrice: Number(buyMsg.buy.buy_price),
-    entrySpot: Number(buyMsg.buy.start_time ?? 0),
-    longcode: buyMsg.buy.longcode ?? "",
-  };
 }
 
 // ── Profit table fetch via OTP WebSocket ──────────────────────────────────────

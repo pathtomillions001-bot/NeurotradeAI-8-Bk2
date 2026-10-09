@@ -46,6 +46,7 @@ import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { familySpecsFor } from "./families";
+import { recoverySafetyFactor } from "./recovery-risk";
 import type { AutonomousContractSets } from "./contract-sets";
 import { runAutonomousHedgeAgents, type HedgeAgentInput } from "./agents";
 import {
@@ -506,7 +507,15 @@ async function resolveStake(
     ctx.settings.maxRecoverySteps,
     ctx.settings.recoveryAutoMode,
   );
-  return { stake, payout };
+  const safety = recoverySafetyFactor({
+    posteriorEdgeProbability: b.posteriorEdgeProbability,
+    lossRunRisk: b.lossRunRisk,
+    instability: b.instability,
+    lossRun: recoveryEngine.getState().streakLossCount,
+  });
+  // Keep evaluating on every tick, but make uncertain recovery attempts
+  // gradual instead of exposing the full debt target in one trade.
+  return { stake: Math.max(MIN_STAKE, stake * safety), payout };
 }
 
 function barrierFor(row: HedgeCandidate): number | null {

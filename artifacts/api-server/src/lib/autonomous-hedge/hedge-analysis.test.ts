@@ -61,6 +61,17 @@ describe("autonomous hedge analysis", () => {
     assert.ok(Math.abs(stats.ev - (stats.probability * 1.9 - 1)) < 1e-12);
     assert.equal(stats.samples, 120);
     assert.equal(stats.losses, 24);
+    assert.ok(stats.posteriorEdgeProbability > 0.5);
+    assert.ok(stats.lossRunRisk >= 0 && stats.lossRunRisk <= 1);
+  });
+
+  it("penalises recovery candidates with clustered future losses", () => {
+    const stable = Array.from({ length: 120 }, (_, i) => i % 4 !== 3);
+    const clustered = Array.from({ length: 120 }, (_, i) => i % 10 < 7);
+    const stableStats = analyseHedgeCandidate({ wins: stable, p0: 0.5, payout: 1.9, mode: "RECOVERY" });
+    const clusteredStats = analyseHedgeCandidate({ wins: clustered, p0: 0.5, payout: 1.9, mode: "RECOVERY" });
+    assert.ok(clusteredStats.lossRunRisk > stableStats.lossRunRisk);
+    assert.ok(clusteredStats.score < stableStats.score);
   });
 
   it("is eligible on a real edge in normal mode and rejects thin samples", () => {

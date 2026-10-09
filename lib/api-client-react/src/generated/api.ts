@@ -25,6 +25,7 @@ import type {
   AiInsight,
   AiRecommendation,
   ApiError,
+  AutonomousEnginePreview,
   DailySummary,
   DerivAccount,
   DerivTokenInput,
@@ -1752,7 +1753,7 @@ export const getGetAiEngineStatusUrl = () => {
 }
 
 /**
- * @summary Get status of all AI agents and autonomous engine
+ * @summary Get autonomous engine status
  */
 export const getAiEngineStatus = async ( options?: RequestInit): Promise<AiEngineStatus> => {
 
@@ -1799,7 +1800,7 @@ export type GetAiEngineStatusQueryError = ErrorType<unknown>
 
 
 /**
- * @summary Get status of all AI agents and autonomous engine
+ * @summary Get autonomous engine status
  */
 
 export function useGetAiEngineStatus<TData = Awaited<ReturnType<typeof getAiEngineStatus>>, TError = ErrorType<unknown>>(
@@ -1808,6 +1809,83 @@ export function useGetAiEngineStatus<TData = Awaited<ReturnType<typeof getAiEngi
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetAiEngineStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+
+
+
+
+
+
+export const getGetAutonomousEnginePreviewUrl = () => {
+
+
+
+
+  return `/api/ai/engine/preview`
+}
+
+/**
+ * @summary Get the current autonomous-engine market tournament for Quick Strike
+ */
+export const getAutonomousEnginePreview = async ( options?: RequestInit): Promise<AutonomousEnginePreview> => {
+
+  return customFetch<AutonomousEnginePreview>(getGetAutonomousEnginePreviewUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAutonomousEnginePreviewQueryKey = () => {
+    return [
+    `/api/ai/engine/preview`
+    ] as const;
+    }
+
+
+export const getGetAutonomousEnginePreviewQueryOptions = <TData = Awaited<ReturnType<typeof getAutonomousEnginePreview>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAutonomousEnginePreview>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAutonomousEnginePreviewQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAutonomousEnginePreview>>> = ({ signal }) => getAutonomousEnginePreview({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAutonomousEnginePreview>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAutonomousEnginePreviewQueryResult = NonNullable<Awaited<ReturnType<typeof getAutonomousEnginePreview>>>
+export type GetAutonomousEnginePreviewQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Get the current autonomous-engine market tournament for Quick Strike
+ */
+
+export function useGetAutonomousEnginePreview<TData = Awaited<ReturnType<typeof getAutonomousEnginePreview>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAutonomousEnginePreview>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAutonomousEnginePreviewQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

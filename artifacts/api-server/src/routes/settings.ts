@@ -4,6 +4,7 @@ import { settingsTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import { UpdateSettingsBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
+import { applyCooldownSettingUpdate } from "./ai";
 import { broadcastSSE } from "../lib/sse";
 import {
   encodeContractSet,
@@ -65,6 +66,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     paperTradeMode: s.paperTradeMode,
     requirePositiveEv: s.requirePositiveEv,
     cooldownMinutes: s.cooldownMinutes,
+    cooldownEnabled: s.cooldownEnabled,
     normalOverDigit: s.normalOverDigit,
     normalUnderDigit: s.normalUnderDigit,
     recoveryOverDigit: s.recoveryOverDigit,
@@ -139,6 +141,7 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).paperTradeMode !== undefined) updateData.paperTradeMode = (updates as any).paperTradeMode;
   if ((updates as any).requirePositiveEv !== undefined) updateData.requirePositiveEv = (updates as any).requirePositiveEv;
   if ((updates as any).cooldownMinutes !== undefined) updateData.cooldownMinutes = (updates as any).cooldownMinutes;
+  if ((updates as any).cooldownEnabled !== undefined) updateData.cooldownEnabled = (updates as any).cooldownEnabled;
   if ((updates as any).normalOverDigit !== undefined) updateData.normalOverDigit = (updates as any).normalOverDigit;
   if ((updates as any).normalUnderDigit !== undefined) updateData.normalUnderDigit = (updates as any).normalUnderDigit;
   if ((updates as any).recoveryOverDigit !== undefined) updateData.recoveryOverDigit = (updates as any).recoveryOverDigit;
@@ -180,6 +183,7 @@ router.put("/", async (req, res): Promise<void> => {
       .returning();
 
     logger.info({ id: updated.id }, "Settings saved successfully");
+    if (updated.cooldownEnabled === false) applyCooldownSettingUpdate(req.sessionId, updated);
     // Notify only this browser session so another visitor's UI is never affected.
     broadcastSSE("settings_updated", {
       preferredContractTypes: updated.preferredContractTypes.split(",").filter(Boolean),

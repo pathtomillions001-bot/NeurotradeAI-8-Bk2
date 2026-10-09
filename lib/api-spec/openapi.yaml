@@ -443,7 +443,7 @@ paths:
     get:
       operationId: getAiEngineStatus
       tags: [ai]
-      summary: Get status of all AI agents and autonomous engine
+      summary: Get autonomous engine status
       responses:
         "200":
           description: Engine status
@@ -451,6 +451,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AiEngineStatus"
+
+  /ai/engine/preview:
+    get:
+      operationId: getAutonomousEnginePreview
+      tags: [ai]
+      summary: Get the current autonomous-engine market tournament for Quick Strike
+      responses:
+        "200":
+          description: Read-only ranked market preview
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AutonomousEnginePreview"
 
   /ai/engine/toggle:
     post:
@@ -993,17 +1006,13 @@ components:
 
     AiEngineStatus:
       type: object
-      required: [isRunning, mode, agentStatuses, tradesExecutedToday, currentMarket, nextScanIn, stopReasons]
+      required: [isRunning, mode, tradesExecutedToday, currentMarket, nextScanIn, stopReasons]
       properties:
         isRunning:
           type: boolean
         mode:
           type: string
           enum: [manual, autonomous]
-        agentStatuses:
-          type: array
-          items:
-            $ref: "#/components/schemas/AgentStatus"
         tradesExecutedToday:
           type: integer
         currentMarket:
@@ -1019,6 +1028,73 @@ components:
           description: ISO timestamp when the cooldown ends and engine auto-resumes
         recovery:
           $ref: "#/components/schemas/RecoveryStatus"
+
+    AutonomousEnginePreview:
+      type: object
+      required: [mode, markets, marketsScanned, best, stopReason]
+      properties:
+        mode:
+          type: string
+          enum: [NORMAL, RECOVERY]
+        marketsScanned:
+          type: integer
+        stopReason:
+          type: ["string", "null"]
+        best:
+          type: ["object", "null"]
+          properties:
+            symbol:
+              type: string
+            contractType:
+              type: string
+            barrier:
+              type: ["integer", "null"]
+            eligible:
+              type: boolean
+            reason:
+              type: string
+        markets:
+          type: array
+          items:
+            type: object
+            required: [symbol, displayName, group, contractType, qualityScore, confidenceScore, winProbability, expectedValue, stake, recommendedDuration, shouldTrade, rank]
+            properties:
+              symbol:
+                type: string
+              displayName:
+                type: string
+              group:
+                type: integer
+              contractType:
+                type: string
+              recommendedContractType:
+                type: string
+              barrier:
+                type: ["integer", "null"]
+              digitBarrier:
+                type: ["integer", "null"]
+              qualityScore:
+                type: number
+              confidenceScore:
+                type: number
+              winProbability:
+                type: number
+              expectedValue:
+                type: number
+              stake:
+                type: number
+              recommendedDuration:
+                type: integer
+              payoutMultiplier:
+                type: number
+              shouldTrade:
+                type: boolean
+              regime:
+                type: string
+              samples:
+                type: integer
+              rank:
+                type: integer
 
     RecoveryStatus:
       type: object
@@ -1070,19 +1146,6 @@ components:
           type: ["number", "null"]
           description: The stake (USD) that will be used on this family's next recovery trade
 
-    AgentStatus:
-      type: object
-      required: [name, isActive, lastRun, confidence]
-      properties:
-        name:
-          type: string
-        isActive:
-          type: boolean
-        lastRun:
-          type: ["string", "null"]
-        confidence:
-          type: number
-
     EngineToggleInput:
       type: object
       required: [running]
@@ -1092,7 +1155,7 @@ components:
 
     TradingSettings:
       type: object
-      required: [id, riskProfile, maxRiskPerTrade, dailyTarget, dailyLossLimit, maxDrawdown, consecutiveLossLimit, minConfidenceThreshold, marketRotationAfter, preferredContractTypes, preferredCategories, autonomousEnabled, loopIntervalSec, recoveryMode, recoveryMultiplier, maxRecoverySteps, scanAllMarkets, tradeDurationSec, maxTradeStake]
+      required: [id, riskProfile, maxRiskPerTrade, dailyTarget, dailyLossLimit, maxDrawdown, consecutiveLossLimit, minConfidenceThreshold, marketRotationAfter, preferredContractTypes, preferredCategories, autonomousEnabled, loopIntervalSec, recoveryMode, recoveryMultiplier, maxRecoverySteps, scanAllMarkets, tradeDurationSec, maxTradeStake, cooldownEnabled]
       properties:
         id:
           type: integer
@@ -1158,6 +1221,9 @@ components:
         cooldownMinutes:
           type: integer
           description: Minutes to wait before auto-resuming after consecutive loss stop
+        cooldownEnabled:
+          type: boolean
+          description: Enable automatic cooldown pauses after reaching the consecutive-loss limit
         normalOverDigit:
           type: integer
           description: Digit barrier used for DIGITOVER trades in normal (non-recovery) mode
@@ -1254,6 +1320,8 @@ components:
           type: boolean
         cooldownMinutes:
           type: integer
+        cooldownEnabled:
+          type: boolean
         normalOverDigit:
           type: integer
         normalUnderDigit:

@@ -45,15 +45,15 @@ export function FlashCard3D({ front }: { front: React.ReactNode; back?: React.Re
 }
 
 // ── Win probability bar ────────────────────────────────────────────────────────
-function WinProbBar({ value }: { value: number }) {
-  const color = value >= 65 ? "#10b981" : value >= 50 ? "#f59e0b" : "#ef4444";
+function WinProbBar({ value }: { value: number | null }) {
+  const color = value == null ? "#71717a" : value >= 65 ? "#10b981" : value >= 50 ? "#f59e0b" : "#ef4444";
   return (
     <div className="flex flex-col items-center gap-0.5 w-14">
-      <div className="text-xs font-mono font-bold" style={{ color }}>{value.toFixed(0)}%</div>
+      <div className="text-xs font-mono font-bold" style={{ color }}>{value == null ? "—" : `${value.toFixed(0)}%`}</div>
       <div className="w-full h-1 bg-white/10 rounded-full overflow-hidden">
         <div
           className="h-full rounded-full transition-all duration-700"
-          style={{ width: `${Math.min(value, 100)}%`, background: color }}
+          style={{ width: `${value == null ? 0 : Math.min(value, 100)}%`, background: color }}
         />
       </div>
       <div className="text-[8px] font-mono text-muted-foreground">WIN PROB</div>
@@ -62,11 +62,14 @@ function WinProbBar({ value }: { value: number }) {
 }
 
 // ── Quick Strike Card ──────────────────────────────────────────────────────────
-export function MarketOpportunityFlashCard({
+export function QuickStrikeFlashCard({
   onTrade,
+  onStartEngine,
+  engineTogglePending = false,
 }: {
   onTrade?: () => void;
-  currentStreak?: number;
+  onStartEngine?: () => void;
+  engineTogglePending?: boolean;
 }) {
   const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
@@ -88,45 +91,37 @@ export function MarketOpportunityFlashCard({
   const clampedIdx = Math.min(selectedGroupIdx, visibleGroups.length - 1);
 
   const selectedGroup = visibleGroups[clampedIdx];
-  const effectiveGroupIdx = CONTRACT_GROUPS.findIndex(g => g.short === selectedGroup.short);
-
-  // All markets ranked by quality score from background scanner
-  const { data: allMarkets } = useQuery<any[]>({
-    queryKey: ["markets", "ranked-all"],
-    queryFn: () => fetch("/api/markets?limit=50").then(r => r.json()),
-    refetchInterval: 8000,
+  // Read-only preview of the live autonomous tournament. This shares the
+  // engine's candidate/risk ranking instead of the legacy coordinator output.
+  const { data: preview } = useQuery<{ markets?: any[]; marketsScanned?: number; stopReason?: string | null }>({
+    queryKey: ["autonomous-engine-preview"],
+    queryFn: () => fetch("/api/ai/engine/preview").then(r => r.json()),
+    refetchInterval: 3000,
+    staleTime: 1500,
   });
+  const allMarkets = preview?.markets ?? [];
 
-  // Filter to markets whose AI-recommended contract type is in the selected group
-  const groupMarkets = (allMarkets ?? []).filter((m: any) =>
-    (selectedGroup.types as readonly string[]).includes(m.recommendedContractType)
+  // Filter to candidates whose engine contract belongs to the selected group.
+  const groupMarkets = allMarkets.filter((m: any) =>
+    (selectedGroup.types as readonly string[]).includes(m.contractType)
   );
   const tradeableGroupMarkets = groupMarkets.filter((m: any) => m.shouldTrade);
 
   // Best market: tradeable first, then highest quality score
-  const bestGroupMarket = tradeableGroupMarkets[0] ?? groupMarkets[0] ?? allMarkets?.[0];
+  const bestGroupMarket = tradeableGroupMarkets[0] ?? groupMarkets[0];
 
-  // Fetch full recommendation for the selected market (AI-configured ticks, stake, barrier)
-  const { data: marketDetail } = useQuery<any>({
-    queryKey: ["market-detail-flash", bestGroupMarket?.symbol, effectiveGroupIdx],
-    queryFn: () => bestGroupMarket?.symbol
-      ? fetch(`/api/markets/${bestGroupMarket.symbol}`).then(r => r.json())
-      : Promise.resolve(null),
-    refetchInterval: 8000,
-    enabled: !!bestGroupMarket?.symbol,
-  });
+  // The preview is itself the current engine recommendation for this row.
+  const rec = bestGroupMarket;
 
-  const rec = marketDetail?.recommendation;
-
-  // Contract type from AI recommendation, clamped to the selected group
-  const recContractType: string = rec?.contractType ?? bestGroupMarket?.recommendedContractType ?? selectedGroup.types[0];
+  // Contract type from the engine's ranked candidate, clamped to the selected group.
+  const recContractType: string = rec?.contractType ?? rec?.recommendedContractType ?? selectedGroup.types[0];
   const contractType = (selectedGroup.types as readonly string[]).includes(recContractType)
     ? recContractType
     : selectedGroup.types[0];
 
-  // Barrier from AI recommendation
-  const activeBarrier = contractType.includes("DIGIT") && rec?.digitBarrier != null
-    ? rec.digitBarrier
+  // Barrier from the engine's selected candidate.
+  const activeBarrier = contractType.includes("DIGIT") && rec?.barrier != null
+    ? Number(rec.barrier)
     : undefined;
 
   const ctColor = contractColor(contractType);
@@ -134,18 +129,19 @@ export function MarketOpportunityFlashCard({
 
   // Execute is active when there is a recommendation for the selected group
   const isGroupMatch = (selectedGroup.types as readonly string[]).includes(
-    rec?.contractType ?? bestGroupMarket?.recommendedContractType ?? ""
+    rec?.contractType ?? rec?.recommendedContractType ?? ""
   );
-  const shouldTrade = isGroupMatch && !!rec;
+  const shouldTrade = isGroupMatch && !!rec?.shouldTrade;
 
-  const winProb = rec?.winProbability ?? rec?.confidence ?? 0;
+  const winProb = rec ? rec.winProbability ?? rec.confidenceScore ?? 0 : null;
+  const emptyMarketLabel = preview?.stopReason ?? (preview?.marketsScanned ? "No candidate yet" : "Waiting for market ticks");
   const isExecuting = executingSymbol === bestGroupMarket?.symbol;
 
   const handleExecute = () => {
-    if (!bestGroupMarket || !rec) return;
+    if (!bestGroupMarket || !rec?.shouldTrade) return;
 
     const sym = bestGroupMarket.symbol;
-    const stake = rec?.stake ?? 1;
+    const stake = Number(rec?.stake ?? 1);
     setExecutingSymbol(sym);
 
     executeTrade.mutate({
@@ -155,7 +151,7 @@ export function MarketOpportunityFlashCard({
         stake,
         direction: contractToDirection(contractType),
         ...(activeBarrier != null && { barrier: activeBarrier }),
-        duration: rec?.recommendedDuration ?? 5,
+        duration: rec?.recommendedDuration ?? 1,
         durationUnit: "t",
       } as any
     }, {
@@ -211,34 +207,48 @@ export function MarketOpportunityFlashCard({
             Quick Strike
           </span>
 
-          {/* Contract group tab selector — only shows enabled families */}
-          {visibleGroups.length > 0 && (
-            <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
-              {visibleGroups.map((g, i) => (
-                <button
-                  key={g.short}
-                  onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
-                  className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
-                    i === clampedIdx
-                      ? "text-primary border border-primary/50"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                  style={i === clampedIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
-                >
-                  {g.short}
-                </button>
-              ))}
-            </div>
-          )}
-
-          <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1 bg-green-500" />
+          <div className="ml-auto flex items-center gap-1.5">
+            {/* Contract group tab selector — only shows enabled families */}
+            {visibleGroups.length > 0 && (
+              <div className="flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
+                {visibleGroups.map((g, i) => (
+                  <button
+                    key={g.short}
+                    onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
+                    className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
+                      i === clampedIdx
+                        ? "text-primary border border-primary/50"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    style={i === clampedIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
+                  >
+                    {g.short}
+                  </button>
+                ))}
+              </div>
+            )}
+            {onStartEngine && (
+              <button
+                type="button"
+                onClick={onStartEngine}
+                disabled={engineTogglePending}
+                title="Start the autonomous engine"
+                className="flex items-center gap-1 rounded-md border border-cyan-400/30 bg-cyan-400/5 px-2 py-1 text-[8px] font-mono font-bold tracking-wide text-cyan-300 hover:bg-cyan-400/10 disabled:opacity-50"
+              >
+                <Zap className="h-3 w-3" />
+                <span className="hidden sm:inline">START ENGINE</span>
+                <span className="sm:hidden">START</span>
+              </button>
+            )}
+            <span className={`w-1.5 h-1.5 rounded-full ${allMarkets.length ? "bg-green-500 animate-pulse" : "bg-zinc-600"}`} title={allMarkets.length ? "Engine preview ready" : "Waiting for market ticks"} />
+          </div>
         </div>
 
         {/* Market info + win prob + execute */}
         <div className="flex items-center gap-2">
           {/* Left: market name + contract badge */}
           <div className="flex-1 min-w-0">
-            <div className="text-sm font-bold leading-tight truncate">{bestGroupMarket?.displayName ?? "Scanning…"}</div>
+            <div className="text-sm font-bold leading-tight truncate">{bestGroupMarket?.displayName ?? emptyMarketLabel}</div>
             <div className="text-[10px] font-mono text-muted-foreground">{bestGroupMarket?.symbol ?? "—"}</div>
             <div className="mt-2 flex items-center gap-1.5">
               {isUp
@@ -248,16 +258,16 @@ export function MarketOpportunityFlashCard({
                 className="text-sm font-mono font-bold px-2 py-0.5 rounded-full border"
                 style={{ color: ctColor, borderColor: `${ctColor}50`, background: `${ctColor}15` }}
               >
-                {formatContractLabel(contractType, activeBarrier ?? rec?.digitBarrier ?? rec?.barrier)}
+                {formatContractLabel(contractType, activeBarrier ?? rec?.barrier)}
               </span>
               <span className="text-[9px] text-muted-foreground font-mono capitalize truncate">
-                {(bestGroupMarket?.regime ?? marketDetail?.regime ?? "").replace(/_/g, " ")}
+                {(bestGroupMarket?.regime ?? "").replace(/_/g, " ")}
               </span>
             </div>
           </div>
 
           {/* Center: win probability */}
-          <WinProbBar value={Math.round(winProb * (winProb > 1 ? 1 : 100))} />
+          <WinProbBar value={winProb == null ? null : Math.round(winProb * (winProb > 1 ? 1 : 100))} />
 
           {/* Right: execute button */}
           <div className="shrink-0">
@@ -298,8 +308,8 @@ export function MarketOpportunityFlashCard({
         {/* Stats row: EV | Ticks | Stake */}
         <div className="grid grid-cols-3 gap-1.5">
           {[
-            { label: "EV",    value: rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—" },
-            { label: "Ticks", value: rec ? `${rec.recommendedDuration ?? 5}t` : "—" },
+            { label: "EV",    value: rec ? `${Number(rec.expectedValue) >= 0 ? "+" : "−"}$${Math.abs(Number(rec.expectedValue ?? 0)).toFixed(2)}` : "—" },
+            { label: "Ticks", value: rec ? `${rec.recommendedDuration ?? 1}t` : "—" },
             { label: "Stake", value: rec ? `$${(rec.stake ?? 1).toFixed(2)}` : "—" },
           ].map(({ label, value }) => (
             <div key={label} className="text-center p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
@@ -312,7 +322,7 @@ export function MarketOpportunityFlashCard({
         {/* Footer: count + expand */}
         <div className="flex items-center justify-between mt-auto">
           <span className="text-[9px] font-mono text-muted-foreground">
-            {allMarkets?.length ?? 0} markets scanned &middot; {tradeableGroupMarkets.length} tradeable in {selectedGroup.short}
+            {preview?.marketsScanned ?? 0} markets evaluated &middot; {tradeableGroupMarkets.length} eligible in {selectedGroup.short}
           </span>
           {groupMarkets.length > 1 && (
             <button
@@ -348,7 +358,7 @@ export function MarketOpportunityFlashCard({
                         className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border"
                         style={{ color: ctCol, borderColor: `${ctCol}40`, background: `${ctCol}10` }}
                       >
-                        {formatContractLabel(ct)}
+                        {formatContractLabel(ct, market.barrier)}
                       </span>
                       <span className="text-[9px] font-mono text-muted-foreground w-8 text-right">
                         {market.confidenceScore?.toFixed(0) ?? 0}%
@@ -361,9 +371,10 @@ export function MarketOpportunityFlashCard({
                           executeTrade.mutate({
                             data: {
                               symbol: sym, contractType: ct,
-                              stake: rec?.stake ?? 1,
+                              stake: Number(market.stake ?? rec?.stake ?? 1),
                               direction: contractToDirection(ct),
-                              duration: rec?.recommendedDuration ?? 5,
+                              ...(market.barrier != null && { barrier: market.barrier }),
+                              duration: market.recommendedDuration ?? 1,
                               durationUnit: "t",
                             } as any
                           }, {

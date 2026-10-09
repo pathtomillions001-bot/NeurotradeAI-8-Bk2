@@ -31,6 +31,7 @@ export interface TradingSettingsInput {
   paperTradeMode?: boolean;
   requirePositiveEv?: boolean;
   cooldownMinutes?: number;
+  cooldownEnabled?: boolean;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;

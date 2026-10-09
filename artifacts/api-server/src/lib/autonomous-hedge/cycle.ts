@@ -12,8 +12,9 @@
  *    and debt is never understated. The reconciler resolves the row from the
  *    exact contract id, and the engine stays gated until it does.
  *
- * This module is the autonomous engine's own copy of the Nexus logic. It does
- * not import or change the Nexus Hedge Forge bot or the shared agents.
+ * This module is the autonomous engine's own copy of the Nexus logic. Its
+ * tournament selection is independent of the legacy analysis-agent suite and
+ * leaves every Bot Arena console and engine untouched.
  */
 
 import { db, tradesTable } from "@workspace/db";
@@ -44,11 +45,10 @@ import {
 import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
 import { recoveryEscalation } from "./recovery-risk";
 import { decideHedge, type HedgeDecision } from "./contest";
-import { applySettlement, type HedgeMemory } from "./hedge-state";
+import { applyRematch, applySettlement, rankRows, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
-import { runAutonomousHedgeAgents, type HedgeAgentInput } from "./agents";
 import {
   claimOpenRow,
   ledgerEntryPayout,
@@ -89,7 +89,6 @@ export interface HedgePublish {
   sessionLossCount?: number;
   tradesExecutedToday?: number;
   lastTradeTime?: Date | null;
-  lastAgentScores?: Record<string, number>;
   nextScanIn?: number | null;
 }
 
@@ -250,6 +249,94 @@ function watchedMarkets(ctx: HedgeContext) {
     : AUTOMATED_DERIV_MARKETS;
 }
 
+function collectMarketCandidates(
+  ctx: HedgeContext,
+  markets: ReturnType<typeof watchedMarkets>,
+  mode: HedgeMode,
+  escalation: number,
+): { tapes: HedgeTape[]; rows: HedgeCandidate[] } {
+  const tapes: HedgeTape[] = [];
+  const rows: HedgeCandidate[] = [];
+  for (const market of markets) {
+    const tape = readHedgeTape(market.symbol);
+    if (!tape || tape.ageMs > STALE_TAPE_MS) continue;
+    // Live trades never rely on simulated prices. Paper mode may use either.
+    if (!tape.live && !ctx.paperTradeMode) continue;
+    tapes.push(tape);
+    const specs = familySpecsFor({
+      settings: ctx.settings,
+      mode,
+      digitEnabled: market.digitEnabled,
+      sets: ctx.contractSets,
+    });
+    rows.push(...buildMarketCandidates({
+      symbol: market.symbol,
+      group: hedgeGroupIndex(market.symbol),
+      digits: tape.digits,
+      prices: tape.prices,
+      tickSequence: tape.tickSequence,
+      specs,
+      mode,
+      escalation,
+    }));
+  }
+  return { tapes, rows };
+}
+
+function copyHedgeMemory(memory: HedgeMemory): HedgeMemory {
+  return {
+    ...(memory.rematch ? { rematch: { ...memory.rematch } } : {}),
+    ...(memory.confirmation ? { confirmation: { ...memory.confirmation } } : {}),
+  };
+}
+
+export interface HedgePreview {
+  mode: HedgeMode;
+  decision: HedgeDecision | null;
+  rankedRows: HedgeCandidate[];
+  marketsScanned: number;
+  risk: RiskDecision;
+}
+
+/**
+ * Read-only snapshot for Quick Strike. It uses the same tape collection,
+ * candidate scoring, risk gate and tournament ranker as an autonomous cycle,
+ * but clones rescan memory so merely viewing the card cannot change engine state.
+ */
+export function buildHedgePreview(
+  ctx: HedgeContext,
+  mode: HedgeMode,
+  memory: HedgeMemory,
+  lossRun: number,
+  escalation: number,
+): HedgePreview {
+  const markets = watchedMarkets(ctx);
+  const risk = riskFor(ctx, markets[0]?.symbol ?? "");
+  if (risk.hardStop) {
+    return { mode, decision: null, rankedRows: [], marketsScanned: 0, risk };
+  }
+
+  const { tapes, rows } = collectMarketCandidates(ctx, markets, mode, escalation);
+  const decision = decideHedge({
+    rows,
+    mode,
+    memory: copyHedgeMemory(memory),
+    lossRun,
+    escalation,
+  });
+  const rankRowsMemory = copyHedgeMemory(memory);
+  const rowsForRanking = rows.map((row) => ({ ...row }));
+  applyRematch(rowsForRanking, rankRowsMemory);
+
+  return {
+    mode,
+    decision,
+    rankedRows: rankRows(rowsForRanking),
+    marketsScanned: tapes.length,
+    risk,
+  };
+}
+
 // ── Exposure gate ─────────────────────────────────────────────────────────────
 
 function requestReconcile(s: HedgeSession): void {
@@ -335,38 +422,14 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   // 0. Hard limits first. A breached limit stops the engine before anything is ranked.
   const risk = riskFor(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
   if (risk.hardStop) {
-    const consecutive = ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
+    const consecutive = ctx.settings.cooldownEnabled !== false && ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
     host.stop(risk.hardStopReason ?? "risk limit reached", consecutive ? ctx.cooldownMinutes : undefined);
     return;
   }
 
   // 1. Read every watched market's 1-tick tape and rank its families.
   const markets = watchedMarkets(ctx);
-  const tapes: HedgeTape[] = [];
-  const rows: HedgeCandidate[] = [];
-  for (const market of markets) {
-    const tape = readHedgeTape(market.symbol);
-    if (!tape || tape.ageMs > STALE_TAPE_MS) continue;
-    // Live trades never rely on simulated prices. Paper mode may use either.
-    if (!tape.live && !ctx.paperTradeMode) continue;
-    tapes.push(tape);
-    const specs = familySpecsFor({
-      settings: ctx.settings,
-      mode,
-      digitEnabled: market.digitEnabled,
-      sets: ctx.contractSets,
-    });
-    rows.push(...buildMarketCandidates({
-      symbol: market.symbol,
-      group: hedgeGroupIndex(market.symbol),
-      digits: tape.digits,
-      prices: tape.prices,
-      tickSequence: tape.tickSequence,
-      specs,
-      mode,
-      escalation,
-    }));
-  }
+  const { tapes, rows } = collectMarketCandidates(ctx, markets, mode, escalation);
 
   // 2. Contest and gate.
   const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
@@ -375,34 +438,8 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     return;
   }
 
-  // 3. Agents and UI (throttled — the engine may evaluate on every tick).
-  const agentInput: HedgeAgentInput = {
-    mode,
-    decision,
-    rows,
-    tapes,
-    configuredMarkets: markets.length,
-    lossRun,
-    recovery: {
-      inRecovery: recoveryEngine.isInRecovery(),
-      step: recoveryEngine.getState().recoveryStep,
-      debt: recoveryEngine.getState().unrecoveredAmount,
-      escalation,
-    },
-    risk: {
-      hardStop: risk.hardStop,
-      hardStopReason: risk.hardStopReason,
-      riskBudget: risk.riskBudget,
-      riskLevel: risk.riskLevel,
-      stakeMultiplier: risk.stakeMultiplier,
-      recommendedStake: risk.recommendedStake,
-    },
-    memory: s.memory,
-    exposureOpen: s.exposure !== null,
-  };
-  const agents = runAutonomousHedgeAgents(agentInput);
-  const agentScores = Object.fromEntries(Object.entries(agents).map(([k, v]) => [k, v.score]));
-  publishScan(host, s, decision, agentScores, lossRun, ctx, tapes.length);
+  // 3. Publish the current contest result (throttled — the engine may evaluate on every tick).
+  publishScan(host, s, decision, lossRun, ctx, tapes.length);
 
   if (!decision.eligible) return;
 
@@ -410,7 +447,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   const fresh = await getContext(host, s, true);
   const freshRisk = riskFor(fresh, decision.best.symbol);
   if (freshRisk.hardStop) {
-    const consecutive = fresh.daily.consecutiveLosses >= fresh.consecutiveLossLimit;
+    const consecutive = fresh.settings.cooldownEnabled !== false && fresh.daily.consecutiveLosses >= fresh.consecutiveLossLimit;
     host.stop(freshRisk.hardStopReason ?? "risk limit reached", consecutive ? fresh.cooldownMinutes : undefined);
     return;
   }
@@ -423,14 +460,12 @@ function publishScan(
   host: HedgeHost,
   s: HedgeSession,
   decision: HedgeDecision,
-  agentScores: Record<string, number>,
   lossRun: number,
   ctx: HedgeContext,
   rankedTapes: number,
 ): void {
   host.publish({
     currentMarket: decision.best.symbol,
-    lastAgentScores: agentScores,
     sessionLossCount: lossRun,
     nextScanIn: null,
   });
@@ -442,7 +477,6 @@ function publishScan(
     symbol: b.symbol,
     quality: Math.round(b.probability * 100),
     confidence: Math.round(b.lowerBound * 100),
-    agentScores,
     marketsScanned: rankedTapes,
     regime: null,
     shouldTrade: decision.eligible,
@@ -824,7 +858,7 @@ function finishTrade(
     reason: t.reason,
   });
   logger.info({ symbol: t.symbol, won: t.won, profit: t.profit.toFixed(2), stake: t.stake, contract: t.contract }, "Trade executed");
-  if (!t.won && streak >= t.ctx.consecutiveLossLimit) {
+  if (!t.won && t.ctx.settings.cooldownEnabled !== false && streak >= t.ctx.consecutiveLossLimit) {
     host.stop(
       `${streak} consecutive losses — limit ${t.ctx.consecutiveLossLimit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
       t.ctx.cooldownMinutes,

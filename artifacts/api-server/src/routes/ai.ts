@@ -2,7 +2,7 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { and, sql, desc, eq } from "drizzle-orm";
-import { tickManager, AUTOMATED_DERIV_MARKETS, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket, verifiedAccountCurrency } from "../lib/deriv";
+import { tickManager, AUTOMATED_DERIV_MARKETS, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
 import { runCoordinator, buildLegacyAnalysis } from "../lib/agent-coordinator";
@@ -11,12 +11,6 @@ import { normalizePreferredTypes } from "../lib/autonomous-hedge/families";
 import { HEDGE_DURATION_TICKS } from "../lib/autonomous-hedge/constants";
 import { recoveryEscalation } from "../lib/autonomous-hedge/recovery-risk";
 import { resolveContractSets } from "../lib/autonomous-hedge/contract-sets";
-import {
-  preflightRefusalMessage,
-  runAutonomousPreflight,
-  shouldRefuseStart,
-  type PreflightResult,
-} from "../lib/autonomous-hedge/preflight";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
 import { getRecentReports, getIntelligenceSummary } from "../lib/agents/trade-intelligence";
@@ -107,18 +101,6 @@ export async function resumeEngineIfEnabled(): Promise<void> {
         logger.info(
           { sessionId: row.sessionId },
           "Auto-resume skipped — that account session has no connected Deriv account",
-        );
-        continue;
-      }
-      const engine = getEngine(row.sessionId);
-      const preflight = await runAutonomousPreflightFor(engine);
-      if (shouldRefuseStart(preflight)) {
-        await db.update(settingsTable).set({ autonomousEnabled: false })
-          .where(eq(settingsTable.sessionId, row.sessionId));
-        engine.stopReasons = [preflightRefusalMessage(preflight)];
-        logger.warn(
-          { sessionId: row.sessionId, blocked: preflight.blocked },
-          "Auto-resume refused — this Deriv account cannot quote the selected contracts",
         );
         continue;
       }
@@ -521,38 +503,6 @@ export function applyCooldownSettingUpdate(
   }
 }
 
-/**
- * Ask Deriv, before the engine trades, which of this account's selected
- * contracts it will actually quote. Quotes only — no money moves.
- */
-async function runAutonomousPreflightFor(engine: EngineInstance): Promise<PreflightResult> {
-  const empty: PreflightResult = {
-    checkedAt: Date.now(), ran: false, quotable: [], blocked: [], inconclusive: [], marketsProbed: 0,
-  };
-  try {
-    const ctx = await loadHedgeContext(engine);
-    if (ctx.paperTradeMode || !ctx.token || !ctx.derivAccountId) return empty;
-    const allowed = ctx.allowedMarketSymbols;
-    const markets = (allowed && allowed.length > 0
-      ? AUTOMATED_DERIV_MARKETS.filter((m) => allowed.includes(m.symbol))
-      : AUTOMATED_DERIV_MARKETS
-    ).map((m) => ({ symbol: m.symbol, digitEnabled: m.digitEnabled }));
-    return await runAutonomousPreflight({
-      sessionId: engine.sessionId,
-      token: ctx.token,
-      accountId: ctx.derivAccountId,
-      currency: ctx.currency,
-      markets,
-      settings: ctx.settings,
-      sets: ctx.contractSets,
-    });
-  } catch (err) {
-    // A pre-flight that cannot run must never block an engine that may trade fine.
-    logger.warn({ err, sessionId: engine.sessionId }, "Autonomous pre-flight unavailable — starting without it");
-    return empty;
-  }
-}
-
 // ── Autonomous engine host (tick-driven 1-tick cycle) ─────────────────────────
 //
 // The cycle itself lives in lib/autonomous-hedge/cycle.ts. This section binds
@@ -610,25 +560,6 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
   const journalManager = getJournalManager(sessionId);
   if (token && derivAccountId) journalManager.setCredentials(token, derivAccountId);
 
-  // Every proposal is priced in the account's currency, so the broker's own
-  // answer outranks the stored row. A row that disagrees makes EVERY buy fail
-  // while the rest of the app looks healthy.
-  const storedCurrency = account?.currency ?? "USD";
-  let currency = storedCurrency;
-  if (token && derivAccountId) {
-    const verified = await verifiedAccountCurrency(token, derivAccountId, storedCurrency);
-    currency = verified.currency;
-    if (verified.changed && account) {
-      logger.warn(
-        { sessionId, derivAccountId, storedCurrency, brokerCurrency: verified.currency },
-        "Stored account currency disagrees with Deriv — using the broker's currency for proposals",
-      );
-      await db.update(accountsTable).set({ currency: verified.currency, updatedAt: new Date() })
-        .where(eq(accountsTable.id, account.id))
-        .catch((err) => logger.warn({ err }, "Could not correct the stored account currency"));
-    }
-  }
-
   const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
   const tradingSettings = buildTradingSettings(settings, normalizePreferredTypes(rawPreferred));
   // The contract sets the user chose for normal and recovery trades. A set that was
@@ -680,7 +611,7 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
 
   return {
     balance,
-    currency,
+    currency: account?.currency ?? "USD",
     token,
     derivAccountId,
     settings: tradingSettings,
@@ -928,7 +859,7 @@ router.get("/engine/preview", async (req, res): Promise<void> => {
     const mode = recoveryEngine.isInRecovery() ? "RECOVERY" as const : "NORMAL" as const;
     const lossRun = ledger.streakLossCount;
     const escalation = recoveryEscalation(lossRun, ledger.recoveryStep);
-    const result = buildHedgePreview(ctx, mode, getHedgeMemory(req.sessionId), lossRun, escalation, req.sessionId);
+    const result = buildHedgePreview(ctx, mode, getHedgeMemory(req.sessionId), lossRun, escalation);
     const stake = result.risk.recommendedStake;
     const markets = result.rankedRows.map((row, index) => {
       const market = getMarketInfo(row.symbol);
@@ -1029,25 +960,6 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       res.status(409).json({
         error: `Cannot start: the ${owner ? tradingOwnerLabel(owner) : "other engine"} is currently trading this account. Stop it first — only one engine may trade (and own the recovery ledger) at a time.`,
       });
-      return;
-    }
-
-    // ── Pre-flight: what can THIS Deriv account actually quote? ──────────────
-    // Quotes only, before any money moves. An account that cannot quote the
-    // selected contracts used to discover it three rejected buys into every
-    // start ("Deriv rejected 3 consecutive 1-tick buys — Unknown contract
-    // proposal") and no restart could change that. Now the broker's verdict is
-    // read first: unusable contracts are quarantined and the engine trades the
-    // rest, and a start is refused only when nothing selected is quotable —
-    // with the account's own contracts and Deriv's codes in the message.
-    const preflight = await runAutonomousPreflightFor(engine);
-    if (shouldRefuseStart(preflight)) {
-      releaseTradingOwnership("autonomous", req.sessionId);
-      const reason = preflightRefusalMessage(preflight);
-      engine.stopReasons = [reason];
-      engine.currentMarket = null;
-      logger.warn({ sessionId: req.sessionId, blocked: preflight.blocked }, "Autonomous engine start refused by the pre-flight");
-      res.status(422).json({ error: reason });
       return;
     }
 

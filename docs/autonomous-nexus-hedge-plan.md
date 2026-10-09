@@ -50,7 +50,7 @@ Fix the recovery ledger so a settlement timeout can never drop or understate deb
   across 2 distinct fresh ticks, or 3 when the loss run is ≥ 3. A settlement clears it.
 - Rematch: after a loss, the losing tuple is penalised by 8 + 2·(lossRun−1), decaying
   ×0.8 per fresh tick. A win clears all penalties.
-- Breaker (autonomous): when `cooldownEnabled` is true, the consecutive-loss limit stops the session for the configured cooldown. Turning it off bypasses only that pause; daily-loss and all other hard limits still stop the engine. Separately, 3 consecutive definitive buy rejections by Deriv stop the session with no cooldown and show the reason in `stopReasons`. **Updated 2026-10-09:** only rejections that are *not* a capability verdict count. A contract this Deriv account cannot quote (`Unknown contract proposal` and friends) is quarantined instead — see `docs/autonomous-unknown-contract-proposal.md` — so an account-scoped configuration problem can no longer stop the engine three buys into every restart.
+- Breaker (autonomous): when `cooldownEnabled` is true, the consecutive-loss limit stops the session for the configured cooldown. Turning it off bypasses only that pause; daily-loss and all other hard limits still stop the engine. Separately, 3 consecutive definitive buy rejections by Deriv stop the session with no cooldown and show the reason in `stopReasons`.
 
 ## Decisions (user answers)
 
@@ -117,19 +117,6 @@ minimum. Nexus sends 1 tick for every family, so the autonomous engine does the 
 There is no runtime `contracts_for` check (user decision). If the broker rejects a
 1-tick buy, that is handled as a definitive rejection: the row goes to "error" with no
 ledger change, and after 3 consecutive rejections the engine stops.
-
-**Updated 2026-10-09.** That last sentence is what produced
-`Deriv rejected 3 consecutive 1-tick buys — last: Unknown contract proposal` on
-accounts that cannot quote the selected contracts at all: the same three
-rejections repeated on every restart. Two additions, both broker-side reads that
-do not change the 1-tick model:
-
-- a **pre-flight** quotes each selected family once before the engine trades
-  (`lib/autonomous-hedge/preflight.ts`), and
-- `contracts_for` is read **for stake bounds only** (min/max in the account's own
-  currency), never for duration.
-
-See `docs/autonomous-unknown-contract-proposal.md`.
 
 ## Settings that decisions no longer read
 

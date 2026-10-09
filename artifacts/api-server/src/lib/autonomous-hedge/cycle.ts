@@ -28,13 +28,29 @@ import type { RiskDecision } from "../agents/risk-manager";
 import { resolveRecoveryPayout } from "../recovery-payout";
 import {
   AUTOMATED_DERIV_MARKETS,
+  classifyDerivRejection,
   executeLiveTrade,
   fetchDerivPortfolioContracts,
   fetchDerivProfitTable,
+  getAccountStakeBounds,
+  getMarketInfo,
   isAutomatedMarket,
+  probeAccountContract,
   TradeOutcomeUnknownError,
   waitForContractResult,
+  type AccountStakeBounds,
+  type DerivRejectionKind,
 } from "../deriv";
+import {
+  filterQuarantined,
+  hasTradeableContract,
+  inferQuarantineScope,
+  rememberQuarantined,
+  summarizeQuarantine,
+  type RejectionEvidence,
+} from "./contract-availability";
+import { friendlyErrorMessage } from "../friendly-error";
+import { clampStakeToBounds, isTwoDecimalCurrency, roundStake } from "./stake-bounds";
 import {
   AUTONOMOUS_HEDGE_PREFIX,
   HEDGE_DURATION_TICKS,
@@ -42,7 +58,7 @@ import {
   hedgeGroupIndex,
   HEDGE_GROUP_NAMES,
 } from "./constants";
-import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
+import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeContractType, type HedgeMode } from "./hedge-analysis";
 import { recoveryEscalation } from "./recovery-risk";
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applyRematch, applySettlement, rankRows, type HedgeMemory } from "./hedge-state";
@@ -132,6 +148,12 @@ interface HedgeSession {
   lastReconcileAt: number;
   lastEmitAt: number;
   execFailures: number;
+  /** Contracts Deriv already rejected as unavailable for this account. The
+   *  candidate they were rejected on is quarantined so the same rejection is
+   *  never spent from the 3-strike budget twice (see contract-availability.ts). */
+  quarantineAttempts: number;
+  /** Broker stake bounds per symbol, read from the account's own currency. */
+  stakeBounds: Map<string, { at: number; bounds: AccountStakeBounds | null }>;
   ctx: { at: number; value: HedgeContext } | null;
 }
 
@@ -139,10 +161,28 @@ const CONTEXT_TTL_MS = 2_000;
 const EMIT_THROTTLE_MS = 400;
 const EXPOSURE_RECHECK_MS = 1_500;
 const RECONCILE_THROTTLE_MS = 5_000;
+/**
+ * Consecutive DEFINITIVE broker failures before the engine gives up. Only
+ * failures that are not a capability verdict count: a contract this account
+ * cannot quote is quarantined instead (contract-availability.ts), because
+ * spending a strike on it makes an account-wide configuration problem look
+ * like a broker outage and stops the engine three buys into every restart.
+ */
 const CONSECUTIVE_EXEC_FAILURE_LIMIT = 3;
+/** Capability rejections cost a follow-up probe each; cap the probing. */
+const MAX_QUARANTINE_PROBES = 12;
 /** A tape with no tick for this long belongs to a closed or stalled market and is not ranked. */
 const STALE_TAPE_MS = 15_000;
+/**
+ * Fallback minimum stake when the broker does not report one. It is a USD
+ * figure: the authoritative minimum comes from `contracts_for` for the
+ * account's own currency (see getAccountStakeBounds), because 0.35 means
+ * something entirely different in BTC, and a stake below the account's minimum
+ * is rejected by every proposal on that login.
+ */
 const MIN_STAKE = 0.35;
+/** Broker stake bounds are re-read at most this often per symbol. */
+const STAKE_BOUNDS_TTL_MS = 5 * 60_000;
 
 const sessions = new Map<string, HedgeSession>();
 
@@ -157,6 +197,8 @@ function newSession(): HedgeSession {
     lastReconcileAt: 0,
     lastEmitAt: 0,
     execFailures: 0,
+    quarantineAttempts: 0,
+    stakeBounds: new Map(),
     ctx: null,
   };
 }
@@ -173,6 +215,11 @@ function sessionState(sessionId: string): HedgeSession {
 /** Fresh rescan memory for a new engine start, exactly as a Nexus bot restart. */
 export function resetHedgeSession(sessionId: string): void {
   sessions.set(sessionId, newSession());
+  // NOTE: the contract quarantine is deliberately NOT cleared here. It is
+  // re-verified by the pre-flight that runs before a start
+  // (autonomous-hedge/preflight.ts), and a cooldown auto-resume continues the
+  // same session — losing the broker's verdicts there would just repeat the
+  // rejected quotes.
 }
 
 export function getHedgeMemory(sessionId: string): HedgeMemory {
@@ -309,6 +356,8 @@ export function buildHedgePreview(
   memory: HedgeMemory,
   lossRun: number,
   escalation: number,
+  /** Pass the session id so quarantined contracts stay out of Quick Strike too. */
+  sessionId?: string,
 ): HedgePreview {
   const markets = watchedMarkets(ctx);
   const risk = riskFor(ctx, markets[0]?.symbol ?? "");
@@ -316,7 +365,9 @@ export function buildHedgePreview(
     return { mode, decision: null, rankedRows: [], marketsScanned: 0, risk };
   }
 
-  const { tapes, rows } = collectMarketCandidates(ctx, markets, mode, escalation);
+  const collected = collectMarketCandidates(ctx, markets, mode, escalation);
+  const tapes = collected.tapes;
+  const rows = sessionId ? filterQuarantined(sessionId, collected.rows) : collected.rows;
   const decision = decideHedge({
     rows,
     mode,
@@ -429,7 +480,19 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
 
   // 1. Read every watched market's 1-tick tape and rank its families.
   const markets = watchedMarkets(ctx);
-  const { tapes, rows } = collectMarketCandidates(ctx, markets, mode, escalation);
+  const collected = collectMarketCandidates(ctx, markets, mode, escalation);
+  const tapes = collected.tapes;
+  // Contracts this account cannot quote never reach the ranker, so they can
+  // never be picked and rejected again.
+  const rows = filterQuarantined(host.sessionId, collected.rows);
+  if (rows.length === 0 && collected.rows.length > 0) {
+    host.stop(
+      "Deriv will not quote any contract this account selected — " +
+      `${summarizeQuarantine(host.sessionId).join("; ")}. ` +
+      "Check this Deriv account's market access and currency, or choose different contracts.",
+    );
+    return;
+  }
 
   // 2. Contest and gate.
   const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
@@ -566,6 +629,157 @@ function barrierFor(row: HedgeCandidate): number | null {
   return row.barrier >= 0 ? row.barrier : null;
 }
 
+/**
+ * This account's broker-reported stake range for a symbol, cached per session.
+ * Returns null when the broker did not answer, which callers must treat as
+ * "unknown", never as "no limit".
+ */
+async function stakeBoundsFor(
+  s: HedgeSession,
+  ctx: HedgeContext,
+  symbol: string,
+): Promise<AccountStakeBounds | null> {
+  if (!ctx.token || !ctx.derivAccountId) return null;
+  const cached = s.stakeBounds.get(symbol);
+  if (cached && Date.now() - cached.at < STAKE_BOUNDS_TTL_MS) return cached.bounds;
+  const bounds = await getAccountStakeBounds(ctx.token, ctx.derivAccountId, symbol, ctx.currency);
+  s.stakeBounds.set(symbol, { at: Date.now(), bounds });
+  if (bounds?.minStake) {
+    logger.debug({ symbol, currency: ctx.currency, minStake: bounds.minStake, maxStake: bounds.maxStake }, "Broker stake bounds for this account");
+  }
+  return bounds;
+}
+
+/** Digit contracts need a market that offers digits; direction contracts do not. */
+function familySupportedOn(market: { digitEnabled?: boolean }, contract: string): boolean {
+  return contract.startsWith("DIGIT") ? market.digitEnabled === true : true;
+}
+
+/** A valid probe barrier for a family the user selected (auto digits get a real one). */
+function probeBarrierFor(contract: HedgeContractType, barrier: number): number | null {
+  switch (contract) {
+    case "DIGITOVER": return barrier >= 0 && barrier <= 8 ? barrier : 4;
+    case "DIGITUNDER": return barrier >= 1 && barrier <= 9 ? barrier : 5;
+    case "DIGITMATCH":
+    case "DIGITDIFF": return barrier >= 0 && barrier <= 9 ? barrier : 5;
+    default: return null;
+  }
+}
+
+/** Every contract family in the user's normal + recovery selection. */
+function selectedContractTypes(ctx: HedgeContext): HedgeContractType[] {
+  const types = new Set<HedgeContractType>();
+  for (const mode of ["NORMAL", "RECOVERY"] as const) {
+    for (const spec of familySpecsFor({ settings: ctx.settings, mode, digitEnabled: true, sets: ctx.contractSets })) {
+      types.add(spec.type);
+    }
+  }
+  return [...types];
+}
+
+/** Probe stake: the broker's own minimum for this account, or the USD fallback. */
+async function probeStakeFor(s: HedgeSession, ctx: HedgeContext, symbol: string): Promise<number> {
+  const bounds = await stakeBoundsFor(s, ctx, symbol);
+  if (bounds?.minStake && bounds.minStake > 0) return roundStake(bounds.minStake, ctx.currency);
+  return isTwoDecimalCurrency(ctx.currency) ? MIN_STAKE : roundStake(MIN_STAKE, ctx.currency);
+}
+
+function probeOutcome(ok: boolean, kind: DerivRejectionKind): "ok" | "rejected" | "unknown" {
+  if (ok) return "ok";
+  // Only a capability verdict widens the quarantine. A throttled or unanswered
+  // probe says nothing about what the account can trade.
+  return kind === "contract-unavailable" ? "rejected" : "unknown";
+}
+
+/**
+ * Find how wide a capability rejection really is, then quarantine it there.
+ *
+ * Two follow-up quotes, each changing exactly ONE variable, locate the fault:
+ *  - same contract, different market  → the family is unavailable
+ *  - same market, different contract  → the market is unavailable
+ *  - both                             → the account cannot trade these at all
+ *  - neither                          → only this exact combination is out
+ * Both probes are quotes only — no money moves — and they are capped per start.
+ */
+async function quarantineRejectedContract(
+  host: HedgeHost,
+  s: HedgeSession,
+  ctx: HedgeContext,
+  b: HedgeCandidate,
+  reason: string,
+  code: string,
+  kind: DerivRejectionKind,
+): Promise<void> {
+  const sessionId = host.sessionId;
+  const evidence: RejectionEvidence = { sameContractOtherMarket: "unknown", sameMarketOtherContract: "unknown" };
+
+  if (ctx.token && ctx.derivAccountId && s.quarantineAttempts < MAX_QUARANTINE_PROBES) {
+    const markets = watchedMarkets(ctx);
+    const barrier = probeBarrierFor(b.contract, b.barrier);
+
+    const otherMarket = markets.find((m) => m.symbol !== b.symbol && familySupportedOn(m, b.contract));
+    if (otherMarket) {
+      s.quarantineAttempts += 1;
+      const probe = await probeAccountContract(ctx.token, ctx.derivAccountId, {
+        symbol: otherMarket.symbol,
+        contractType: b.contract,
+        stake: await probeStakeFor(s, ctx, otherMarket.symbol),
+        duration: HEDGE_DURATION_TICKS,
+        durationUnit: HEDGE_DURATION_UNIT,
+        currency: ctx.currency,
+        barrier,
+      });
+      evidence.sameContractOtherMarket = probeOutcome(probe.ok, probe.kind);
+      logger.info(
+        { contract: b.contract, otherMarket: otherMarket.symbol, result: evidence.sameContractOtherMarket, code: probe.code },
+        "Autonomous 1-tick: probed the rejected contract on another market",
+      );
+    }
+
+    const otherContract = selectedContractTypes(ctx)
+      .find((type) => type !== b.contract && familySupportedOn(getMarketInfo(b.symbol) ?? { digitEnabled: true }, type));
+    if (otherContract) {
+      s.quarantineAttempts += 1;
+      const probe = await probeAccountContract(ctx.token, ctx.derivAccountId, {
+        symbol: b.symbol,
+        contractType: otherContract,
+        stake: await probeStakeFor(s, ctx, b.symbol),
+        duration: HEDGE_DURATION_TICKS,
+        durationUnit: HEDGE_DURATION_UNIT,
+        currency: ctx.currency,
+        barrier: probeBarrierFor(otherContract, -1),
+      });
+      evidence.sameMarketOtherContract = probeOutcome(probe.ok, probe.kind);
+      logger.info(
+        { symbol: b.symbol, otherContract, result: evidence.sameMarketOtherContract, code: probe.code },
+        "Autonomous 1-tick: probed another contract on the rejected market",
+      );
+    }
+  } else if (s.quarantineAttempts >= MAX_QUARANTINE_PROBES) {
+    logger.warn({ symbol: b.symbol, contract: b.contract }, "Autonomous 1-tick: probe budget spent — quarantining this combination only");
+  }
+
+  const scope = inferQuarantineScope(evidence);
+  rememberQuarantined(sessionId, { scope, symbol: b.symbol, contract: b.contract, code, reason, kind });
+  logger.warn(
+    { sessionId, symbol: b.symbol, contract: b.contract, barrier: b.barrier, scope, code, reason, evidence },
+    "Autonomous 1-tick: contract quarantined — this Deriv account cannot quote it",
+  );
+  host.emit("contract_quarantined", {
+    symbol: b.symbol, contract: b.contract, barrier: b.barrier, scope, code, reason,
+  });
+  host.publish({ nextScanIn: null });
+
+  const symbols = watchedMarkets(ctx).map((m) => m.symbol);
+  if (!hasTradeableContract(sessionId, { symbols, contracts: selectedContractTypes(ctx) })) {
+    host.stop(
+      "Deriv will not quote anything this account selected — " +
+      `${summarizeQuarantine(sessionId).join("; ")}. ` +
+      "Check this Deriv account's market access and currency, or choose different contracts.",
+    );
+  }
+}
+
 function recordLedger(
   sessionId: string,
   outcome: { won: boolean; profit: number; cost: number; contract: string; payout: number; maxRecoverySteps: number },
@@ -592,10 +806,25 @@ async function executeDecision(
   const sessionId = host.sessionId;
   const reasoningBase = `${AUTONOMOUS_HEDGE_PREFIX}${decision.reason}`;
   const { stake: rawStake, payout } = await resolveStake(decision, ctx, mode, risk);
-  const stake = Math.round(rawStake * 100) / 100;
-  if (!Number.isFinite(stake) || stake < MIN_STAKE || stake > ctx.balance) {
+  // Stake limits are the broker's, denominated in THIS account's currency. The
+  // hard-coded USD fallback only applies when the broker reports no bounds.
+  const bounds = await stakeBoundsFor(s, ctx, b.symbol);
+  const stake = clampStakeToBounds({
+    amount: rawStake,
+    currency: ctx.currency,
+    minStake: bounds?.minStake,
+    maxStake: bounds?.maxStake,
+    balance: ctx.balance,
+    // The USD fallback only applies to currencies that take 2 decimals; for a
+    // crypto account an invented floor would itself be an invalid stake.
+    fallbackMin: isTwoDecimalCurrency(ctx.currency) ? MIN_STAKE : 0,
+  });
+  if (stake === null) {
     host.publish({ nextScanIn: null });
-    logger.warn({ stake, balance: ctx.balance }, "Autonomous 1-tick: stake outside the allowed range — holding");
+    logger.warn(
+      { rawStake, minStake: bounds?.minStake ?? null, maxStake: bounds?.maxStake ?? null, currency: ctx.currency, balance: ctx.balance },
+      "Autonomous 1-tick: stake outside the broker's allowed range for this account — holding",
+    );
     return;
   }
   const barrier = barrierFor(b);
@@ -722,20 +951,42 @@ async function executeDecision(
       buyPrice = found.buyPrice;
     } else {
       // Definite rejection: no contract was placed, so nothing enters the ledger.
-      const message = buyErr instanceof Error ? buyErr.message : String(buyErr);
+      const message = friendlyErrorMessage(buyErr);
+      const verdict = classifyDerivRejection(buyErr);
+      const brokerCode = verdict.code ? ` (Deriv code ${verdict.code})` : "";
       await claimOpenRow(openRow.id, {
         status: "error",
         profit: "0",
         payout: "0",
         closedAt: new Date(),
-        agentReasoning: `${reasoningBase} [EXECUTION FAILED: ${message}]`,
+        agentReasoning: `${reasoningBase} [EXECUTION FAILED: ${message}${brokerCode}]`,
       });
       s.exposure = null;
+      host.emit("trade_completed", {
+        id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract,
+        error: `${message}${brokerCode}`,
+      });
+
+      // A contract this account cannot quote is a property of the ACCOUNT, not
+      // of this tick: the same request fails again on the next tick and on
+      // every restart. Quarantine it at the narrowest scope the evidence
+      // supports and keep trading what the account CAN quote, instead of
+      // spending the 3-strike budget and stopping the whole engine.
+      if (verdict.kind === "contract-unavailable") {
+        await quarantineRejectedContract(host, s, ctx, b, message, verdict.code, verdict.kind);
+        return;
+      }
+
       s.execFailures += 1;
-      logger.warn({ err: message, symbol: b.symbol, failures: s.execFailures }, "Autonomous 1-tick buy rejected by Deriv");
-      host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
+      logger.warn(
+        { err: message, code: verdict.code, kind: verdict.kind, symbol: b.symbol, contract: b.contract, failures: s.execFailures },
+        "Autonomous 1-tick buy rejected by Deriv",
+      );
       if (s.execFailures >= CONSECUTIVE_EXEC_FAILURE_LIMIT) {
-        host.stop(`Deriv rejected ${CONSECUTIVE_EXEC_FAILURE_LIMIT} consecutive 1-tick buys — last: ${message}`);
+        host.stop(
+          `Deriv rejected ${CONSECUTIVE_EXEC_FAILURE_LIMIT} consecutive 1-tick buys — last: ${message}` +
+          (verdict.code ? ` — ${verdict.hint}` : ""),
+        );
       }
       return;
     }

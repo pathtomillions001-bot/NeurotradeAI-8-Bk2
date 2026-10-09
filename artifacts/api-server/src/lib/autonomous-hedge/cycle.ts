@@ -28,6 +28,7 @@ import type { RiskDecision } from "../agents/risk-manager";
 import { resolveRecoveryPayout } from "../recovery-payout";
 import {
   AUTOMATED_DERIV_MARKETS,
+  DerivTradeError,
   executeLiveTrade,
   fetchDerivPortfolioContracts,
   fetchDerivProfitTable,
@@ -48,7 +49,9 @@ import { decideHedge, type HedgeDecision } from "./contest";
 import { applyRematch, applySettlement, rankRows, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { familySpecsFor } from "./families";
+import { contractSpecLabel } from "./contract-sets";
 import type { AutonomousContractSets } from "./contract-sets";
+import { decideExecutionFailure } from "./execution-failure";
 import {
   claimOpenRow,
   ledgerEntryPayout,
@@ -132,6 +135,20 @@ interface HedgeSession {
   lastReconcileAt: number;
   lastEmitAt: number;
   execFailures: number;
+  /**
+   * Quote→purchase handoff refusals ("Unknown contract proposal", throttling).
+   * Kept apart from `execFailures` because they place nothing and say nothing
+   * about the account: they must not stop the engine after three ticks.
+   */
+  quoteFailures: number;
+  /**
+   * Candidates this Deriv account refused as untradeable (contract not offered,
+   * market closed, unsupported barrier). They are skipped for the rest of this
+   * run so the engine trades the rest of the user's set instead of re-hammering
+   * the same rejected contract every tick. Cleared by `resetHedgeSession`, so a
+   * restart re-probes them.
+   */
+  blocked: Set<string>;
   ctx: { at: number; value: HedgeContext } | null;
 }
 
@@ -139,7 +156,6 @@ const CONTEXT_TTL_MS = 2_000;
 const EMIT_THROTTLE_MS = 400;
 const EXPOSURE_RECHECK_MS = 1_500;
 const RECONCILE_THROTTLE_MS = 5_000;
-const CONSECUTIVE_EXEC_FAILURE_LIMIT = 3;
 /** A tape with no tick for this long belongs to a closed or stalled market and is not ranked. */
 const STALE_TAPE_MS = 15_000;
 const MIN_STAKE = 0.35;
@@ -157,6 +173,8 @@ function newSession(): HedgeSession {
     lastReconcileAt: 0,
     lastEmitAt: 0,
     execFailures: 0,
+    quoteFailures: 0,
+    blocked: new Set<string>(),
     ctx: null,
   };
 }
@@ -254,9 +272,12 @@ function collectMarketCandidates(
   markets: ReturnType<typeof watchedMarkets>,
   mode: HedgeMode,
   escalation: number,
-): { tapes: HedgeTape[]; rows: HedgeCandidate[] } {
+  /** Candidate keys this account already refused — skipped, never re-bought. */
+  blocked: ReadonlySet<string> = new Set<string>(),
+): { tapes: HedgeTape[]; rows: HedgeCandidate[]; blockedKeys: string[] } {
   const tapes: HedgeTape[] = [];
   const rows: HedgeCandidate[] = [];
+  const blockedKeys: string[] = [];
   for (const market of markets) {
     const tape = readHedgeTape(market.symbol);
     if (!tape || tape.ageMs > STALE_TAPE_MS) continue;
@@ -269,7 +290,7 @@ function collectMarketCandidates(
       digitEnabled: market.digitEnabled,
       sets: ctx.contractSets,
     });
-    rows.push(...buildMarketCandidates({
+    for (const row of buildMarketCandidates({
       symbol: market.symbol,
       group: hedgeGroupIndex(market.symbol),
       digits: tape.digits,
@@ -278,9 +299,15 @@ function collectMarketCandidates(
       specs,
       mode,
       escalation,
-    }));
+    })) {
+      if (blocked.has(row.key)) {
+        blockedKeys.push(row.key);
+        continue;
+      }
+      rows.push(row);
+    }
   }
-  return { tapes, rows };
+  return { tapes, rows, blockedKeys };
 }
 
 function copyHedgeMemory(memory: HedgeMemory): HedgeMemory {
@@ -429,7 +456,20 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
 
   // 1. Read every watched market's 1-tick tape and rank its families.
   const markets = watchedMarkets(ctx);
-  const { tapes, rows } = collectMarketCandidates(ctx, markets, mode, escalation);
+  const { tapes, rows, blockedKeys } = collectMarketCandidates(ctx, markets, mode, escalation, s.blocked);
+
+  // 1b. Everything Deriv offered this tick is a contract this account has
+  // already refused. Say so instead of holding silently: this is the case that
+  // looks like "the engine will not start" from the outside.
+  if (rows.length === 0 && blockedKeys.length > 0) {
+    host.publish({ currentMarket: null, nextScanIn: null });
+    host.stop(
+      `Stopped: this Deriv account refused every contract it was offered (${blockedKeys.length} blocked: ` +
+        `${blockedKeys.slice(0, 3).join(", ")}${blockedKeys.length > 3 ? ", …" : ""}). ` +
+        "Choose different contracts or markets, or connect an account that can trade synthetic indices.",
+    );
+    return;
+  }
 
   // 2. Contest and gate.
   const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
@@ -453,7 +493,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
   if (!host.canExecute()) return;
   const lastPrice = tapes.find((t) => t.symbol === decision.best.symbol)?.prices.at(-1) ?? 0;
-  await executeDecision(host, s, decision, fresh, mode, freshRisk, lastPrice);
+  await executeDecision(host, s, decision, fresh, mode, freshRisk, lastPrice, rows.map((row) => row.key));
 }
 
 function publishScan(
@@ -587,6 +627,8 @@ async function executeDecision(
   mode: HedgeMode,
   risk: RiskDecision,
   lastPrice: number,
+  /** Every candidate key ranked this tick — what the account could trade instead. */
+  candidateKeys: string[] = [],
 ): Promise<void> {
   const b = decision.best;
   const sessionId = host.sessionId;
@@ -722,26 +764,84 @@ async function executeDecision(
       buyPrice = found.buyPrice;
     } else {
       // Definite rejection: no contract was placed, so nothing enters the ledger.
-      const message = buyErr instanceof Error ? buyErr.message : String(buyErr);
+      // WHAT Deriv refused decides what happens next (see
+      // lib/autonomous-hedge/execution-failure.ts): a stale quote→purchase
+      // handoff is held and re-quoted next tick, a contract this account is not
+      // offered is skipped for the rest of the run, and an account-level refusal
+      // stops the engine on the spot with the way out.
+      const rawMessage = buyErr instanceof Error ? buyErr.message : String(buyErr);
+      const rejected = buyErr instanceof DerivTradeError ? buyErr : null;
+      const action = decideExecutionFailure({
+        code: rejected?.code ?? null,
+        message: rejected ? rejected.brokerMessage : rawMessage,
+        stage: rejected?.stage ?? "unknown",
+        kind: rejected?.kind,
+        symbol: b.symbol,
+        contractType: b.contract,
+        barrier: b.barrier,
+        candidateKey: b.key,
+        contractLabel: contractSpecLabel({ type: b.contract, digit: b.barrier }),
+        state: {
+          execFailures: s.execFailures,
+          quoteFailures: s.quoteFailures,
+          blocked: [...s.blocked],
+          candidateKeys,
+        },
+      });
       await claimOpenRow(openRow.id, {
         status: "error",
         profit: "0",
         payout: "0",
         closedAt: new Date(),
-        agentReasoning: `${reasoningBase} [EXECUTION FAILED: ${message}]`,
+        agentReasoning: `${reasoningBase} [EXECUTION FAILED: ${action.held}]`,
       });
       s.exposure = null;
-      s.execFailures += 1;
-      logger.warn({ err: message, symbol: b.symbol, failures: s.execFailures }, "Autonomous 1-tick buy rejected by Deriv");
-      host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
-      if (s.execFailures >= CONSECUTIVE_EXEC_FAILURE_LIMIT) {
-        host.stop(`Deriv rejected ${CONSECUTIVE_EXEC_FAILURE_LIMIT} consecutive 1-tick buys — last: ${message}`);
+      if (action.countAsExecFailure) s.execFailures += 1;
+      if (action.countAsQuoteFailure) s.quoteFailures += 1;
+      if (action.quarantine) s.blocked.add(b.key);
+      logger.warn(
+        {
+          err: rawMessage,
+          code: rejected?.code ?? null,
+          stage: rejected?.stage ?? "unknown",
+          kind: action.kind,
+          symbol: b.symbol,
+          contract: b.contract,
+          barrier: b.barrier,
+          execFailures: s.execFailures,
+          quoteFailures: s.quoteFailures,
+          quarantined: action.quarantine,
+          blockedCount: s.blocked.size,
+        },
+        "Autonomous 1-tick buy rejected by Deriv",
+      );
+      host.emit("trade_completed", {
+        id: openRow.id,
+        symbol: b.symbol,
+        won: false,
+        profit: "0",
+        contract: b.contract,
+        barrier,
+        stake,
+        error: action.held,
+        errorKind: action.kind,
+        errorCode: rejected?.code ?? null,
+        // A held handoff/throttle is retried on the next tick; a quarantined
+        // contract is skipped for the rest of this run.
+        retryable: action.kind === "unknown-proposal" || action.kind === "transient",
+        quarantined: action.quarantine,
+      });
+      if (action.stop) {
+        host.stop(action.reason ?? `Deriv rejected this trade — ${action.held}`);
       }
       return;
     }
   }
 
+  // A placed purchase clears both failure budgets: the counters measure
+  // CONSECUTIVE refusals, and the broker has just accepted one of ours.
   s.execFailures = 0;
+  s.quoteFailures = 0;
   s.exposure.contractId = contractId;
   await db.update(tradesTable).set({
     derivContractId: String(contractId),

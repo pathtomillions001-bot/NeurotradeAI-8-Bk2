@@ -204,6 +204,7 @@ export default function Settings() {
     maxDrawdown: 10,
     consecutiveLossLimit: 3,
     cooldownMinutes: 30,
+    cooldownEnabled: true,
     marketRotationAfter: 5,
     tradeDurationSec: 5,
     maxTradeStake: 500,
@@ -235,6 +236,7 @@ export default function Settings() {
         maxDrawdown: settings.maxDrawdown,
         consecutiveLossLimit: settings.consecutiveLossLimit,
         cooldownMinutes: (settings as any).cooldownMinutes ?? 30,
+        cooldownEnabled: settings.cooldownEnabled ?? true,
         marketRotationAfter: settings.marketRotationAfter,
         tradeDurationSec: (settings as any).tradeDurationSec ?? 5,
         maxTradeStake: (settings as any).maxTradeStake ?? 500,
@@ -343,7 +345,7 @@ export default function Settings() {
           <div className="flex flex-wrap gap-2">
             <StatPill accent="cyan" label="Per trade" value={stakePreview === null ? "—" : `$${stakePreview.toFixed(2)}`} />
             <StatPill accent="amber" label="Daily stop" value={`−$${form.dailyLossLimit}`} />
-            <StatPill accent="amber" label="Cooldown" value={`${form.cooldownMinutes}m`} />
+            <StatPill accent="amber" label="Cooldown" value={form.cooldownEnabled ? `${form.cooldownMinutes}m` : "off"} />
           </div>
         }
       >
@@ -404,8 +406,14 @@ export default function Settings() {
             <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
               <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
             </SettingRow>
-            <SettingRow label="Cooldown Duration" description="Minutes before the engine auto-resumes after a loss-limit stop.">
-              <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
+            <SettingRow
+              label="Cooldown"
+              description="Automatically pause the engine after the consecutive-loss limit and resume it once the cooldown elapses. Off: the engine still stops at the loss limit, but waits for you to resume it manually."
+            >
+              <Switch checked={form.cooldownEnabled} onCheckedChange={(v) => set("cooldownEnabled", v)} />
+            </SettingRow>
+            <SettingRow label="Cooldown Duration" description="Minutes before the engine auto-resumes after a loss-limit stop. Only used while the cooldown is enabled.">
+              <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" disabled={!form.cooldownEnabled} />
             </SettingRow>
           </Panel>
         </div>

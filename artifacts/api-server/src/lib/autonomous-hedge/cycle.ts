@@ -74,6 +74,11 @@ export interface HedgeContext {
   settings: TradingSettings;
   consecutiveLossLimit: number;
   cooldownMinutes: number;
+  /**
+   * Master switch for the timed cooldown pause. When false the consecutive-loss
+   * stop still fires (safety) but no auto-resume timer is scheduled.
+   */
+  cooldownEnabled: boolean;
   allowedMarketSymbols: string[] | null;
   paperTradeMode: boolean;
   daily: DailyStats;
@@ -336,7 +341,9 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   const risk = riskFor(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
   if (risk.hardStop) {
     const consecutive = ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
-    host.stop(risk.hardStopReason ?? "risk limit reached", consecutive ? ctx.cooldownMinutes : undefined);
+    // The stop itself is the safety circuit breaker — it always fires. Only the
+    // timed auto-resume (the cooldown) is behind the user's cooldownEnabled switch.
+    host.stop(risk.hardStopReason ?? "risk limit reached", consecutive && ctx.cooldownEnabled ? ctx.cooldownMinutes : undefined);
     return;
   }
 
@@ -411,7 +418,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   const freshRisk = riskFor(fresh, decision.best.symbol);
   if (freshRisk.hardStop) {
     const consecutive = fresh.daily.consecutiveLosses >= fresh.consecutiveLossLimit;
-    host.stop(freshRisk.hardStopReason ?? "risk limit reached", consecutive ? fresh.cooldownMinutes : undefined);
+    host.stop(freshRisk.hardStopReason ?? "risk limit reached", consecutive && fresh.cooldownEnabled ? fresh.cooldownMinutes : undefined);
     return;
   }
   if (!host.canExecute()) return;
@@ -825,9 +832,14 @@ function finishTrade(
   });
   logger.info({ symbol: t.symbol, won: t.won, profit: t.profit.toFixed(2), stake: t.stake, contract: t.contract }, "Trade executed");
   if (!t.won && streak >= t.ctx.consecutiveLossLimit) {
+    // The stop always fires (safety). The cooldown duration — the timed
+    // auto-resume — only applies when the user has the cooldown enabled.
+    const pauseNote = t.ctx.cooldownEnabled
+      ? `, cooling down ${t.ctx.cooldownMinutes}m`
+      : " — cooldown disabled, resume manually";
     host.stop(
-      `${streak} consecutive losses — limit ${t.ctx.consecutiveLossLimit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
-      t.ctx.cooldownMinutes,
+      `${streak} consecutive losses — limit ${t.ctx.consecutiveLossLimit} reached${pauseNote}`,
+      t.ctx.cooldownEnabled ? t.ctx.cooldownMinutes : undefined,
     );
   }
   void s;

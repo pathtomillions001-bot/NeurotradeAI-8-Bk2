@@ -946,6 +946,9 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
+  // A purchase must never be repeated by react-query's default retry — a
+  // retried POST could buy the same contract twice. Pinned by
+  // src/lib/manual-trading.test.ts.
   return  { mutationFn, ...mutationOptions, retry: false }}
 
     export type ExecuteTradeMutationResult = NonNullable<Awaited<ReturnType<typeof executeTrade>>>

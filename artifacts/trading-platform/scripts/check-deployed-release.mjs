@@ -59,11 +59,8 @@ try {
     console.log(`GET ${target}/__release → ${release.parity}`);
     console.log(`  web : ${release.web?.shortSha} (${release.web?.environment}) built ${release.web?.builtAt}`);
     console.log(`  api : ${release.api?.shortSha ?? "unknown"}`);
-    if (release.missingConsolesHere?.length) {
-      problems.push(`deployed web build cannot render: ${release.missingConsolesHere.join(", ")}`);
-    }
     if (release.apiError) problems.push(`API unreachable from the web service: ${release.apiError}`);
-    if (release.parity !== "ok") problems.push(release.hint ?? "web/API console contracts differ");
+    if (release.parity !== "ok") problems.push(release.hint ?? "web/API release handshake reported a problem");
   } else {
     // An older bundle has no /__release route; the SPA fallback answers with
     // index.html, which is itself proof that the deployed build predates the

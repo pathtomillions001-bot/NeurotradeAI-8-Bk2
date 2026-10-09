@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
-import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
+import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Power } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 // ── Contract type groups ────────────────────────────────────────────────────────
@@ -64,9 +64,15 @@ function WinProbBar({ value }: { value: number }) {
 // ── Quick Strike Card ──────────────────────────────────────────────────────────
 export function MarketOpportunityFlashCard({
   onTrade,
+  onEnableAutonomous,
+  autonomousPending,
 }: {
   onTrade?: () => void;
   currentStreak?: number;
+  /** Shown as a small AUTO power button — starts the autonomous engine (the
+   *  card hosting this flips to the engine face once the engine is running). */
+  onEnableAutonomous?: () => void;
+  autonomousPending?: boolean;
 }) {
   const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
@@ -204,12 +210,25 @@ export function MarketOpportunityFlashCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header: label + contract group selector + live dot */}
+        {/* Header: label + AUTO engine toggle + contract group selector + live dot */}
         <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
           <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
             Quick Strike
           </span>
+
+          {/* Hand over to the autonomous engine — the hosting card flips to
+              the engine face the moment the engine is running. */}
+          {onEnableAutonomous && (
+            <button
+              onClick={onEnableAutonomous}
+              disabled={autonomousPending}
+              title="Enable the autonomous engine"
+              className="flex items-center gap-1 text-[8px] font-mono font-bold uppercase tracking-widest px-1.5 py-0.5 rounded border border-primary/40 text-primary/80 hover:bg-primary/10 hover:text-primary transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Power className="w-2.5 h-2.5" /> Auto
+            </button>
+          )}
 
           {/* Contract group tab selector — only shows enabled families */}
           {visibleGroups.length > 0 && (

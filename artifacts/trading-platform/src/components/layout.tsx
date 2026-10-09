@@ -1,15 +1,13 @@
 import { ReactNode, useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import { useGetAiEngineStatus, useToggleAutonomousEngine } from "@workspace/api-client-react";
-import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X, Calculator, Bot, Workflow, CandlestickChart } from "lucide-react";
+import { Activity, BarChart2, Briefcase, LayoutDashboard, Settings as SettingsIcon, Link as LinkIcon, Menu, X, Calculator, Workflow, CandlestickChart } from "lucide-react";
 import { Switch } from "./ui/switch";
 import { Label } from "./ui/label";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import { SpeedAIFab } from "./speed-ai-fab";
 import { AccountSwitcher } from "./account-switcher";
-import { LiveBotIndicator } from "./live-bot-indicator";
-import { useLiveBots } from "@/lib/live-bots";
 import { useIsBotBuilderActive } from "@/lib/use-bot-builder-active";
 import { preloadBotBuilder } from "@/lib/bot-builder-frame";
 
@@ -17,7 +15,6 @@ const navItems = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/markets", label: "Markets", icon: BarChart2 },
   { href: "/terminal", label: "Desk", icon: CandlestickChart },
-  { href: "/bots", label: "AI Bots", icon: Bot },
   { href: "/bot-builder", label: "Bot Builder", icon: Workflow },
   { href: "/trades", label: "Journal", icon: Briefcase },
   { href: "/analytics", label: "Analytics", icon: Activity },
@@ -102,21 +99,7 @@ export function Layout({ children }: { children: ReactNode }) {
   // The Desk has its own execution/agent controls; do not float another engine
   // launcher over its responsive panels.
   const showSpeedAiFab = location !== "/bot-builder" && location !== "/terminal";
-  // The Desk owns its full information hierarchy (connection, risk, news and
-  // execution controls). The global "Active Engine / No bot running" chip
-  // obscures it, so never render that unrelated bot indicator on the Desk.
-  // It also remains hidden on the embedded Bot Builder where it collides with
-  // the builder's own controls.
-  const showLiveBotIndicatorDesktop = location !== "/bot-builder" && location !== "/terminal";
-  const showLiveBotIndicatorMobile = location !== "/terminal";
   const [mobileOpen, setMobileOpen] = useState(false);
-  // The single source of truth for "which bot is live right now" — polled
-  // every 5s + SSE, so a bot that starts in the background appears within
-  // seconds and survives a page refresh (the poll re-runs on mount).
-  // On /bot-builder the interval pauses (builder's main-thread budget — see
-  // use-bot-builder-active.ts); SSE updates keep the chip correct meanwhile.
-  const isBotBuilder = useIsBotBuilderActive();
-  const liveBots = useLiveBots(isBotBuilder ? false : 5_000);
 
   // Boot the Deriv bot builder in the background the moment the app shell is
   // up: the (large) builder bundle downloads and initializes while the user is
@@ -209,25 +192,7 @@ export function Layout({ children }: { children: ReactNode }) {
           </div>
           <span className="font-bold text-base tracking-tight">NeuroTrade</span>
         </div>
-        <div className="ml-auto flex items-center gap-2">
-          {showLiveBotIndicatorMobile && <LiveBotIndicator compact live={liveBots} />}
-        </div>
       </header>
-
-      {/* Active-engine indicator — desktop, fixed to the top-right of every
-          page EXCEPT Bot Builder, where it would cover the embedded builder's
-          own Run/Stop cluster. ALWAYS rendered elsewhere: "No bot running"
-          when idle, the live engine (AI Bots section, NeuroAI FAB or
-          autonomous) when trading.
-          z-30: below the z-40/50 console dialogs (which show the same bot
-          in full detail) but above all page content. */}
-      {showLiveBotIndicatorDesktop && (
-        <div className="hidden md:block fixed top-3 right-4 z-30 pointer-events-none">
-          <div className="pointer-events-auto">
-            <LiveBotIndicator live={liveBots} />
-          </div>
-        </div>
-      )}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">

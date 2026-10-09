@@ -6,7 +6,7 @@ import {
 } from "recharts";
 import {
   TrendingUp, TrendingDown, Activity, Zap, Target,
-  CheckCircle2, XCircle, Clock, Flame,
+  CheckCircle2, XCircle, Clock, Flame, Wallet,
 } from "lucide-react";
 import { useMemo, useEffect } from "react";
 import { withTabSession } from "@/lib/tab-session";
@@ -234,6 +234,63 @@ function ContractBreakdown({ trades }: { trades: any[] }) {
   );
 }
 
+// ── Stake & outcome extremes ──────────────────────────────────────────────────
+// Smallest/largest stake used, and the smallest/largest profit (wins) and loss
+// (losing trades) of the day. Losses are stored as negative profit values, so
+// the smallest loss is the one closest to zero and the largest is the most
+// negative. `won` comes from the Deriv journal; the local-DB fallback only has
+// `status`, so derive it defensively.
+function ExtremesCard({ trades }: { trades: any[] }) {
+  const extremes = useMemo(() => {
+    const isWin = (t: any) =>
+      t.won === true || t.status === "won" || (t.won === undefined && t.status === undefined && Number(t.profit ?? 0) > 0);
+    const stakes = trades.map((t: any) => Number(t.stake ?? 0)).filter((v: number) => v > 0);
+    const winProfits = trades.filter(isWin).map((t: any) => Number(t.profit ?? 0));
+    const lossProfits = trades.filter((t: any) => !isWin(t)).map((t: any) => Number(t.profit ?? 0));
+    return {
+      minStake: stakes.length > 0 ? Math.min(...stakes) : null,
+      maxStake: stakes.length > 0 ? Math.max(...stakes) : null,
+      minProfit: winProfits.length > 0 ? Math.min(...winProfits) : null,
+      maxProfit: winProfits.length > 0 ? Math.max(...winProfits) : null,
+      // Losses are negative: closest to zero = smallest loss, most negative = largest.
+      minLoss: lossProfits.length > 0 ? Math.max(...lossProfits) : null,
+      maxLoss: lossProfits.length > 0 ? Math.min(...lossProfits) : null,
+    };
+  }, [trades]);
+
+  if (trades.length === 0) return null;
+
+  const cells: Array<{ label: string; value: string; tone: "neutral" | "up" | "down"; icon: React.ComponentType<any> }> = [
+    { label: "Smallest Stake", value: extremes.minStake === null ? "—" : `$${extremes.minStake.toFixed(2)}`, tone: "neutral", icon: Wallet },
+    { label: "Largest Stake",  value: extremes.maxStake === null ? "—" : `$${extremes.maxStake.toFixed(2)}`, tone: "neutral", icon: Wallet },
+    { label: "Smallest Profit", value: extremes.minProfit === null ? "—" : `+$${extremes.minProfit.toFixed(2)}`, tone: "up", icon: TrendingUp },
+    { label: "Largest Profit",  value: extremes.maxProfit === null ? "—" : `+$${extremes.maxProfit.toFixed(2)}`, tone: "up", icon: TrendingUp },
+    { label: "Smallest Loss",   value: extremes.minLoss === null ? "—" : `-$${Math.abs(extremes.minLoss).toFixed(2)}`, tone: "down", icon: TrendingDown },
+    { label: "Largest Loss",    value: extremes.maxLoss === null ? "—" : `-$${Math.abs(extremes.maxLoss).toFixed(2)}`, tone: "down", icon: TrendingDown },
+  ];
+
+  return (
+    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
+      <p className="text-xs font-semibold text-foreground mb-0.5">Stake &amp; Outcome Extremes</p>
+      <p className="text-[10px] text-muted-foreground mb-3">Today's smallest and largest</p>
+      <div className="grid grid-cols-3 gap-2">
+        {cells.map((c) => {
+          const toneColor = c.tone === "up" ? "text-emerald-400" : c.tone === "down" ? "text-red-400" : "text-foreground";
+          return (
+            <div key={c.label} className="rounded-lg bg-white/[0.03] px-2 py-1.5 min-w-0">
+              <p className="flex items-center gap-1 text-[8px] uppercase tracking-wider text-muted-foreground/60">
+                <c.icon className={`w-2.5 h-2.5 ${toneColor}`} />
+                <span className="truncate">{c.label}</span>
+              </p>
+              <p className={`text-xs font-mono font-bold mt-0.5 truncate ${toneColor}`}>{c.value}</p>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── Live trade timeline ───────────────────────────────────────────────────────
 function TradeTimeline({ trades }: { trades: any[] }) {
   const reversed = [...trades].reverse().slice(0, 30);
@@ -444,6 +501,7 @@ export default function Analytics() {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}
               className="space-y-4">
               <ContractBreakdown trades={trades} />
+              <ExtremesCard trades={trades} />
             </motion.div>
           </div>
         </>

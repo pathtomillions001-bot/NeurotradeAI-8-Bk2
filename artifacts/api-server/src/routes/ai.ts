@@ -607,6 +607,10 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
     settings: tradingSettings,
     consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
     cooldownMinutes: settings?.cooldownMinutes ?? 30,
+    // Master switch for the timed cooldown pause. When disabled the engine
+    // still stops at the consecutive-loss limit (the safety stop stays), but
+    // no auto-resume timer is scheduled — it waits for a manual resume.
+    cooldownEnabled: settings?.cooldownEnabled ?? true,
     allowedMarketSymbols,
     paperTradeMode: tradingSettings.paperTradeMode,
     daily,

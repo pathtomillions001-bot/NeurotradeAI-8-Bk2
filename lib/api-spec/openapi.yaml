@@ -1158,6 +1158,9 @@ components:
         cooldownMinutes:
           type: integer
           description: Minutes to wait before auto-resuming after consecutive loss stop
+        cooldownEnabled:
+          type: boolean
+          description: Enable the automatic cooldown pause after the consecutive-loss limit. When disabled the engine still stops at the loss limit but waits for a manual resume instead of auto-resuming after the cooldown duration.
         normalOverDigit:
           type: integer
           description: Digit barrier used for DIGITOVER trades in normal (non-recovery) mode
@@ -1254,6 +1257,9 @@ components:
           type: boolean
         cooldownMinutes:
           type: integer
+        cooldownEnabled:
+          type: boolean
+          description: Enable the automatic cooldown pause after the consecutive-loss limit. When disabled the engine still stops at the loss limit but waits for a manual resume instead of auto-resuming after the cooldown duration.
         normalOverDigit:
           type: integer
         normalUnderDigit:

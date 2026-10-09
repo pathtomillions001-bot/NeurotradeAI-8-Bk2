@@ -16,6 +16,7 @@ import {
   DIFF_PAYOUT,
 } from "../payouts";
 import { HEDGE_LIMITS, HEDGE_MIN_TICKS } from "./constants";
+import { posteriorEdgeProbability } from "./recovery-risk";
 
 export type HedgeContractType =
   | "DIGITOVER"
@@ -46,6 +47,12 @@ export interface HedgeStats {
   afterLoss: number;
   afterWin: number;
   conditionalEdge: number;
+  /** Posterior probability that the true win rate beats break-even. */
+  posteriorEdgeProbability: number;
+  /** Probability of three future losses after the current recovery state. */
+  lossRunRisk: number;
+  /** Recent conditional win rate after a loss. */
+  recentAfterLoss: number;
   clustering: number;
   instability: number;
   score: number;
@@ -90,6 +97,16 @@ export function analyseHedgeCandidate(input: {
   const afterLoss = (lw + 1) / (ll + lw + 2);
   const afterWin = (ww + 1) / (wl + ww + 2);
   const markov = wins[n - 1] ? afterWin : afterLoss;
+  const recentStart = Math.max(0, n - Math.min(40, n));
+  let recentLossTransitions = 0;
+  let recentLossToWin = 0;
+  for (let i = Math.max(1, recentStart); i < n; i++) {
+    if (!wins[i - 1]) {
+      recentLossTransitions++;
+      if (wins[i]) recentLossToWin++;
+    }
+  }
+  const recentAfterLoss = (recentLossToWin + 1) / (recentLossTransitions + 2);
   const lossRate = 1 - probability;
   const clustering =
     losses >= HEDGE_LIMITS.minClusterLosses
@@ -99,14 +116,34 @@ export function analyseHedgeCandidate(input: {
   const recent = wins.slice(-half).filter(Boolean).length / half;
   const prior = wins.slice(0, half).filter(Boolean).length / half;
   const instability = Math.abs(recent - prior);
-  const conditionalEdge = (isRecovery ? afterLoss : markov) - breakEven;
-  const score =
+  // Blend long-run and recent after-loss behaviour. The recent component gets
+  // more influence when the tape is unstable, without imposing a hard pause.
+  const regimeWeight = Math.min(0.75, instability * 3);
+  const recoveryAfterLoss = afterLoss * (1 - regimeWeight) + recentAfterLoss * regimeWeight;
+  const conditionalEdge = (isRecovery ? recoveryAfterLoss : markov) - breakEven;
+  const posteriorEdge = posteriorEdgeProbability({
+    probability,
+    samples: n,
+    priorStrength: HEDGE_LIMITS.priorStrength,
+    breakEven,
+  });
+  const lossTransitionProbability = (ll + 1) / (ll + lw + 2);
+  const lossRunRisk = Math.min(1, (1 - recoveryAfterLoss) * Math.pow(lossTransitionProbability, 2));
+  const baseScore =
     100 *
     ((lowerBound - breakEven) * 0.5 +
       conditionalEdge * 0.22 +
       ev * 0.18 -
       instability * 0.18 -
       Math.max(0, clustering - 1) * 0.07);
+  // Recovery ranks candidates by both edge confidence and short loss-run risk.
+  // This is a continuous adjustment, not another entry gate.
+  const score = isRecovery
+    ? baseScore +
+      18 * (posteriorEdge - 0.5) -
+      18 * lossRunRisk -
+      8 * Math.sqrt(Math.max(0, probability * (1 - probability) / (n + HEDGE_LIMITS.priorStrength + 1)))
+    : baseScore;
   const eligible =
     n >= limits.minSamples &&
     ev > limits.minEv &&
@@ -124,6 +161,9 @@ export function analyseHedgeCandidate(input: {
     afterLoss,
     afterWin,
     conditionalEdge,
+    posteriorEdgeProbability: posteriorEdge,
+    lossRunRisk,
+    recentAfterLoss,
     clustering,
     instability,
     score,

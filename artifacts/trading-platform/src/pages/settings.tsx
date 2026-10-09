@@ -9,22 +9,11 @@ import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { DollarSign, Percent } from "lucide-react";
-import {
-  OVER_PAYOUTS,
-  UNDER_PAYOUTS,
-  EVEN_ODD_PAYOUT,
-  RISE_FALL_PAYOUT,
-  MATCH_PAYOUT,
-  DIFF_PAYOUT,
-  exactRecoveryStake,
-  roundRecoveryStakeUp,
-} from "@/lib/payouts";
 import { AutonomousContractSetEditor } from "@/components/autonomous-contract-set-editor";
 import {
   contractSetError,
   decodeContractSet,
   encodeContractSet,
-  firstDigitOf,
   type AutonomousContractSpec,
 } from "@/lib/autonomous-contracts";
 
@@ -189,36 +178,6 @@ export default function Settings() {
 
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
-  // UI examples use the canonical fallback schedule. At execution time the
-  // server asks Deriv for a live $1 proposal and only falls back to these values.
-  // Example barriers come from the sets: the first Over/Under in each set. A set
-  // with no Over or Under simply shows no example for that side.
-  const recoveryOverDigit = firstDigitOf(form.recoveryContracts, "DIGITOVER");
-  const recoveryUnderDigit = firstDigitOf(form.recoveryContracts, "DIGITUNDER");
-  const normalOverDigit = firstDigitOf(form.normalContracts, "DIGITOVER") ?? 1;
-  const normalUnderDigit = firstDigitOf(form.normalContracts, "DIGITUNDER") ?? 8;
-  const exampleBaseStake = form.riskAmountType === "percentage" && account
-    ? Math.max(0.35, Number(account.balance) * form.riskAmountValue / 100)
-    : Math.max(0.35, form.riskAmountValue);
-  const normalOverPayout = OVER_PAYOUTS[normalOverDigit] ?? OVER_PAYOUTS[1];
-  const normalUnderPayout = UNDER_PAYOUTS[normalUnderDigit] ?? UNDER_PAYOUTS[8];
-  const recoveryExamples = [
-    recoveryOverDigit === null ? null : {
-      side: `OVER ${recoveryOverDigit}`,
-      normal: `OVER ${normalOverDigit}`,
-      payout: OVER_PAYOUTS[recoveryOverDigit] ?? OVER_PAYOUTS[3],
-      target: exampleBaseStake * (normalOverPayout - 1),
-    },
-    recoveryUnderDigit === null ? null : {
-      side: `UNDER ${recoveryUnderDigit}`,
-      normal: `UNDER ${normalUnderDigit}`,
-      payout: UNDER_PAYOUTS[recoveryUnderDigit] ?? UNDER_PAYOUTS[6],
-      target: exampleBaseStake * (normalUnderPayout - 1),
-    },
-  ]
-    .filter((e): e is NonNullable<typeof e> => e !== null)
-    .map((e) => ({ ...e, instant: roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, e.target, e.payout)) }));
-
   return (
     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
       <div>
@@ -233,84 +192,64 @@ export default function Settings() {
         </div>
       )}
 
-      {/* Risk Profile */}
-      <Card className="bg-card">
+      {/* Risk and daily controls */}
+      <Card className="bg-card border-primary/15 shadow-[0_0_30px_hsl(var(--primary)/0.04)]">
         <CardHeader className="pb-2">
-          <CardTitle className="text-base">Risk Profile</CardTitle>
-          <CardDescription className="text-xs">Core risk configuration applied to all trades.</CardDescription>
+          <CardTitle className="text-base">Risk &amp; Daily Controls</CardTitle>
+          <CardDescription className="text-xs">Shape per-trade exposure and the automatic stop conditions from one control surface.</CardDescription>
         </CardHeader>
         <CardContent>
-          <SettingRow label="Profile Preset" description="Affects stake sizing multiplier.">
-            <Select value={form.riskProfile} onValueChange={(v) => set("riskProfile", v)}>
-              <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="conservative">Conservative</SelectItem>
-                <SelectItem value="moderate">Moderate</SelectItem>
-                <SelectItem value="aggressive">Aggressive</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingRow>
-          <SettingRow label="Risk Amount Type" description="Choose how you specify the amount to risk per trade.">
-            <div className="flex rounded-lg overflow-hidden border border-border">
-              <button
-                onClick={() => set("riskAmountType", "fixed")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "fixed" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}
-              >
-                <DollarSign className="w-3 h-3" /> Fixed $
-              </button>
-              <button
-                onClick={() => set("riskAmountType", "percentage")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "percentage" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}
-              >
-                <Percent className="w-3 h-3" /> % Balance
-              </button>
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 xl:gap-6">
+            <div className="rounded-xl border border-border/70 bg-secondary/10 px-4">
+              <div className="flex items-center gap-2 pt-3 pb-1">
+                <div className="h-1.5 w-1.5 rounded-full bg-primary shadow-[0_0_8px_hsl(var(--primary))]" />
+                <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Exposure</span>
+              </div>
+              <SettingRow label="Profile Preset" description="Affects stake sizing multiplier.">
+                <Select value={form.riskProfile} onValueChange={(v) => set("riskProfile", v)}>
+                  <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="conservative">Conservative</SelectItem>
+                    <SelectItem value="moderate">Moderate</SelectItem>
+                    <SelectItem value="aggressive">Aggressive</SelectItem>
+                  </SelectContent>
+                </Select>
+              </SettingRow>
+              <SettingRow label="Risk Amount Type" description="Choose a fixed amount or a percentage of balance.">
+                <div className="flex rounded-lg overflow-hidden border border-border">
+                  <button onClick={() => set("riskAmountType", "fixed")} className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "fixed" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}><DollarSign className="w-3 h-3" /> Fixed $</button>
+                  <button onClick={() => set("riskAmountType", "percentage")} className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "percentage" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}><Percent className="w-3 h-3" /> % Balance</button>
+                </div>
+              </SettingRow>
+              <SettingRow label={form.riskAmountType === "fixed" ? "Risk Amount" : "Risk Percentage"} description={form.riskAmountType === "fixed" ? "Fixed dollar amount to risk per trade." : "Percentage of current balance to risk per trade."}>
+                <NumInput value={form.riskAmountValue} onChange={(v) => set("riskAmountValue", v)} min={form.riskAmountType === "fixed" ? 0.35 : 0.1} max={form.riskAmountType === "fixed" ? 50000 : 50} step={form.riskAmountType === "fixed" ? 0.5 : 0.1} suffix={form.riskAmountType === "fixed" ? "$" : "%"} />
+              </SettingRow>
+              <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
+                <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
+              </SettingRow>
             </div>
-          </SettingRow>
-          <SettingRow
-            label={form.riskAmountType === "fixed" ? "Risk Amount" : "Risk Percentage"}
-            description={form.riskAmountType === "fixed" ? "Fixed dollar amount to risk per trade." : "Percentage of current balance to risk per trade."}
-          >
-            <NumInput
-              value={form.riskAmountValue}
-              onChange={(v) => set("riskAmountValue", v)}
-              min={form.riskAmountType === "fixed" ? 0.35 : 0.1}
-              max={form.riskAmountType === "fixed" ? 50000 : 50}
-              step={form.riskAmountType === "fixed" ? 0.5 : 0.1}
-              suffix={form.riskAmountType === "fixed" ? "$" : "%"}
-            />
-          </SettingRow>
-          <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
-            <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
-          </SettingRow>
-          {/* NOTE: the AI Bot Recovery Markup intentionally does NOT live here.
-              It is a bot-only setting, editable from the AI Bot section
-              (bot deploy console). The main autonomous engine and the NeuroAI
-              Quantum FAB use their own recovery logic. */}
-        </CardContent>
-      </Card>
-
-      {/* Daily Limits */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Daily Limits</CardTitle>
-          <CardDescription className="text-xs">Engine auto-stops when these are hit.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow label="Daily Profit Target" description="Stop once this daily profit is achieved.">
-            <NumInput value={form.dailyTarget} onChange={(v) => set("dailyTarget", v)} min={1} max={100000} step={1} suffix="$" />
-          </SettingRow>
-          <SettingRow label="Daily Loss Limit" description="Stop if total daily loss hits this.">
-            <NumInput value={form.dailyLossLimit} onChange={(v) => set("dailyLossLimit", v)} min={1} max={100000} step={1} suffix="$" />
-          </SettingRow>
-          <SettingRow label="Max Drawdown" description="Stop if portfolio drops by this %.">
-            <NumInput value={form.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} min={1} max={50} step={0.5} suffix="%" />
-          </SettingRow>
-          <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
-            <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
-          </SettingRow>
-          <SettingRow label="Cooldown Duration" description="Minutes before engine auto-resumes after a consecutive-loss stop.">
-            <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
-          </SettingRow>
+            <div className="rounded-xl border border-border/70 bg-secondary/10 px-4">
+              <div className="flex items-center gap-2 pt-3 pb-1">
+                <div className="h-1.5 w-1.5 rounded-full bg-amber-400 shadow-[0_0_8px_rgb(251_191_36)]" />
+                <span className="text-[10px] font-semibold uppercase tracking-[0.18em] text-amber-400">Daily guardrails</span>
+              </div>
+              <SettingRow label="Daily Profit Target" description="Stop once this daily profit is achieved.">
+                <NumInput value={form.dailyTarget} onChange={(v) => set("dailyTarget", v)} min={1} max={100000} step={1} suffix="$" />
+              </SettingRow>
+              <SettingRow label="Daily Loss Limit" description="Stop if total daily loss hits this.">
+                <NumInput value={form.dailyLossLimit} onChange={(v) => set("dailyLossLimit", v)} min={1} max={100000} step={1} suffix="$" />
+              </SettingRow>
+              <SettingRow label="Max Drawdown" description="Stop if portfolio drops by this %.">
+                <NumInput value={form.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} min={1} max={50} step={0.5} suffix="%" />
+              </SettingRow>
+              <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
+                <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
+              </SettingRow>
+              <SettingRow label="Cooldown Duration" description="Minutes before auto-resume after a loss-limit stop.">
+                <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
+              </SettingRow>
+            </div>
+          </div>
         </CardContent>
       </Card>
 
@@ -377,7 +316,7 @@ export default function Settings() {
                     className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors ${form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
                   >
                     <span className="font-semibold">Auto</span>
-                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>AI computes exact stake</span>
+                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>AI adapts stake to risk</span>
                   </button>
                   <button
                     onClick={() => set("recoveryAutoMode", false)}
@@ -442,61 +381,6 @@ export default function Settings() {
                 <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
               </SettingRow>
 
-              {/* Recovery calculation preview */}
-              <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
-                {form.recoveryAutoMode ? (
-                  <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Auto recovery — ${exampleBaseStake.toFixed(2)} normal-loss example</div>
-                    <div className="text-[10px] text-muted-foreground mb-3">
-                      Target profit comes from the original normal trade. Live payout is used at execution; the values below use the fallback schedule.
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {recoveryExamples.length === 0 && (
-                        <p className="text-[10px] text-muted-foreground sm:col-span-2">Add an Over or Under contract to the recovery set to see stake examples.</p>
-                      )}
-                      {recoveryExamples.map((example) => (
-                        <div key={example.side} className="rounded-lg bg-background/50 border border-border/60 p-2.5 space-y-1">
-                          <div className="flex justify-between text-[10px]">
-                            <span className="font-medium text-foreground">{example.side}</span>
-                            <span className="font-mono text-amber-400">{example.payout.toFixed(2)}× payout</span>
-                          </div>
-                          <p className="text-[9px] text-muted-foreground">
-                            ${exampleBaseStake.toFixed(2)} {example.normal} loss + ${example.target.toFixed(2)} original target
-                          </p>
-                          <div className="flex justify-between text-[10px] pt-1">
-                            <span>Instant exact</span>
-                            <span className="font-mono font-bold text-amber-300">${example.instant.toFixed(2)}</span>
-                          </div>
-                          <div className="flex justify-between text-[10px]">
-                            <span>Split next stake</span>
-                            <span className="font-mono font-bold text-amber-300">${Math.min(exampleBaseStake, example.instant).toFixed(2)} max</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-[9px] text-muted-foreground/60 mt-2">
-                      Deriv's $0.35 minimum and your Max Stake Per Trade remain hard execution limits.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Manual multiplier ladder (× base stake)</div>
-                    <div className="text-[10px] text-muted-foreground mb-2">
-                      No auto-calibration. The multiplier compounds after a recovery loss and freezes at Max Recovery Steps.
-                    </div>
-                    <div className="flex gap-3 flex-wrap">
-                      {Array.from({ length: form.maxRecoverySteps }, (_, i) => i + 1).map((step) => (
-                        <div key={step} className="text-center">
-                          <div className="text-[10px] text-muted-foreground">Step {step}</div>
-                          <div className="text-xs font-mono font-bold text-amber-400">
-                            {form.recoveryMethod === "split" ? "≤" : ""}×{Math.pow(form.recoveryMultiplier, step).toFixed(2)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
             </>
           )}
         </CardContent>
@@ -537,21 +421,6 @@ export default function Settings() {
             specs={form.recoveryContracts}
             onChange={(next) => set("recoveryContracts", next)}
           />
-          <div className="rounded-lg border border-border/60 bg-secondary/10 p-2.5">
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">$1 fallback payout reference</p>
-            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
-              {Object.entries(OVER_PAYOUTS).map(([digit, payout]) => (
-                <div key={digit} className="rounded bg-background/60 px-1.5 py-1 text-center">
-                  <div className="text-[9px] text-muted-foreground">O{digit} / U{9 - Number(digit)}</div>
-                  <div className="text-[10px] font-mono text-foreground">{payout.toFixed(2)}×</div>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
-            <p><strong className="text-foreground">Payout meaning:</strong> values are the total returned after a win, including the initial stake. Auto recovery uses only the net portion (payout − 1).</p>
-            <p>Other fallback payouts: Even/Odd <strong className="text-foreground">{EVEN_ODD_PAYOUT.toFixed(2)}×</strong> · Rise/Fall <strong className="text-foreground">{RISE_FALL_PAYOUT.toFixed(2)}×</strong> · Matches <strong className="text-foreground">{MATCH_PAYOUT.toFixed(2)}×</strong> · Differs <strong className="text-foreground">{DIFF_PAYOUT.toFixed(2)}×</strong>.</p>
-          </div>
         </CardContent>
       </Card>
 

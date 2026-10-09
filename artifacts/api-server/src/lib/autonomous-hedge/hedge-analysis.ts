@@ -16,6 +16,12 @@ import {
   DIFF_PAYOUT,
 } from "../payouts";
 import { HEDGE_LIMITS, HEDGE_MIN_TICKS } from "./constants";
+import {
+  posteriorEdgeProbability,
+  posteriorVariance,
+  recoveryRiskWeight,
+  threeLossRunRisk,
+} from "./recovery-risk";
 
 export type HedgeContractType =
   | "DIGITOVER"
@@ -46,6 +52,16 @@ export interface HedgeStats {
   afterLoss: number;
   afterWin: number;
   conditionalEdge: number;
+  /** Posterior probability that the true win rate beats break-even. */
+  posteriorEdgeProbability: number;
+  /** Probability of three future losses after the current recovery state (R_3L). */
+  lossRunRisk: number;
+  /** Conditional win rate after a loss over the recent window only. */
+  recentAfterLoss: number;
+  /** Long-run after-loss rate blended toward the recent window. */
+  recoveryAfterLoss: number;
+  /** Loss-streak weight applied to the recovery risk terms (1 when not escalating). */
+  riskWeight: number;
   clustering: number;
   instability: number;
   score: number;
@@ -53,17 +69,24 @@ export interface HedgeStats {
 }
 
 /**
- * Exact port of analyseNexusHedgeCandidate (hedge term fixed at 0, as in the
- * Nexus runtime, where phi/rho is never computed). `wins` is chronological:
- * index n-1 is the most recent outcome.
+ * Port of analyseNexusHedgeCandidate (hedge term fixed at 0, as in the Nexus
+ * runtime, where phi/rho is never computed), extended with the recovery risk
+ * model from docs/recovery-trade-mathematical-design.md. `wins` is
+ * chronological: index n-1 is the most recent outcome.
+ *
+ * `escalation` is how deep the account is into the current recovery episode
+ * (see recoveryEscalation). It only re-weights the two directional recovery risk
+ * terms in the score; it never changes `eligible` and never touches a stake.
  */
 export function analyseHedgeCandidate(input: {
   wins: boolean[];
   p0: number;
   payout: number;
   mode: HedgeMode;
+  escalation?: number;
 }): HedgeStats {
   const { wins, p0, payout, mode } = input;
+  const escalation = input.escalation ?? 0;
   const isRecovery = mode === "RECOVERY";
   const limits = isRecovery ? HEDGE_LIMITS.recovery : HEDGE_LIMITS.normal;
   const z = HEDGE_LIMITS.confidenceZ;
@@ -90,6 +113,19 @@ export function analyseHedgeCandidate(input: {
   const afterLoss = (lw + 1) / (ll + lw + 2);
   const afterWin = (ww + 1) / (wl + ww + 2);
   const markov = wins[n - 1] ? afterWin : afterLoss;
+  // Conditional win rate after a loss over the recent window only. Recovery
+  // weights this against the long-run estimate so a regime shift in after-loss
+  // behaviour moves the ranking without pausing the engine.
+  const recentStart = Math.max(0, n - Math.min(HEDGE_LIMITS.recentAfterLossWindow, n));
+  let recentLossTransitions = 0;
+  let recentLossToWin = 0;
+  for (let i = Math.max(1, recentStart); i < n; i++) {
+    if (!wins[i - 1]) {
+      recentLossTransitions++;
+      if (wins[i]) recentLossToWin++;
+    }
+  }
+  const recentAfterLoss = (recentLossToWin + 1) / (recentLossTransitions + 2);
   const lossRate = 1 - probability;
   const clustering =
     losses >= HEDGE_LIMITS.minClusterLosses
@@ -99,14 +135,41 @@ export function analyseHedgeCandidate(input: {
   const recent = wins.slice(-half).filter(Boolean).length / half;
   const prior = wins.slice(0, half).filter(Boolean).length / half;
   const instability = Math.abs(recent - prior);
-  const conditionalEdge = (isRecovery ? afterLoss : markov) - breakEven;
-  const score =
+  // Blend the long-run and recent after-loss estimates. The recent component
+  // gains influence as the two tape halves diverge — a soft regime adaptation,
+  // never a pause condition.
+  const regimeWeight = Math.min(HEDGE_LIMITS.regimeWeightCap, instability * 3);
+  const recoveryAfterLoss = afterLoss * (1 - regimeWeight) + recentAfterLoss * regimeWeight;
+  const conditionalEdge = (isRecovery ? recoveryAfterLoss : markov) - breakEven;
+  const posteriorEdge = posteriorEdgeProbability({
+    probability,
+    samples: n,
+    priorStrength: HEDGE_LIMITS.priorStrength,
+    breakEven,
+  });
+  // q_L→L from the same first-order counts, and R_3L = (1 − q_L→W)·q_L→L².
+  const lossToLoss = (ll + 1) / (ll + lw + 2);
+  const lossRunRisk = threeLossRunRisk({ afterLossWin: recoveryAfterLoss, lossToLoss });
+  const baseScore =
     100 *
     ((lowerBound - breakEven) * 0.5 +
       conditionalEdge * 0.22 +
       ev * 0.18 -
       instability * 0.18 -
       Math.max(0, clustering - 1) * 0.07);
+  // Recovery ranks by edge confidence AND near-term loss-run risk:
+  //   S_R = S_0 + 18w·(P(p>p_BE|D) − 0.5) − 18w·R_3L − 8·√Var(p)
+  // `w` is the bounded loss-streak weight (1 outside a run). These are ranking
+  // weights, not probabilities, and they stay small enough that the EV,
+  // confidence-interval, instability and clustering terms remain influential.
+  // Staking is untouched — cycle.ts still calls getDynamicRecoveryStake.
+  const riskWeight = isRecovery ? recoveryRiskWeight(escalation) : 1;
+  const score = isRecovery
+    ? baseScore +
+      18 * riskWeight * (posteriorEdge - 0.5) -
+      18 * riskWeight * lossRunRisk -
+      8 * Math.sqrt(posteriorVariance(probability, n, HEDGE_LIMITS.priorStrength))
+    : baseScore;
   const eligible =
     n >= limits.minSamples &&
     ev > limits.minEv &&
@@ -124,6 +187,11 @@ export function analyseHedgeCandidate(input: {
     afterLoss,
     afterWin,
     conditionalEdge,
+    posteriorEdgeProbability: posteriorEdge,
+    lossRunRisk,
+    recentAfterLoss,
+    recoveryAfterLoss,
+    riskWeight,
     clustering,
     instability,
     score,
@@ -232,15 +300,17 @@ export function buildMarketCandidates(input: {
   tickSequence: number;
   specs: HedgeFamilySpec[];
   mode: HedgeMode;
+  /** Recovery-episode depth; re-weights the recovery risk terms only. */
+  escalation?: number;
 }): HedgeCandidate[] {
-  const { symbol, group, digits, prices, tickSequence, specs, mode } = input;
+  const { symbol, group, digits, prices, tickSequence, specs, mode, escalation } = input;
   if (digits.length < HEDGE_MIN_TICKS || prices.length !== digits.length) return [];
   const rows: HedgeCandidate[] = [];
   for (const spec of specs) {
     const stream = hedgeWinStream(spec, digits, prices);
     if (!stream) continue;
     const payout = hedgePayout(spec.type, stream.barrier);
-    const stats = analyseHedgeCandidate({ wins: stream.wins, p0: stream.p0, payout, mode });
+    const stats = analyseHedgeCandidate({ wins: stream.wins, p0: stream.p0, payout, mode, escalation });
     rows.push({
       ...stats,
       symbol,

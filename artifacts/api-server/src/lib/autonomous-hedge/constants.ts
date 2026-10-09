@@ -28,6 +28,10 @@ export const HEDGE_LIMITS = Object.freeze({
   priorStrength: 20,
   confidenceZ: 1.282,
   minClusterLosses: 10,
+  /** Ticks in the recent window used for the after-loss conditional estimate. */
+  recentAfterLossWindow: 40,
+  /** Ceiling on how strongly the recent window may outvote the long-run estimate. */
+  regimeWeightCap: 0.75,
   /** Fresh distinct ticks the same best candidate must hold before a RECOVERY fires. */
   recoveryConfirmations: 2,
   /** Confirmations escalate to this value once the consecutive loss run is ≥ 3. */
@@ -50,6 +54,15 @@ export const HEDGE_LIMITS = Object.freeze({
     lowerBoundMargin: 0.05,
     maxInstability: Infinity,
     maxClustering: 1.6,
+    /**
+     * Loss-streak response of the recovery RANKING (never of a stake). At
+     * escalation 0 the two directional risk terms keep their design-document
+     * weight of 18; at `escalationCap` they are 1 + riskWeightMax times heavier,
+     * which widens the gap between well-evidenced and weakly-evidenced recovery
+     * candidates as a loss run deepens.
+     */
+    riskWeightMax: 0.5,
+    escalationCap: 6,
   }),
 });
 

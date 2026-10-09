@@ -16,6 +16,11 @@ export interface HedgeRecoverySnapshot {
   inRecovery: boolean;
   step: number;
   debt: number;
+  /**
+   * Depth of the current recovery episode: max(consecutive loss run, recovery
+   * step). Drives the bounded loss-streak weight on the recovery risk terms.
+   */
+  escalation: number;
 }
 
 export interface HedgeRiskSnapshot {

@@ -16,6 +16,22 @@ function edgeWins(n: number): boolean[] {
   return Array.from({ length: n }, (_, i) => i % 5 !== 4);
 }
 
+/** Period-4 pattern: losses are isolated, so loss→loss transitions are absent. */
+function isolatedLossWins(n: number): boolean[] {
+  return Array.from({ length: n }, (_, i) => i % 4 !== 3);
+}
+
+/** Period-10 pattern with three losses in a row: losses cluster. */
+function clusteredLossWins(n: number): boolean[] {
+  return Array.from({ length: n }, (_, i) => i % 10 < 7);
+}
+
+/** A flat hit rate of `rate` over `n` ticks, spread evenly. */
+function rateWins(n: number, rate: number): boolean[] {
+  const hits = Math.round(n * rate);
+  return Array.from({ length: n }, (_, i) => i < hits);
+}
+
 describe("autonomous hedge analysis", () => {
   it("pays the canonical table values per family", () => {
     assert.equal(hedgePayout("DIGITOVER", 4), OVER_PAYOUTS[4]);
@@ -80,6 +96,55 @@ describe("autonomous hedge analysis", () => {
     const wins = edgeWins(HEDGE_LIMITS.recovery.minSamples + 5);
     const recovery = analyseHedgeCandidate({ wins, p0: 0.5, payout: 1.9, mode: "RECOVERY" });
     assert.equal(recovery.eligible, true);
+  });
+
+  it("reports the posterior edge probability and the three-loss stress indicator", () => {
+    const stats = analyseHedgeCandidate({ wins: edgeWins(120), p0: 0.5, payout: 1.9, mode: "RECOVERY" });
+    assert.ok(stats.posteriorEdgeProbability > 0.5, "a strong tape is more likely than not to beat break-even");
+    assert.ok(stats.lossRunRisk >= 0 && stats.lossRunRisk <= 1);
+    assert.ok(stats.recentAfterLoss > 0 && stats.recentAfterLoss < 1);
+    assert.equal(stats.riskWeight, 1, "no escalation means the design-document weights");
+  });
+
+  it("does not rank a 55% win rate on 20 samples like the same rate on 2,000", () => {
+    const thin = analyseHedgeCandidate({ wins: rateWins(20, 0.55), p0: 0.5, payout: 1.9, mode: "RECOVERY" });
+    const deep = analyseHedgeCandidate({ wins: rateWins(2000, 0.55), p0: 0.5, payout: 1.9, mode: "RECOVERY" });
+    assert.ok(
+      deep.posteriorEdgeProbability > thin.posteriorEdgeProbability,
+      "posterior uncertainty must discount a small recovery sample",
+    );
+  });
+
+  it("penalises recovery candidates with clustered future losses", () => {
+    const stable = analyseHedgeCandidate({ wins: isolatedLossWins(120), p0: 0.5, payout: 1.9, mode: "RECOVERY" });
+    const clustered = analyseHedgeCandidate({ wins: clusteredLossWins(120), p0: 0.5, payout: 1.9, mode: "RECOVERY" });
+    assert.ok(clustered.lossRunRisk > stable.lossRunRisk, "R3L must rise when losses follow losses");
+    assert.ok(clustered.score < stable.score, "the stress indicator must lower the recovery score");
+  });
+
+  it("widens the recovery gap as the loss run deepens, without moving eligibility", () => {
+    const strong = edgeWins(120);
+    const clustered = clusteredLossWins(120);
+    const analyse = (wins: boolean[], escalation: number) =>
+      analyseHedgeCandidate({ wins, p0: 0.5, payout: 1.9, mode: "RECOVERY", escalation });
+
+    const calmGap = analyse(strong, 0).score - analyse(clustered, 0).score;
+    const deepGap = analyse(strong, 6).score - analyse(clustered, 6).score;
+    assert.ok(deepGap > calmGap, "a deeper run must separate the well-evidenced candidate further");
+    assert.equal(analyse(strong, 6).riskWeight, 1 + HEDGE_LIMITS.recovery.riskWeightMax);
+    assert.equal(
+      analyse(strong, 99).riskWeight,
+      1 + HEDGE_LIMITS.recovery.riskWeightMax,
+      "the weight is bounded at the escalation cap",
+    );
+    assert.equal(analyse(strong, 6).eligible, analyse(strong, 0).eligible, "escalation re-ranks, it never gates");
+  });
+
+  it("leaves the normal-mode score untouched by the loss run", () => {
+    const calm = analyseHedgeCandidate({ wins: edgeWins(120), p0: 0.5, payout: 1.9, mode: "NORMAL", escalation: 0 });
+    const deep = analyseHedgeCandidate({ wins: edgeWins(120), p0: 0.5, payout: 1.9, mode: "NORMAL", escalation: 6 });
+    assert.equal(calm.score, deep.score, "normal ranking keeps the pre-existing base score");
+    assert.equal(deep.riskWeight, 1);
   });
 
   it("builds candidate rows with stable keys and a per-tick identity", () => {

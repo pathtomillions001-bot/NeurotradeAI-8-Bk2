@@ -9,7 +9,7 @@
  * same browser or the same Google account.
  *
  * Root cause of the "normal/recovery mix-up" incident (within ONE account):
- * the main autonomous engine (`runAutonomousLoop` in routes/ai.ts) and the
+ * the main autonomous engine (the 1-tick cycle in lib/autonomous-hedge/cycle.ts, hosted by routes/ai.ts) and the
  * NeuroAI FAB engine (`runLoop` in lib/speed-ai-engine.ts) could trade the
  * same Deriv account simultaneously while each tracked its own private
  * recovery state. Every win or loss was only visible to the engine that placed

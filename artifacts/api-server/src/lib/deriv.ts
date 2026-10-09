@@ -3151,6 +3151,18 @@ export function isRetryableDerivError(msg: any): boolean {
 
 // ── Live trade execution via OTP WebSocket ────────────────────────────────────
 /**
+ * Thrown when a buy was sent but Deriv's reply is missing or malformed, so the
+ * contract may or may not exist. Callers must keep the exposure open and resolve
+ * it from the broker's records, never mark the trade as not placed.
+ */
+export class TradeOutcomeUnknownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TradeOutcomeUnknownError";
+  }
+}
+
+/**
  * Execute a live trade using the new OTP-authenticated WebSocket flow:
  *  1. POST /accounts/{accountId}/otp → OTP WS URL
  *  2. Connect to OTP URL (no authorize message)
@@ -3234,13 +3246,19 @@ export async function executeLiveTrade(
   const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
   logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
 
+  // Once the buy has been SENT, a missing or malformed reply means the purchase
+  // may still have happened. That is a different outcome from a rejection, so it
+  // is raised as TradeOutcomeUnknownError and the caller must not treat the trade
+  // as never placed.
+  // A rejected request promise means the message was never sent (no connection
+  // or send failure), so it propagates unchanged as a definite "not placed".
   const buyMsg = await accountRequest(
     bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
   );
-  if (!buyMsg) throw new Error("Trade execution timeout — Deriv did not confirm the purchase.");
+  if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");
   if (buyMsg.error) throw new Error(buyMsg.error.message ?? "Trade rejected by Deriv");
   if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
-    throw new Error("Deriv returned an unexpected response to the buy request.");
+    throw new TradeOutcomeUnknownError("Deriv returned an unexpected response to the buy request.");
   }
 
   return {
@@ -3252,24 +3270,52 @@ export async function executeLiveTrade(
 }
 
 // ── Profit table fetch via OTP WebSocket ──────────────────────────────────────
+/** Open contracts on the account (portfolio). Empty on any failure. */
+export async function fetchDerivPortfolioContracts(
+  bearerToken: string,
+  accountId: string,
+): Promise<any[]> {
+  if (!bearerToken || !accountId) return [];
+  try {
+    const msg = await accountRequest(bearerToken, accountId, { portfolio: 1 }, 10_000);
+    if (!msg || msg.error) return [];
+    return msg.portfolio?.contracts ?? [];
+  } catch (err) {
+    logger.warn({ err }, "fetchDerivPortfolioContracts failed");
+    return [];
+  }
+}
+
 export async function fetchDerivProfitTable(
   bearerToken: string,
   accountId: string,
   limit = 50,
+  options: {
+    /** Unix seconds: only transactions bought/settled at or after this time. */
+    dateFrom?: number;
+    /**
+     * Throw instead of returning [] when Deriv errors or does not answer. Used
+     * where an empty list must not be read as "no such trade" (ledger release).
+     */
+    strict?: boolean;
+  } = {},
 ): Promise<any[]> {
   if (!bearerToken || !accountId) {
+    if (options.strict) throw new Error("fetchDerivProfitTable: no Bearer token or accountId");
     logger.warn("fetchDerivProfitTable: no Bearer token or accountId — returning empty");
     return [];
   }
+  const request: Record<string, unknown> = { profit_table: 1, description: 1, sort: "DESC", limit };
+  if (options.dateFrom && options.dateFrom > 0) request.date_from = Math.floor(options.dateFrom);
   try {
-    const msg = await accountRequest(
-      bearerToken, accountId,
-      { profit_table: 1, description: 1, sort: "DESC", limit },
-      15_000,
-    );
-    if (!msg || msg.error) return [];
+    const msg = await accountRequest(bearerToken, accountId, request, 15_000);
+    if (!msg || msg.error) {
+      if (options.strict) throw new Error(`profit_table unavailable: ${msg?.error?.message ?? "no response"}`);
+      return [];
+    }
     return msg.profit_table?.transactions ?? [];
   } catch (err) {
+    if (options.strict) throw err;
     logger.warn({ err }, "fetchDerivProfitTable failed");
     return [];
   }

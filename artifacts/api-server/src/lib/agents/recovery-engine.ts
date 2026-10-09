@@ -256,6 +256,30 @@ async function persistToDb(): Promise<void> {
   }
 }
 
+/**
+ * Durably write the CURRENT state and report whether this snapshot was written.
+ * Resolves false when it failed or was superseded by a newer write. Used by the
+ * autonomous ledger so a settlement is marked settled in the DB only after the
+ * recovery debt that includes it has been persisted. Bots keep the fire-and-forget path.
+ */
+export async function flushRecoveryState(): Promise<boolean> {
+  const snapshot = JSON.stringify(state);
+  const sessionId = activeSessionId();
+  const generation = (persistGenerationBySession.get(sessionId) ?? 0) + 1;
+  persistGenerationBySession.set(sessionId, generation);
+  try {
+    const { db, settingsTable } = await import("@workspace/db");
+    const { eq } = await import("drizzle-orm");
+    if (generation !== persistGenerationBySession.get(sessionId)) return false;
+    await db.update(settingsTable)
+      .set({ recoveryStateJson: snapshot, updatedAt: new Date() })
+      .where(eq(settingsTable.sessionId, sessionId));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /** Contract types the recovery engine tracks outcomes for. */

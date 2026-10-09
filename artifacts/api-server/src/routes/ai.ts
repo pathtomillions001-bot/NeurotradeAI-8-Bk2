@@ -2,17 +2,16 @@ import { Router } from "express";
 import { db } from "@workspace/db";
 import { aiInsightsTable, tradesTable, settingsTable, accountsTable } from "@workspace/db";
 import { and, sql, desc, eq } from "drizzle-orm";
-import { tickManager, DERIV_MARKETS, AUTOMATED_DERIV_MARKETS, executeLiveTrade, waitForContractResult, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
-import { resolveRecoveryPayout } from "../lib/recovery-payout";
+import { tickManager, AUTOMATED_DERIV_MARKETS, getLiveBalance, getMarketInfo, analyzeDigits, analyzeTrend, analyzeEvenOdd, getJournalManager, isAutomatedMarket } from "../lib/deriv";
 import { ToggleAutonomousEngineBody } from "@workspace/api-zod";
 import { logger } from "../lib/logger";
-import { runCoordinator, buildLegacyAnalysis, recordTradeOutcome } from "../lib/agent-coordinator";
+import { runCoordinator, buildLegacyAnalysis } from "../lib/agent-coordinator";
+import { requestHedgeCycle, resetHedgeSession, type HedgeContext, type HedgeHost, type HedgePublish } from "../lib/autonomous-hedge/cycle";
+import { normalizePreferredTypes } from "../lib/autonomous-hedge/families";
 import type { TradingSettings, DailyStats, ScanContext } from "../lib/agents/types";
-import { computeStake } from "../lib/agents/ev-calculator";
 import * as recoveryEngine from "../lib/agents/recovery-engine";
-import { recordLossForPattern, clearLossPattern } from "../lib/agents/recovery-intelligence";
-import { analyzeCompletedTrade, getRecentReports, getIntelligenceSummary } from "../lib/agents/trade-intelligence";
-import { trackRejectedTrade, getMissedOpportunitySummary, getRecentMissed } from "../lib/agents/missed-opportunity";
+import { getRecentReports, getIntelligenceSummary } from "../lib/agents/trade-intelligence";
+import { getMissedOpportunitySummary, getRecentMissed } from "../lib/agents/missed-opportunity";
 import { getStatus as getDynamicConfidenceStatus, loadFromDb as loadDynamicConfidence } from "../lib/agents/dynamic-confidence";
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 import { runWithSession } from "../lib/session";
@@ -53,8 +52,6 @@ export function forceDayReset(broadcast = true, sessionId?: string): void {
   for (const engine of targets) {
     engine.tradesExecutedToday = 0;
     engine.sessionLossCount = 0;
-    engine.lastTradeCompletedAt = null;
-    engine.recentTradesBySymbol.clear();
     if (engine.cooldownResumeTimer) { clearTimeout(engine.cooldownResumeTimer); engine.cooldownResumeTimer = null; }
     engine.cooldownUntil = null;
 
@@ -158,30 +155,17 @@ interface EngineInstance {
   mode: string;
   tradesExecutedToday: number;
   currentMarket: string | null;
+  /** Always null: the engine is tick-driven, there is no scan countdown. */
   nextScanIn: number | null;
   stopReasons: string[];
-  timer: ReturnType<typeof setTimeout> | null;
   loopIntervalSec: number;
   lastTradeTime: Date | null;
-  /** Concurrency guard — prevents two loop iterations of THIS engine running simultaneously */
-  isLoopRunning: boolean;
   cooldownUntil: Date | null;
   cooldownResumeTimer: ReturnType<typeof setTimeout> | null;
-  /** Consecutive loss counter — increments on each loss; resets to 0 on any win; full reset on cooldown expiry */
+  /** Consecutive-loss streak, mirrored from the recovery ledger. */
   sessionLossCount: number;
-  exploitSymbol: string | null;
-  exploitCount: number;
-  exploitQualityThreshold: number;
-  /** Real-time agent scores (updated each scan) */
+  /** Agent scores from the last cycle, keyed by agentId. */
   lastAgentScores: Record<string, number>;
-  /** Family rotation hint — which contract family to prefer on the NEXT scan */
-  scheduledFamilyHint: string | null;
-  /** Per-symbol trade cooldown — max executions on one pair within SAME_SYMBOL_COOLDOWN_MS */
-  recentTradesBySymbol: Map<string, Date[]>;
-  /** Per-group scan cursors (0=V1s, 1=V, 2=Jump, 3=Bull/Bear) */
-  groupCursors: number[];
-  /** Prevents an immediate second scan while a trade is still being journalled */
-  lastTradeCompletedAt: Date | null;
 }
 
 const enginesBySession = new Map<string, EngineInstance>();
@@ -197,51 +181,32 @@ function getEngine(sessionId: string): EngineInstance {
       currentMarket: null,
       nextScanIn: null,
       stopReasons: [],
-      timer: null,
       loopIntervalSec: 5,
       lastTradeTime: null,
-      isLoopRunning: false,
       cooldownUntil: null,
       cooldownResumeTimer: null,
       sessionLossCount: 0,
-      exploitSymbol: null,
-      exploitCount: 0,
-      exploitQualityThreshold: 0,
       lastAgentScores: {},
-      scheduledFamilyHint: null,
-      recentTradesBySymbol: new Map(),
-      groupCursors: [0, 0, 0, 0],
-      lastTradeCompletedAt: null,
     };
     enginesBySession.set(sessionId, engine);
   }
   return engine;
 }
 
-const MAX_TRADES_SAME_SYMBOL = 2;
-const SAME_SYMBOL_COOLDOWN_MS = 8 * 60 * 1000; // 8 minutes
-
-// Stale open-trade threshold — shared between normal path and recovery fast path
-const STALE_OPEN_MS = 2 * 60 * 1000; // 2 minutes
-
-// Groups: 0=Volatility 1s (1HZ*), 1=Volatility (R_*), 2=Jump (JD*), 3=Bull/Bear
-const GROUP_NAMES = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
-
-// 13-agent system names and score keys
+// The autonomous engine runs 14 agents (lib/autonomous-hedge/agents). Names and
+// score keys are paired by index; keys are the agentIds those agents report.
 const AGENT_NAMES = [
-  "Market Scanner", "Tick Intelligence", "Digit Probability",
-  "Rise/Fall Model", "Market Regime", "Execution Timing",
-  "Confidence Fusion", "Recovery Intelligence", "Risk Intelligence",
-  "Portfolio Manager", "Learning Agent", "Pattern Discovery",
-  "Trade Explainability",
+  "Market Scanner", "Tick Intelligence", "Digit Probability", "Rise/Fall Model",
+  "Market Regime", "Execution Timing", "Confidence Fusion", "Recovery Intelligence",
+  "Duration Optimizer", "Portfolio Manager", "Risk Intelligence", "Learning Agent",
+  "Pattern Discovery", "Trade Explainability",
 ];
 
 const AGENT_SCORE_KEYS = [
-  "marketScanner", "tickIntelligence", "digitProbability",
-  "riseFallAgent", "marketRegime", "executionTiming",
-  "confidenceFusion", "recoveryIntelligence", "riskIntelligence",
-  "portfolioManager", "learningAgent", "patternDiscovery",
-  "tradeExplainability",
+  "marketScanner", "tickIntelligence", "digitProbability", "riseFallAgent",
+  "marketRegime", "executionTiming", "confidenceFusion", "recoveryIntelligence",
+  "durationOptimizer", "portfolioManager", "riskIntelligence", "learningAgent",
+  "patternDiscovery", "tradeExplainability",
 ];
 
 // ── Settings builders ─────────────────────────────────────────────────────────
@@ -365,6 +330,9 @@ const lastTickTime = new Map<string, number>();
 tickManager.on("tick", (tick) => {
   broadcastSSE("tick", tick);
   lastTickTime.set(tick.symbol, Date.now());
+  // The autonomous engine is tick-driven: every live tick of a watched market
+  // triggers a coalesced 1-tick cycle for each running engine.
+  dispatchHedgeTick(tick.symbol);
   const market = getMarketInfo(tick.symbol);
   if (market && isAutomatedMarket(tick.symbol)) {
     const prices = tickManager.getTicks(tick.symbol, 100);
@@ -439,34 +407,28 @@ function startEngineFor(sessionId: string, settingsRow?: typeof settingsTable.$i
   engine.running = true;
   engine.mode = "autonomous";
   engine.stopReasons = [];
-  engine.nextScanIn = engine.loopIntervalSec;
-  engine.exploitSymbol = null;
-  engine.exploitCount = 0;
-  engine.groupCursors.fill(0);
-  if (engine.timer) { clearTimeout(engine.timer); engine.timer = null; }
-  engine.timer = setTimeout(() => runAutonomousLoop(engine), 2000);
+  engine.nextScanIn = null;
+  // A fresh start rescans from empty memory, exactly like a restarted bot.
+  resetHedgeSession(sessionId);
   logger.info(
     { sessionId, loopIntervalSec: engine.loopIntervalSec },
     settingsRow
       ? "Autonomous engine auto-resumed for its account session after restart"
       : "Autonomous engine started",
   );
+  // Tick-driven: evaluate now; every later live tick re-evaluates.
+  requestHedgeCycle(hedgeHostFor(engine));
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
 function stopEngine(engine: EngineInstance, reason: string, cooldownMinutes?: number) {
   engine.running = false;
   engine.mode = "manual";
   engine.stopReasons = [reason];
   engine.currentMarket = null;
   engine.nextScanIn = null;
-  engine.exploitSymbol = null;
-  engine.exploitCount = 0;
-  engine.isLoopRunning = false;
-  if (engine.timer) { clearTimeout(engine.timer); engine.timer = null; }
   // Give up trading ownership (scoped to THIS account session) so another
   // engine on the same account (NeuroAI FAB) may execute while this one is
-  // stopped. Ownership is re-acquired atomically at loop start, so a cooldown
+  // stopped. Ownership is re-acquired before any trade, so a cooldown
   // auto-resume can never race a FAB session that started meanwhile.
   releaseTradingOwnership("autonomous", engine.sessionId);
 
@@ -491,13 +453,11 @@ function stopEngine(engine: EngineInstance, reason: string, cooldownMinutes?: nu
       engine.running = true;
       engine.mode = "autonomous";
       engine.stopReasons = [];
-      engine.nextScanIn = engine.loopIntervalSec;
-      engine.exploitSymbol = null;
-      engine.exploitCount = 0;
+      engine.nextScanIn = null;
       logger.info({ sessionId: engine.sessionId }, "Cooldown expired — autonomous engine auto-resuming, session loss count reset");
       broadcastEngineSSE(engine, "engine_started", { reason: "cooldown_expired" });
       broadcastEngineSSE(engine, "loss_streak_reset", { sessionLossCount: 0 });
-      engine.timer = setTimeout(() => runAutonomousLoop(engine), 1000);
+      requestHedgeCycle(hedgeHostFor(engine));
     }, cooldownMinutes * 60 * 1000);
     logger.info({ sessionId: engine.sessionId, reason, cooldownMinutes }, "Engine stopped with cooldown");
   } else {
@@ -531,953 +491,112 @@ async function syncLiveBalance(
   } catch { /* ignore */ }
 }
 
-// ── Autonomous loop ───────────────────────────────────────────────────────────
-function runAutonomousLoop(engine: EngineInstance): void {
-  // Bind this engine's account session into AsyncLocalStorage so everything
-  // inside the loop (recovery-engine persistence, the trading arbiter, journal
-  // helpers) resolves THIS account's session — never another account's, even
-  // when several engines run concurrently in this process.
-  runWithSession(engine.sessionId, () => { void runAutonomousLoopBody(engine); });
+// ── Autonomous engine host (tick-driven 1-tick cycle) ─────────────────────────
+//
+// The cycle itself lives in lib/autonomous-hedge/cycle.ts. This section binds
+// one engine instance (one account session) to it: loads the account context,
+// keeps the engine's status fields current, and enforces the single-executor
+// rule. Nothing here analyses markets or sizes trades.
+
+function dispatchHedgeTick(symbol: string): void {
+  if (!isAutomatedMarket(symbol)) return;
+  for (const engine of enginesBySession.values()) {
+    if (engine.running) requestHedgeCycle(hedgeHostFor(engine));
+  }
 }
 
-async function runAutonomousLoopBody(engine: EngineInstance): Promise<void> {
-  if (!engine.running) return;
-  // Prevent concurrent iterations — if a previous loop is still running, skip
-  if (engine.isLoopRunning) {
-    logger.warn("Autonomous loop: previous iteration still running — skipping this tick");
-    scheduleNext(engine, false);
-    return;
-  }
-
-  // ── Single-executor guard ───────────────────────────────────────────────────
-  // One account = one recovery ledger = one executing engine. If the NeuroAI
-  // FAB session owns execution right now, this engine must NOT trade — two
-  // engines sizing recovery stakes off the same account was the root cause of
-  // the "normal trade while in recovery / recovery trade after recovering" bug.
-  if (!acquireTradingOwnership("autonomous", engine.sessionId)) {
-    const owner = currentTradingOwner();
-    logger.warn({ owner }, "Autonomous loop cannot trade — another engine owns execution; stopping to protect the shared recovery ledger");
-    stopEngine(engine, 
-      `Stopped: the ${owner ? tradingOwnerLabel(owner) : "other engine"} is trading this account. One recovery ledger = one trading engine at a time — stop that engine before restarting this one.`,
-    );
-    return;
-  }
-
-  engine.isLoopRunning = true;
-
-  try {
-    const sessionId = engine.sessionId;
-    if (!sessionId) {
-      stopEngine(engine, "Autonomous engine lost its browser-session owner");
-      return;
-    }
-    recoveryEngine.setPersistenceSession(sessionId);
-    const { balance, settings, account } = await getAccountAndSettings(sessionId);
-    const token = account?.bearerToken ?? account?.token ?? null;
-    const derivAccountId = account?.derivAccountId ?? account?.loginId ?? null;
-    const journalManager = getJournalManager(sessionId);
-    if (token && derivAccountId) journalManager.setCredentials(token, derivAccountId);
-
-    const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
-    // Normalize: accept both CALL/PUT and RISE/FALL, unify to CALL/PUT
-    const preferredContractTypes = rawPreferred.map(t => t === "RISE" ? "CALL" : t === "FALL" ? "PUT" : t).filter((v, i, a) => a.indexOf(v) === i);
-    const tradingSettings = buildTradingSettings(settings, preferredContractTypes);
-    const marketRotationAfter = settings?.marketRotationAfter ?? 5;
-    const paperTradeMode = tradingSettings.paperTradeMode;
-
-    // ── Over/Under digit barriers — settings-driven, no hardcoded fallback ────
-    // Recovery is a single global state now: whenever it's active, EVERY Over/Under
-    // scan uses the user-configured recovery pair; otherwise the normal pair.
-    // Computed once per loop iteration since recovery state doesn't change mid-scan.
-    const activeBarrierOverride: { DIGITOVER: number; DIGITUNDER: number } = recoveryEngine.isInRecovery()
-      ? { DIGITOVER: tradingSettings.recoveryOverDigit, DIGITUNDER: tradingSettings.recoveryUnderDigit }
-      : { DIGITOVER: tradingSettings.normalOverDigit, DIGITUNDER: tradingSettings.normalUnderDigit };
-
-    const allowedMarketSymbols: string[] | null =
-      (settings as any)?.allowedMarkets
-        ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
-        : null;
-    const availableMarkets = allowedMarketSymbols && allowedMarketSymbols.length > 0
-      ? AUTOMATED_DERIV_MARKETS.filter((m) => allowedMarketSymbols.includes(m.symbol))
-      : AUTOMATED_DERIV_MARKETS;
-
-    if (settings?.loopIntervalSec) engine.loopIntervalSec = settings.loopIntervalSec;
-
-    // Daily stats — shared day boundary with /api/trades/deriv-journal and
-    // /api/trades/daily-summary so the engine's own hard-stop checks below use
-    // the exact same "today" window the dashboards display.
-    const today = getTodayStart();
-    const todayTrades = await db.select().from(tradesTable).where(and(
-      eq(tradesTable.sessionId, sessionId),
-      sql`${tradesTable.createdAt} >= ${today}`,
-    ));
-    const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
-    engine.tradesExecutedToday = closedToday.length;
-
-    // ── Ground-truth consecutive-loss and daily P&L ──────────────────────────
-    // Consecutive losses: ALWAYS use local DB (written immediately when trades settle,
-    // before scheduleNext fires — always current). The Deriv profit_table can lag
-    // 15–60 s after forceRefresh, which caused missed cooldown triggers. Unknown-outcome
-    // failures are marked "error" (not "lost"), so local DB "lost" records are reliable.
-    // Daily P&L: prefer Deriv journal (authoritative net profit), fall back to local DB.
-    const derivTxns = token ? journalManager.getCached() : [];
-    const todayMidnightSec = today.getTime() / 1000; // Deriv uses Unix seconds
-    const derivTodayTxns = derivTxns.filter(
-      (t: any) => Number(t.sell_time ?? t.purchase_time ?? 0) >= todayMidnightSec,
-    );
-
-    let resolvedDailyProfit: number;
-
-    // ── Daily P&L — prefer Deriv journal (authoritative net P&L), fall back to DB ──
-    // The Deriv profit_table has the correct net profit including payout multipliers.
-    // Local DB profit fields are set from Deriv's contractResult.profit on live trades
-    // so they should match, but the journal is used as a secondary accuracy check.
-    if (derivTodayTxns.length > 0) {
-      resolvedDailyProfit = derivTodayTxns.reduce(
-        (s: number, t: any) => s + Number(t.profit ?? 0), 0,
+function hedgeHostFor(engine: EngineInstance): HedgeHost {
+  return {
+    sessionId: engine.sessionId,
+    isRunning: () => engine.running,
+    canExecute: () => {
+      if (acquireTradingOwnership("autonomous", engine.sessionId)) return true;
+      // ── Single-executor guard ─────────────────────────────────────────────
+      // One account = one recovery ledger = one executing engine. If the NeuroAI
+      // FAB session owns execution right now, this engine must NOT trade.
+      const owner = currentTradingOwner(engine.sessionId);
+      logger.warn({ owner }, "Autonomous engine cannot trade — another engine owns execution; stopping to protect the shared recovery ledger");
+      stopEngine(engine,
+        `Stopped: the ${owner ? tradingOwnerLabel(owner) : "other engine"} is trading this account. One recovery ledger = one trading engine at a time — stop that engine before restarting this one.`,
       );
-    } else {
-      resolvedDailyProfit = closedToday.reduce((s, t) => s + Number(t.profit ?? 0), 0);
-    }
+      return false;
+    },
+    stop: (reason: string, cooldownMinutes?: number) => stopEngine(engine, reason, cooldownMinutes),
+    emit: (event: string, data: Record<string, unknown>) => broadcastEngineSSE(engine, event, data),
+    publish: (patch: HedgePublish) => {
+      if (patch.currentMarket !== undefined) engine.currentMarket = patch.currentMarket;
+      if (patch.sessionLossCount !== undefined) engine.sessionLossCount = patch.sessionLossCount;
+      if (patch.tradesExecutedToday !== undefined) engine.tradesExecutedToday = patch.tradesExecutedToday;
+      if (patch.lastTradeTime !== undefined) engine.lastTradeTime = patch.lastTradeTime;
+      if (patch.lastAgentScores !== undefined) engine.lastAgentScores = patch.lastAgentScores;
+      if (patch.nextScanIn !== undefined) engine.nextScanIn = patch.nextScanIn;
+    },
+    loadContext: () => loadHedgeContext(engine),
+    afterSettlement: (ctx: HedgeContext) => {
+      if (ctx.paperTradeMode || !ctx.token || !ctx.derivAccountId) return;
+      getJournalManager(engine.sessionId).forceRefresh();
+      void syncLiveBalance(engine.sessionId, ctx.token, ctx.derivAccountId);
+    },
+  };
+}
 
-    // ── Consecutive-loss streak — SINGLE authoritative source ────────────────
-    // The global Recovery Intelligence loss-streak counter (recoveryEngine.getState()
-    // .streakLossCount) is the exact same number shown on the dashboard's Recovery
-    // card. It is the ONLY signal that ever triggers a cooldown — no other path
-    // (daily-journal recount, per-family counters, etc.) is allowed to do so.
-    const globalStreakCount = recoveryEngine.getState().streakLossCount;
-    engine.sessionLossCount = globalStreakCount;
+/** Account, settings and today's resolved P&L for this engine's session. */
+async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
+  const sessionId = engine.sessionId;
+  const { balance, settings, account } = await getAccountAndSettings(sessionId);
+  const token = account?.bearerToken ?? account?.token ?? null;
+  const derivAccountId = account?.derivAccountId ?? account?.loginId ?? null;
+  const journalManager = getJournalManager(sessionId);
+  if (token && derivAccountId) journalManager.setCredentials(token, derivAccountId);
 
-    const daily = buildDailyStats(closedToday, globalStreakCount);
-    // Override daily.profit with the resolved value (Deriv journal when available)
-    daily.profit = resolvedDailyProfit;
-    const todayProfit = resolvedDailyProfit;
+  const rawPreferred = settings?.preferredContractTypes?.split(",").filter(Boolean) ?? ["CALL", "PUT", "DIGITOVER", "DIGITUNDER", "DIGITEVEN", "DIGITODD"];
+  const tradingSettings = buildTradingSettings(settings, normalizePreferredTypes(rawPreferred));
+  if (settings?.loopIntervalSec) engine.loopIntervalSec = settings.loopIntervalSec;
 
-    // Hard stops — only triggered by Deriv-verified P&L and loss streak.
-    if (todayProfit <= -tradingSettings.dailyLossLimit) { stopEngine(engine, `Daily loss limit ${tradingSettings.dailyLossLimit} reached`); return; }
-    if (todayProfit >= tradingSettings.dailyTarget) { stopEngine(engine, `Daily target ${tradingSettings.dailyTarget} reached!`); return; }
-    // Start-of-loop safety net: if the streak already sits at/above the limit
-    // (e.g. engine resumed mid-streak), stop immediately instead of trading first.
-    if (globalStreakCount >= tradingSettings.consecutiveLossLimit) {
-      const cooldownMins = settings?.cooldownMinutes ?? 30;
-      stopEngine(engine, 
-        `${globalStreakCount} consecutive losses — limit ${tradingSettings.consecutiveLossLimit} reached, cooling down ${cooldownMins}m`,
-        cooldownMins,
-      );
-      return;
-    }
-
-    // ── Market selection: parallel tournament scanning ───────────────────────
-    // All 4 groups are scanned simultaneously. Each group scans all its markets
-    // in parallel and returns the single best candidate (highest qualityScore).
-    // The best candidate across all 4 groups is then evaluated for execution.
-    // Bull/Bear only participates when CALL/PUT contract types are enabled.
-    // If no candidate passes all gates → rescan immediately (no delay).
-    const hasDigitTypes = preferredContractTypes.some(t => t.startsWith("DIGIT"));
-    const hasDirectionTypes = preferredContractTypes.some(t => ["CALL", "PUT"].includes(t));
-
-    // Build set of symbols currently on per-symbol cooldown so they are excluded
-    // from the tournament scan entirely — the engine will find the next-best pair
-    // instead of looping on a blocked symbol.
-    const symCutoffPre = Date.now() - SAME_SYMBOL_COOLDOWN_MS;
-    const cooledDownSymbols = new Set<string>();
-    for (const [sym, dates] of engine.recentTradesBySymbol) {
-      const recentCount = dates.filter(d => d.getTime() > symCutoffPre).length;
-      if (recentCount >= MAX_TRADES_SAME_SYMBOL) cooledDownSymbols.add(sym);
-    }
-    if (cooledDownSymbols.size > 0) {
-      logger.info({ cooledDown: [...cooledDownSymbols] }, "Autonomous: excluding symbols on per-pair cooldown from scan");
-    }
-
-    const contractCompatibleMarkets = availableMarkets.filter(m => {
-      // Skip symbols that have hit the 2-trades-per-8-min cooldown
-      if (cooledDownSymbols.has(m.symbol)) return false;
-      // Skip non-digit markets when only digit contract types are enabled
-      if (hasDigitTypes && !hasDirectionTypes && !m.digitEnabled) return false;
-      // Bull/Bear (RDBULL/RDBEAR) support both direction AND digit contracts
-      // (Over/Under, Even/Odd, Match/Differ) — skip only if neither is enabled.
-      if ((m.symbol === "RDBULL" || m.symbol === "RDBEAR") && !hasDirectionTypes && !hasDigitTypes) return false;
-      return true;
-    });
-
-    // ── Contract family type definitions (hoisted so recovery fast path can use them) ──
-    const dirTypes = preferredContractTypes.filter(t => ["CALL", "PUT"].includes(t));
-    const ouTypes  = preferredContractTypes.filter(t => ["DIGITOVER", "DIGITUNDER"].includes(t));
-    const eoTypes  = preferredContractTypes.filter(t => ["DIGITEVEN", "DIGITODD"].includes(t));
-    const mdTypes  = preferredContractTypes.filter(t => ["DIGITMATCH", "DIGITDIFF"].includes(t));
-
-    // ── Unified path: recovery uses the SAME pipeline as normal trades ───────
-    // The former "recovery fast path" (a bespoke 3-window consensus scan that
-    // bypassed the coordinator entirely) has been REMOVED. Recovery trades now
-    // go through exactly the same analysis, timing and execution as normal
-    // trades:
-    //
-    //   - same 4-group parallel tournament over `contractCompatibleMarkets`
-    //   - same 13-agent coordinator (feature engineering → EV → risk → timing
-    //     → fusion → master decision)
-    //   - same master-decision admission, now EVIDENCE-BASED rather than a
-    //     chain of independent hard gates
-    //
-    // What differs in recovery is carried entirely by existing, unchanged
-    // mechanisms plus one new one:
-    //   - barriers:  ScanContext.recoveryBarrierOverride (already wired)
-    //   - stake:     recoveryEngine.getDynamicRecoveryStake (UNCHANGED — the
-    //                debt-driven formula and Split/Instant/Auto/Manual modes are
-    //                untouched; only the candidate selection changed)
-    //   - admission: the evidence threshold decays with time-in-recovery
-    //                (see ScanContext.recovery + master-decision) so the engine
-    //                takes the first candidate whose evidence clears the bar
-    //                instead of waiting for every independent gate to align.
-    //
-    // The 30+ minute waits came from the conjunction of independent vetoes,
-    // not from the analysis being slow: the coordinator scan itself runs in
-    // parallel across markets with a 4s timeout. Replacing votes with weighted
-    // evidence removes the conjunction without removing the analysis.
-
-
-
-    const getGroupIndex = (sym: string): number => {
-      if (sym.startsWith("1HZ")) return 0; // Volatility 1s (5 markets)
-      if (sym.startsWith("R_"))  return 1; // Volatility     (5 markets)
-      if (sym.startsWith("JD"))  return 2; // Jump Indices   (5 markets)
-      return 3;                             // Bull/Bear      (2 markets)
-    };
-    // Bucket markets into their 4 groups
-    const marketGroups: (typeof contractCompatibleMarkets)[] = [[], [], [], []];
-    for (const m of contractCompatibleMarkets) marketGroups[getGroupIndex(m.symbol)].push(m);
-
-    let totalMarketsScanned = 0;
-    const SCAN_TIMEOUT_MS = 4000;
-    const withTimeout = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
-      Promise.race([p, new Promise<T>((r) => setTimeout(() => r(fallback), ms))]);
-
-    type ScanResult = { market: typeof availableMarkets[0]; output: Awaited<ReturnType<typeof runCoordinator>>; ctx: ScanContext; family: string };
-
-    // ── Contract family definitions (already defined above for recovery fast path) ──
-    // dirTypes, ouTypes, eoTypes, mdTypes are defined before the recovery fast path
-    // so both the recovery path and the normal tournament path can use them.
-
-    // ── Phase 1: All 4 groups scan in PARALLEL, but each group scans
-    //    ONLY ONE market per iteration — the one at its cursor position.
-    //
-    //    Canonical scan order per group (determined by DERIV_MARKETS array):
-    //      Volatility 1s : 1HZ10V → 1HZ15V → 1HZ25V → 1HZ30V → 1HZ50V → 1HZ75V → 1HZ90V → 1HZ100V → wrap
-    //      Volatility    : R_10    → R_25    → R_50    → R_75    → R_100    → wrap
-    //      Jump Indices  : JD10   → JD25   → JD50   → JD75   → wrap (JD100 is manual-only)
-    //      Bull/Bear     : RDBULL → RDBEAR → wrap
-    //
-    //    No market is revisited until every market in its group has been
-    //    scanned once. Cursor advances BEFORE awaiting so groups never
-    //    block each other. Only enabled contract families are run per market.
-    broadcastEngineSSE(engine, "scan_started", { groups: GROUP_NAMES.filter((_, i) => marketGroups[i].length > 0), ts: Date.now() });
-
-    const groupWinners = (await Promise.allSettled(
-      marketGroups.map(async (group, gi): Promise<(ScanResult & { groupName: string }) | null> => {
-        if (group.length === 0) return null;
-
-        // Scan ALL markets in this group in parallel — pick the best opportunity
-        // across the whole group rather than using a single cursor position.
-        type MarketResult = ScanResult & { allFamilyResults: ScanResult[] };
-        const allMarketResults = (await Promise.allSettled(
-          group.map(async (m): Promise<MarketResult | null> => {
-            try {
-              const isBullBear = m.symbol === "RDBULL" || m.symbol === "RDBEAR";
-
-              // Only run families whose contract types are enabled in settings.
-              const families: Array<{ name: string; types: string[] }> = [];
-              if (dirTypes.length > 0)                                  families.push({ name: "direction", types: dirTypes });
-              // Bull/Bear markets (RDBULL/RDBEAR) fully support digit contracts — allow all digit families
-              if (m.digitEnabled && ouTypes.length > 0)  families.push({ name: "overunder", types: ouTypes });
-              if (m.digitEnabled && eoTypes.length > 0)  families.push({ name: "evenodd",   types: eoTypes });
-              if (m.digitEnabled && mdTypes.length > 0) {
-                // Strategy:
-                //   Normal mode  → DIGITDIFF (coldest digit, high win rate, 1.09× fallback payout)
-                //   Recovery 1–2 → DIGITMATCH (hottest digit, 8.93× payout — tiny stake covers full DIFF loss)
-                //   Recovery 3+  → DIGITDIFF  (2 consecutive MATCH losses means MATCH isn't hitting;
-                //                              fall back to DIFF so the debt can still be recovered)
-                // If the user only enabled one of the two, use whichever is enabled.
-                const inRecovery = recoveryEngine.isInRecovery();
-                const consecutiveMatchLosses = recoveryEngine.getState().consecutiveMatchLosses;
-                // Allow up to 3 consecutive MATCH losses before falling back to DIFF.
-                // 3 attempts gives the high-payout MATCH contract enough chances to fire
-                // (each attempt independently has ~10–15 % win probability); after 3
-                // misses the engine switches to DIFF which wins ~96 % of the time to
-                // at least partially rebuild the balance before retrying MATCH.
-                const matchFallbackToDiff = inRecovery && consecutiveMatchLosses >= 3;
-                const activeMdTypes = (inRecovery && !matchFallbackToDiff && mdTypes.includes("DIGITMATCH"))
-                  ? ["DIGITMATCH"]   // recovery attempt 1–3: high payout covers full DIFF loss cheaply
-                  : mdTypes.includes("DIGITDIFF")
-                    ? ["DIGITDIFF"]  // normal mode OR match-fallback: near-certain wins on cold digit
-                    : mdTypes;       // fallback: whatever the user enabled
-                families.push({ name: "matchdiff", types: activeMdTypes });
-              }
-
-              if (families.length === 0) return null;
-
-              const baseCtx = buildScanContext(m, balance, tradingSettings, daily, null, account?.currency ?? "USD");
-
-              const familyResults = (await Promise.allSettled(
-                families.map(async (fam) => {
-                  // Over/Under always trades the EXACT settings-configured digit pair
-                  // (normal or recovery, chosen once per loop iteration above) — no
-                  // AI-driven candidate scanning, no hardcoded barriers.
-                  const famCtx: ScanContext = {
-                    ...baseCtx,
-                    settings: {
-                      ...baseCtx.settings,
-                      preferredContractTypes: fam.types,
-                      // Even/odd contracts are inherently near-50/50 so the Markov-edge signal
-                      // never reaches the same confidence scores as direction or digit-barrier
-                      // agents. Always lower the threshold for this family regardless of what
-                      // other families are also active so Even/Odd gets a fair shot in the
-                      // tournament when multiple markets are enabled simultaneously.
-                      minConfidenceThreshold:
-                        fam.name === "evenodd"
-                          ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
-                          // DIGITMATCH: 8.93× payout but only ~10-15% win rate → agent scores are
-                          // naturally lower. Lower the threshold so the EV gate (not confidence)
-                          // does the real filtering; master-decision already requires positive EV.
-                          // DIGITDIFF: ~96% win rate but low payout → scores may vary; keep same floor.
-                          : fam.name === "matchdiff"
-                            ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 45)
-                            // OVER/UNDER: safe low-payout barriers have naturally lower agent scores
-                            // because their "edge" vs breakeven is always negative in near-uniform
-                            // markets. Cap at 48 (same as evenodd) so the EV gate and digit skew
-                            // do the real filtering, not an artificially high consensus threshold.
-                            : fam.name === "overunder"
-                              ? Math.min(baseCtx.settings.minConfidenceThreshold ?? 38, 48)
-                              : baseCtx.settings.minConfidenceThreshold,
-                    },
-                    recoveryBarrierOverride: fam.name === "overunder" ? activeBarrierOverride : undefined,
-                  };
-                  const output = await withTimeout(runCoordinator(famCtx), SCAN_TIMEOUT_MS, null as any);
-                  if (!output) return null;
-                  return { market: m, output, ctx: famCtx, family: fam.name } as ScanResult;
-                })
-              )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
-
-              if (familyResults.length === 0) return null;
-
-              totalMarketsScanned++;
-
-              const tradeableFamilies = familyResults.filter(r => r.output.shouldTrade);
-              const marketBest = tradeableFamilies.length > 0
-                ? tradeableFamilies.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
-                : familyResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
-
-              return { ...marketBest, allFamilyResults: familyResults };
-            } catch { return null; }
-          })
-        )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
-
-        if (allMarketResults.length === 0) return null;
-
-        // Among all markets in this group, prefer tradeable then highest qualityScore.
-        const tradeableMarkets = allMarketResults.filter(r => r.output.shouldTrade);
-        const groupBest = tradeableMarkets.length > 0
-          ? tradeableMarkets.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0]
-          : allMarketResults.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0];
-
-        logger.info({
-          group: GROUP_NAMES[gi],
-          marketsScanned: allMarketResults.length,
-          tradeableCount: tradeableMarkets.length,
-          bestSymbol: groupBest.market.symbol,
-          family: groupBest.family,
-          quality: groupBest.output.qualityScore,
-          shouldTrade: groupBest.output.shouldTrade,
-        }, "Group full scan complete");
-
-        const allFamilySummaries = groupBest.allFamilyResults.map(r => ({
-          name: r.family,
-          contract: r.output.recommendation?.product ?? null,
-          shouldTrade: r.output.shouldTrade,
-          confidence: Math.round(r.output.confidenceScore),
-          quality: Math.round(r.output.qualityScore),
-          rejectReason: r.output.rejectReason ?? null,
-        }));
-
-        broadcastEngineSSE(engine, "group_scanned", {
-          group: GROUP_NAMES[gi],
-          totalInGroup: group.length,
-          scanned: allMarketResults.length,
-          bestSymbol: groupBest.market.symbol,
-          bestDisplayName: groupBest.market.displayName,
-          quality: groupBest.output.qualityScore,
-          shouldTrade: groupBest.output.shouldTrade,
-          contract: groupBest.output.recommendation?.product ?? null,
-          confidence: groupBest.output.confidenceScore,
-          family: groupBest.family,
-          families: allFamilySummaries,
-          rejectReason: groupBest.output.rejectReason ?? null,
-        });
-
-        return { ...groupBest, groupName: GROUP_NAMES[gi] };
-      })
-    )).flatMap(r => r.status === "fulfilled" && r.value ? [r.value] : []);
-
-    // ── Phase 2: Tournament — pick the overall winner ────────────────────────
-    // Among tradeable group winners, apply family rotation so Rise/Fall and
-    // Even/Odd get executed in turn alongside Over/Under rather than always
-    // losing the quality tournament to higher-scoring digit barriers.
-    const tradeableWinners = groupWinners.filter(w => w.output.shouldTrade);
-
-    // Determine which families actually have tradeable results this scan
-    const enabledFamiliesThisScan = new Set(tradeableWinners.map(w => w.family));
-    const multipleFamily = enabledFamiliesThisScan.size > 1;
-
-    // ── Recovery priority ─────────────────────────────────────────────────────
-    // Recovery is a SINGLE global state now, independent of contract type — when
-    // active, ANY tradeable contract type is eligible to execute the recovery
-    // trade (stake sizing via getDynamicRecoveryStake handles the rest), and the
-    // highest-confidence opportunity is chosen rather than the highest-quality one.
-    const inRecoveryNow = recoveryEngine.isInRecovery();
-
-    // When multiple families are active and NOT in recovery, narrow the pool to
-    // the scheduled family so each family gets executed roughly in turn.
-    let tournamentPool = tradeableWinners;
-    if (!inRecoveryNow && multipleFamily && engine.scheduledFamilyHint && enabledFamiliesThisScan.has(engine.scheduledFamilyHint)) {
-      const hinted = tradeableWinners.filter(w => w.family === engine.scheduledFamilyHint);
-      if (hinted.length > 0) tournamentPool = hinted;
-    }
-
-    const bestResult: (ScanResult & { groupName: string }) | null = tournamentPool.length > 0
-      ? (inRecoveryNow
-          // In recovery: execute the highest-confidence opportunity across ALL families.
-          ? tournamentPool.sort((a, b) => b.output.confidenceScore - a.output.confidenceScore)[0]
-          : tournamentPool.sort((a, b) => b.output.qualityScore - a.output.qualityScore)[0])
+  const allowedMarketSymbols: string[] | null =
+    (settings as any)?.allowedMarkets
+      ? ((settings as any).allowedMarkets as string).split(",").filter(Boolean)
       : null;
 
-    if (bestResult) {
-      logger.info({
-        symbol: bestResult.market.symbol,
-        group: bestResult.groupName,
-        quality: bestResult.output.qualityScore,
-        groupsScanned: groupWinners.length,
-        marketsScanned: totalMarketsScanned,
-      }, "Tournament winner — executing");
-    } else {
-      logger.info({ groupsScanned: groupWinners.length, marketsScanned: totalMarketsScanned }, "No qualifying opportunity across all groups — rescanning");
-      scheduleNext(engine, false, 500); // Near-instant rescan
-      return;
-    }
+  // Daily stats share the day boundary used by the journal and daily-summary views.
+  const today = getTodayStart();
+  const todayTrades = await db.select().from(tradesTable).where(and(
+    eq(tradesTable.sessionId, sessionId),
+    sql`${tradesTable.createdAt} >= ${today}`,
+  ));
+  const closedToday = todayTrades.filter((t) => t.status === "won" || t.status === "lost");
+  engine.tradesExecutedToday = closedToday.length;
 
-    const { market: bestMarket, output } = bestResult;
-    // Rebuild ctx with real token for live trade execution (scan used null for speed).
-    // Carry recoveryBarrierOverride so any post-tournament coordinator/master-decision
-    // call still sees the correct normal-vs-recovery barrier pair rather than falling
-    // back to the ALLOWED_BARRIERS constant default.
-    const ctx = {
-      ...buildScanContext(bestMarket, balance, tradingSettings, daily, token, account?.currency ?? "USD"),
-      recoveryBarrierOverride: activeBarrierOverride,
-    };
-    engine.currentMarket = bestMarket.symbol;
+  // Consecutive losses come from the recovery ledger: the same number the
+  // dashboard shows, and the only signal that triggers a cooldown.
+  const globalStreakCount = recoveryEngine.getState().streakLossCount;
+  engine.sessionLossCount = globalStreakCount;
 
-    // ── Guard: block if there is already an open/in-progress trade ───────────
-    // Stale "open" trades (> 2 minutes old) are auto-recovered as "error" so
-    // they never permanently freeze the loop. This handles the crash path where
-    // executeLiveTrade OR waitForContractResult threw after the DB insert but
-    // before the status update — leaving a ghost trade that blocked the engine
-    // indefinitely (the engine keeps finding the ghost every 3s and backing off).
-    // STALE_OPEN_MS is defined at module scope above
-    const openTrades = await db.select().from(tradesTable).where(and(eq(tradesTable.sessionId, sessionId), eq(tradesTable.status, "open")));
-    if (openTrades.length > 0) {
-      const now = Date.now();
-      const staleTrades = openTrades.filter(t => now - new Date(t.createdAt).getTime() > STALE_OPEN_MS);
-      if (staleTrades.length > 0) {
-        logger.warn(
-          { staleIds: staleTrades.map(t => t.id), ages: staleTrades.map(t => Math.round((now - new Date(t.createdAt).getTime()) / 1000) + "s") },
-          "Autonomous: auto-recovering stale open trades — settlement result unknown, marking as error",
-        );
-        await Promise.all(
-          staleTrades.map(t =>
-            db.update(tradesTable)
-              .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                     agentReasoning: `${t.agentReasoning ?? ""} [AUTO-RECOVERED: trade left open after crash — settlement unknown]` })
-              .where(eq(tradesTable.id, t.id))
-              .catch(dbErr => logger.error({ dbErr, tradeId: t.id }, "Failed to auto-recover stale open trade")),
-          ),
-        );
-      }
-      const freshTrades = openTrades.filter(t => now - new Date(t.createdAt).getTime() <= STALE_OPEN_MS);
-      if (freshTrades.length > 0) {
-        logger.info({ openCount: freshTrades.length }, "Autonomous: open trade in progress — waiting before next scan");
-        scheduleNext(engine, false);
-        return;
-      }
-      // All open trades were stale and have been cleared — fall through and continue
-    }
+  // Daily P&L: prefer the Deriv journal (authoritative net P&L), fall back to the local DB.
+  const todayMidnightSec = today.getTime() / 1000;
+  const derivTxns = token ? journalManager.getCached() : [];
+  const derivTodayTxns = derivTxns.filter(
+    (t: any) => Number(t.sell_time ?? t.purchase_time ?? 0) >= todayMidnightSec,
+  );
+  const resolvedDailyProfit = derivTodayTxns.length > 0
+    ? derivTodayTxns.reduce((s: number, t: any) => s + Number(t.profit ?? 0), 0)
+    : closedToday.reduce((s, t) => s + Number(t.profit ?? 0), 0);
 
-    // ── Guard: require minimum time since last trade settled ─────────────────
-    // Ensures the Deriv journal has time to record the closed trade before we start
-    // the next scan. This prevents the engine from opening a second trade while the
-    // first is still being journalled on Deriv's side.
-    if (engine.lastTradeCompletedAt && (Date.now() - engine.lastTradeCompletedAt.getTime()) < 12_000) {
-      logger.info({ msAgo: Date.now() - engine.lastTradeCompletedAt.getTime() }, "Autonomous: journal settle delay — waiting 3s");
-      scheduleNext(engine, false, 3000);
-      return;
-    }
+  const daily = buildDailyStats(closedToday, globalStreakCount);
+  daily.profit = resolvedDailyProfit;
 
-    // ── Guard: per-symbol cooldown (max 2 trades per pair per 8 min) ─────────
-    // Note: symbols already on cooldown are filtered out of the scan above so
-    // the tournament winner should never be on cooldown. This guard is a safety
-    // net for the rare edge case where the cooldown was reached mid-scan.
-    const symHistory = engine.recentTradesBySymbol.get(bestMarket.symbol) ?? [];
-    const symCutoff = Date.now() - SAME_SYMBOL_COOLDOWN_MS;
-    const symRecentCount = symHistory.filter(d => d.getTime() > symCutoff).length;
-    if (symRecentCount >= MAX_TRADES_SAME_SYMBOL) {
-      logger.info({ symbol: bestMarket.symbol, recentCount: symRecentCount },
-        "Autonomous: symbol cooldown guard triggered mid-scan — rescanning for next-best pair");
-      scheduleNext(engine, false, 500);
-      return;
-    }
-
-    // Build legacy analysis for backward-compat fields
-    const analysis = buildLegacyAnalysis(output);
-
-    // Update agent scores
-    const agentOutputs = output.agents;
-    engine.lastAgentScores = Object.fromEntries(
-      AGENT_SCORE_KEYS.map((k) => [k, agentOutputs[k]?.score ?? 65])
-    );
-
-    broadcastEngineSSE(engine, "scan_complete", {
-      symbol: bestMarket.symbol,
-      quality: output.qualityScore,
-      confidence: output.confidenceScore,
-      agentScores: engine.lastAgentScores,
-      marketsScanned: totalMarketsScanned,
-      regime: output.regime,
-      shouldTrade: output.shouldTrade,
-      rejectReason: output.rejectReason,
-      sessionLossCount: engine.sessionLossCount,
-      consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
-    });
-
-    if (!output.shouldTrade) {
-      logger.info({
-        symbol: bestMarket.symbol,
-        quality: output.qualityScore,
-        reason: output.rejectReason,
-      }, "Conditions not favourable — scanning next");
-
-      // Track the rejected trade so the Missed Opportunity Agent can evaluate it
-      const rejectedRec = output.recommendation;
-      trackRejectedTrade({
-        symbol:       bestMarket.symbol,
-        contractType: rejectedRec.product,
-        barrier:      rejectedRec.barrier ?? null,
-        rejectReason: output.rejectReason,
-        output,
-        duration:     rejectedRec.duration ?? 5,
-        stake:        rejectedRec.stake,
-      });
-
-      scheduleNext(engine, false);
-      return;
-    }
-
-    // ── Absolute quality floor ────────────────────────────────────────────────
-    // Even when shouldTrade is true, skip the cycle if the tournament winner's
-    // quality score is below the floor. A score that low means the agents collectively
-    // have borderline confidence — the engine is reaching for a marginal trade
-    // rather than a genuinely strong setup. Waiting costs nothing; a bad trade costs real money.
-    //
-    // During active recovery the floor is REMOVED entirely (0). Master decision
-    // now performs evidence-based admission with a time-decayed threshold, so a
-    // second, static quality floor layered on top would be exactly the kind of
-    // redundant independent veto this change removes — it stalled recovery on
-    // the very trades the mode exists to place. In recovery the evidence score
-    // IS the quality gate, and it is strictly more informative than a fixed
-    // cut-off because it accounts for whether the edge is statistically real.
-    const isOverUnderTrade = output.recommendation?.product === "DIGITOVER" ||
-      output.recommendation?.product === "DIGITUNDER";
-    const qualityFloor = isOverUnderTrade ? 0 : (inRecoveryNow ? 0 : 60);
-    if (output.qualityScore < qualityFloor) {
-      logger.info({ symbol: bestMarket.symbol, quality: output.qualityScore, inRecovery: inRecoveryNow },
-        `Quality floor not met (< ${qualityFloor}) — holding off this scan cycle`);
-      scheduleNext(engine, false, 500);
-      return;
-    }
-
-    // ── Advance family rotation hint for the NEXT scan ───────────────────────
-    {
-      const allEnabledFamilies = [
-        ...(dirTypes.length > 0 ? ["direction"] : []),
-        ...(ouTypes.length > 0 ? ["overunder"] : []),
-        ...(eoTypes.length > 0 ? ["evenodd"] : []),
-        ...(mdTypes.length > 0 ? ["matchdiff"] : []),
-      ];
-      if (allEnabledFamilies.length > 1) {
-        const currentIdx = allEnabledFamilies.indexOf(bestResult.family);
-        engine.scheduledFamilyHint = allEnabledFamilies[(currentIdx + 1) % allEnabledFamilies.length];
-      } else {
-        engine.scheduledFamilyHint = null;
-      }
-    }
-
-    // ── Trade execution ──────────────────────────────────────────────────────
-    const rec = output.recommendation;
-    const effectiveContractType = rec.product;
-    const effectiveBarrier = rec.barrier;
-    // Enforce minimum 5 ticks for DIGITEVEN/DIGITODD — Deriv rejects < 5t for these types.
-    // Enforce exactly 5 ticks for DIGITMATCH/DIGITDIFF — these settle on the LAST digit so
-    // longer durations add time exposure without improving accuracy. The Markov analysis
-    // predicts the next digit distribution; capping at 5t keeps execution tight and accurate.
-    const rawDuration = rec.duration ?? 5;
-    const duration = (effectiveContractType === "DIGITEVEN" || effectiveContractType === "DIGITODD")
-      ? Math.max(5, rawDuration)                          // Deriv minimum 5t for Even/Odd
-      : (effectiveContractType === "DIGITMATCH" || effectiveContractType === "DIGITDIFF")
-        ? Math.max(1, Math.min(5, rawDuration))           // 1–5t: duration optimizer chooses; never >5 (extra exposure)
-        : rawDuration;
-
-    // ── Regime handling — now evidence, not a veto ────────────────────────────
-    // Digit contracts assume an approximately uniform terminal digit, and a
-    // trending regime skews which digits appear at expiry, so a trend genuinely
-    // IS adverse evidence for a digit trade. That penalty is now applied inside
-    // master-decision's `regimeEvidenceScore` as a bounded, weighted term
-    // instead of an 8-second hard block: a strong enough edge can still take the
-    // trade, and a weak one is rejected on its merits rather than on regime
-    // alone. The former behaviour stalled recovery here indefinitely in
-    // trending markets.
-
-    // ── Recovery Mode stake override ─────────────────────────────────────────
-    // Single global recovery state — ANY tracked contract type uses the exact
-    // same dynamic-stake formula (minimum stake needed to recover the accumulated
-    // loss, adjusted for this trade's own payout and win probability).
-    const isTracked = recoveryEngine.isTrackedContract(effectiveContractType);
-    let effectivePayoutMultiplier = rec.payoutMultiplier;
-    if (isTracked) {
-      const payoutQuote = await resolveRecoveryPayout({
-        symbol: bestMarket.symbol,
-        contractType: effectiveContractType,
-        barrier: effectiveBarrier,
-        duration,
-        durationUnit: "t",
-        currency: account?.currency ?? "USD",
-      });
-      // Preserve an already-live coordinator quote if the dedicated quote timed
-      // out; otherwise prefer the freshest proposal obtained immediately here.
-      if (payoutQuote.source === "live" || !Number.isFinite(effectivePayoutMultiplier) || effectivePayoutMultiplier <= 1) {
-        effectivePayoutMultiplier = payoutQuote.payoutMultiplier;
-      }
-    }
-
-    let stake = rec.stake;
-    if (isTracked && recoveryEngine.isInRecovery()) {
-      stake = recoveryEngine.getDynamicRecoveryStake(
-        rec.stake,
-        tradingSettings.maxTradeStake,
-        balance,
-        effectivePayoutMultiplier,
-        rec.winProbability / 100,
-        tradingSettings.riskProfile,
-        tradingSettings.recoveryMultiplier,
-        tradingSettings.recoveryMethod,
-        tradingSettings.maxRecoverySteps,
-        tradingSettings.recoveryAutoMode,
-      );
-    }
-
-    // Estimated payout for paper trades (live payout comes from Deriv result)
-    const estimatedPayout = stake * effectivePayoutMultiplier;
-    const barrierToStore = effectiveContractType.includes("DIGIT") ? (effectiveBarrier ?? null) : null;
-
-    let won: boolean, profit: number, entryPrice: number, exitPrice: number;
-    // Actual payout settled (set after trade outcome known)
-    let actualPayout: number;
-
-    if (paperTradeMode || !token) {
-      const winProb = rec.winProbability / 100;
-      won = Math.random() < winProb;
-      profit = won ? estimatedPayout - stake : -stake;
-      actualPayout = won ? estimatedPayout : 0;
-      entryPrice = ctx.prices[ctx.prices.length - 1] ?? 100;
-      exitPrice = entryPrice;
-      logger.info({ symbol: bestMarket.symbol, paper: true, won, ev: analysis.expectedValue }, "Paper trade");
-
-      // Paper trades: insert completed record immediately
-      recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
-      if (isTracked) {
-        recoveryEngine.recordOutcome(
-          won, profit, stake, settings?.maxRecoverySteps ?? 3,
-          effectiveContractType, effectivePayoutMultiplier,
-        );
-      }
-      // Update structural loss pattern detector so the next scan avoids repeating
-      // the exact same losing contractType+regime combination.
-      if (won) clearLossPattern(bestMarket.symbol);
-      else recordLossForPattern(bestMarket.symbol, effectiveContractType, output.regime ?? "");
-
-      const [paperTrade] = await db.insert(tradesTable).values({
-        sessionId,
-        symbol: bestMarket.symbol,
-        displayName: bestMarket.displayName,
-        contractType: effectiveContractType,
-        barrier: barrierToStore,
-        stake: String(stake),
-        direction: output.direction,
-        status: won ? "won" : "lost",
-        payout: String(actualPayout),
-        profit: String(profit),
-        entryPrice: String(entryPrice),
-        exitPrice: String(exitPrice),
-        aiConfidence: String(rec.winProbability),
-        aiRiskScore: String(output.riskScore),
-        isAutonomous: true,
-        agentReasoning: `[PAPER] ${output.reasoning}`,
-        duration,
-        durationUnit: "t",
-        closedAt: new Date(),
-      }).returning();
-
-      // Fire-and-forget: Trade Intelligence analysis (does not block loop)
-      if (paperTrade) {
-        analyzeCompletedTrade({
-          tradeId: paperTrade.id,
-          symbol: bestMarket.symbol,
-          contractType: effectiveContractType,
-          barrier: effectiveBarrier ?? null,
-          stake,
-          won,
-          profit,
-          output,
-        }).catch(() => {});
-      }
-    } else {
-      // ── Live trade: insert "open" FIRST so journal shows it immediately ──
-      const [openTrade] = await db.insert(tradesTable).values({
-        sessionId,
-        symbol: bestMarket.symbol,
-        displayName: bestMarket.displayName,
-        contractType: effectiveContractType,
-        barrier: barrierToStore,
-        stake: String(stake),
-        direction: output.direction,
-        status: "open",
-        aiConfidence: String(rec.winProbability),
-        aiRiskScore: String(output.riskScore),
-        isAutonomous: true,
-        agentReasoning: output.reasoning,
-        duration,
-        durationUnit: "t",
-      }).returning();
-
-      // Broadcast so journal updates immediately
-      broadcastEngineSSE(engine, "trade_started", {
-        id: openTrade.id,
-        symbol: bestMarket.symbol,
-        contract: effectiveContractType,
-        barrier: barrierToStore,
-        stake,
-        duration,
-        regime: output.regime,
-        confidence: rec.winProbability,
-        ev: analysis.expectedValue,
-      });
-
-      try {
-        if (!isAutomatedMarket(bestMarket.symbol)) {
-          throw new Error(`${bestMarket.displayName} is blocked from autonomous execution`);
-        }
-        // Deriv requires stake with max 2 decimal places
-        const liveStake = Math.round(stake * 100) / 100;
-        const liveResult = await executeLiveTrade(token, {
-          symbol: bestMarket.symbol,
-          contractType: effectiveContractType,
-          stake: liveStake,
-          duration,
-          durationUnit: "t",
-          currency: account?.currency ?? "USD",
-          accountId: derivAccountId!,
-          barrier: effectiveContractType.includes("DIGIT") ? effectiveBarrier : undefined,
-        });
-        entryPrice = liveResult.buyPrice;
-        // Wait for Deriv to settle the contract — timeout = ticks * 1s + 30s buffer
-        const contractResult = await waitForContractResult(token, derivAccountId!, liveResult.contractId, (duration + 30) * 1000);
-        won = contractResult.won;
-        // Use Deriv's exact profit — this is the ground truth for the journal
-        profit = contractResult.profit;
-        // Actual payout = stake returned + net profit (only when won; 0 when lost)
-        actualPayout = won ? stake + profit : 0;
-        entryPrice = contractResult.entrySpot || liveResult.buyPrice;
-        // profit_table doesn't expose tick-level exit spot; fall back to entry price for display
-        exitPrice = contractResult.exitSpot || entryPrice;
-        await syncLiveBalance(sessionId, token, derivAccountId!);
-      } catch (liveErr) {
-        const errMsg = liveErr instanceof Error ? liveErr.message : String(liveErr);
-        logger.warn({ liveErrMsg: errMsg, symbol: bestMarket.symbol, contractType: effectiveContractType }, "Live autonomous trade failed — outcome unknown, marking as error");
-        // Mark as "error" (NOT "lost") — Deriv may still settle this contract as a WIN.
-        // Marking as "lost" would create a false loss that corrupts consecutive-loss count
-        // and daily P&L, causing the engine to falsely trigger loss-streak / loss-limit stops
-        // even when the actual Deriv journal shows wins.
-        //
-        // IMPORTANT: wrap this DB update in its own try/catch. If it throws (DB hiccup,
-        // network drop), the exception must NOT propagate to the outer catch — that would
-        // leave the trade stuck as "open" permanently and freeze the loop (the stale-trade
-        // auto-recovery above handles it if that happens, but preventing it is better).
-        try {
-          await db.update(tradesTable)
-            .set({ status: "error", profit: "0", payout: "0", closedAt: new Date(),
-                   agentReasoning: `${output.reasoning} [EXECUTION FAILED: ${errMsg}]` })
-            .where(eq(tradesTable.id, openTrade.id));
-        } catch (dbErr) {
-          logger.error({ dbErr, tradeId: openTrade.id },
-            "Failed to mark live trade as error in DB — stale-open guard will auto-recover on next iteration");
-        }
-        broadcastEngineSSE(engine, "trade_completed", { id: openTrade.id, symbol: bestMarket.symbol, won: false,
-          profit: "0", contract: effectiveContractType, error: errMsg });
-        // No forceRefresh here — the trade never settled on Deriv so the
-        // profit_table has nothing new to fetch. Calling it was contributing
-        // to the concurrent-pagination rate-limit cascade.
-
-        // Do NOT touch engine.sessionLossCount here — the contract outcome
-        // is unknown (Deriv may have settled it as won). Adding a false loss count here
-        // is what caused consecutive-loss / daily-limit false-positives.
-        // Only record the cooldown timestamp so the engine waits before re-scanning
-        // (gives Deriv time to settle the contract before another trade is attempted).
-        engine.lastTradeCompletedAt = new Date();
-        const symNowErr = new Date();
-        const symLogErr = engine.recentTradesBySymbol.get(bestMarket.symbol) ?? [];
-        symLogErr.push(symNowErr);
-        engine.recentTradesBySymbol.set(bestMarket.symbol, symLogErr.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
-
-        scheduleNext(engine, true);
-        return;
-      }
-
-      // Update the open record to Deriv-confirmed final status
-      recordTradeOutcome(bestMarket.symbol, effectiveContractType, effectiveBarrier ?? null, won, profit, stake);
-      if (isTracked) {
-        recoveryEngine.recordOutcome(
-          won, profit, stake, settings?.maxRecoverySteps ?? 3,
-          effectiveContractType, effectivePayoutMultiplier,
-        );
-      }
-      // Update structural loss pattern detector — prevents re-entering the same
-      // losing contractType+regime combo back-to-back without a regime change.
-      if (won) clearLossPattern(bestMarket.symbol);
-      else recordLossForPattern(bestMarket.symbol, effectiveContractType, output.regime ?? "");
-
-      await db.update(tradesTable).set({
-        status: won ? "won" : "lost",
-        // actualPayout: total returned to account (stake + net profit) when won, 0 when lost
-        payout: String(actualPayout),
-        // profit: exact net P&L from Deriv (positive on win, negative on loss)
-        profit: String(profit),
-        entryPrice: String(entryPrice),
-        exitPrice: String(exitPrice),
-        closedAt: new Date(),
-      }).where(eq(tradesTable.id, openTrade.id));
-
-      // Fire-and-forget: Trade Intelligence analysis (does not block loop)
-      analyzeCompletedTrade({
-        tradeId: openTrade.id,
-        symbol: bestMarket.symbol,
-        contractType: effectiveContractType,
-        barrier: effectiveBarrier ?? null,
-        stake,
-        won,
-        profit,
-        output,
-      }).catch(() => {});
-    }
-
-    // ── Record trade in per-symbol cooldown map ──────────────────────────────
-    const symNow = new Date();
-    const symLog = engine.recentTradesBySymbol.get(bestMarket.symbol) ?? [];
-    symLog.push(symNow);
-    // Prune old entries outside the cooldown window
-    engine.recentTradesBySymbol.set(bestMarket.symbol, symLog.filter(d => d.getTime() > Date.now() - SAME_SYMBOL_COOLDOWN_MS));
-
-    // ── Mark last-trade timestamp so journal-settle guard works correctly ─────
-    engine.lastTradeCompletedAt = symNow;
-
-    // ── Consecutive-loss streak — mirrors the single global source of truth ──
-    // recoveryEngine.recordOutcome() (called above) already updated
-    // getState().streakLossCount: +1 on loss, reset to 0 on ANY win (even a
-    // partial one — only the recovery debt itself persists on partial wins).
-    // engine.sessionLossCount is kept only as a display mirror of that same number.
-    engine.sessionLossCount = recoveryEngine.getState().streakLossCount;
-
-    // ── Immediate post-loss cooldown gate — THE single trigger path ─────────
-    // Checks the exact same counter shown on the dashboard's Recovery card
-    // right after every trade settles, so the engine never opens the next
-    // trade without first knowing if it should enter cooldown. The start-of-
-    // loop check is a secondary safety net using the identical counter.
-    if (!won && engine.running) {
-      const freshSettingsForCooldown = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, sessionId)).limit(1);
-      const hardLimit = freshSettingsForCooldown[0]?.consecutiveLossLimit ?? 3;
-      const cooldownMins = freshSettingsForCooldown[0]?.cooldownMinutes ?? 30;
-      if (engine.sessionLossCount >= hardLimit) {
-        broadcastEngineSSE(engine, "trade_completed", {
-          symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
-          contract: effectiveContractType,
-          barrier: barrierToStore,
-          stake,
-          live: !!token && !paperTradeMode,
-          paper: paperTradeMode,
-          ev: analysis.expectedValue,
-          regime: output.regime,
-        });
-        if (!paperTradeMode && token) journalManager.forceRefresh();
-        logger.info({
-          symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
-          stake, ev: analysis.expectedValue, contract: effectiveContractType,
-        }, "Trade executed");
-        stopEngine(engine, 
-          `${engine.sessionLossCount} consecutive losses — limit ${hardLimit} reached, cooling down ${cooldownMins}m`,
-          cooldownMins,
-        );
-        engine.tradesExecutedToday++;
-        engine.lastTradeTime = new Date();
-        return;
-      }
-    }
-
-    engine.tradesExecutedToday++;
-    engine.lastTradeTime = new Date();
-
-    broadcastEngineSSE(engine, "trade_completed", {
-      symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
-      contract: effectiveContractType,
-      barrier: barrierToStore,
-      stake,
-      live: !!token && !paperTradeMode,
-      paper: paperTradeMode,
-      ev: analysis.expectedValue,
-      regime: output.regime,
-    });
-    // Force-refresh the Deriv journal immediately so dashboard stats update right away
-    if (!paperTradeMode && token) journalManager.forceRefresh();
-    logger.info({
-      symbol: bestMarket.symbol, won, profit: profit.toFixed(2),
-      stake, ev: analysis.expectedValue,
-      contract: effectiveContractType,
-    }, "Trade executed");
-
-  } catch (err) {
-    logger.error({ err }, "Autonomous loop error");
-  } finally {
-    // Always release the lock so the loop can run again
-    engine.isLoopRunning = false;
-  }
-
-  // After a live trade completes, wait before next scan so Deriv can journal the
-  // closed trade. The engine.lastTradeCompletedAt guard inside the loop also enforces this.
-  scheduleNext(engine, true);
-}
-
-function scheduleNext(engine: EngineInstance, tradeExecuted = false, overrideDelayMs?: number) {
-  if (!engine.running) return;
-  // Clear any pending timer before scheduling a new one (prevents double-fires)
-  if (engine.timer) { clearTimeout(engine.timer); engine.timer = null; }
-  // 15s after a trade (gives Deriv journal time to record the closed trade),
-  // 500ms when rescanning for opportunity, 3s between normal scans
-  const delayMs = overrideDelayMs ?? (tradeExecuted ? 15_000 : 3000);
-  engine.nextScanIn = Math.ceil(delayMs / 1000);
-  engine.loopIntervalSec = engine.nextScanIn;
-  engine.timer = setTimeout(() => runAutonomousLoop(engine), delayMs);
+  return {
+    balance,
+    currency: account?.currency ?? "USD",
+    token,
+    derivAccountId,
+    settings: tradingSettings,
+    consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
+    cooldownMinutes: settings?.cooldownMinutes ?? 30,
+    allowedMarketSymbols,
+    paperTradeMode: tradingSettings.paperTradeMode,
+    daily,
+  };
 }
 
 // ── Helper: build recommendation payload for /recommendation route ─────────────
@@ -1534,37 +653,15 @@ async function buildRecommendationPayload(sessionId: string, symbol: string, mar
   };
 }
 
-// ── Fast agent score computation for engine status ────────────────────────────
-async function getComputedAgentScores(engine: EngineInstance): Promise<Record<string, number>> {
-  if (Object.keys(engine.lastAgentScores).length > 0) return engine.lastAgentScores;
-  // Quick scan on the best-buffered market
-  const candidateSymbols = ["1HZ100V", "R_100", "R_50", "R_25", "R_10"];
-  const best = candidateSymbols
-    .map((s) => ({ symbol: s, count: tickManager.getTicks(s, 100).length }))
-    .filter((x) => x.count >= 5)
-    .sort((a, b) => b.count - a.count)[0];
-  if (!best) return {};
-  const mInfo = getMarketInfo(best.symbol);
-  if (!mInfo) return {};
-
-  try {
-    const ctx: ScanContext = {
-      symbol: mInfo.symbol,
-      displayName: mInfo.displayName,
-      category: mInfo.category,
-      prices: tickManager.getTicks(mInfo.symbol, 100),
-      digits: mInfo.digitEnabled ? tickManager.getDigits(mInfo.symbol, 100) : [],
-      balance: 10000,
-      settings: buildTradingSettings(null, ["CALL", "PUT", "DIGITOVER", "DIGITUNDER"]),
-      daily: { tradesCount: 0, wins: 0, losses: 0, profit: 0, consecutiveLosses: 0, consecutiveWins: 0 },
-      token: null,
-      currency: "USD",
-    };
-    const output = await runCoordinator(ctx);
-    return Object.fromEntries(
-      AGENT_SCORE_KEYS.map((k) => [k, output.agents[k]?.score ?? 65])
-    );
-  } catch { return {}; }
+// ── Engine agent status (from the last autonomous cycle) ──────────────────────
+function engineAgentStatuses(engine: EngineInstance) {
+  const now = new Date().toISOString();
+  return AGENT_SCORE_KEYS.map((key, i) => ({
+    name: AGENT_NAMES[i],
+    isActive: engine.running,
+    lastRun: now,
+    confidence: engine.lastAgentScores[key] ?? 0,
+  }));
 }
 
 
@@ -1710,7 +807,7 @@ router.get("/insights", async (req, res): Promise<void> => {
 // ── Recovery dashboard payload — single global recovery state ───────────────
 //
 // Recovery is ONE state now, regardless of contract type. The loss-streak
-// count is the exact same counter that gates cooldown (see runAutonomousLoop).
+// count is the exact same counter that gates cooldown (see lib/autonomous-hedge/cycle.ts).
 // The card only returns to "Normal" once a win FULLY covers unrecoveredAmount
 // — a partial win clears the streak count but leaves the debt (and `active`)
 // in place, per spec.
@@ -1750,20 +847,10 @@ router.get("/engine/status", async (req, res): Promise<void> => {
   ));
   // This account's OWN independent engine instance — never another session's.
   const engine = getEngine(req.sessionId);
-  const liveScores = await getComputedAgentScores(engine);
 
   res.json({
     isRunning: engine.running, mode: engine.running ? engine.mode : "manual",
-    agentStatuses: AGENT_NAMES.map((name, i) => {
-      const key = AGENT_SCORE_KEYS[i] ?? "featureEngineering";
-      const score = liveScores[key] ?? 65;
-      return {
-        name,
-        isActive: true,
-        lastRun: new Date().toISOString(),
-        confidence: score,
-      };
-    }),
+    agentStatuses: engineAgentStatuses(engine),
     tradesExecutedToday: todayTrades.length,
     currentMarket: engine.currentMarket,
     nextScanIn: engine.running ? engine.nextScanIn : null,
@@ -1832,14 +919,9 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
       .where(eq(settingsTable.id, settings[0].id));
   }
 
-  const toggleScores = await getComputedAgentScores(engine);
   res.json({
     isRunning: engine.running, mode: engine.mode,
-    agentStatuses: AGENT_NAMES.map((name, i) => {
-      const key = AGENT_SCORE_KEYS[i] ?? "featureEngineering";
-      const score = toggleScores[key] ?? 65;
-      return { name, isActive: true, lastRun: new Date().toISOString(), confidence: score };
-    }),
+    agentStatuses: engineAgentStatuses(engine),
     tradesExecutedToday: engine.tradesExecutedToday, currentMarket: engine.currentMarket,
     nextScanIn: engine.nextScanIn, stopReasons: engine.stopReasons, loopIntervalSec: engine.loopIntervalSec,
     lastTradeTime: engine.lastTradeTime?.toISOString() ?? null,

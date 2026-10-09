@@ -22,11 +22,24 @@
 
 import { db } from "@workspace/db";
 import { accountsTable, settingsTable, tradesTable } from "@workspace/db";
-import { and, eq, gte, inArray, sql } from "drizzle-orm";
+import { and, eq, gte, inArray, isNull, lte, notLike, or, like } from "drizzle-orm";
 import { fetchDerivProfitTable } from "./deriv";
 import { logger } from "./logger";
 import { runWithSession } from "./session";
 import * as recoveryEngine from "./agents/recovery-engine";
+import { AUTONOMOUS_HEDGE_PREFIX } from "./autonomous-hedge/constants";
+import {
+  matchAutonomousRows,
+  settledProfit,
+  type DerivTx,
+  type ReconRow,
+} from "./autonomous-hedge/ledger-match";
+import {
+  claimUnsettledRow,
+  isAutonomousHedgeRow,
+  loadClaimedContractIds,
+  settleAutonomousRow,
+} from "./autonomous-hedge/ledger";
 
 /** Trades older than this that are still `open` are considered unsettled. */
 const RECONCILE_AFTER_MS = 90_000;
@@ -34,6 +47,19 @@ const RECONCILE_AFTER_MS = 90_000;
 const RECONCILE_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** How many unsettled rows to examine per sweep. */
 const RECONCILE_BATCH = 100;
+/**
+ * Autonomous Nexus-logic rows are 1-tick: Deriv settles them within seconds, so
+ * they are reconciled after a short grace instead of the 90 s general cutoff.
+ */
+const AUTONOMOUS_RECONCILE_AFTER_MS = 15_000;
+/**
+ * An autonomous row with NO contract id that is still unmatched after this long
+ * is released as unresolved. It is not counted in the ledger. A buy that never
+ * appears on the broker's books inside this window was not placed.
+ */
+const AUTONOMOUS_UNRESOLVED_AFTER_MS = 10 * 60 * 1000;
+/** How far before a row's creation the broker lookup starts (covers an in-flight buy). */
+const AUTONOMOUS_LOOKBACK_MS = 2 * 60 * 1000;
 
 interface UnsettledRow {
   id: number;
@@ -82,6 +108,70 @@ export function findTransaction(row: UnsettledRow, transactions: any[]): any | n
 }
 
 /**
+ * Autonomous rows. Exact contract id first, otherwise a claim-unique match.
+ * Every settlement goes through settleAutonomousRow: the recovery ledger is made
+ * durable BEFORE the row is claimed, and a row is recorded at most once. A row whose outcome is not yet on
+ * the broker's books stays open, so the exposure gate keeps the engine from
+ * trading over it.
+ */
+export async function settleAutonomousRows(
+  sessionId: string,
+  rows: UnsettledRow[],
+  transactions: any[],
+  maxRecoverySteps: number,
+): Promise<number> {
+  let settled = 0;
+  const claimed = await loadClaimedContractIds(sessionId, new Date(Date.now() - RECONCILE_WINDOW_MS));
+  const matches = matchAutonomousRows(rows as ReconRow[], transactions as DerivTx[], claimed);
+
+  for (const row of rows) {
+    const tx = matches.get(row.id);
+    if (!tx) {
+      const unresolvedFor = Date.now() - row.createdAt.getTime();
+      if (!row.derivContractId && unresolvedFor > AUTONOMOUS_UNRESOLVED_AFTER_MS) {
+        const released = await claimUnsettledRow(row.id, {
+          status: "error",
+          profit: "0",
+          payout: "0",
+          closedAt: new Date(),
+          agentReasoning: `${row.agentReasoning ?? ""} [UNRESOLVED: no Deriv record after 10 min — not counted in the recovery ledger]`,
+        });
+        if (released) {
+          logger.warn({ tradeId: row.id, sessionId }, "Autonomous row released as unresolved — no Deriv record");
+        }
+      }
+      continue;
+    }
+
+    const { buy, sell, profit, won } = settledProfit(tx as DerivTx);
+    const txContractId = tx.contract_id != null ? String(tx.contract_id) : row.derivContractId;
+    const payoutMultiplier = won && buy > 0
+      ? Math.round(((buy + profit) / buy) * 1000) / 1000
+      : 1;
+    const settlement = await settleAutonomousRow(
+      sessionId,
+      row.id,
+      {
+        status: won ? "won" : "lost",
+        profit: String(profit),
+        payout: String(won ? buy + profit : 0),
+        exitPrice: String(sell || buy),
+        derivContractId: txContractId,
+        closedAt: tx.sell_time ? new Date(Number(tx.sell_time) * 1000) : new Date(),
+      },
+      { won, profit, cost: buy, contract: row.contractType, payout: payoutMultiplier, maxRecoverySteps },
+    );
+    if (settlement !== "settled") continue; // already settled elsewhere, or held for retry
+    settled++;
+    logger.info(
+      { tradeId: row.id, contractId: txContractId, won, profit },
+      "Reconciler settled an autonomous 1-tick trade from Deriv's profit table",
+    );
+  }
+  return settled;
+}
+
+/**
  * Settle every `open`/`error` trade that Deriv has already resolved.
  * Returns the number of rows settled.
  */
@@ -90,6 +180,7 @@ export async function reconcileUnsettledTrades(): Promise<number> {
   try {
     const since = new Date(Date.now() - RECONCILE_WINDOW_MS);
     const cutoff = new Date(Date.now() - RECONCILE_AFTER_MS);
+    const autonomousCutoff = new Date(Date.now() - AUTONOMOUS_RECONCILE_AFTER_MS);
 
     const rows = (await db
       .select({
@@ -105,9 +196,21 @@ export async function reconcileUnsettledTrades(): Promise<number> {
       .from(tradesTable)
       .where(
         and(
-          inArray(tradesTable.status, ["open", "error"]),
           gte(tradesTable.createdAt, since),
-          sql`${tradesTable.createdAt} <= ${cutoff}`,
+          or(
+            // Autonomous 1-tick rows: only while still open, on the short grace.
+            and(
+              eq(tradesTable.status, "open"),
+              like(tradesTable.agentReasoning, `${AUTONOMOUS_HEDGE_PREFIX}%`),
+              lte(tradesTable.createdAt, autonomousCutoff),
+            ),
+            // Every other row keeps the original rule, unchanged.
+            and(
+              inArray(tradesTable.status, ["open", "error"]),
+              or(isNull(tradesTable.agentReasoning), notLike(tradesTable.agentReasoning, `${AUTONOMOUS_HEDGE_PREFIX}%`)),
+              lte(tradesTable.createdAt, cutoff),
+            ),
+          ),
         ),
       )
       .limit(RECONCILE_BATCH)) as UnsettledRow[];
@@ -146,14 +249,28 @@ export async function reconcileUnsettledTrades(): Promise<number> {
           .limit(1);
         const maxRecoverySteps = Number((settingsRows[0] as any)?.maxRecoverySteps ?? 3) || 3;
 
-        const transactions = await fetchDerivProfitTable(
-          token,
-          account.derivAccountId ?? account.loginId,
-          100,
-        );
+        const accountId = account.derivAccountId ?? account.loginId;
+
+        // Autonomous 1-tick rows: a bounded, STRICT lookup. A failed lookup
+        // throws and the rows stay open, so an outage can never be read as
+        // "no such trade" and released out of the recovery ledger.
+        const autonomousRows = sessionRows.filter((r) => isAutonomousHedgeRow(r.agentReasoning));
+        if (autonomousRows.length > 0) {
+          const earliest = Math.min(...autonomousRows.map((r) => r.createdAt.getTime()));
+          const autonomousTx = await fetchDerivProfitTable(token, accountId, 100, {
+            dateFrom: Math.floor((earliest - AUTONOMOUS_LOOKBACK_MS) / 1000),
+            strict: true,
+          });
+          settled += await settleAutonomousRows(sessionId, autonomousRows, autonomousTx, maxRecoverySteps);
+        }
+
+        // Legacy rows: unchanged lookup and matching.
+        const legacyRows = sessionRows.filter((r) => !isAutonomousHedgeRow(r.agentReasoning));
+        if (legacyRows.length === 0) continue;
+        const transactions = await fetchDerivProfitTable(token, accountId, 100);
         if (transactions.length === 0) continue;
 
-        for (const row of sessionRows) {
+        for (const row of legacyRows) {
           // Omni owns a durable purchase intent and atomically settles it with
           // the shared recovery ledger. Its unknown acknowledgements must NEVER
           // be fuzzy-matched by this legacy display-only reconciliation path.

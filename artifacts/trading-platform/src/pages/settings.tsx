@@ -9,24 +9,100 @@ import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { DollarSign, Percent } from "lucide-react";
-import {
-  OVER_PAYOUTS,
-  UNDER_PAYOUTS,
-  EVEN_ODD_PAYOUT,
-  RISE_FALL_PAYOUT,
-  MATCH_PAYOUT,
-  DIFF_PAYOUT,
-  exactRecoveryStake,
-  roundRecoveryStakeUp,
-} from "@/lib/payouts";
 import { AutonomousContractSetEditor } from "@/components/autonomous-contract-set-editor";
 import {
   contractSetError,
   decodeContractSet,
   encodeContractSet,
-  firstDigitOf,
   type AutonomousContractSpec,
 } from "@/lib/autonomous-contracts";
+
+// ── Presentation primitives ──────────────────────────────────────────────────
+// Full class strings only: Tailwind cannot see dynamically assembled names.
+const ACCENT = {
+  cyan: {
+    card: "border-cyan-400/20 shadow-[0_0_35px_rgba(34,211,238,0.05)]",
+    dot: "bg-cyan-400 shadow-[0_0_10px_rgb(34_211_238)]",
+    label: "text-cyan-300",
+    panel: "border-cyan-400/15",
+    chip: "border-cyan-400/25 bg-cyan-400/5 text-cyan-200",
+  },
+  amber: {
+    card: "border-amber-400/20 shadow-[0_0_35px_rgba(251,191,36,0.05)]",
+    dot: "bg-amber-400 shadow-[0_0_10px_rgb(251_191_36)]",
+    label: "text-amber-300",
+    panel: "border-amber-400/15",
+    chip: "border-amber-400/25 bg-amber-400/5 text-amber-200",
+  },
+  violet: {
+    card: "border-violet-400/20 shadow-[0_0_35px_rgba(167,139,250,0.05)]",
+    dot: "bg-violet-400 shadow-[0_0_10px_rgb(167_139_250)]",
+    label: "text-violet-300",
+    panel: "border-violet-400/15",
+    chip: "border-violet-400/25 bg-violet-400/5 text-violet-200",
+  },
+} as const;
+
+type AccentKey = keyof typeof ACCENT;
+
+function SectionCard({
+  index,
+  title,
+  description,
+  accent,
+  aside,
+  children,
+}: {
+  index: string;
+  title: string;
+  description: string;
+  accent: AccentKey;
+  aside?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const a = ACCENT[accent];
+  return (
+    <Card className={`bg-card ${a.card}`}>
+      <CardHeader className="pb-3 border-b border-border/50">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex items-start gap-3 min-w-0">
+            <span className="mt-0.5 font-mono text-[10px] tabular-nums text-muted-foreground/70">{index}</span>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full ${a.dot}`} />
+                <CardTitle className="text-base">{title}</CardTitle>
+              </div>
+              <CardDescription className="text-xs mt-1 max-w-2xl leading-relaxed">{description}</CardDescription>
+            </div>
+          </div>
+          {aside}
+        </div>
+      </CardHeader>
+      <CardContent className="pt-4">{children}</CardContent>
+    </Card>
+  );
+}
+
+function Panel({ label, accent, children }: { label: string; accent: AccentKey; children: React.ReactNode }) {
+  const a = ACCENT[accent];
+  return (
+    <div className={`rounded-xl border ${a.panel} bg-secondary/10 px-4 pb-1`}>
+      <div className="pt-3 pb-1">
+        <span className={`text-[10px] font-semibold uppercase tracking-[0.18em] ${a.label}`}>{label}</span>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function StatPill({ label, value, accent }: { label: string; value: string; accent: AccentKey }) {
+  return (
+    <div className={`rounded-lg border ${ACCENT[accent].chip} px-2.5 py-1`}>
+      <div className="text-[9px] uppercase tracking-[0.14em] opacity-70">{label}</div>
+      <div className="font-mono text-xs font-semibold tabular-nums">{value}</div>
+    </div>
+  );
+}
 
 function SettingRow({ label, description, children }: { label: string; description?: string; children: React.ReactNode }) {
   return (
@@ -56,6 +132,41 @@ function NumInput({ value, onChange, min, max, step = 1, suffix, disabled }: {
   );
 }
 
+/** Segmented two-way control used for Risk Amount Type and Auto/Manual. */
+function SegmentedChoice<T extends string | boolean>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (next: T) => void;
+  options: Array<{ value: T; icon?: React.ReactNode; title: string; hint?: string }>;
+}) {
+  return (
+    <div className="flex w-full rounded-xl overflow-hidden border border-border/80 bg-secondary/20 shadow-inner">
+      {options.map((option, i) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={String(option.value)}
+            type="button"
+            onClick={() => onChange(option.value)}
+            className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2 text-xs font-medium transition-colors ${i > 0 ? "border-l border-border" : ""} ${active ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
+          >
+            <span className="flex items-center gap-1.5 font-semibold">
+              {option.icon}
+              {option.title}
+            </span>
+            {option.hint && (
+              <span className={`text-[10px] ${active ? "text-primary-foreground/80" : "text-muted-foreground"}`}>{option.hint}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Default contract sets, used only before the server has answered. The server
 // always returns the sets the engine actually trades.
 const DEFAULT_NORMAL_CONTRACTS: AutonomousContractSpec[] = [
@@ -74,6 +185,9 @@ const DEFAULT_RECOVERY_CONTRACTS: AutonomousContractSpec[] = [
   { type: "DIGITEVEN", digit: -1 },
   { type: "DIGITODD", digit: -1 },
 ];
+
+/** Mirrors the engine's risk-profile multiplier so the preview matches execution. */
+const PROFILE_MULTIPLIER: Record<string, number> = { conservative: 0.4, moderate: 0.7, aggressive: 1 };
 
 export default function Settings() {
   const { data: settings, isLoading } = useGetSettings();
@@ -189,229 +303,198 @@ export default function Settings() {
 
   if (isLoading) return <div className="p-8 text-muted-foreground text-sm animate-pulse">Loading settings…</div>;
 
-  // UI examples use the canonical fallback schedule. At execution time the
-  // server asks Deriv for a live $1 proposal and only falls back to these values.
-  // Example barriers come from the sets: the first Over/Under in each set. A set
-  // with no Over or Under simply shows no example for that side.
-  const recoveryOverDigit = firstDigitOf(form.recoveryContracts, "DIGITOVER");
-  const recoveryUnderDigit = firstDigitOf(form.recoveryContracts, "DIGITUNDER");
-  const normalOverDigit = firstDigitOf(form.normalContracts, "DIGITOVER") ?? 1;
-  const normalUnderDigit = firstDigitOf(form.normalContracts, "DIGITUNDER") ?? 8;
-  const exampleBaseStake = form.riskAmountType === "percentage" && account
-    ? Math.max(0.35, Number(account.balance) * form.riskAmountValue / 100)
-    : Math.max(0.35, form.riskAmountValue);
-  const normalOverPayout = OVER_PAYOUTS[normalOverDigit] ?? OVER_PAYOUTS[1];
-  const normalUnderPayout = UNDER_PAYOUTS[normalUnderDigit] ?? UNDER_PAYOUTS[8];
-  const recoveryExamples = [
-    recoveryOverDigit === null ? null : {
-      side: `OVER ${recoveryOverDigit}`,
-      normal: `OVER ${normalOverDigit}`,
-      payout: OVER_PAYOUTS[recoveryOverDigit] ?? OVER_PAYOUTS[3],
-      target: exampleBaseStake * (normalOverPayout - 1),
-    },
-    recoveryUnderDigit === null ? null : {
-      side: `UNDER ${recoveryUnderDigit}`,
-      normal: `UNDER ${normalUnderDigit}`,
-      payout: UNDER_PAYOUTS[recoveryUnderDigit] ?? UNDER_PAYOUTS[6],
-      target: exampleBaseStake * (normalUnderPayout - 1),
-    },
-  ]
-    .filter((e): e is NonNullable<typeof e> => e !== null)
-    .map((e) => ({ ...e, instant: roundRecoveryStakeUp(exactRecoveryStake(exampleBaseStake, e.target, e.payout)) }));
+  // Preview only — execution stays with the engine. Percentage mode needs the
+  // live balance, so it shows nothing until the account has loaded.
+  const balance = account ? Number(account.balance) : null;
+  const profileMult = PROFILE_MULTIPLIER[form.riskProfile] ?? 0.7;
+  const rawStake = form.riskAmountType === "fixed"
+    ? form.riskAmountValue * profileMult
+    : (balance ?? 0) * (form.riskAmountValue / 100) * profileMult;
+  const stakePreview = Number.isFinite(rawStake) && rawStake > 0
+    ? Math.max(0.35, Math.min(rawStake, form.maxTradeStake))
+    : null;
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-3xl mx-auto space-y-5 pb-24">
-      <div>
-        <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground mt-1 text-sm">The AI engine learns autonomously — configure risk and trade mode only.</p>
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="p-4 md:p-8 max-w-6xl mx-auto space-y-5 pb-24">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Settings</h1>
+          <p className="text-muted-foreground mt-1 text-sm">The AI engine learns autonomously — configure risk and trade mode only.</p>
+        </div>
+        {account && (
+          <div className="flex items-center gap-2.5 px-3 py-2 rounded-xl bg-green-500/5 border border-green-500/20">
+            <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0 animate-pulse" />
+            <span className="text-xs text-green-400">
+              Live on <span className="font-mono">{account.loginId}</span>
+              <span className="text-green-400/60"> · </span>
+              <span className="font-mono">{account.currency} {Number(account.balance).toFixed(2)}</span>
+            </span>
+          </div>
+        )}
       </div>
 
-      {account && (
-        <div className="flex items-center gap-3 p-3 rounded-lg bg-green-500/5 border border-green-500/20">
-          <div className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0" />
-          <span className="text-sm text-green-400">Live on <span className="font-mono">{account.loginId}</span> — {account.currency} {Number(account.balance).toFixed(2)}</span>
-        </div>
-      )}
-
-      {/* Risk Profile */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Risk Profile</CardTitle>
-          <CardDescription className="text-xs">Core risk configuration applied to all trades.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow label="Profile Preset" description="Affects stake sizing multiplier.">
-            <Select value={form.riskProfile} onValueChange={(v) => set("riskProfile", v)}>
-              <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="conservative">Conservative</SelectItem>
-                <SelectItem value="moderate">Moderate</SelectItem>
-                <SelectItem value="aggressive">Aggressive</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingRow>
-          <SettingRow label="Risk Amount Type" description="Choose how you specify the amount to risk per trade.">
-            <div className="flex rounded-lg overflow-hidden border border-border">
-              <button
-                onClick={() => set("riskAmountType", "fixed")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "fixed" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}
-              >
-                <DollarSign className="w-3 h-3" /> Fixed $
-              </button>
-              <button
-                onClick={() => set("riskAmountType", "percentage")}
-                className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${form.riskAmountType === "percentage" ? "bg-primary text-primary-foreground" : "bg-secondary/50 text-muted-foreground hover:text-foreground"}`}
-              >
-                <Percent className="w-3 h-3" /> % Balance
-              </button>
-            </div>
-          </SettingRow>
-          <SettingRow
-            label={form.riskAmountType === "fixed" ? "Risk Amount" : "Risk Percentage"}
-            description={form.riskAmountType === "fixed" ? "Fixed dollar amount to risk per trade." : "Percentage of current balance to risk per trade."}
-          >
-            <NumInput
-              value={form.riskAmountValue}
-              onChange={(v) => set("riskAmountValue", v)}
-              min={form.riskAmountType === "fixed" ? 0.35 : 0.1}
-              max={form.riskAmountType === "fixed" ? 50000 : 50}
-              step={form.riskAmountType === "fixed" ? 0.5 : 0.1}
-              suffix={form.riskAmountType === "fixed" ? "$" : "%"}
-            />
-          </SettingRow>
-          <SettingRow label="Max Stake Per Trade" description="Hard cap per trade regardless of balance.">
-            <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
-          </SettingRow>
-          {/* NOTE: the AI Bot Recovery Markup intentionally does NOT live here.
-              It is a bot-only setting, editable from the AI Bot section
-              (bot deploy console). The main autonomous engine and the NeuroAI
-              Quantum FAB use their own recovery logic. */}
-        </CardContent>
-      </Card>
-
-      {/* Daily Limits */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Daily Limits</CardTitle>
-          <CardDescription className="text-xs">Engine auto-stops when these are hit.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow label="Daily Profit Target" description="Stop once this daily profit is achieved.">
-            <NumInput value={form.dailyTarget} onChange={(v) => set("dailyTarget", v)} min={1} max={100000} step={1} suffix="$" />
-          </SettingRow>
-          <SettingRow label="Daily Loss Limit" description="Stop if total daily loss hits this.">
-            <NumInput value={form.dailyLossLimit} onChange={(v) => set("dailyLossLimit", v)} min={1} max={100000} step={1} suffix="$" />
-          </SettingRow>
-          <SettingRow label="Max Drawdown" description="Stop if portfolio drops by this %.">
-            <NumInput value={form.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} min={1} max={50} step={0.5} suffix="%" />
-          </SettingRow>
-          <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
-            <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
-          </SettingRow>
-          <SettingRow label="Cooldown Duration" description="Minutes before engine auto-resumes after a consecutive-loss stop.">
-            <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
-          </SettingRow>
-        </CardContent>
-      </Card>
-
-      {/* Engine Configuration */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Engine Configuration</CardTitle>
-          <CardDescription className="text-xs">Core AI engine parameters that control how and when the engine trades.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow
-            label="Paper Trade Mode"
-            description="Log all trades to the journal without sending real orders to Deriv. Use to test strategies with zero risk. Turn off to go live."
-          >
-            <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
-          </SettingRow>
-          <SettingRow
-            label="Require Positive EV"
-            description="Only trade when the engine calculates a positive expected value. Disabling allows more trade attempts but may reduce win rate."
-          >
-            <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
-          </SettingRow>
-          <SettingRow
-            label="Min Confidence Threshold"
-            description="Minimum AI confidence score (0–100) required before placing a trade. Higher = fewer trades, better quality."
-          >
-            <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={30} max={95} step={1} suffix="%" />
-          </SettingRow>
-          <SettingRow
-            label="Scan Interval"
-            description="How often the autonomous engine scans markets for opportunities."
-          >
-            <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={120} step={1} suffix="s" />
-          </SettingRow>
-          {form.paperTradeMode && (
-            <div className="mt-2 p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
-              <strong>Paper Trade Mode is ON</strong> — no real orders will be sent to Deriv. All trades are simulated in the journal.
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Recovery Mode */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Recovery Mode</CardTitle>
-          <CardDescription className="text-xs">
-            When enabled, after a loss the engine escalates stake size to recover the lost amount. Recovery is tracked as a single global state — it returns to normal as soon as accumulated loss debt is fully repaid. Optional target profit is used only to size an ideal recovery stake and never keeps recovery active.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <SettingRow label="Enable Recovery Mode" description="Automatically increase stake after a loss to recover.">
-            <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
-          </SettingRow>
-
-          {form.recoveryMode && (
-            <>
-              {/* Auto / Manual mode selector */}
-              <div className="mt-3 mb-1">
-                <div className="text-xs font-medium text-foreground mb-2">Recovery Calculator Mode</div>
-                <div className="flex rounded-lg overflow-hidden border border-border w-full">
-                  <button
-                    onClick={() => set("recoveryAutoMode", true)}
-                    className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors ${form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
-                  >
-                    <span className="font-semibold">Auto</span>
-                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>AI computes exact stake</span>
-                  </button>
-                  <button
-                    onClick={() => set("recoveryAutoMode", false)}
-                    className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors border-l border-border ${!form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
-                  >
-                    <span className="font-semibold">Manual</span>
-                    <span className={`text-[10px] ${!form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>Set your own multiplier</span>
-                  </button>
-                </div>
-                {form.recoveryAutoMode ? (
-                  <div className="mt-2 p-2.5 bg-primary/5 border border-primary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
-                    <p>
-                      <span className="text-primary font-medium">Auto mode — no multiplier: </span>
-                      exact stake = (accumulated loss debt + optional original target profit) ÷ (live payout − 1). Recovery still ends the moment debt is cleared, even if the optional target is missed.
-                    </p>
-                    <p>
-                      Payout includes the returned stake, so only payout − 1 is available as profit.
-                      Instant targets full clearance in one win; Split never stakes more than one normal base stake per attempt.
-                    </p>
-                  </div>
-                ) : (
-                  <div className="mt-2 p-2.5 bg-secondary/20 border border-border rounded-lg text-[11px] text-muted-foreground">
-                    <span className="text-foreground font-medium">Manual mode: </span>
-                    Your multiplier is used as entered with no payout calibration or hidden range. It compounds after each recovery loss until Max Recovery Steps.
-                  </div>
-                )}
+      {/* 01 — Risk Profile and Daily Limits, one control surface */}
+      <SectionCard
+        index="01"
+        title="Risk & Daily Controls"
+        description="Per-trade exposure on the left, the automatic stop conditions on the right. Everything the engine checks before it risks a cent lives here."
+        accent="cyan"
+        aside={
+          <div className="flex flex-wrap gap-2">
+            <StatPill accent="cyan" label="Per trade" value={stakePreview === null ? "—" : `$${stakePreview.toFixed(2)}`} />
+            <StatPill accent="amber" label="Daily stop" value={`−$${form.dailyLossLimit}`} />
+            <StatPill accent="amber" label="Cooldown" value={`${form.cooldownMinutes}m`} />
+          </div>
+        }
+      >
+        <div className="grid gap-4 xl:grid-cols-2 xl:gap-5">
+          <Panel label="Exposure" accent="cyan">
+            <SettingRow label="Profile Preset" description="Scales every stake: conservative ×0.4, moderate ×0.7, aggressive ×1.0.">
+              <Select value={form.riskProfile} onValueChange={(v) => set("riskProfile", v)}>
+                <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="conservative">Conservative</SelectItem>
+                  <SelectItem value="moderate">Moderate</SelectItem>
+                  <SelectItem value="aggressive">Aggressive</SelectItem>
+                </SelectContent>
+              </Select>
+            </SettingRow>
+            <SettingRow label="Risk Amount Type" description="A fixed amount, or a percentage of the live balance.">
+              <div className="w-44">
+                <SegmentedChoice
+                  value={form.riskAmountType}
+                  onChange={(v) => set("riskAmountType", v)}
+                  options={[
+                    { value: "fixed", title: "Fixed $", icon: <DollarSign className="w-3 h-3" /> },
+                    { value: "percentage", title: "% Balance", icon: <Percent className="w-3 h-3" /> },
+                  ]}
+                />
               </div>
+            </SettingRow>
+            <SettingRow
+              label={form.riskAmountType === "fixed" ? "Risk Amount" : "Risk Percentage"}
+              description={form.riskAmountType === "fixed"
+                ? "Fixed amount at risk per trade, before the profile multiplier."
+                : "Share of the current balance at risk per trade, before the profile multiplier."}
+            >
+              <NumInput
+                value={form.riskAmountValue}
+                onChange={(v) => set("riskAmountValue", v)}
+                min={form.riskAmountType === "fixed" ? 0.35 : 0.1}
+                max={form.riskAmountType === "fixed" ? 50000 : 50}
+                step={form.riskAmountType === "fixed" ? 0.5 : 0.1}
+                suffix={form.riskAmountType === "fixed" ? "$" : "%"}
+              />
+            </SettingRow>
+            <SettingRow label="Max Stake Per Trade" description="Hard cap on any single stake, including a recovery stake.">
+              <NumInput value={form.maxTradeStake} onChange={(v) => set("maxTradeStake", v)} min={0.35} max={50000} step={0.5} suffix="$" />
+            </SettingRow>
+          </Panel>
 
-              {/* Recovery Method — available in both modes */}
+          <Panel label="Daily guardrails" accent="amber">
+            <SettingRow label="Daily Profit Target" description="Engine stops for the day once this profit is banked.">
+              <NumInput value={form.dailyTarget} onChange={(v) => set("dailyTarget", v)} min={1} max={100000} step={1} suffix="$" />
+            </SettingRow>
+            <SettingRow label="Daily Loss Limit" description="Engine stops for the day once total loss reaches this.">
+              <NumInput value={form.dailyLossLimit} onChange={(v) => set("dailyLossLimit", v)} min={1} max={100000} step={1} suffix="$" />
+            </SettingRow>
+            <SettingRow label="Max Drawdown" description="Stop when the portfolio is down this much from its peak.">
+              <NumInput value={form.maxDrawdown} onChange={(v) => set("maxDrawdown", v)} min={1} max={50} step={0.5} suffix="%" />
+            </SettingRow>
+            <SettingRow label="Consecutive Loss Limit" description="Pause after this many losses in a row.">
+              <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
+            </SettingRow>
+            <SettingRow label="Cooldown Duration" description="Minutes before the engine auto-resumes after a loss-limit stop.">
+              <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
+            </SettingRow>
+          </Panel>
+        </div>
+        {/* NOTE: the AI Bot Recovery Markup intentionally does NOT live here.
+            It is a bot-only setting, editable from the AI Bot section
+            (bot deploy console). The main autonomous engine and the NeuroAI
+            Quantum FAB use their own recovery logic. */}
+      </SectionCard>
+
+      {/* 02 — Engine Configuration */}
+      <SectionCard
+        index="02"
+        title="Engine Configuration"
+        description="How the engine behaves while it trades: whether orders are real, and how strong a signal has to be before it acts."
+        accent="cyan"
+      >
+        <div className="grid gap-4 xl:grid-cols-2 xl:gap-5">
+          <Panel label="Execution posture" accent="cyan">
+            <SettingRow
+              label="Paper Trade Mode"
+              description="Log every trade to the journal without sending real orders to Deriv. Test a strategy with zero risk."
+            >
+              <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
+            </SettingRow>
+            <SettingRow
+              label="Require Positive EV"
+              description="Only trade when the calculated expected value is positive. Off allows more attempts at a lower win rate."
+            >
+              <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
+            </SettingRow>
+          </Panel>
+          <Panel label="Signal quality" accent="cyan">
+            <SettingRow
+              label="Min Confidence Threshold"
+              description="Minimum AI confidence (0–100) before a trade is placed. Higher means fewer, better trades."
+            >
+              <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={30} max={95} step={1} suffix="%" />
+            </SettingRow>
+            <SettingRow
+              label="Scan Interval"
+              description="How often the autonomous engine scans markets for opportunities."
+            >
+              <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={120} step={1} suffix="s" />
+            </SettingRow>
+          </Panel>
+        </div>
+        {form.paperTradeMode && (
+          <div className="mt-4 p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
+            <strong>Paper Trade Mode is ON</strong> — no real orders will be sent to Deriv. All trades are simulated in the journal.
+          </div>
+        )}
+      </SectionCard>
+
+      {/* 03 — Recovery Mode */}
+      <SectionCard
+        index="03"
+        title="Recovery Mode"
+        description="After a loss the engine works the debt back. Recovery is one global state per account and ends the moment the accumulated loss debt is repaid — an optional target profit only helps size a stake, it never keeps recovery alive."
+        accent="amber"
+        aside={
+          <div className="flex items-center gap-2.5">
+            <span className="text-xs text-muted-foreground">Enabled</span>
+            <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
+          </div>
+        }
+      >
+        {!form.recoveryMode ? (
+          <p className="text-xs text-muted-foreground py-2">
+            Recovery is off — every trade is sized from your risk settings above, and a loss is simply a loss.
+          </p>
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-2 xl:gap-5">
+            <Panel label="Sizing" accent="amber">
+              <div className="py-3 border-b border-border/50">
+                <div className="font-medium text-sm mb-2">Calculator Mode</div>
+                <SegmentedChoice
+                  value={form.recoveryAutoMode}
+                  onChange={(v) => set("recoveryAutoMode", v)}
+                  options={[
+                    { value: true, title: "Auto", hint: "engine computes the exact stake" },
+                    { value: false, title: "Manual", hint: "you set the multiplier" },
+                  ]}
+                />
+              </div>
               <SettingRow
                 label="Recovery Method"
                 description={form.recoveryAutoMode
-                  ? "Auto Split caps every attempt at one normal base stake and carries remaining debt forward. Auto Instant sizes the stake to try to clear debt plus the optional target profit in one win. Missing the target by a cent does not keep recovery active."
-                  : "Manual Split uses your compounded multiplier as a cap on the exact target. Manual Instant uses your compounded multiplier stake directly. No automatic payout multiplier is substituted."}
+                  ? "Split caps every attempt at one normal base stake and carries the remaining debt forward. Instant sizes one win to clear the debt plus the optional target."
+                  : "Split uses your compounded multiplier as a cap on the exact target. Instant stakes your compounded multiplier directly."}
               >
                 <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
                   <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
@@ -421,75 +504,51 @@ export default function Settings() {
                   </SelectContent>
                 </Select>
               </SettingRow>
-
-              {/* Recovery Multiplier — manual mode only */}
               {!form.recoveryAutoMode && (
                 <SettingRow
                   label="Recovery Multiplier"
-                  description={`Used exactly as entered and compounded by recovery step: Step 1 = ×${form.recoveryMultiplier}, Step 2 = ×${Math.pow(form.recoveryMultiplier, 2).toFixed(2)}, Step 3 = ×${Math.pow(form.recoveryMultiplier, 3).toFixed(2)}. Auto mode never reads this value.`}
+                  description={`Used exactly as entered and compounded by step: 1 = ×${form.recoveryMultiplier.toFixed(2)}, 2 = ×${Math.pow(form.recoveryMultiplier, 2).toFixed(2)}, 3 = ×${Math.pow(form.recoveryMultiplier, 3).toFixed(2)}. Auto mode never reads this value.`}
                 >
                   <NumInput value={form.recoveryMultiplier} onChange={(v) => set("recoveryMultiplier", v)} step={0.01} suffix="×" />
                 </SettingRow>
               )}
-
-              {/* Max Recovery Steps — available in both modes */}
               <SettingRow
                 label="Max Recovery Steps"
                 description={form.recoveryAutoMode
-                  ? "Maximum recovery-loss step recorded by the engine. Auto stake still recalculates from live debt and payout; it never adds a fixed multiplier."
-                  : "Maximum exponent for your manual multiplier. Recovery continues after this step, but the multiplier stops compounding further."}
+                  ? "Deepest recovery-loss step the engine records. Auto still recalculates from live debt and payout."
+                  : "Highest exponent for your multiplier. Recovery continues past it, but the multiplier stops compounding."}
               >
                 <NumInput value={form.maxRecoverySteps} onChange={(v) => set("maxRecoverySteps", v)} min={1} max={10} />
               </SettingRow>
+            </Panel>
 
-              {/* Recovery calculation preview */}
-              <div className="mt-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+            <Panel label="How it behaves" accent="amber">
+              <div className="py-3 space-y-2.5">
                 {form.recoveryAutoMode ? (
                   <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Auto recovery — ${exampleBaseStake.toFixed(2)} normal-loss example</div>
-                    <div className="text-[10px] text-muted-foreground mb-3">
-                      Target profit comes from the original normal trade. Live payout is used at execution; the values below use the fallback schedule.
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {recoveryExamples.length === 0 && (
-                        <p className="text-[10px] text-muted-foreground sm:col-span-2">Add an Over or Under contract to the recovery set to see stake examples.</p>
-                      )}
-                      {recoveryExamples.map((example) => (
-                        <div key={example.side} className="rounded-lg bg-background/50 border border-border/60 p-2.5 space-y-1">
-                          <div className="flex justify-between text-[10px]">
-                            <span className="font-medium text-foreground">{example.side}</span>
-                            <span className="font-mono text-amber-400">{example.payout.toFixed(2)}× payout</span>
-                          </div>
-                          <p className="text-[9px] text-muted-foreground">
-                            ${exampleBaseStake.toFixed(2)} {example.normal} loss + ${example.target.toFixed(2)} original target
-                          </p>
-                          <div className="flex justify-between text-[10px] pt-1">
-                            <span>Instant exact</span>
-                            <span className="font-mono font-bold text-amber-300">${example.instant.toFixed(2)}</span>
-                          </div>
-                          <div className="flex justify-between text-[10px]">
-                            <span>Split next stake</span>
-                            <span className="font-mono font-bold text-amber-300">${Math.min(exampleBaseStake, example.instant).toFixed(2)} max</span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                    <p className="text-[9px] text-muted-foreground/60 mt-2">
-                      Deriv's $0.35 minimum and your Max Stake Per Trade remain hard execution limits.
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      <span className="text-amber-300 font-medium">Auto — no multiplier. </span>
+                      Each attempt is sized from the live payout of the contract the engine picks:
+                      stake = (loss debt + optional target) ÷ (payout − 1). Payouts include the returned stake, so only payout − 1 repays debt.
                     </p>
+                    <ul className="text-[11px] text-muted-foreground space-y-1.5">
+                      <li className="flex gap-2"><span className="text-amber-400 mt-1 h-1 w-1 rounded-full bg-amber-400 flex-shrink-0" /><span><strong className="text-foreground">Split</strong> — never stakes more than one normal base stake; the rest of the debt rolls into the next attempt.</span></li>
+                      <li className="flex gap-2"><span className="text-amber-400 mt-1 h-1 w-1 rounded-full bg-amber-400 flex-shrink-0" /><span><strong className="text-foreground">Instant</strong> — targets full clearance in a single win.</span></li>
+                      <li className="flex gap-2"><span className="text-amber-400 mt-1 h-1 w-1 rounded-full bg-amber-400 flex-shrink-0" /><span>Deriv's $0.35 minimum and your Max Stake Per Trade stay hard limits.</span></li>
+                    </ul>
                   </>
                 ) : (
                   <>
-                    <div className="text-xs font-medium text-amber-400 mb-1">Manual multiplier ladder (× base stake)</div>
-                    <div className="text-[10px] text-muted-foreground mb-2">
-                      No auto-calibration. The multiplier compounds after a recovery loss and freezes at Max Recovery Steps.
-                    </div>
-                    <div className="flex gap-3 flex-wrap">
-                      {Array.from({ length: form.maxRecoverySteps }, (_, i) => i + 1).map((step) => (
-                        <div key={step} className="text-center">
-                          <div className="text-[10px] text-muted-foreground">Step {step}</div>
-                          <div className="text-xs font-mono font-bold text-amber-400">
-                            {form.recoveryMethod === "split" ? "≤" : ""}×{Math.pow(form.recoveryMultiplier, step).toFixed(2)}
+                    <p className="text-[11px] text-muted-foreground leading-relaxed">
+                      <span className="text-foreground font-medium">Manual — no calibration. </span>
+                      Your multiplier is used exactly as entered, with no payout adjustment and no hidden floor. It compounds after each recovery loss and freezes at Max Recovery Steps.
+                    </p>
+                    <div className="flex gap-2 flex-wrap pt-1">
+                      {Array.from({ length: Math.max(1, Math.min(form.maxRecoverySteps, 10)) }, (_, i) => i + 1).map((step) => (
+                        <div key={step} className="rounded-lg border border-amber-400/20 bg-amber-400/5 px-2.5 py-1.5 text-center">
+                          <div className="text-[9px] uppercase tracking-wider text-muted-foreground">Step {step}</div>
+                          <div className="text-xs font-mono font-bold text-amber-300">
+                            {form.recoveryMethod === "split" ? "≤ " : ""}×{Math.pow(form.recoveryMultiplier, step).toFixed(2)}
                           </div>
                         </div>
                       ))}
@@ -497,66 +556,49 @@ export default function Settings() {
                   </>
                 )}
               </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
+            </Panel>
+          </div>
+        )}
+      </SectionCard>
 
-      {/* Normal market contracts — what the engine trades outside recovery */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Normal Market Contracts</CardTitle>
-          <CardDescription className="text-xs">
-            The contracts the engine may trade when it is not recovering. Pick any mix (up to 8). Each Over, Under, Matches and Differs carries its own digit, and Matches or Differs can use auto to let the engine pick the digit from the live tape.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <AutonomousContractSetEditor
-            testId="normal-contracts"
-            title="Normal contracts"
-            description="Used for every normal trade."
-            specs={form.normalContracts}
-            onChange={(next) => set("normalContracts", next)}
-          />
-        </CardContent>
-      </Card>
-
-      {/* Recovery contracts — chosen independently of normal */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base">Recovery Contracts</CardTitle>
-          <CardDescription className="text-xs">
-            The contracts the engine may trade while recovering a loss. This set is independent of the normal set, so you can trade Even in normal markets and Matches in recovery. Recovery stakes are sized from the live payout of the contract the engine picks.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <AutonomousContractSetEditor
-            testId="recovery-contracts"
-            title="Recovery contracts"
-            description="Used for every recovery trade."
-            specs={form.recoveryContracts}
-            onChange={(next) => set("recoveryContracts", next)}
-          />
-          <div className="rounded-lg border border-border/60 bg-secondary/10 p-2.5">
-            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-2">$1 fallback payout reference</p>
-            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
-              {Object.entries(OVER_PAYOUTS).map(([digit, payout]) => (
-                <div key={digit} className="rounded bg-background/60 px-1.5 py-1 text-center">
-                  <div className="text-[9px] text-muted-foreground">O{digit} / U{9 - Number(digit)}</div>
-                  <div className="text-[10px] font-mono text-foreground">{payout.toFixed(2)}×</div>
-                </div>
-              ))}
+      {/* 04 — Contract sets, side by side so the two are easy to compare */}
+      <SectionCard
+        index="04"
+        title="Contract Sets"
+        description="The two sets are independent: the engine ranks the normal set while trading normally and the recovery set while recovering, so you can trade Even normally and Matches in recovery. Pick any mix up to 8 per set — Over, Under, Matches and Differs take a digit, and Matches or Differs can use auto."
+        accent="violet"
+      >
+        <div className="grid gap-4 xl:grid-cols-2 xl:gap-5">
+          <Panel label="Normal trades" accent="cyan">
+            <div className="py-3">
+              <AutonomousContractSetEditor
+                testId="normal-contracts"
+                title="Normal contracts"
+                description="Ranked on every normal trade."
+                specs={form.normalContracts}
+                onChange={(next) => set("normalContracts", next)}
+              />
             </div>
-          </div>
-          <div className="p-2.5 bg-secondary/20 rounded-lg text-[11px] text-muted-foreground space-y-1">
-            <p><strong className="text-foreground">Payout meaning:</strong> values are the total returned after a win, including the initial stake. Auto recovery uses only the net portion (payout − 1).</p>
-            <p>Other fallback payouts: Even/Odd <strong className="text-foreground">{EVEN_ODD_PAYOUT.toFixed(2)}×</strong> · Rise/Fall <strong className="text-foreground">{RISE_FALL_PAYOUT.toFixed(2)}×</strong> · Matches <strong className="text-foreground">{MATCH_PAYOUT.toFixed(2)}×</strong> · Differs <strong className="text-foreground">{DIFF_PAYOUT.toFixed(2)}×</strong>.</p>
-          </div>
-        </CardContent>
-      </Card>
+          </Panel>
+          <Panel label="Recovery trades" accent="violet">
+            <div className="py-3">
+              <AutonomousContractSetEditor
+                testId="recovery-contracts"
+                title="Recovery contracts"
+                description="Ranked on every recovery trade; stakes are sized from the live payout of whichever of these the engine picks."
+                specs={form.recoveryContracts}
+                onChange={(next) => set("recoveryContracts", next)}
+              />
+            </div>
+          </Panel>
+        </div>
+      </SectionCard>
 
-      <div className="flex justify-end pt-2">
-        <Button onClick={handleSave} disabled={updateSettings.isPending} className="w-full sm:w-48">
+      <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+        <p className="text-[11px] text-muted-foreground">
+          Saved settings apply to the running engine immediately and are broadcast to your other open tabs.
+        </p>
+        <Button onClick={handleSave} disabled={updateSettings.isPending} className="w-full sm:w-52">
           {updateSettings.isPending ? "Saving…" : "Save All Settings"}
         </Button>
       </div>

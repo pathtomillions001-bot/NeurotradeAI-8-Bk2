@@ -42,6 +42,7 @@ import {
   HEDGE_GROUP_NAMES,
 } from "./constants";
 import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
+import { recoveryEscalation } from "./recovery-risk";
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
@@ -324,7 +325,12 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
 
   const ctx = await getContext(host, s, false);
   const mode: HedgeMode = recoveryEngine.isInRecovery() ? "RECOVERY" : "NORMAL";
-  const lossRun = recoveryEngine.getState().streakLossCount;
+  const ledger = recoveryEngine.getState();
+  const lossRun = ledger.streakLossCount;
+  // Depth of THIS recovery episode. streakLossCount resets on any win and on a
+  // cooldown auto-resume; recoveryStep only clears when the debt is repaid, so
+  // the maximum keeps the recovery ranking honest across a cooldown.
+  const escalation = recoveryEscalation(lossRun, ledger.recoveryStep);
 
   // 0. Hard limits first. A breached limit stops the engine before anything is ranked.
   const risk = riskFor(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
@@ -358,11 +364,12 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
       tickSequence: tape.tickSequence,
       specs,
       mode,
+      escalation,
     }));
   }
 
   // 2. Contest and gate.
-  const decision = decideHedge({ rows, mode, memory: s.memory, lossRun });
+  const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
   if (!decision) {
     host.publish({ currentMarket: null, nextScanIn: null });
     return;
@@ -380,6 +387,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
       inRecovery: recoveryEngine.isInRecovery(),
       step: recoveryEngine.getState().recoveryStep,
       debt: recoveryEngine.getState().unrecoveredAmount,
+      escalation,
     },
     risk: {
       hardStop: risk.hardStop,
@@ -447,6 +455,13 @@ function publishScan(
     confirmations: decision.confirmations,
     requiredConfirmations: decision.requiredConfirmations,
     rescanInProgress: decision.rescanInProgress,
+    // Recovery risk model (docs/recovery-trade-mathematical-design.md): the
+    // posterior probability the true win rate beats break-even, the three-loss
+    // stress indicator, and the loss-streak weight the score used.
+    posteriorEdge: Math.round(b.posteriorEdgeProbability * 1000) / 1000,
+    lossRunRisk: Math.round(b.lossRunRisk * 1000) / 1000,
+    riskWeight: Math.round(b.riskWeight * 100) / 100,
+    escalation: decision.escalation,
   });
   for (const gw of decision.groupWinners) {
     const w = gw.winner;

@@ -26,6 +26,8 @@ export interface HedgeDecision {
   confirmations: number;
   requiredConfirmations: number;
   rescanInProgress: boolean;
+  /** Recovery-episode depth the risk terms were weighted at (0 in normal mode). */
+  escalation: number;
   blockers: string[];
   reason: string;
   groupWinners: GroupWinner[];
@@ -37,6 +39,8 @@ export interface DecideInput {
   mode: HedgeMode;
   memory: HedgeMemory;
   lossRun: number;
+  /** Recovery-episode depth; reported for transparency. Ranking already carries it. */
+  escalation?: number;
 }
 
 /**
@@ -45,6 +49,7 @@ export interface DecideInput {
  */
 export function decideHedge(input: DecideInput): HedgeDecision | null {
   const { mode, memory, lossRun } = input;
+  const escalation = Math.max(0, Math.floor(input.escalation ?? 0));
   const rows = input.rows.map((row) => ({ ...row })); // never mutate the caller's rows
   if (rows.length === 0) {
     memory.confirmation = undefined;
@@ -80,12 +85,19 @@ export function decideHedge(input: DecideInput): HedgeDecision | null {
 
   const confirmation = evaluateConfirmation(memory, mode, best, lossRun);
   const rescanNote = rescanInProgress ? ` · post-loss rescan (lossRun ${lossRun})` : "";
+  // Recovery evidence, reported so an entry or a hold is explainable: the
+  // posterior probability that the true win rate beats break-even, the
+  // three-loss stress indicator R3L, and the loss-streak weight both were
+  // scored at. These re-rank candidates; they never size a stake.
+  const recoveryNote = mode === "RECOVERY"
+    ? ` · P(edge) ${(best.posteriorEdgeProbability * 100).toFixed(0)}% R3L ${best.lossRunRisk.toFixed(2)} w${best.riskWeight.toFixed(2)}`
+    : "";
   const barrierText = best.barrier >= 0 ? ` ${best.barrier}` : "";
   const reason = best.eligible
     ? confirmation.eligible
-      ? `READY ${best.contract}${barrierText} on ${best.symbol} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%${rescanNote}`
-      : `HOLD · confirming recovery setup ${confirmation.confirmations}/${confirmation.required} on a fresh tick${rescanNote}`
-    : `HOLD: ${blockers.join(", ") || "no qualified edge"}${rescanNote}`;
+      ? `READY ${best.contract}${barrierText} on ${best.symbol} score ${best.score.toFixed(2)} EV ${(best.ev * 100).toFixed(2)}% LCB ${(best.lowerBound * 100).toFixed(1)}%${recoveryNote}${rescanNote}`
+      : `HOLD · confirming recovery setup ${confirmation.confirmations}/${confirmation.required} on a fresh tick${recoveryNote}${rescanNote}`
+    : `HOLD: ${blockers.join(", ") || "no qualified edge"}${recoveryNote}${rescanNote}`;
 
   return {
     mode,
@@ -94,6 +106,7 @@ export function decideHedge(input: DecideInput): HedgeDecision | null {
     confirmations: confirmation.confirmations,
     requiredConfirmations: confirmation.required,
     rescanInProgress,
+    escalation,
     blockers,
     reason,
     groupWinners,

@@ -18,7 +18,6 @@ import Settings from "./pages/settings";
 import Intelligence from "./pages/intelligence";
 import RiskCalculator from "./pages/risk-calculator";
 import BotBuilder from "./pages/bot-builder";
-import Bots from "./pages/bots";
 import { onSessionChange, withTabSession } from "@/lib/tab-session";
 import {
   isLandingDismissed,
@@ -220,7 +219,7 @@ function Router() {
   const isRoot = path === "/";
 
   // The funnel belongs to the root URL alone. Deep links are rendered as-is so
-  // a refresh on Journal/Markets/Bots/Connect keeps the visitor on that page.
+  // a refresh on Journal/Markets/Connect keeps the visitor on that page.
   if (isRoot) {
     if (gateState === "undecided") return <BootSplash />;
     if (gateState === "landing") {
@@ -236,7 +235,6 @@ function Router() {
         {/* Multi-Asset Desk: forex, metals, indices, commodities, crypto, futures. */}
         <Route path="/terminal" component={Terminal} />
         <Route path="/markets/:symbol" component={MarketDetail} />
-        <Route path="/bots" component={Bots} />
         <Route path="/bot-builder" component={BotBuilder} />
         <Route path="/trades" component={Trades} />
         <Route path="/analytics" component={Analytics} />

@@ -21,7 +21,9 @@ import {
   roundRecoveryStakeUp,
 } from "@/lib/payouts";
 import { withTabSession } from "@/lib/tab-session";
-import { OPEN_SPEED_AI_EVENT } from "@/lib/live-bots";
+
+/** Event name used to ask the NeuroAI FAB (floating on every page) to open its panel. */
+export const OPEN_SPEED_AI_EVENT = "neurotrade:open-speed-ai";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -385,8 +387,7 @@ export function SpeedAIFab() {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [open, fetchStatus]);
 
-  // The global active-engine indicator (top-right chip) opens this panel via
-  // a window event when the NeuroAI session is the engine running.
+  // Other UI (e.g. deep links) can open this panel via a window event.
   useEffect(() => {
     const openFromIndicator = () => setOpen(true);
     window.addEventListener(OPEN_SPEED_AI_EVENT, openFromIndicator);

@@ -13,7 +13,8 @@
  *
  * Fix for release-skew incident (2026-09-19):
  * - Old web bundle at 39300a9 had no __release handler, so /__release fell through
- *   to index.html (200) and Railway healthcheck passed while bot consoles were wrong.
+ *   to index.html (200) and Railway healthcheck passed while the web/API releases
+ *   disagreed.
  * - Now /__release and /release.json are handled explicitly BEFORE static handler,
  *   always returning JSON with no-store cache, so healthcheck and deployment
  *   verification can never be fooled by SPA fallback.
@@ -217,23 +218,14 @@ async function releaseReport() {
     apiError = error instanceof Error ? error.message : String(error);
   }
 
-  const webConsoles = new Set(web.consoles ?? []);
-  const apiConsoles = new Set(api?.consoles ?? []);
-  const missingHere = [...apiConsoles].filter(id => !webConsoles.has(id)).sort();
-  const missingOnApi = [...webConsoles].filter(id => !apiConsoles.has(id)).sort();
-
+  // The web app no longer ships bot consoles, so console parity is no longer a
+  // web/API skew signal — parity now only reports whether the API is reachable.
   return {
     status: "ok",
     web,
     api: api ? { ...api.release, consoles: api.consoles } : null,
     apiError,
-    parity: apiError || missingHere.length > 0 ? "skew" : "ok",
-    missingConsolesHere: missingHere,
-    consolesNotOnApi: missingOnApi,
-    hint:
-      missingHere.length > 0
-        ? `This web build (${web.shortSha}) cannot render ${missingHere.join(", ")} — redeploy the web service from main; do not Redeploy the old deployment.`
-        : undefined,
+    parity: apiError ? "skew" : "ok",
     ts: new Date().toISOString(),
   };
 }

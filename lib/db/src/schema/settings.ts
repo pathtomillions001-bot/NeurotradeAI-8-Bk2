@@ -28,6 +28,10 @@ export const settingsTable = pgTable("settings", {
   paperTradeMode: boolean("paper_trade_mode").notNull().default(false),
   requirePositiveEv: boolean("require_positive_ev").notNull().default(true),
   cooldownMinutes: integer("cooldown_minutes").notNull().default(1),
+  // Master switch for the automatic cooldown pause after the consecutive-loss
+  // limit. When false the engine still stops at the loss limit (safety) but no
+  // timed auto-resume is scheduled — it waits for a manual resume.
+  cooldownEnabled: boolean("cooldown_enabled").notNull().default(true),
   normalOverDigit: integer("normal_over_digit").notNull().default(1),
   normalUnderDigit: integer("normal_under_digit").notNull().default(8),
   recoveryOverDigit: integer("recovery_over_digit").notNull().default(3),

@@ -31,6 +31,8 @@ export interface TradingSettingsInput {
   paperTradeMode?: boolean;
   requirePositiveEv?: boolean;
   cooldownMinutes?: number;
+  /** Enable the automatic cooldown pause after the consecutive-loss limit. When disabled the engine still stops at the loss limit but waits for a manual resume instead of auto-resuming after the cooldown duration. */
+  cooldownEnabled?: boolean;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;

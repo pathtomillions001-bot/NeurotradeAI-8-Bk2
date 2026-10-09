@@ -4,7 +4,6 @@ import tailwindcss from "@tailwindcss/vite";
 import fs from "fs";
 import path from "path";
 import runtimeErrorOverlay from "@replit/vite-plugin-runtime-error-modal";
-import { WEB_CONSOLE_IDS } from "./src/lib/console-contract";
 
 // Default to 5000 — Replit's standard webview port, required for autoStart preview.
 const rawPort = process.env.PORT ?? "5000";
@@ -109,10 +108,9 @@ function botPreviewDevServe(): Plugin {
 
 // ── Release stamp ─────────────────────────────────────────────────────────────
 // The web and API services deploy independently, so every build carries the
-// commit it came from plus the bot consoles it implements. The bundle compares
-// that against `/api/healthz` / `/api/bots` and shows an "update available"
-// panel when the two services are on different releases, instead of silently
-// rendering the wrong bot consoles (see src/lib/console-contract.ts).
+// commit it came from. The production server (`scripts/serve-production.mjs`
+// → `/__release`) and `check:release` compare it against the API's release so a
+// stale web service is never mistaken for a healthy one.
 const releaseSha =
   (process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT_SHA ?? process.env.COMMIT_SHA ?? "")
     .trim() || "unknown";
@@ -123,7 +121,7 @@ const webRelease = {
   builtAt: new Date().toISOString(),
   environment:
     (process.env.RAILWAY_ENVIRONMENT_NAME ?? process.env.NODE_ENV ?? "local").trim() || "local",
-  consoles: [...WEB_CONSOLE_IDS],
+  consoles: [] as string[],
 };
 
 /**

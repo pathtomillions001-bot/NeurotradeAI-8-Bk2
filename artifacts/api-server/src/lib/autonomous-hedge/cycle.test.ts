@@ -27,6 +27,7 @@ function context(): HedgeContext {
     },
     consecutiveLossLimit: 3,
     cooldownMinutes: 30,
+    cooldownEnabled: true,
     allowedMarketSymbols: ["R_100"],
     paperTradeMode: true,
     daily: { ...DAILY },

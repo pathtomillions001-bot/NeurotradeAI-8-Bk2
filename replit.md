@@ -43,15 +43,12 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 - `artifacts/api-server/src/lib/bot-engine.ts` — specialist bot session/scan/execution loop
 - `artifacts/api-server/src/lib/dual-lock-analysis.ts` — 6th bot: the pre-deploy lock search (loss-clustering Markov, conditional recovery transition, χ² stationarity, block-bootstrap survival, BH-FDR)
 - `artifacts/api-server/src/lib/dual-lock-engine.ts` — 6th bot: frozen-pair continuous execution loop + circuit breaker
-- `artifacts/trading-platform/src/components/dual-lock-console.tsx` — 6th bot console (scan once → lock → monitor)
 - `artifacts/api-server/src/lib/killshot-analysis.ts` — 7th bot: the Kill-Shot stack (five-expert hedge ensemble, Platt calibration, train/test walk-forward of the entry rule itself, anytime-valid e-value on the SHOTS, exact Markov-chain-imbedded ladder ruin, closed-form ladder depth + mean time to break, post-loss shield simulation, Page–Hinkley, stationarity, concordance, BH-FDR)
 - `artifacts/api-server/src/lib/killshot-timing.ts` — 7th bot: the entry-timing layer (momentum, Markov state preference, renewal clock, feed freshness, shot spacing, patience valve)
 - `artifacts/api-server/src/lib/killshot-engine.ts` — 7th bot: measure once → lock the market → wait → fire, with a health guard that raises RESCAN REQUIRED and never rotates
 - `artifacts/api-server/src/lib/killshot-analysis.test.ts` — 7th bot: causality proved by prefix replay (the live decision must reproduce the recorded shot exactly), the ladder formulas, the e-value under the null, and a guarantee that the rule always produces measurable shots
-- `artifacts/trading-platform/src/components/killshot-console.tsx` — 7th bot console (contract + proof bar, the measurement card, then the four gates shown separately)
-- `artifacts/api-server/src/routes/bots.ts` — `/api/bots` routes (catalogue, status, scan, start, stop)
-- `artifacts/trading-platform/src/pages/bots.tsx` — AI Bot Arena page
-- `artifacts/trading-platform/src/components/bot-console.tsx` — per-bot deploy console
+- `artifacts/api-server/src/routes/bots.ts` — `/api/bots` routes (catalogue, status, scan, start, stop) — legacy specialist-bot API; the AI Bot Arena UI was removed from the web app, so nothing in the frontend calls it (the bot engines stay available server-side)
+- `artifacts/trading-platform/src/components/quick-strike-flip-card.tsx` — the dashboard flip card: Quick Strike while the autonomous engine is off, flipping to the live Autonomous Engine view (4-group tournament + stop control) while it runs
 - `artifacts/api-server/src/lib/multiasset/bridge-links.ts` — the MT5 bridge's durable layer: pairing codes and bearer links in Postgres (tokens stored hashed, sliding TTL, explicit revocation), so a restart reconnects instead of stranding the terminal on a dead code
 - `artifacts/api-server/src/routes/bridge.ts` — MT5 bridge API (`/pairing-code` is idempotent until unlink, `/pair` adds to a link instead of rotating it, `/sync` rehydrates a Desk from the durable link, reports EA version skew)
 - `artifacts/mt5-ea/NeurotradeBridge.mq5` — the EA the Desk ships (v3.03); also served verbatim from `artifacts/trading-platform/public/downloads/`, with a parity test
@@ -88,16 +85,16 @@ AI-driven trading platform connected to Deriv's WebSocket API with 8-agent auton
 
 ## Product
 
-- **AI Bots** (`/bots`): five single-contract specialist bots — Parity Sentinel (Even/Odd), Differ Guardian (Differs), Match Sniper (Matches), Barrier Architect (Over/Under), Vector Momentum (Rise/Fall). Each is hard-wired to one contract family for BOTH normal and recovery trades, so a parity bot only ever recovers in Even/Odd. Users set side (over-only / under-only / both), digit lock (match/differ), stake, SL, TP, recovery policy and locked-vs-switching market mode, exactly as in the Quantum FAB.
-- **Historical Twin-Rail Sentinel**: previously a paired-contract specialist; no longer present in the current bot registry.
-- **Kill-Shot Oracle** (`/bots` → BOT-KILLSHOT): one user-named contract (Over N / Under N / Matches / Even / Odd — never both sides of a pair), the AI pulls 4,999 digits from every market, measures its own entry rule out of sample and LOCKS the best market, then waits — as long as it takes — for health, edge, the post-loss shield and the tick to all agree. No rotation, no trade on deploy, a RESCAN REQUIRED alert when the locked market changes, and a proof bar the user chooses. For Matches it scores all ten digits in every market and applies BH-FDR across the whole 190-candidate family.
-- **Dashboard**: Engine status (8 AI agents), top opportunity card, daily P&L, trades today
+- **Autonomous Engine**: the single trading engine. Toggled from the sidebar Engine Mode switch or the dashboard's Quick Strike card (AUTO button). While running it scans markets in a 4-group parallel tournament and trades the winner; the dashboard card flips to a live engine view (tournament groups, next-trade countdown, stop control).
+- **Quick Strike**: one-tap manual trade on the AI's top market per contract family (Rise/Fall, Over/Under, Even/Odd), with win probability, EV, ticks and stake.
+- **Dashboard**: Quick Strike / Autonomous Engine flip card, daily target, performance stats (win rate, today's profit, streak, recovery, total trades), slim cooldown bar
 - **Markets**: All 33+ markets ranked by AI quality score — Synthetic, Forex, Commodities, Derived
 - **Market Detail**: Individual market with price chart, full 8-agent score breakdown, AI recommendation
 - **Trade Journal**: Complete trade history with win/loss, confidence, AI reasoning per trade
-- **Analytics**: Performance curves, drawdown analysis, market breakdown, agent accuracy
-- **Settings**: Risk profile (Conservative/Moderate/Aggressive), daily target, loss limits, drawdown protection, confidence thresholds, market rotation parameters
+- **Analytics**: Performance curves, hourly P&L, trade timeline, per-contract breakdown, stake & outcome extremes (smallest/largest stake, smallest/largest profit, smallest/largest loss)
+- **Settings**: Risk profile (Conservative/Moderate/Aggressive), daily target, loss limits, drawdown protection, confidence thresholds, market rotation parameters, cooldown enable/disable + duration
 - **Connect**: Deriv API token connection screen
+- **Removed**: the AI Bot Arena (`/bots` page, the 14 specialist bot consoles and the dashboard's agent grid + AI Opportunity Scanner) was deleted from the app. The specialist bot engines and `/api/bots` API remain server-side but are no longer wired to any UI.
 
 - **Historical Twin-Rail design (removed before the current manual-trading change)**: paired-contract execution is not an available trading path in the current app.
 

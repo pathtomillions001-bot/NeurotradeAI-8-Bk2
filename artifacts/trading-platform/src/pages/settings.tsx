@@ -254,35 +254,36 @@ export default function Settings() {
       </Card>
 
       {/* Engine Configuration */}
-      <Card className="bg-card border-primary/15 shadow-[0_0_30px_hsl(var(--primary)/0.04)]">
-        <CardHeader className="pb-3 border-b border-border/50">
-          <div className="flex items-center gap-2">
-            <div className="h-2 w-2 rounded-full bg-primary shadow-[0_0_10px_hsl(var(--primary))]" />
-            <CardTitle className="text-base">Engine Configuration</CardTitle>
-          </div>
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Engine Configuration</CardTitle>
           <CardDescription className="text-xs">Core AI engine parameters that control how and when the engine trades.</CardDescription>
         </CardHeader>
-        <CardContent className="pt-4">
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 xl:gap-6">
-            <div className="rounded-xl border border-border/70 bg-secondary/10 px-4">
-              <div className="pt-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Execution posture</div>
-              <SettingRow label="Paper Trade Mode" description="Log trades without sending real orders to Deriv.">
-                <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
-              </SettingRow>
-              <SettingRow label="Require Positive EV" description="Only trade when calculated expected value is positive.">
-                <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
-              </SettingRow>
-            </div>
-            <div className="rounded-xl border border-border/70 bg-secondary/10 px-4">
-              <div className="pt-3 pb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-primary">Signal quality</div>
-              <SettingRow label="Min Confidence Threshold" description="Minimum AI confidence required before placing a trade.">
-                <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={30} max={95} step={1} suffix="%" />
-              </SettingRow>
-              <SettingRow label="Scan Interval" description="How often the autonomous engine scans for opportunities.">
-                <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={120} step={1} suffix="s" />
-              </SettingRow>
-            </div>
-          </div>
+        <CardContent>
+          <SettingRow
+            label="Paper Trade Mode"
+            description="Log all trades to the journal without sending real orders to Deriv. Use to test strategies with zero risk. Turn off to go live."
+          >
+            <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
+          </SettingRow>
+          <SettingRow
+            label="Require Positive EV"
+            description="Only trade when the engine calculates a positive expected value. Disabling allows more trade attempts but may reduce win rate."
+          >
+            <Switch checked={form.requirePositiveEv} onCheckedChange={(v) => set("requirePositiveEv", v)} />
+          </SettingRow>
+          <SettingRow
+            label="Min Confidence Threshold"
+            description="Minimum AI confidence score (0–100) required before placing a trade. Higher = fewer trades, better quality."
+          >
+            <NumInput value={form.minConfidenceThreshold} onChange={(v) => set("minConfidenceThreshold", v)} min={30} max={95} step={1} suffix="%" />
+          </SettingRow>
+          <SettingRow
+            label="Scan Interval"
+            description="How often the autonomous engine scans markets for opportunities."
+          >
+            <NumInput value={form.loopIntervalSec} onChange={(v) => set("loopIntervalSec", v)} min={5} max={120} step={1} suffix="s" />
+          </SettingRow>
           {form.paperTradeMode && (
             <div className="mt-2 p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
               <strong>Paper Trade Mode is ON</strong> — no real orders will be sent to Deriv. All trades are simulated in the journal.
@@ -292,17 +293,14 @@ export default function Settings() {
       </Card>
 
       {/* Recovery Mode */}
-      <Card className="bg-card border-amber-400/20 shadow-[0_0_30px_rgba(251,191,36,0.04)]">
-        <CardHeader className="pb-3 border-b border-border/50">
-          <div className="flex items-center gap-2">
-            <div className="h-2 w-2 rounded-full bg-amber-400 shadow-[0_0_10px_rgb(251_191_36)]" />
-            <CardTitle className="text-base">Recovery Mode</CardTitle>
-          </div>
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recovery Mode</CardTitle>
           <CardDescription className="text-xs">
             When enabled, after a loss the engine escalates stake size to recover the lost amount. Recovery is tracked as a single global state — it returns to normal as soon as accumulated loss debt is fully repaid. Optional target profit is used only to size an ideal recovery stake and never keeps recovery active.
           </CardDescription>
         </CardHeader>
-        <CardContent className="pt-4">
+        <CardContent>
           <SettingRow label="Enable Recovery Mode" description="Automatically increase stake after a loss to recover.">
             <Switch checked={form.recoveryMode} onCheckedChange={(v) => set("recoveryMode", v)} />
           </SettingRow>
@@ -312,13 +310,13 @@ export default function Settings() {
               {/* Auto / Manual mode selector */}
               <div className="mt-3 mb-1">
                 <div className="text-xs font-medium text-foreground mb-2">Recovery Calculator Mode</div>
-                <div className="flex rounded-xl overflow-hidden border border-border/80 bg-secondary/20 w-full shadow-inner">
+                <div className="flex rounded-lg overflow-hidden border border-border w-full">
                   <button
                     onClick={() => set("recoveryAutoMode", true)}
                     className={`flex-1 flex flex-col items-center gap-0.5 px-3 py-2.5 text-xs font-medium transition-colors ${form.recoveryAutoMode ? "bg-primary text-primary-foreground" : "bg-secondary/40 text-muted-foreground hover:text-foreground"}`}
                   >
                     <span className="font-semibold">Auto</span>
-                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>AI calculates exact stake</span>
+                    <span className={`text-[10px] ${form.recoveryAutoMode ? "text-primary-foreground/80" : "text-muted-foreground"}`}>AI adapts stake to risk</span>
                   </button>
                   <button
                     onClick={() => set("recoveryAutoMode", false)}
@@ -389,17 +387,14 @@ export default function Settings() {
       </Card>
 
       {/* Normal market contracts — what the engine trades outside recovery */}
-      <Card className="bg-card border-cyan-400/15 shadow-[0_0_30px_rgba(34,211,238,0.035)]">
-        <CardHeader className="pb-3 border-b border-border/50">
-          <div className="flex items-center gap-2">
-            <div className="h-2 w-2 rounded-full bg-cyan-400 shadow-[0_0_10px_rgb(34_211_238)]" />
-            <CardTitle className="text-base">Normal Market Contracts</CardTitle>
-          </div>
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Normal Market Contracts</CardTitle>
           <CardDescription className="text-xs">
             The contracts the engine may trade when it is not recovering. Pick any mix (up to 8). Each Over, Under, Matches and Differs carries its own digit, and Matches or Differs can use auto to let the engine pick the digit from the live tape.
           </CardDescription>
         </CardHeader>
-        <CardContent className="pt-4">
+        <CardContent>
           <AutonomousContractSetEditor
             testId="normal-contracts"
             title="Normal contracts"
@@ -411,17 +406,14 @@ export default function Settings() {
       </Card>
 
       {/* Recovery contracts — chosen independently of normal */}
-      <Card className="bg-card border-violet-400/15 shadow-[0_0_30px_rgba(167,139,250,0.035)]">
-        <CardHeader className="pb-3 border-b border-border/50">
-          <div className="flex items-center gap-2">
-            <div className="h-2 w-2 rounded-full bg-violet-400 shadow-[0_0_10px_rgb(167_139_250)]" />
-            <CardTitle className="text-base">Recovery Contracts</CardTitle>
-          </div>
+      <Card className="bg-card">
+        <CardHeader className="pb-2">
+          <CardTitle className="text-base">Recovery Contracts</CardTitle>
           <CardDescription className="text-xs">
             The contracts the engine may trade while recovering a loss. This set is independent of the normal set, so you can trade Even in normal markets and Matches in recovery. Recovery stakes are sized from the live payout of the contract the engine picks.
           </CardDescription>
         </CardHeader>
-        <CardContent className="space-y-4 pt-4">
+        <CardContent className="space-y-4">
           <AutonomousContractSetEditor
             testId="recovery-contracts"
             title="Recovery contracts"

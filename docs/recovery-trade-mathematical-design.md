@@ -2,10 +2,10 @@
 
 ## What the change is intended to solve
 
-Ten consecutive recovery losses are not evidence that a single missing threshold is the problem. They can arise from ordinary variance, a negative or overstated edge, autocorrelated losses, payout miscalibration, or an exposure ladder that grows faster than the evidence supporting the trade. The engine therefore needs a better candidate-selection control while preserving the existing staking contract:
+Ten consecutive recovery losses are not evidence that a single missing threshold is the problem. They can arise from ordinary variance, a negative or overstated edge, autocorrelated losses, payout miscalibration, or an exposure ladder that grows faster than the evidence supporting the trade. The engine therefore needs two separate controls:
 
 1. **Choose the least-bad recovery opportunity available now**, using uncertainty and loss clustering rather than point-estimate EV alone.
-2. **Leave staking to the existing recovery engine**, so Instant and Split continue to behave exactly as configured.
+2. **Limit the amount exposed to that opportunity**, so one uncertain recovery attempt does not consume the full debt target.
 
 The implementation keeps the tick-driven flow. It does not add a multi-minute confirmation wait or a new time-based hard gate.
 
@@ -26,7 +26,7 @@ The posterior mean used by the existing ranker is equivalent to:
  \bar p = \frac{w+s p_0}{w+l+s}
 \]
 
-The recovery score also estimates posterior uncertainty:
+The new recovery score also estimates the posterior uncertainty:
 
 \[
  \operatorname{Var}(p) \approx \frac{\bar p(1-\bar p)}{w+l+s+1}
@@ -76,15 +76,24 @@ For normal trades, the existing score remains the base score. For recovery trade
 
 The coefficients are ranking weights, not probabilities. They are intentionally small enough that the established EV, confidence interval, instability, and clustering terms remain influential. The point is to make two candidates with similar EV distinguishable by uncertainty and near-term loss-run risk.
 
-### Staking invariant
+### Fractional recovery exposure
 
-The analysis change does **not** alter stake calculation. Once a recovery candidate is selected, `cycle.ts` continues to call the existing `getDynamicRecoveryStake` path with the configured payout, recovery method, multiplier, maximum recovery steps, and auto/manual mode. Therefore:
+The exact recovery ladder remains the reference target, but it is multiplied by a bounded safety factor:
 
-- **Instant** continues sizing the configured full-clearance recovery attempt.
-- **Split** continues capping each attempt according to the existing normal-base-stake/debt-carry-forward behavior.
-- Existing minimum-stake, balance, maximum-stake, payout, and settlement rules remain authoritative.
+\[
+ f=0.35+0.40\,C_E\,C_S\,C_R\,D_L
+\]
 
-Fractional-Kelly and drawdown-sensitive exposure are useful future research directions, but they are intentionally not part of this implementation. The Kelly reference [3] is retained as design context only.
+where:
+
+- \(C_E=\max(0,2P(p>p_{BE}\mid D)-1)\) is edge confidence;
+- \(C_S=\operatorname{clip}(1-1.75\,\text{instability},0.35,1)\) is stability;
+- \(C_R=\operatorname{clip}(1-R_{3L},0.35,1)\) is projected three-loss survival;
+- \(D_L=1/(1+0.10\times\text{current loss run})\) is a mild streak dampener.
+
+The resulting factor is bounded to `[0.35, 0.75]` and is applied to the requested recovery stake, subject to the existing minimum stake, balance, and maximum-stake checks. This is a **fractional recovery** policy: it accepts that a single win may not clear the full debt, in exchange for reducing the amount at risk when the evidence is weak or clustered losses are likely.
+
+The rationale follows the limitations documented for Kelly-style sizing: maximizing long-run log growth does not guarantee acceptable short-term drawdown, and probabilistic drawdown constraints or fractional sizing can be preferable when parameter estimates are uncertain [3]. The change does not use full Kelly. It uses a bounded heuristic safety factor because the engine's payout, edge, and independence assumptions are not known with enough precision to justify an optimal-growth claim.
 
 ## Why this is preferable to another hard gate
 
@@ -93,10 +102,10 @@ A hard rule such as “wait for three confirmations” can reduce some bad entri
 - continues evaluating each tick;
 - ranks all eligible recovery candidates with a risk-adjusted score;
 - adapts to recent after-loss behaviour;
-- changes candidate ranking when uncertainty, clustering, or a loss streak rises while leaving exposure sizing unchanged;
+- reduces exposure when uncertainty, clustering, or a loss streak rises;
 - preserves the existing account-level hard stops and unresolved-exposure protections.
 
-This cannot eliminate ten-loss runs. If the underlying contract is negative expectancy or the tape is effectively independent with a high loss probability, no recovery formula can manufacture a positive edge. It can, however, improve which eligible recovery candidate is selected without silently changing the user's configured staking mode.
+This cannot eliminate ten-loss runs. If the underlying contract is negative expectancy or the tape is effectively independent with a high loss probability, no recovery formula can manufacture a positive edge. It can, however, reduce the chance that the engine compounds an uncertain recovery attempt into a large balance shock.
 
 ## Validation performed
 

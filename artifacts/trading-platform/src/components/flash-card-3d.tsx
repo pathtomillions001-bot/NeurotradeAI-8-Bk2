@@ -4,7 +4,6 @@ import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
 import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { EnginePowerButton } from "@/components/engine-power-button";
 
 // ── Contract type groups ────────────────────────────────────────────────────────
 const CONTRACT_GROUPS = [
@@ -63,25 +62,11 @@ function WinProbBar({ value }: { value: number }) {
 }
 
 // ── Quick Strike Card ──────────────────────────────────────────────────────────
-// This is the manual-trading face of the dashboard's main card. It is also where
-// the engine's redesigned power control now lives (top right of the header):
-// the old header START/STOP button and the full-width engine status strip were
-// removed from the dashboard, so this card (and its autonomous twin) owns the
-// engine on/off action.
 export function MarketOpportunityFlashCard({
   onTrade,
-  engineRunning = false,
-  cooldownSecs = null,
-  togglePending = false,
-  onToggleEngine,
 }: {
   onTrade?: () => void;
   currentStreak?: number;
-  /** Engine state, so the button can render START vs RESUME (cooldown). */
-  engineRunning?: boolean;
-  cooldownSecs?: number | null;
-  togglePending?: boolean;
-  onToggleEngine?: (running: boolean) => void;
 }) {
   const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
@@ -219,18 +204,16 @@ export function MarketOpportunityFlashCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header: label + live dot + contract group selector + engine power (top right) */}
+        {/* Header: label + contract group selector + live dot */}
         <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
-          <span className="text-[10px] font-mono uppercase tracking-widest shrink-0" style={{ color: "rgba(0,255,255,0.7)" }}>
+          <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
             Quick Strike
           </span>
-          <span className="w-1.5 h-1.5 rounded-full animate-pulse bg-green-500 shrink-0" />
 
-          {/* Contract group tab selector — only shows enabled families.
-              ml-auto keeps them right-aligned, clear of the market text below. */}
+          {/* Contract group tab selector — only shows enabled families */}
           {visibleGroups.length > 0 && (
-            <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5 shrink-0">
+            <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
               {visibleGroups.map((g, i) => (
                 <button
                   key={g.short}
@@ -248,17 +231,7 @@ export function MarketOpportunityFlashCard({
             </div>
           )}
 
-          {/* Redesigned engine control — pinned to the card's top-right corner.
-              Owns the start/resume action that used to sit in the dashboard
-              header and status strip. */}
-          {onToggleEngine && (
-            <EnginePowerButton
-              running={engineRunning}
-              cooldownSecs={cooldownSecs}
-              pending={togglePending}
-              onToggle={onToggleEngine}
-            />
-          )}
+          <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1 bg-green-500" />
         </div>
 
         {/* Market info + win prob + execute */}

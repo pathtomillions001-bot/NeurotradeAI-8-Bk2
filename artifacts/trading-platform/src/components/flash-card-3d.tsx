@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
+import { useExecuteTrade, useGetSettings, useGetAiEngineStatus, useToggleAutonomousEngine } from "@workspace/api-client-react";
 import { toast } from "sonner";
-import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp, Play, Square } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
 // ── Contract type groups ────────────────────────────────────────────────────────
@@ -73,6 +74,18 @@ export function MarketOpportunityFlashCard({
   const [showMarkets, setShowMarkets] = useState(false);
 
   const executeTrade = useExecuteTrade();
+
+  // Engine status & toggle (for the START/STOP button in the Quick Strike card)
+  const { data: engine } = useGetAiEngineStatus({ query: { refetchInterval: 3000 } } as any);
+  const toggleEngine = useToggleAutonomousEngine();
+  const runToggle = (running: boolean) =>
+    toggleEngine.mutate(
+      { data: { running } },
+      {
+        onError: (err: any) =>
+          toast.error(err?.data?.error ?? err?.message ?? "Could not toggle the engine"),
+      },
+    );
 
   // Read user's enabled contract families from settings
   const { data: settings } = useGetSettings();
@@ -204,7 +217,7 @@ export function MarketOpportunityFlashCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header: label + contract group selector + live dot */}
+        {/* Header: label + contract group selector + live dot + engine toggle */}
         <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
           <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
@@ -232,6 +245,27 @@ export function MarketOpportunityFlashCard({
           )}
 
           <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1 bg-green-500" />
+
+          {/* Engine toggle button (START/STOP) */}
+          <Button
+            size="sm"
+            variant={engine?.isRunning ? "destructive" : "default"}
+            className="h-7 px-3 text-[10px] font-mono gap-1 shrink-0"
+            onClick={() => runToggle(!engine?.isRunning)}
+            disabled={toggleEngine.isPending}
+          >
+            {engine?.isRunning ? (
+              <>
+                <Square className="w-3 h-3" />
+                <span>STOP</span>
+              </>
+            ) : (
+              <>
+                <Play className="w-3 h-3" />
+                <span>START</span>
+              </>
+            )}
+          </Button>
         </div>
 
         {/* Market info + win prob + execute */}

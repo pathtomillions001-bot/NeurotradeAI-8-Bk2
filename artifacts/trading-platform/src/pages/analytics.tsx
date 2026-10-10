@@ -234,57 +234,6 @@ function ContractBreakdown({ trades }: { trades: any[] }) {
   );
 }
 
-// ── Stake and outcome extremes ────────────────────────────────────────────────
-function TradeExtremes({ trades }: { trades: any[] }) {
-  const extremes = useMemo(() => {
-    const numbers = (values: unknown[]) => values
-      .map(value => value == null || value === "" ? Number.NaN : Number(value))
-      .filter(Number.isFinite);
-    const stakes = numbers(trades.map(t => t.stake)).filter(value => value > 0);
-    const profits = numbers(trades.map(t => t.profit));
-    const wins = profits.filter(value => value > 0);
-    const losses = profits.filter(value => value < 0);
-    return {
-      smallestStake: stakes.length ? Math.min(...stakes) : null,
-      largestStake: stakes.length ? Math.max(...stakes) : null,
-      smallestProfit: wins.length ? Math.min(...wins) : null,
-      largestProfit: wins.length ? Math.max(...wins) : null,
-      // A smaller loss is the loss closest to zero; the largest is most negative.
-      smallestLoss: losses.length ? Math.max(...losses) : null,
-      largestLoss: losses.length ? Math.min(...losses) : null,
-    };
-  }, [trades]);
-
-  const money = (value: number | null, signed = false) => {
-    if (value == null || !Number.isFinite(value)) return "—";
-    if (signed && value < 0) return `−$${Math.abs(value).toFixed(2)}`;
-    return `$${value.toFixed(2)}`;
-  };
-  const metrics = [
-    { label: "Smallest stake", value: money(extremes.smallestStake), color: "text-cyan-300" },
-    { label: "Largest stake", value: money(extremes.largestStake), color: "text-cyan-300" },
-    { label: "Smallest profit", value: money(extremes.smallestProfit), color: "text-emerald-300" },
-    { label: "Largest profit", value: money(extremes.largestProfit), color: "text-emerald-300" },
-    { label: "Smallest loss · closest to $0", value: money(extremes.smallestLoss, true), color: "text-rose-300" },
-    { label: "Largest loss · most negative", value: money(extremes.largestLoss, true), color: "text-rose-300" },
-  ];
-
-  return (
-    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
-      <p className="text-xs font-semibold text-foreground mb-0.5">Trade Extremes</p>
-      <p className="text-[10px] text-muted-foreground mb-3">Today's settled trades · losses are signed; smallest loss is closest to $0</p>
-      <div className="grid grid-cols-2 gap-2">
-        {metrics.map(metric => (
-          <div key={metric.label} className="rounded-lg border border-border/50 bg-secondary/15 px-2.5 py-2">
-            <div className="text-[9px] leading-tight text-muted-foreground">{metric.label}</div>
-            <div className={`mt-1 font-mono text-sm font-semibold tabular-nums ${metric.color}`}>{metric.value}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 // ── Live trade timeline ───────────────────────────────────────────────────────
 function TradeTimeline({ trades }: { trades: any[] }) {
   const reversed = [...trades].reverse().slice(0, 30);
@@ -495,7 +444,6 @@ export default function Analytics() {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}
               className="space-y-4">
               <ContractBreakdown trades={trades} />
-              <TradeExtremes trades={trades} />
             </motion.div>
           </div>
         </>

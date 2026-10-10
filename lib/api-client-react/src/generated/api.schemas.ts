@@ -389,6 +389,14 @@ export const AiEngineStatusMode = {
   autonomous: 'autonomous',
 } as const;
 
+export interface AgentStatus {
+  name: string;
+  isActive: boolean;
+  /** @nullable */
+  lastRun: string | null;
+  confidence: number;
+}
+
 export type RecoveryFamilyStateFamily = typeof RecoveryFamilyStateFamily[keyof typeof RecoveryFamilyStateFamily];
 
 
@@ -433,6 +441,7 @@ export interface RecoveryStatus {
 export interface AiEngineStatus {
   isRunning: boolean;
   mode: AiEngineStatusMode;
+  agentStatuses: AgentStatus[];
   tradesExecutedToday: number;
   /** @nullable */
   currentMarket: string | null;
@@ -445,59 +454,6 @@ export interface AiEngineStatus {
      */
   cooldownUntil?: string | null;
   recovery?: RecoveryStatus;
-}
-
-export type AutonomousEnginePreviewMode = typeof AutonomousEnginePreviewMode[keyof typeof AutonomousEnginePreviewMode];
-
-
-export const AutonomousEnginePreviewMode = {
-  NORMAL: 'NORMAL',
-  RECOVERY: 'RECOVERY',
-} as const;
-
-/**
- * @nullable
- */
-export type AutonomousEnginePreviewBest = {
-  symbol?: string;
-  contractType?: string;
-  /** @nullable */
-  barrier?: number | null;
-  eligible?: boolean;
-  reason?: string;
-} | null;
-
-export type AutonomousEnginePreviewMarketsItem = {
-  symbol: string;
-  displayName: string;
-  group: number;
-  contractType: string;
-  recommendedContractType?: string;
-  /** @nullable */
-  barrier?: number | null;
-  /** @nullable */
-  digitBarrier?: number | null;
-  qualityScore: number;
-  confidenceScore: number;
-  winProbability: number;
-  expectedValue: number;
-  stake: number;
-  recommendedDuration: number;
-  payoutMultiplier?: number;
-  shouldTrade: boolean;
-  regime?: string;
-  samples?: number;
-  rank: number;
-};
-
-export interface AutonomousEnginePreview {
-  mode: AutonomousEnginePreviewMode;
-  marketsScanned: number;
-  /** @nullable */
-  stopReason: string | null;
-  /** @nullable */
-  best: AutonomousEnginePreviewBest;
-  markets: AutonomousEnginePreviewMarketsItem[];
 }
 
 export interface EngineToggleInput {
@@ -570,8 +526,6 @@ export interface TradingSettings {
   requirePositiveEv?: boolean;
   /** Minutes to wait before auto-resuming after consecutive loss stop */
   cooldownMinutes?: number;
-  /** Enable automatic cooldown pauses after reaching the consecutive-loss limit */
-  cooldownEnabled: boolean;
   /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
   normalOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */
@@ -652,7 +606,6 @@ export interface TradingSettingsInput {
   paperTradeMode?: boolean;
   requirePositiveEv?: boolean;
   cooldownMinutes?: number;
-  cooldownEnabled?: boolean;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;

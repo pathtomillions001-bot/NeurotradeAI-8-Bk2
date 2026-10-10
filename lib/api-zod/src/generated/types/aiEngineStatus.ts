@@ -5,12 +5,14 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { AgentStatus } from './agentStatus';
 import type { AiEngineStatusMode } from './aiEngineStatusMode';
 import type { RecoveryStatus } from './recoveryStatus';
 
 export interface AiEngineStatus {
   isRunning: boolean;
   mode: AiEngineStatusMode;
+  agentStatuses: AgentStatus[];
   tradesExecutedToday: number;
   /** @nullable */
   currentMarket: string | null;

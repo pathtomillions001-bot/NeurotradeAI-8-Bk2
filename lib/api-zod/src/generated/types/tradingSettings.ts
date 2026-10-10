@@ -47,8 +47,6 @@ export interface TradingSettings {
   requirePositiveEv?: boolean;
   /** Minutes to wait before auto-resuming after consecutive loss stop */
   cooldownMinutes?: number;
-  /** Enable automatic cooldown pauses after reaching the consecutive-loss limit */
-  cooldownEnabled: boolean;
   /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
   normalOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */

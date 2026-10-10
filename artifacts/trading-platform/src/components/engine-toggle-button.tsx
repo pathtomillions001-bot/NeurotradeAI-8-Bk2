@@ -75,7 +75,7 @@ export function EngineToggleButton() {
         onClick={handleStop}
         disabled={toggle.isPending}
         title="Stop the autonomous engine"
-        className="flex items-center justify-center gap-1.5 h-6 min-w-[104px] px-2.5 rounded-lg border font-mono text-[8px] font-bold uppercase tracking-widest whitespace-nowrap transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+        className="flex items-center gap-1.5 h-6 px-2.5 rounded-lg border font-mono text-[8px] font-bold uppercase tracking-widest transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
         style={{
           borderColor: "rgba(239,68,68,0.5)",
           background: "rgba(239,68,68,0.12)",
@@ -95,7 +95,7 @@ export function EngineToggleButton() {
         onClick={handleClick}
         disabled={toggle.isPending}
         title="Resume the autonomous engine now"
-        className="flex items-center justify-center gap-1.5 h-6 min-w-[104px] px-2.5 rounded-lg border font-mono text-[8px] font-bold uppercase tracking-widest whitespace-nowrap transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+        className="flex items-center gap-1.5 h-6 px-2.5 rounded-lg border font-mono text-[8px] font-bold uppercase tracking-widest transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
         style={{
           borderColor: "rgba(245,158,11,0.5)",
           background: "rgba(245,158,11,0.12)",
@@ -114,7 +114,7 @@ export function EngineToggleButton() {
       onClick={handleClick}
       disabled={toggle.isPending}
       title="Start the autonomous engine"
-      className="flex items-center justify-center gap-1.5 h-6 min-w-[104px] px-2.5 rounded-lg border font-mono text-[8px] font-bold uppercase tracking-widest whitespace-nowrap transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+      className="flex items-center gap-1.5 h-6 px-2.5 rounded-lg border font-mono text-[8px] font-bold uppercase tracking-widest transition-all active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
       style={{
         borderColor: "rgba(16,185,129,0.5)",
         background: "rgba(16,185,129,0.12)",

@@ -23,7 +23,7 @@ export const settingsTable = pgTable("settings", {
   recoveryMultiplier: numeric("recovery_multiplier", { precision: 20, scale: 4 }).notNull().default("1.62"),
   maxRecoverySteps: integer("max_recovery_steps").notNull().default(3),
   scanAllMarkets: boolean("scan_all_markets").notNull().default(true),
-  tradeDurationSec: integer("trade_duration_sec").notNull().default(5),
+  tradeDurationSec: integer("trade_duration_sec").notNull().default(1),
   maxTradeStake: numeric("max_trade_stake", { precision: 20, scale: 2 }).notNull().default("500"),
   paperTradeMode: boolean("paper_trade_mode").notNull().default(false),
   requirePositiveEv: boolean("require_positive_ev").notNull().default(true),

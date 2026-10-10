@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
@@ -64,10 +64,8 @@ function WinProbBar({ value }: { value: number }) {
 // ── Quick Strike Card ──────────────────────────────────────────────────────────
 export function MarketOpportunityFlashCard({
   onTrade,
-  engineControls,
 }: {
   onTrade?: () => void;
-  engineControls?: ReactNode;
   currentStreak?: number;
 }) {
   const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
@@ -207,7 +205,7 @@ export function MarketOpportunityFlashCard({
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
         {/* Header: label + contract group selector + live dot */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
           <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
             Quick Strike
@@ -391,7 +389,6 @@ export function MarketOpportunityFlashCard({
             </motion.div>
           )}
         </AnimatePresence>
-        {engineControls}
       </div>
     </div>
   );

@@ -13,7 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import { Link } from "wouter";
-import { Target, Clock, ShieldAlert, Play, Square } from "lucide-react";
+import { Target, Clock, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
 import { AutonomousEngineCard, type GroupScanResult } from "@/components/autonomous-engine-card";
@@ -387,6 +387,53 @@ export default function Dashboard() {
           )}
         </div>
       </header>
+
+
+      {/* Engine status strip — ALWAYS the same height, so the cooldown state
+          appears and disappears without the dashboard blocks below resizing. */}
+      <div
+        className={`flex items-center gap-2.5 h-9 px-3 rounded-lg border overflow-hidden text-[11px] font-mono ${
+          cooldownSecs !== null
+            ? "border-amber-500/30 bg-amber-500/8 text-amber-300"
+            : engine?.isRunning
+              ? "border-green-500/25 bg-green-500/5 text-green-400"
+              : "border-border bg-secondary/20 text-muted-foreground"
+        }`}
+      >
+        <span
+          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+            cooldownSecs !== null ? "bg-amber-400 animate-pulse" : engine?.isRunning ? "bg-green-500 animate-pulse" : "bg-zinc-600"
+          }`}
+        />
+        <span className="uppercase tracking-widest shrink-0">
+          {cooldownSecs !== null ? "Cooldown" : engine?.isRunning ? "Engine online" : "Standby"}
+        </span>
+        <span className="truncate text-[10px] opacity-80">
+          {cooldownSecs !== null
+            ? (engine?.stopReasons?.[0] ?? "Consecutive losses triggered a safety pause")
+            : engine?.isRunning
+              ? "Autonomous trading · tick-driven 4-group tournament"
+              : (engine?.stopReasons?.[0] ?? "Manual trading — start the engine to trade automatically")}
+        </span>
+        <span className="ml-auto shrink-0 tabular-nums">
+          {cooldownSecs !== null
+            ? `${formatCooldown(cooldownSecs)} until auto-resume`
+            : engine?.isRunning && countdown !== null
+              ? `next trade in ${countdown}s`
+              : ""}
+        </span>
+        {cooldownSecs !== null && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px] font-mono border-amber-500/40 text-amber-400 hover:bg-amber-500/10 shrink-0"
+            onClick={() => runToggle(true)}
+            disabled={toggleEngine.isPending}
+          >
+            Resume Now
+          </Button>
+        )}
+      </div>
 
       {/* Stat strip — displayStats applies pending optimistic updates instantly */}
       <div className="space-y-2">

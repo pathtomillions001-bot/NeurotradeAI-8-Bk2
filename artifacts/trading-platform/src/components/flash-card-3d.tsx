@@ -64,17 +64,9 @@ function WinProbBar({ value }: { value: number }) {
 // ── Quick Strike Card ──────────────────────────────────────────────────────────
 export function MarketOpportunityFlashCard({
   onTrade,
-  onToggleEngine,
-  isTogglePending,
-  cooldownSecs,
-  onResume,
 }: {
   onTrade?: () => void;
   currentStreak?: number;
-  onToggleEngine?: () => void;
-  isTogglePending?: boolean;
-  cooldownSecs?: number | null;
-  onResume?: () => void;
 }) {
   const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
@@ -163,7 +155,7 @@ export function MarketOpportunityFlashCard({
         stake,
         direction: contractToDirection(contractType),
         ...(activeBarrier != null && { barrier: activeBarrier }),
-        duration: 1,
+        duration: rec?.recommendedDuration ?? 5,
         durationUnit: "t",
       } as any
     }, {
@@ -212,17 +204,16 @@ export function MarketOpportunityFlashCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header: label + contract group selector + live dot + engine toggle (integrated, no overlap) */}
-        <div className="flex items-center gap-2 flex-wrap">
+        {/* Header: label + contract group selector + live dot */}
+        <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
-          <span className="text-[10px] font-mono uppercase tracking-widest shrink-0" style={{ color: "rgba(0,255,255,0.7)" }}>
+          <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
             Quick Strike
           </span>
-          <span className="w-1.5 h-1.5 rounded-full animate-pulse bg-green-500 shrink-0" />
 
           {/* Contract group tab selector — only shows enabled families */}
           {visibleGroups.length > 0 && (
-            <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5 shrink-0">
+            <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
               {visibleGroups.map((g, i) => (
                 <button
                   key={g.short}
@@ -240,29 +231,7 @@ export function MarketOpportunityFlashCard({
             </div>
           )}
 
-          {/* Engine toggle integrated top-right — no overlap with tabs/text */}
-          {onToggleEngine && (
-            cooldownSecs != null && cooldownSecs > 0 ? (
-              <button
-                onClick={onResume ?? onToggleEngine}
-                disabled={!!isTogglePending}
-                className="shrink-0 ml-1 h-6 px-2.5 text-[10px] font-mono font-bold rounded-full border border-amber-500/40 text-amber-300 bg-amber-500/10 hover:bg-amber-500/15 disabled:opacity-50 flex items-center gap-1"
-                title={`Cooldown ${cooldownSecs}s`}
-              >
-                <span className="w-1 h-1 rounded-full bg-amber-400 animate-pulse" />
-                Resume in {Math.floor(cooldownSecs/60) > 0 ? `${Math.floor(cooldownSecs/60)}m ${String(cooldownSecs%60).padStart(2,'0')}s` : `${cooldownSecs}s`}
-              </button>
-            ) : (
-              <button
-                onClick={onToggleEngine}
-                disabled={!!isTogglePending}
-                className="shrink-0 ml-1 h-6 px-2.5 text-[10px] font-mono font-bold rounded-full border border-green-500/40 text-green-400 bg-green-500/10 hover:bg-green-500/15 disabled:opacity-50 flex items-center gap-1"
-              >
-                <span className="w-1 h-1 rounded-full bg-green-500 animate-pulse" />
-                START ENGINE
-              </button>
-            )
-          )}
+          <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1 bg-green-500" />
         </div>
 
         {/* Market info + win prob + execute */}
@@ -330,7 +299,7 @@ export function MarketOpportunityFlashCard({
         <div className="grid grid-cols-3 gap-1.5">
           {[
             { label: "EV",    value: rec ? (rec.expectedValue > 0 ? `+$${rec.expectedValue.toFixed(2)}` : `$${rec.expectedValue?.toFixed(2) ?? "—"}`) : "—" },
-            { label: "Ticks", value: rec ? `1t` : "—" },
+            { label: "Ticks", value: rec ? `${rec.recommendedDuration ?? 5}t` : "—" },
             { label: "Stake", value: rec ? `$${(rec.stake ?? 1).toFixed(2)}` : "—" },
           ].map(({ label, value }) => (
             <div key={label} className="text-center p-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06]">
@@ -394,7 +363,7 @@ export function MarketOpportunityFlashCard({
                               symbol: sym, contractType: ct,
                               stake: rec?.stake ?? 1,
                               direction: contractToDirection(ct),
-                              duration: 1,
+                              duration: rec?.recommendedDuration ?? 5,
                               durationUnit: "t",
                             } as any
                           }, {

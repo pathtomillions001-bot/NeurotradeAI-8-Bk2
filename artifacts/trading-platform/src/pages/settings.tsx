@@ -204,6 +204,7 @@ export default function Settings() {
     maxDrawdown: 10,
     consecutiveLossLimit: 3,
     cooldownMinutes: 30,
+    cooldownEnabled: true,
     marketRotationAfter: 5,
     tradeDurationSec: 5,
     maxTradeStake: 500,
@@ -235,6 +236,7 @@ export default function Settings() {
         maxDrawdown: settings.maxDrawdown,
         consecutiveLossLimit: settings.consecutiveLossLimit,
         cooldownMinutes: (settings as any).cooldownMinutes ?? 30,
+        cooldownEnabled: (settings as any).cooldownEnabled ?? true,
         marketRotationAfter: settings.marketRotationAfter,
         tradeDurationSec: (settings as any).tradeDurationSec ?? 5,
         maxTradeStake: (settings as any).maxTradeStake ?? 500,
@@ -343,7 +345,7 @@ export default function Settings() {
           <div className="flex flex-wrap gap-2">
             <StatPill accent="cyan" label="Per trade" value={stakePreview === null ? "—" : `$${stakePreview.toFixed(2)}`} />
             <StatPill accent="amber" label="Daily stop" value={`−$${form.dailyLossLimit}`} />
-            <StatPill accent="amber" label="Cooldown" value={`${form.cooldownMinutes}m`} />
+            <StatPill accent="amber" label="Cooldown" value={form.cooldownEnabled ? `${form.cooldownMinutes}m` : "off"} />
           </div>
         }
       >
@@ -405,7 +407,21 @@ export default function Settings() {
               <NumInput value={form.consecutiveLossLimit} onChange={(v) => set("consecutiveLossLimit", v)} min={1} max={20} />
             </SettingRow>
             <SettingRow label="Cooldown Duration" description="Minutes before the engine auto-resumes after a loss-limit stop.">
-              <NumInput value={form.cooldownMinutes} onChange={(v) => set("cooldownMinutes", v)} min={1} max={1440} step={5} suffix="min" />
+              <NumInput
+                value={form.cooldownMinutes}
+                onChange={(v) => set("cooldownMinutes", v)}
+                min={1}
+                max={1440}
+                step={5}
+                suffix="min"
+                disabled={!form.cooldownEnabled}
+              />
+            </SettingRow>
+            <SettingRow
+              label="Cooldown Pause"
+              description="Pause the engine for the duration above once the consecutive-loss limit is hit. Turn it off and the engine keeps trading straight through a loss streak — it still stops at the limit, it just resumes immediately."
+            >
+              <Switch checked={form.cooldownEnabled} onCheckedChange={(v) => set("cooldownEnabled", v)} />
             </SettingRow>
           </Panel>
         </div>

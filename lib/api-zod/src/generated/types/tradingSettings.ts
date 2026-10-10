@@ -47,6 +47,8 @@ export interface TradingSettings {
   requirePositiveEv?: boolean;
   /** Minutes to wait before auto-resuming after consecutive loss stop */
   cooldownMinutes?: number;
+  /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
+  cooldownEnabled?: boolean;
   /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
   normalOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */

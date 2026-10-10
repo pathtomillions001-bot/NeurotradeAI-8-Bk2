@@ -476,7 +476,7 @@ export const ExecuteTradeBody = zod.object({
   "isAutonomous": zod.boolean().optional(),
   "duration": zod.number().optional(),
   "durationUnit": zod.enum(['t', 's', 'm', 'h', 'd']).optional()
-}).strict()
+}).strict().describe('One contract per request. Quantity and order arrays are not supported.')
 
 
 /**
@@ -788,12 +788,6 @@ export const GetAiInsightsResponse = zod.array(GetAiInsightsResponseItem)
 export const GetAiEngineStatusResponse = zod.object({
   "isRunning": zod.boolean(),
   "mode": zod.enum(['manual', 'autonomous']),
-  "agentStatuses": zod.array(zod.object({
-  "name": zod.string(),
-  "isActive": zod.boolean(),
-  "lastRun": zod.string().nullable(),
-  "confidence": zod.number()
-})),
   "tradesExecutedToday": zod.number(),
   "currentMarket": zod.string().nullable(),
   "nextScanIn": zod.number().nullable(),
@@ -829,12 +823,6 @@ export const ToggleAutonomousEngineBody = zod.object({
 export const ToggleAutonomousEngineResponse = zod.object({
   "isRunning": zod.boolean(),
   "mode": zod.enum(['manual', 'autonomous']),
-  "agentStatuses": zod.array(zod.object({
-  "name": zod.string(),
-  "isActive": zod.boolean(),
-  "lastRun": zod.string().nullable(),
-  "confidence": zod.number()
-})),
   "tradesExecutedToday": zod.number(),
   "currentMarket": zod.string().nullable(),
   "nextScanIn": zod.number().nullable(),
@@ -895,6 +883,7 @@ export const GetSettingsResponse = zod.object({
   "paperTradeMode": zod.boolean().optional().describe('Log trades without sending live orders to Deriv'),
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
   "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
+  "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
@@ -944,6 +933,7 @@ export const UpdateSettingsBody = zod.object({
   "paperTradeMode": zod.boolean().optional(),
   "requirePositiveEv": zod.boolean().optional(),
   "cooldownMinutes": zod.number().optional(),
+  "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
   "normalOverDigit": zod.number().optional(),
   "normalUnderDigit": zod.number().optional(),
   "recoveryOverDigit": zod.number().optional(),
@@ -990,6 +980,7 @@ export const UpdateSettingsResponse = zod.object({
   "paperTradeMode": zod.boolean().optional().describe('Log trades without sending live orders to Deriv'),
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
   "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
+  "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),

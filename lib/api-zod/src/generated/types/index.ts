@@ -10,7 +10,6 @@ export * from './agentScore';
 export * from './agentScoreRecord';
 export * from './agentScores';
 export * from './agentScoreSignal';
-export * from './agentStatus';
 export * from './aiEngineStatus';
 export * from './aiEngineStatusMode';
 export * from './aiInsight';

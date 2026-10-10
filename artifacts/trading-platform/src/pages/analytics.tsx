@@ -234,6 +234,60 @@ function ContractBreakdown({ trades }: { trades: any[] }) {
   );
 }
 
+// ── Stake & outcome extremes ──────────────────────────────────────────────────
+function OutcomeExtremes({ trades }: { trades: any[] }) {
+  const extremes = useMemo(() => {
+    const closed = trades.filter((t: any) => t.stake != null || t.profit != null);
+    if (closed.length === 0) return null;
+    const stakes = closed.map((t: any) => Number(t.stake ?? 0)).filter((n: number) => Number.isFinite(n));
+    const profits = closed.filter((t: any) => (t.profit ?? 0) > 0).map((t: any) => Number(t.profit ?? 0));
+    const losses = closed.filter((t: any) => (t.profit ?? 0) < 0).map((t: any) => Number(t.profit ?? 0));
+    const pick = (arr: number[], mode: "min" | "max") =>
+      arr.length === 0 ? null : mode === "min" ? Math.min(...arr) : Math.max(...arr);
+    return {
+      smallestStake: pick(stakes, "min"),
+      largestStake: pick(stakes, "max"),
+      smallestProfit: pick(profits, "min"),
+      largestProfit: pick(profits, "max"),
+      // Losses are stored as negative numbers, so the "largest loss" is the
+      // most negative one and the "smallest loss" the closest to zero.
+      smallestLoss: pick(losses, "max"),
+      largestLoss: pick(losses, "min"),
+      lossCount: losses.length,
+    };
+  }, [trades]);
+
+  if (!extremes) return null;
+
+  const money = (v: number | null, signed = false) =>
+    v == null ? "—" : `${signed && v > 0 ? "+" : ""}${v.toFixed(2)}`;
+
+  const rows: Array<{ label: string; value: string; tone: string; sub: string }> = [
+    { label: "Smallest Stake",  value: money(extremes.smallestStake),  tone: "text-foreground",    sub: "lowest amount risked" },
+    { label: "Largest Stake",   value: money(extremes.largestStake),   tone: "text-foreground",    sub: "highest amount risked" },
+    { label: "Smallest Profit", value: money(extremes.smallestProfit, true),  tone: "text-emerald-400", sub: "thinnest win" },
+    { label: "Largest Profit",  value: money(extremes.largestProfit, true),   tone: "text-emerald-400", sub: "best trade" },
+    { label: "Smallest Loss",   value: money(extremes.smallestLoss),   tone: "text-red-400",       sub: "closest loss to break-even" },
+    { label: "Largest Loss",    value: money(extremes.largestLoss),    tone: "text-red-400",       sub: `${extremes.lossCount} losing trade${extremes.lossCount === 1 ? "" : "s"} today` },
+  ];
+
+  return (
+    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
+      <p className="text-xs font-semibold text-foreground mb-0.5">Stake &amp; Outcome Extremes</p>
+      <p className="text-[10px] text-muted-foreground mb-3">Today's smallest and largest figures</p>
+      <div className="grid grid-cols-2 gap-2">
+        {rows.map(r => (
+          <div key={r.label} className="rounded-lg border border-border/50 bg-secondary/20 px-2.5 py-2">
+            <div className="text-[9px] uppercase tracking-wider text-muted-foreground truncate">{r.label}</div>
+            <div className={`text-sm font-mono font-bold leading-tight mt-0.5 ${r.tone}`}>{r.value}</div>
+            <div className="text-[9px] text-muted-foreground/70 truncate">{r.sub}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ── Live trade timeline ───────────────────────────────────────────────────────
 function TradeTimeline({ trades }: { trades: any[] }) {
   const reversed = [...trades].reverse().slice(0, 30);
@@ -444,6 +498,9 @@ export default function Analytics() {
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}
               className="space-y-4">
               <ContractBreakdown trades={trades} />
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
+                <OutcomeExtremes trades={trades} />
+              </motion.div>
             </motion.div>
           </div>
         </>

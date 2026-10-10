@@ -8,6 +8,9 @@
 import type { TradeInputDirection } from './tradeInputDirection';
 import type { TradeInputDurationUnit } from './tradeInputDurationUnit';
 
+/**
+ * One contract per request. Quantity and order arrays are not supported.
+ */
 export interface TradeInput {
   symbol: string;
   contractType: string;

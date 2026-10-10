@@ -165,8 +165,6 @@ interface EngineInstance {
   cooldownResumeTimer: ReturnType<typeof setTimeout> | null;
   /** Consecutive-loss streak, mirrored from the recovery ledger. */
   sessionLossCount: number;
-  /** Agent scores from the last cycle, keyed by agentId. */
-  lastAgentScores: Record<string, number>;
 }
 
 const enginesBySession = new Map<string, EngineInstance>();
@@ -187,28 +185,11 @@ function getEngine(sessionId: string): EngineInstance {
       cooldownUntil: null,
       cooldownResumeTimer: null,
       sessionLossCount: 0,
-      lastAgentScores: {},
     };
     enginesBySession.set(sessionId, engine);
   }
   return engine;
 }
-
-// The autonomous engine runs 14 agents (lib/autonomous-hedge/agents). Names and
-// score keys are paired by index; keys are the agentIds those agents report.
-const AGENT_NAMES = [
-  "Market Scanner", "Tick Intelligence", "Digit Probability", "Rise/Fall Model",
-  "Market Regime", "Execution Timing", "Confidence Fusion", "Recovery Intelligence",
-  "Duration Optimizer", "Portfolio Manager", "Risk Intelligence", "Learning Agent",
-  "Pattern Discovery", "Trade Explainability",
-];
-
-const AGENT_SCORE_KEYS = [
-  "marketScanner", "tickIntelligence", "digitProbability", "riseFallAgent",
-  "marketRegime", "executionTiming", "confidenceFusion", "recoveryIntelligence",
-  "durationOptimizer", "portfolioManager", "riskIntelligence", "learningAgent",
-  "patternDiscovery", "tradeExplainability",
-];
 
 // ── Settings builders ─────────────────────────────────────────────────────────
 
@@ -421,14 +402,40 @@ function startEngineFor(sessionId: string, settingsRow?: typeof settingsTable.$i
   requestHedgeCycle(hedgeHostFor(engine));
 }
 
-function stopEngine(engine: EngineInstance, reason: string, cooldownMinutes?: number) {
+/**
+ * Everything a cooldown expiry does, factored out so the "cooldown disabled"
+ * path can run it immediately. The loss-streak counter is reset here — the ONLY
+ * reset point outside of a fully-covering win. It clears the counter that gates
+ * cooldown (recoveryEngine streakLossCount), NOT the recovery debt itself
+ * (unrecoveredAmount persists until a win fully covers the debt).
+ */
+function resumeAfterCooldown(engine: EngineInstance, reasonLabel: string): void {
+  engine.cooldownUntil = null;
+  engine.cooldownResumeTimer = null;
+  runWithSession(engine.sessionId, () => {
+    recoveryEngine.setPersistenceSession(engine.sessionId);
+    recoveryEngine.seedState({ ...recoveryEngine.getState(), streakLossCount: 0 });
+  });
+  engine.sessionLossCount = 0;
+  // Auto-resume engine
+  engine.running = true;
+  engine.mode = "autonomous";
+  engine.stopReasons = [];
+  engine.nextScanIn = null;
+  logger.info({ sessionId: engine.sessionId }, `${reasonLabel} — autonomous engine auto-resuming, session loss count reset`);
+  broadcastEngineSSE(engine, "engine_started", { reason: reasonLabel });
+  broadcastEngineSSE(engine, "loss_streak_reset", { sessionLossCount: 0 });
+  requestHedgeCycle(hedgeHostFor(engine));
+}
+
+function stopEngine(engine: EngineInstance, reason: string, cooldownMinutes?: number, immediateResume = false) {
   engine.running = false;
   engine.mode = "manual";
   engine.stopReasons = [reason];
   engine.currentMarket = null;
   engine.nextScanIn = null;
   // Give up trading ownership (scoped to THIS account session) so another
-  // engine on the same account (NeuroAI FAB) may execute while this one is
+  // engine on this same account (NeuroAI FAB) may execute while this one is
   // stopped. Ownership is re-acquired before any trade, so a cooldown
   // auto-resume can never race a FAB session that started meanwhile.
   releaseTradingOwnership("autonomous", engine.sessionId);
@@ -439,28 +446,14 @@ function stopEngine(engine: EngineInstance, reason: string, cooldownMinutes?: nu
   if (cooldownMinutes && cooldownMinutes > 0) {
     engine.cooldownUntil = new Date(Date.now() + cooldownMinutes * 60 * 1000);
     engine.cooldownResumeTimer = setTimeout(() => {
-      engine.cooldownUntil = null;
-      engine.cooldownResumeTimer = null;
-      // Reset the loss-streak counter on cooldown expiry — the ONLY reset
-      // point outside of a fully-covering win. This clears the counter that
-      // gates cooldown (recoveryEngine streakLossCount), NOT the recovery debt
-      // itself (unrecoveredAmount persists until a win fully covers the debt).
-      runWithSession(engine.sessionId, () => {
-        recoveryEngine.setPersistenceSession(engine.sessionId);
-        recoveryEngine.seedState({ ...recoveryEngine.getState(), streakLossCount: 0 });
-      });
-      engine.sessionLossCount = 0;
-      // Auto-resume engine
-      engine.running = true;
-      engine.mode = "autonomous";
-      engine.stopReasons = [];
-      engine.nextScanIn = null;
-      logger.info({ sessionId: engine.sessionId }, "Cooldown expired — autonomous engine auto-resuming, session loss count reset");
-      broadcastEngineSSE(engine, "engine_started", { reason: "cooldown_expired" });
-      broadcastEngineSSE(engine, "loss_streak_reset", { sessionLossCount: 0 });
-      requestHedgeCycle(hedgeHostFor(engine));
+      resumeAfterCooldown(engine, "Cooldown expired");
     }, cooldownMinutes * 60 * 1000);
     logger.info({ sessionId: engine.sessionId, reason, cooldownMinutes }, "Engine stopped with cooldown");
+  } else if (immediateResume) {
+    // Cooldown disabled in Settings: the loss-limit guardrail still fires —
+    // ownership is handed back and the streak is reset exactly as a cooldown
+    // expiry would — but the engine never sits out a pause.
+    logger.info({ sessionId: engine.sessionId, reason }, "Engine stopped, cooldown disabled — resuming immediately");
   } else {
     engine.cooldownUntil = null;
     // Final stop — persist the flag so a server restart does not resurrect an
@@ -471,6 +464,7 @@ function stopEngine(engine: EngineInstance, reason: string, cooldownMinutes?: nu
     logger.info({ sessionId: engine.sessionId, reason }, "Autonomous engine stopped");
   }
   broadcastSSE("engine_stopped", { reason, cooldownUntil: engine.cooldownUntil?.toISOString() ?? null }, engine.sessionId);
+  if (immediateResume) resumeAfterCooldown(engine, "Cooldown disabled");
 }
 
 async function syncLiveBalance(
@@ -523,13 +517,15 @@ function hedgeHostFor(engine: EngineInstance): HedgeHost {
       return false;
     },
     stop: (reason: string, cooldownMinutes?: number) => stopEngine(engine, reason, cooldownMinutes),
+    // Loss-limit stop with the cooldown turned off in Settings: stop, reset the
+    // streak, resume at once — no pause, no waiting for a timer.
+    stopAndResume: (reason: string) => stopEngine(engine, reason, 0, true),
     emit: (event: string, data: Record<string, unknown>) => broadcastEngineSSE(engine, event, data),
     publish: (patch: HedgePublish) => {
       if (patch.currentMarket !== undefined) engine.currentMarket = patch.currentMarket;
       if (patch.sessionLossCount !== undefined) engine.sessionLossCount = patch.sessionLossCount;
       if (patch.tradesExecutedToday !== undefined) engine.tradesExecutedToday = patch.tradesExecutedToday;
       if (patch.lastTradeTime !== undefined) engine.lastTradeTime = patch.lastTradeTime;
-      if (patch.lastAgentScores !== undefined) engine.lastAgentScores = patch.lastAgentScores;
       if (patch.nextScanIn !== undefined) engine.nextScanIn = patch.nextScanIn;
     },
     loadContext: () => loadHedgeContext(engine),
@@ -607,6 +603,7 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
     settings: tradingSettings,
     consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
     cooldownMinutes: settings?.cooldownMinutes ?? 30,
+    cooldownEnabled: (settings as any)?.cooldownEnabled ?? true,
     allowedMarketSymbols,
     paperTradeMode: tradingSettings.paperTradeMode,
     daily,
@@ -667,18 +664,6 @@ async function buildRecommendationPayload(sessionId: string, symbol: string, mar
     generatedAt: new Date().toISOString(),
   };
 }
-
-// ── Engine agent status (from the last autonomous cycle) ──────────────────────
-function engineAgentStatuses(engine: EngineInstance) {
-  const now = new Date().toISOString();
-  return AGENT_SCORE_KEYS.map((key, i) => ({
-    name: AGENT_NAMES[i],
-    isActive: engine.running,
-    lastRun: now,
-    confidence: engine.lastAgentScores[key] ?? 0,
-  }));
-}
-
 
 // ── Routes ─────────────────────────────────────────────────────────────────────
 
@@ -865,7 +850,6 @@ router.get("/engine/status", async (req, res): Promise<void> => {
 
   res.json({
     isRunning: engine.running, mode: engine.running ? engine.mode : "manual",
-    agentStatuses: engineAgentStatuses(engine),
     tradesExecutedToday: todayTrades.length,
     currentMarket: engine.currentMarket,
     nextScanIn: engine.running ? engine.nextScanIn : null,
@@ -936,7 +920,6 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
 
   res.json({
     isRunning: engine.running, mode: engine.mode,
-    agentStatuses: engineAgentStatuses(engine),
     tradesExecutedToday: engine.tradesExecutedToday, currentMarket: engine.currentMarket,
     nextScanIn: engine.nextScanIn, stopReasons: engine.stopReasons, loopIntervalSec: engine.loopIntervalSec,
     lastTradeTime: engine.lastTradeTime?.toISOString() ?? null,

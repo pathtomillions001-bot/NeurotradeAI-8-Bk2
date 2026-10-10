@@ -48,7 +48,6 @@ import { applySettlement, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
-import { runAutonomousHedgeAgents, type HedgeAgentInput } from "./agents";
 import {
   claimOpenRow,
   ledgerEntryPayout,
@@ -74,6 +73,8 @@ export interface HedgeContext {
   settings: TradingSettings;
   consecutiveLossLimit: number;
   cooldownMinutes: number;
+  /** False = trade straight through a loss streak (no cooldown pause). */
+  cooldownEnabled: boolean;
   allowedMarketSymbols: string[] | null;
   paperTradeMode: boolean;
   daily: DailyStats;
@@ -89,7 +90,6 @@ export interface HedgePublish {
   sessionLossCount?: number;
   tradesExecutedToday?: number;
   lastTradeTime?: Date | null;
-  lastAgentScores?: Record<string, number>;
   nextScanIn?: number | null;
 }
 
@@ -102,6 +102,12 @@ export interface HedgeHost {
    */
   canExecute(): boolean;
   stop(reason: string, cooldownMinutes?: number): void;
+  /**
+   * Stop for a breached loss limit and resume at once — used when the user
+   * turned the cooldown off in Settings. The streak reset is the same one a
+   * cooldown expiry performs, so the guardrail cannot re-fire on every loss.
+   */
+  stopAndResume(reason: string): void;
   emit(event: string, data: Record<string, unknown>): void;
   publish(patch: HedgePublish): void;
   /** Loads account, settings and today's resolved P&L for this session. */
@@ -336,7 +342,8 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   const risk = riskFor(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
   if (risk.hardStop) {
     const consecutive = ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
-    host.stop(risk.hardStopReason ?? "risk limit reached", consecutive ? ctx.cooldownMinutes : undefined);
+    if (consecutive) stopForLossLimit(host, ctx, risk.hardStopReason ?? "risk limit reached");
+    else host.stop(risk.hardStopReason ?? "risk limit reached");
     return;
   }
 
@@ -375,34 +382,12 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     return;
   }
 
-  // 3. Agents and UI (throttled — the engine may evaluate on every tick).
-  const agentInput: HedgeAgentInput = {
-    mode,
-    decision,
-    rows,
-    tapes,
-    configuredMarkets: markets.length,
-    lossRun,
-    recovery: {
-      inRecovery: recoveryEngine.isInRecovery(),
-      step: recoveryEngine.getState().recoveryStep,
-      debt: recoveryEngine.getState().unrecoveredAmount,
-      escalation,
-    },
-    risk: {
-      hardStop: risk.hardStop,
-      hardStopReason: risk.hardStopReason,
-      riskBudget: risk.riskBudget,
-      riskLevel: risk.riskLevel,
-      stakeMultiplier: risk.stakeMultiplier,
-      recommendedStake: risk.recommendedStake,
-    },
-    memory: s.memory,
-    exposureOpen: s.exposure !== null,
-  };
-  const agents = runAutonomousHedgeAgents(agentInput);
-  const agentScores = Object.fromEntries(Object.entries(agents).map(([k, v]) => [k, v.score]));
-  publishScan(host, s, decision, agentScores, lossRun, ctx, tapes.length);
+  // 3. Publish the cycle (throttled — the engine may evaluate on every tick).
+  //    The 14 advisory agents that used to run here were removed: they only
+  //    published cosmetic scores, while the trade decision comes from the Nexus
+  //    gate, the rescan memory and the risk hard-stops (see
+  //    docs/autonomous-nexus-hedge-plan.md).
+  publishScan(host, s, decision, lossRun, ctx, tapes.length);
 
   if (!decision.eligible) return;
 
@@ -411,7 +396,8 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   const freshRisk = riskFor(fresh, decision.best.symbol);
   if (freshRisk.hardStop) {
     const consecutive = fresh.daily.consecutiveLosses >= fresh.consecutiveLossLimit;
-    host.stop(freshRisk.hardStopReason ?? "risk limit reached", consecutive ? fresh.cooldownMinutes : undefined);
+    if (consecutive) stopForLossLimit(host, fresh, freshRisk.hardStopReason ?? "risk limit reached");
+    else host.stop(freshRisk.hardStopReason ?? "risk limit reached");
     return;
   }
   if (!host.canExecute()) return;
@@ -423,14 +409,12 @@ function publishScan(
   host: HedgeHost,
   s: HedgeSession,
   decision: HedgeDecision,
-  agentScores: Record<string, number>,
   lossRun: number,
   ctx: HedgeContext,
   rankedTapes: number,
 ): void {
   host.publish({
     currentMarket: decision.best.symbol,
-    lastAgentScores: agentScores,
     sessionLossCount: lossRun,
     nextScanIn: null,
   });
@@ -442,7 +426,6 @@ function publishScan(
     symbol: b.symbol,
     quality: Math.round(b.probability * 100),
     confidence: Math.round(b.lowerBound * 100),
-    agentScores,
     marketsScanned: rankedTapes,
     regime: null,
     shouldTrade: decision.eligible,
@@ -800,6 +783,19 @@ async function findBrokerPurchase(
   return { contractId: Number(tx.contract_id), buyPrice: Number(tx.buy_price) };
 }
 
+/**
+ * Stop for a breached consecutive-loss limit. With the cooldown enabled the
+ * engine sits out `cooldownMinutes` and auto-resumes; with it disabled the
+ * engine resumes immediately (see HedgeHost.stopAndResume).
+ */
+function stopForLossLimit(host: HedgeHost, ctx: HedgeContext, reason: string): void {
+  if (ctx.cooldownEnabled === false) {
+    host.stopAndResume(reason);
+    return;
+  }
+  host.stop(reason, ctx.cooldownMinutes);
+}
+
 function finishTrade(
   host: HedgeHost,
   s: HedgeSession,
@@ -825,9 +821,13 @@ function finishTrade(
   });
   logger.info({ symbol: t.symbol, won: t.won, profit: t.profit.toFixed(2), stake: t.stake, contract: t.contract }, "Trade executed");
   if (!t.won && streak >= t.ctx.consecutiveLossLimit) {
-    host.stop(
-      `${streak} consecutive losses — limit ${t.ctx.consecutiveLossLimit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
-      t.ctx.cooldownMinutes,
+    const limit = t.ctx.consecutiveLossLimit;
+    stopForLossLimit(
+      host,
+      t.ctx,
+      t.ctx.cooldownEnabled === false
+        ? `${streak} consecutive losses — limit ${limit} reached, cooldown disabled — resuming`
+        : `${streak} consecutive losses — limit ${limit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
     );
   }
   void s;

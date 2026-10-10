@@ -6,16 +6,15 @@ import {
   useGetAccount,
   useGetDailySummary,
   useExecuteTrade,
-  useToggleAutonomousEngine,
 } from "@workspace/api-client-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { Link } from "wouter";
-import { Activity, AlertTriangle, Target, Clock, RefreshCw, TimerOff, ShieldAlert } from "lucide-react";
+import { Target, Clock, ShieldAlert } from "lucide-react";
 import { toast } from "sonner";
 import { MarketOpportunityFlashCard } from "@/components/flash-card-3d";
+import { AutonomousEngineCard, type GroupScanResult } from "@/components/autonomous-engine-card";
 import { withTabSession } from "@/lib/tab-session";
 
 interface JournalStats {
@@ -32,39 +31,6 @@ interface PendingResult {
   won: boolean;
   profit: number;
   createdAt: string;
-}
-
-interface FamilySummary {
-  name: string;       // "direction" | "overunder" | "evenodd"
-  contract: string | null;
-  shouldTrade: boolean;
-  confidence: number;
-  quality: number;
-  rejectReason: string | null;
-}
-
-interface GroupScanResult {
-  group: string;
-  scanned: number;
-  bestSymbol: string;
-  bestDisplayName: string;
-  quality: number;
-  shouldTrade: boolean;
-  contract: string | null;
-  confidence: number;
-  family?: string;
-  families?: FamilySummary[];   // all enabled families for this market
-  rejectReason?: string | null;
-  cursorIdx?: number;
-  totalInGroup?: number;
-  scanningAt?: number;
-}
-
-function formatCooldown(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = secs % 60;
-  if (m > 0) return `${m}m ${s.toString().padStart(2, "0")}s`;
-  return `${s}s`;
 }
 
 // ── Recovery stat card (in the top KPI row) ───────────────────────────────────
@@ -142,198 +108,12 @@ function RecoveryStatCard({ engine }: { engine: any }) {
   );
 }
 
-const GROUP_COLORS: Record<string, string> = {
-  "Volatility 1s": "#00ffff",
-  "Volatility":    "#8b5cf6",
-  "Jump Indices":  "#f59e0b",
-  "Bull/Bear":     "#10b981",
-};
-const CONTRACT_SHORT: Record<string, string> = {
-  CALL: "RISE", PUT: "FALL", DIGITOVER: "OVER", DIGITUNDER: "UNDER", DIGITEVEN: "EVEN", DIGITODD: "ODD",
-  DIGITMATCH: "MATCH", DIGITDIFF: "DIFF",
-};
-const FAMILY_COLORS: Record<string, string> = {
-  direction:  "#10b981",
-  overunder:  "#06b6d4",
-  evenodd:    "#8b5cf6",
-  matchdiff:  "#a855f7",
-};
-const CONTRACT_COLORS_MAP: Record<string, string> = {
-  CALL: "#10b981", PUT: "#ef4444",
-  DIGITOVER: "#06b6d4", DIGITUNDER: "#f59e0b",
-  DIGITEVEN: "#8b5cf6", DIGITODD: "#ec4899",
-  DIGITMATCH: "#a855f7", DIGITDIFF: "#14b8a6",
-};
-
-function ParallelGroupScanner({ groups, isScanning, winner, lastSkipReason }: {
-  groups: Record<string, GroupScanResult | "scanning">;
-  isScanning: boolean;
-  winner: string | null;
-  lastSkipReason: string | null;
-}) {
-  const GROUP_ORDER = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
-  const hasAnyData = Object.keys(groups).length > 0;
-
-  if (!isScanning && !hasAnyData) return null;
-
-  return (
-    <div className="rounded-lg border border-primary/15 bg-primary/3 p-3 space-y-2">
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-1">
-        <div className="flex gap-0.5">
-          {[0,1,2].map(i => (
-            <span key={i} className="w-1 h-1 rounded-full bg-primary animate-bounce" style={{ animationDelay: `${i * 0.15}s` }} />
-          ))}
-        </div>
-        <span className="text-[10px] font-mono text-primary/80 uppercase tracking-widest">
-          {isScanning ? "Scanning markets — rotating cursor across all groups" : "Last scan results"}
-        </span>
-        {winner && (
-          <span className="ml-auto text-[9px] font-mono text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded">
-            ✓ EXECUTING: {winner}
-          </span>
-        )}
-      </div>
-
-      {/* Per-group cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
-        {GROUP_ORDER.map(groupName => {
-          const result = groups[groupName];
-          const color = GROUP_COLORS[groupName] ?? "#00ffff";
-          const isGroupScanning = result === "scanning";
-          const isWinner = result !== "scanning" && result && winner && result.bestSymbol === winner;
-
-          return (
-            <div
-              key={groupName}
-              className="rounded-md p-2 border transition-all"
-              style={{
-                borderColor: isWinner ? color : `${color}25`,
-                background: isWinner ? `${color}12` : `${color}06`,
-                boxShadow: isWinner ? `0 0 8px ${color}30` : undefined,
-              }}
-            >
-              {/* Group header */}
-              <div className="flex items-center justify-between mb-1.5">
-                <span className="text-[9px] font-mono font-bold uppercase tracking-wide" style={{ color }}>
-                  {groupName}
-                </span>
-                {isGroupScanning ? (
-                  <span className="w-1 h-1 rounded-full animate-pulse" style={{ background: color }} />
-                ) : result ? (
-                  <span className={`text-[8px] font-mono px-1 py-0.5 rounded ${result.shouldTrade ? "text-green-400 bg-green-500/15" : "text-zinc-500 bg-zinc-800/50"}`}>
-                    {result.shouldTrade ? "GO" : "SKIP"}
-                  </span>
-                ) : (
-                  <span className="text-[8px] text-zinc-600 font-mono">—</span>
-                )}
-              </div>
-
-              {isGroupScanning ? (
-                <div className="space-y-1">
-                  <div className="h-2 rounded bg-black/20 overflow-hidden">
-                    <div className="h-full rounded animate-pulse" style={{ width: "60%", background: color, opacity: 0.4 }} />
-                  </div>
-                  <div className="text-[8px] text-muted-foreground font-mono">Scanning…</div>
-                </div>
-              ) : result && typeof result === "object" ? (
-                <div className="space-y-1.5">
-                  {/* Market name + cursor position */}
-                  <div>
-                    <div className="text-[10px] font-semibold leading-tight truncate">{result.bestDisplayName}</div>
-                    <div className="flex items-center gap-1">
-                      <span className="text-[8px] font-mono text-muted-foreground">{result.bestSymbol}</span>
-                      {result.cursorIdx !== undefined && result.totalInGroup !== undefined && (
-                        <span className="text-[7px] font-mono text-zinc-600">[{result.cursorIdx + 1}/{result.totalInGroup}]</span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Per-family badges — shows ALL enabled families, not just the winner */}
-                  {result.families && result.families.length > 0 ? (
-                    <div className="flex flex-wrap gap-1">
-                      {result.families.map(fam => {
-                        const ct = fam.contract ?? "";
-                        const ctColor = CONTRACT_COLORS_MAP[ct] ?? FAMILY_COLORS[fam.name] ?? "#71717a";
-                        const label = CONTRACT_SHORT[ct] ?? ct;
-                        return (
-                          <span
-                            key={fam.name}
-                            title={fam.rejectReason ?? (fam.shouldTrade ? "Ready to trade" : "Not ready")}
-                            className="text-[7px] font-mono px-1 py-0.5 rounded border leading-none"
-                            style={fam.shouldTrade
-                              ? { color: ctColor, borderColor: `${ctColor}60`, background: `${ctColor}18` }
-                              : { color: "#52525b", borderColor: "#3f3f46", background: "#18181b" }
-                            }
-                          >
-                            {label || fam.name}{fam.shouldTrade ? " ✓" : ""}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  ) : (
-                    /* Fallback: single contract badge (old server version) */
-                    result.contract && (
-                      <span className="text-[8px] font-mono" style={{ color: `${color}90` }}>
-                        {CONTRACT_SHORT[result.contract] ?? result.contract}
-                      </span>
-                    )
-                  )}
-
-                  {/* Confidence + quality bar */}
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-mono font-bold" style={{ color: result.shouldTrade ? color : "#71717a" }}>
-                      {result.confidence.toFixed(0)}%
-                    </span>
-                    <span className="text-[7px] font-mono text-zinc-600">q{result.quality.toFixed(0)}</span>
-                  </div>
-                  <div className="h-0.5 w-full bg-black/20 rounded-full overflow-hidden">
-                    <div className="h-full rounded-full transition-all duration-500"
-                      style={{ width: `${Math.min(100, result.quality)}%`, background: result.shouldTrade ? color : "#52525b" }} />
-                  </div>
-                </div>
-              ) : (
-                <div className="text-[8px] text-muted-foreground font-mono mt-1">Waiting…</div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* ── Skip-reason status bar ─────────────────────────────────────────── */}
-      {!winner && lastSkipReason && (
-        <div className="mt-1 flex items-start gap-2 rounded-md border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5">
-          <span className="text-amber-400 text-[9px] font-mono mt-0.5 shrink-0">⚠ SKIP</span>
-          <span className="text-[9px] font-mono text-amber-300/80 leading-relaxed break-words">{lastSkipReason}</span>
-        </div>
-      )}
-      {winner && (
-        <div className="mt-1 flex items-center gap-2 rounded-md border border-green-500/20 bg-green-500/5 px-2.5 py-1.5">
-          <span className="text-green-400 text-[9px] font-mono shrink-0">✓ TRADE</span>
-          <span className="text-[9px] font-mono text-green-300/80">Executing trade on {winner} — all gates passed</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export default function Dashboard() {
   const { data: summary } = useGetDailySummary({ query: { refetchInterval: 5000 } } as { query: any });
   const { data: topMarket } = useGetTopMarket({ query: { refetchInterval: 8000 } } as { query: any });
   const { data: engine, refetch: refetchEngine } = useGetAiEngineStatus({ query: { refetchInterval: 3000 } } as { query: any });
   const { data: account } = useGetAccount();
   const executeTrade = useExecuteTrade();
-  const toggleEngine = useToggleAutonomousEngine();
-  // Surfaces server-side refusals (e.g. 409 when a NeuroAI FAB session owns
-  // trading) — without this the toggle fails silently with no explanation.
-  const runToggle = (running: boolean) =>
-    toggleEngine.mutate(
-      { data: { running } },
-      {
-        onError: (err: any) =>
-          toast.error(err?.data?.error ?? err?.message ?? "Could not toggle the engine"),
-      },
-    );
 
   const queryClient = useQueryClient();
 
@@ -580,43 +360,6 @@ export default function Dashboard() {
       </header>
 
 
-      {/* Cooldown banner — shown when engine is in cooldown after consecutive losses */}
-      <AnimatePresence>
-        {cooldownSecs !== null && !engine?.isRunning && (
-          <motion.div
-            initial={{ opacity: 0, y: -8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -8 }}
-            className="flex items-center gap-4 p-4 rounded-xl bg-amber-500/8 border border-amber-500/30"
-          >
-            <div className="flex items-center gap-2 flex-1">
-              <TimerOff className="w-4 h-4 text-amber-400 flex-shrink-0" />
-              <div>
-                <div className="text-sm font-medium text-amber-300">Engine in Cooldown</div>
-                <div className="text-xs text-amber-400/70 mt-0.5">
-                  {engine?.stopReasons?.[0] ?? "Consecutive losses triggered a safety pause"}
-                </div>
-              </div>
-            </div>
-            <div className="flex flex-col items-end gap-1">
-              <div className="text-2xl font-mono font-bold text-amber-300 tabular-nums">
-                {formatCooldown(cooldownSecs)}
-              </div>
-              <div className="text-[10px] font-mono text-amber-500/60 uppercase tracking-wider">until auto-resume</div>
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              className="text-xs h-7 px-3 border-amber-500/40 text-amber-400 hover:bg-amber-500/10 flex-shrink-0"
-              onClick={() => runToggle(true)}
-              disabled={toggleEngine.isPending}
-            >
-              Resume Now
-            </Button>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       {/* Stat strip — displayStats applies pending optimistic updates instantly */}
       <div className="space-y-2">
         <span className="text-xs text-muted-foreground font-medium uppercase tracking-wider">Performance</span>
@@ -703,86 +446,23 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
+        {/* One surface, two faces: Quick Strike for manual trading, the
+            autonomous engine itself the moment it is switched on. */}
         <div className="md:col-span-2">
-          <MarketOpportunityFlashCard currentStreak={displayStats?.currentStreak ?? 0} />
-        </div>
-      </div>
-
-      {/* Engine toggle + live tournament */}
-      <Card className="bg-card">
-        <CardHeader className="pb-2">
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <Activity className="w-4 h-4 text-primary" /> AI Engine
-            </CardTitle>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-muted-foreground font-mono">
-                {engine?.tradesExecutedToday ?? 0} trades today
-              </span>
-              <Button
-                size="sm"
-                variant="outline"
-                className={`text-xs h-7 px-3 ${engine?.isRunning ? "border-green-500/40 text-green-500 hover:bg-green-500/10" : "border-border text-muted-foreground hover:text-foreground"}`}
-                onClick={() => runToggle(!engine?.isRunning)}
-                disabled={toggleEngine.isPending}
-              >
-                {engine?.isRunning ? "STOP ENGINE" : "START ENGINE"}
-              </Button>
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Autonomous loop status bar */}
-          <AnimatePresence>
-            {engine?.isRunning && (
-              <motion.div
-                initial={{ opacity: 0, height: 0 }}
-                animate={{ opacity: 1, height: "auto" }}
-                exit={{ opacity: 0, height: 0 }}
-                className="flex items-center gap-4 p-3 rounded-lg bg-green-500/5 border border-green-500/20 overflow-hidden"
-              >
-                <div className="flex items-center gap-2 flex-1">
-                  <RefreshCw className="w-3.5 h-3.5 text-green-500 animate-spin" />
-                  <span className="text-xs text-green-400 font-mono">
-                    {isScanningGroups ? "Running 4-group parallel tournament…" : tournamentWinner ? `Executing: ${tournamentWinner}` : "Scanning markets…"}
-                  </span>
-                </div>
-                {countdown !== null && (
-                  <div className="flex items-center gap-1.5 text-xs font-mono text-muted-foreground">
-                    <Clock className="w-3 h-3" />
-                    <span>Next trade in <span className="text-foreground font-bold">{countdown}s</span></span>
-                  </div>
-                )}
-              </motion.div>
-            )}
-            {!engine?.isRunning && !cooldownSecs && engine?.stopReasons && engine.stopReasons.length > 0 && (
-              <motion.div
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex items-center gap-2 p-3 rounded-lg bg-amber-500/5 border border-amber-500/20"
-              >
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-500 flex-shrink-0" />
-                <span className="text-xs text-amber-400">{engine.stopReasons[0]}</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {/* Parallel group scanner — shows all 4 groups racing in real time */}
-          {engine?.isRunning && (
-            <ParallelGroupScanner
+          {engine?.isRunning ? (
+            <AutonomousEngineCard
+              countdown={countdown}
               groups={groupScans}
               isScanning={isScanningGroups}
               winner={tournamentWinner}
               lastSkipReason={lastSkipReason}
             />
+          ) : (
+            <MarketOpportunityFlashCard currentStreak={displayStats?.currentStreak ?? 0} />
           )}
+        </div>
+      </div>
 
-          {/* NOTE: the advisory agent grid that used to live here was retired
-              with the advisory agents themselves (they published cosmetic
-              scores only and never gated a trade). The tournament, loop
-              status and stop reasons above are the engine's live view. */}
-        </CardContent>
-      </Card>
     </motion.div>
   );
 }

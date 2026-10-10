@@ -1,6 +1,5 @@
 import { RefreshCw, Clock } from "lucide-react";
 import { motion } from "framer-motion";
-import { EngineToggleButton } from "@/components/engine-toggle-button";
 
 // ── Group scan shapes (SSE: scan_started / group_scanned / scan_complete) ──────
 export interface FamilySummary {
@@ -270,20 +269,16 @@ export function AutonomousEngineCard({
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
         {/* Header */}
         <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-          <span className="min-w-0 truncate text-[10px] font-mono uppercase tracking-widest text-emerald-300/80">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-300/80">
             Autonomous Engine
           </span>
-          <div className="ml-auto flex items-center gap-1.5 shrink-0">
-            <span
-              className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider"
-              style={{ color: statusColor, borderColor: `${statusColor}50`, background: `${statusColor}15` }}
-            >
-              {status}
-            </span>
-            {/* Stop the engine straight from the card */}
-            <EngineToggleButton />
-          </div>
+          <span
+            className="ml-auto text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider"
+            style={{ color: statusColor, borderColor: `${statusColor}50`, background: `${statusColor}15` }}
+          >
+            {status}
+          </span>
         </div>
 
         {/* Loop status */}

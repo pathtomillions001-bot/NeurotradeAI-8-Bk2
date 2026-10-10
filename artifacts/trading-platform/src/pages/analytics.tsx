@@ -263,27 +263,24 @@ function OutcomeExtremes({ trades }: { trades: any[] }) {
     v == null ? "—" : `${signed && v > 0 ? "+" : ""}${v.toFixed(2)}`;
 
   const rows: Array<{ label: string; value: string; tone: string; sub: string }> = [
-    { label: "Min Stake",   value: money(extremes.smallestStake),  tone: "text-foreground",    sub: "lowest risked" },
-    { label: "Max Stake",   value: money(extremes.largestStake),   tone: "text-foreground",    sub: "highest risked" },
-    { label: "Min Profit",  value: money(extremes.smallestProfit, true),  tone: "text-emerald-400", sub: "thinnest win" },
-    { label: "Max Profit",  value: money(extremes.largestProfit, true),   tone: "text-emerald-400", sub: "best trade" },
-    { label: "Min Loss",    value: money(extremes.smallestLoss),   tone: "text-red-400",       sub: "closest to break-even" },
-    { label: "Max Loss",    value: money(extremes.largestLoss),    tone: "text-red-400",       sub: `${extremes.lossCount} losing trade${extremes.lossCount === 1 ? "" : "s"}` },
+    { label: "Smallest Stake",  value: money(extremes.smallestStake),  tone: "text-foreground",    sub: "lowest amount risked" },
+    { label: "Largest Stake",   value: money(extremes.largestStake),   tone: "text-foreground",    sub: "highest amount risked" },
+    { label: "Smallest Profit", value: money(extremes.smallestProfit, true),  tone: "text-emerald-400", sub: "thinnest win" },
+    { label: "Largest Profit",  value: money(extremes.largestProfit, true),   tone: "text-emerald-400", sub: "best trade" },
+    { label: "Smallest Loss",   value: money(extremes.smallestLoss),   tone: "text-red-400",       sub: "closest loss to break-even" },
+    { label: "Largest Loss",    value: money(extremes.largestLoss),    tone: "text-red-400",       sub: `${extremes.lossCount} losing trade${extremes.lossCount === 1 ? "" : "s"} today` },
   ];
 
-  // Compact layout: the card stretches to fill whatever vertical space the
-  // column has left next to the Trade Timeline, so the two cards end flush
-  // at the same height with no gap underneath.
   return (
-    <div className="h-full rounded-xl border border-border/60 bg-card/70 p-3 flex flex-col">
-      <p className="text-[11px] font-semibold text-foreground leading-tight">Stake &amp; Outcome Extremes</p>
-      <p className="text-[9px] text-muted-foreground mt-0.5 mb-2">Today's min / max figures</p>
-      <div className="flex-1 min-h-0 grid grid-cols-2 grid-rows-3 gap-1.5">
+    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
+      <p className="text-xs font-semibold text-foreground mb-0.5">Stake &amp; Outcome Extremes</p>
+      <p className="text-[10px] text-muted-foreground mb-3">Today's smallest and largest figures</p>
+      <div className="grid grid-cols-2 gap-2">
         {rows.map(r => (
-          <div key={r.label} className="min-h-0 rounded-lg border border-border/50 bg-secondary/20 px-2 py-1 flex flex-col justify-center overflow-hidden">
-            <div className="text-[8px] uppercase tracking-wider text-muted-foreground truncate leading-tight">{r.label}</div>
-            <div className={`text-xs font-mono font-bold leading-tight ${r.tone}`}>{r.value}</div>
-            <div className="text-[8px] text-muted-foreground/70 truncate leading-tight">{r.sub}</div>
+          <div key={r.label} className="rounded-lg border border-border/50 bg-secondary/20 px-2.5 py-2">
+            <div className="text-[9px] uppercase tracking-wider text-muted-foreground truncate">{r.label}</div>
+            <div className={`text-sm font-mono font-bold leading-tight mt-0.5 ${r.tone}`}>{r.value}</div>
+            <div className="text-[9px] text-muted-foreground/70 truncate">{r.sub}</div>
           </div>
         ))}
       </div>
@@ -296,8 +293,8 @@ function TradeTimeline({ trades }: { trades: any[] }) {
   const reversed = [...trades].reverse().slice(0, 30);
 
   return (
-    <div className="h-full rounded-xl border border-border/60 bg-card/70 p-4 flex flex-col">
-      <div className="flex items-center justify-between mb-3 shrink-0">
+    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
+      <div className="flex items-center justify-between mb-3">
         <div>
           <p className="text-xs font-semibold text-foreground">Trade Timeline</p>
           <p className="text-[10px] text-muted-foreground">Today's trades, newest first</p>
@@ -305,12 +302,12 @@ function TradeTimeline({ trades }: { trades: any[] }) {
         <span className="text-[10px] text-muted-foreground font-mono">{trades.length} total</span>
       </div>
       {reversed.length === 0 ? (
-        <div className="flex-1 flex flex-col items-center justify-center py-8 gap-2">
+        <div className="flex flex-col items-center justify-center py-8 gap-2">
           <Activity className="w-7 h-7 text-muted-foreground/20" />
           <p className="text-xs text-muted-foreground">No trades today yet</p>
         </div>
       ) : (
-        <div className="flex-1 min-h-0 space-y-1.5 max-h-72 overflow-y-auto pr-1">
+        <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
           <AnimatePresence>
             {reversed.map((t, i) => {
               const profit = t.profit ?? 0;
@@ -498,13 +495,10 @@ export default function Analytics() {
               className="lg:col-span-2">
               <TradeTimeline trades={trades} />
             </motion.div>
-            {/* Flex column: OutcomeExtremes expands into the leftover height so
-                this stack ends flush with the Trade Timeline — no gap below. */}
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}
-              className="h-full flex flex-col gap-4">
+              className="space-y-4">
               <ContractBreakdown trades={trades} />
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}
-                className="flex-1 min-h-0">
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
                 <OutcomeExtremes trades={trades} />
               </motion.div>
             </motion.div>

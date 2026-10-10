@@ -344,28 +344,6 @@ export default function Dashboard() {
     return () => clearInterval(iv);
   }, [(engine as any)?.cooldownUntil]);
 
-  // A dedicated in-flow row keeps controls clear of both card headers.
-  const engineControls = (
-    <div className="flex flex-wrap items-center justify-end gap-2 border-t border-white/10 pt-3 mt-auto">
-      {cooldownSecs !== null && (
-        <p className="mr-auto min-w-0 basis-full text-[10px] text-amber-400 font-mono break-words" role="status">
-          {engine?.stopReasons?.[0] ?? "Safety cooldown"} · {formatCooldown(cooldownSecs)} until auto-resume
-        </p>
-      )}
-      {cooldownSecs !== null && (
-        <Button size="sm" variant="outline" className="h-8 text-xs shrink-0"
-          onClick={() => runToggle(true)} disabled={toggleEngine.isPending}>
-          Resume Now
-        </Button>
-      )}
-      <Button size="sm" variant="outline"
-        className={`h-8 text-xs font-mono shrink-0 ${engine?.isRunning ? "border-red-500/40 text-red-400 hover:bg-red-500/10" : "border-primary/40 text-primary hover:bg-primary/10"}`}
-        onClick={() => runToggle(!engine?.isRunning)} disabled={toggleEngine.isPending}>
-        {toggleEngine.isPending ? "PLEASE WAIT…" : engine?.isRunning ? "STOP ENGINE" : "START ENGINE"}
-      </Button>
-    </div>
-  );
-
   const targetPct = summary ? Math.max(0, Math.min(100, (summary.totalProfit / summary.dailyTarget) * 100)) : 0;
   const isProfit = (summary?.totalProfit ?? 0) >= 0;
 
@@ -386,6 +364,15 @@ export default function Dashboard() {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          <Button
+            size="sm"
+            variant="outline"
+            className={`h-7 px-3 text-xs font-mono ${engine?.isRunning ? "border-green-500/40 text-green-500 hover:bg-green-500/10" : "border-border text-muted-foreground hover:text-foreground"}`}
+            onClick={() => runToggle(!engine?.isRunning)}
+            disabled={toggleEngine.isPending}
+          >
+            {engine?.isRunning ? "STOP ENGINE" : "START ENGINE"}
+          </Button>
           {account ? (
             <div className="text-right">
               <div className="text-xs text-muted-foreground font-mono">{account.loginId}</div>
@@ -401,6 +388,52 @@ export default function Dashboard() {
         </div>
       </header>
 
+
+      {/* Engine status strip — ALWAYS the same height, so the cooldown state
+          appears and disappears without the dashboard blocks below resizing. */}
+      <div
+        className={`flex items-center gap-2.5 h-9 px-3 rounded-lg border overflow-hidden text-[11px] font-mono ${
+          cooldownSecs !== null
+            ? "border-amber-500/30 bg-amber-500/8 text-amber-300"
+            : engine?.isRunning
+              ? "border-green-500/25 bg-green-500/5 text-green-400"
+              : "border-border bg-secondary/20 text-muted-foreground"
+        }`}
+      >
+        <span
+          className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+            cooldownSecs !== null ? "bg-amber-400 animate-pulse" : engine?.isRunning ? "bg-green-500 animate-pulse" : "bg-zinc-600"
+          }`}
+        />
+        <span className="uppercase tracking-widest shrink-0">
+          {cooldownSecs !== null ? "Cooldown" : engine?.isRunning ? "Engine online" : "Standby"}
+        </span>
+        <span className="truncate text-[10px] opacity-80">
+          {cooldownSecs !== null
+            ? (engine?.stopReasons?.[0] ?? "Consecutive losses triggered a safety pause")
+            : engine?.isRunning
+              ? "Autonomous trading · tick-driven 4-group tournament"
+              : (engine?.stopReasons?.[0] ?? "Manual trading — start the engine to trade automatically")}
+        </span>
+        <span className="ml-auto shrink-0 tabular-nums">
+          {cooldownSecs !== null
+            ? `${formatCooldown(cooldownSecs)} until auto-resume`
+            : engine?.isRunning && countdown !== null
+              ? `next trade in ${countdown}s`
+              : ""}
+        </span>
+        {cooldownSecs !== null && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[10px] font-mono border-amber-500/40 text-amber-400 hover:bg-amber-500/10 shrink-0"
+            onClick={() => runToggle(true)}
+            disabled={toggleEngine.isPending}
+          >
+            Resume Now
+          </Button>
+        )}
+      </div>
 
       {/* Stat strip — displayStats applies pending optimistic updates instantly */}
       <div className="space-y-2">
@@ -493,7 +526,6 @@ export default function Dashboard() {
         <div className="md:col-span-2">
           {engine?.isRunning ? (
             <AutonomousEngineCard
-              engineControls={engineControls}
               countdown={countdown}
               groups={groupScans}
               isScanning={isScanningGroups}
@@ -501,7 +533,7 @@ export default function Dashboard() {
               lastSkipReason={lastSkipReason}
             />
           ) : (
-            <MarketOpportunityFlashCard engineControls={engineControls} currentStreak={displayStats?.currentStreak ?? 0} />
+            <MarketOpportunityFlashCard currentStreak={displayStats?.currentStreak ?? 0} />
           )}
         </div>
       </div>

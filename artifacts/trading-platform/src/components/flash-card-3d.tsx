@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
+import { useExecuteTrade, useGetAiEngineStatus, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
 import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -74,6 +74,17 @@ export function MarketOpportunityFlashCard({
   const [showMarkets, setShowMarkets] = useState(false);
 
   const executeTrade = useExecuteTrade();
+
+  // Engine state (shared cache with the dashboard poller — no extra requests).
+  // When the autonomous engine stopped itself with something the user must
+  // know (Deriv rejection, risk limit, cooldown...), the card shows a
+  // one-line reason below. User-initiated stops stay silent: the START pill
+  // in the header is the affordance there.
+  const { data: engine } = useGetAiEngineStatus();
+  const engineStopReason =
+    !engine?.isRunning && engine?.stopReasons?.[0] && engine.stopReasons[0] !== "Stopped by user"
+      ? (engine.stopReasons[0] as string)
+      : null;
 
   // Read user's enabled contract families from settings
   const { data: settings } = useGetSettings();
@@ -315,6 +326,14 @@ export function MarketOpportunityFlashCard({
             </div>
           ))}
         </div>
+
+        {/* Engine stop reason — only when the engine halted itself with a reason */}
+        {engineStopReason && (
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-amber-500/25 bg-amber-500/5">
+            <span className="text-[9px] font-mono text-amber-400 shrink-0">⚠ ENGINE</span>
+            <span className="text-[9px] font-mono text-amber-300/80 truncate">{engineStopReason}</span>
+          </div>
+        )}
 
         {/* Footer: count + expand */}
         <div className="flex items-center justify-between mt-auto">

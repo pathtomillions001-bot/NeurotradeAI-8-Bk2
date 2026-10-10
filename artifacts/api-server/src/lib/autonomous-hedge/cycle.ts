@@ -38,13 +38,14 @@ import {
   AUTONOMOUS_HEDGE_PREFIX,
   HEDGE_DURATION_TICKS,
   HEDGE_DURATION_UNIT,
+  HEDGE_MIN_TICKS,
   hedgeGroupIndex,
   HEDGE_GROUP_NAMES,
 } from "./constants";
 import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
 import { recoveryEscalation } from "./recovery-risk";
 import { decideHedge, type HedgeDecision } from "./contest";
-import { applySettlement, type HedgeMemory } from "./hedge-state";
+import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
@@ -136,6 +137,8 @@ interface HedgeSession {
   hydrated: boolean;
   exposure: Exposure | null;
   exposureCheckedAt: number;
+  /** Epoch ms the current exposure started waiting (0 when no exposure). Shown in the settling hold reason. */
+  exposureSince: number;
   lastReconcileAt: number;
   lastEmitAt: number;
   execFailures: number;
@@ -161,6 +164,7 @@ function newSession(): HedgeSession {
     hydrated: false,
     exposure: null,
     exposureCheckedAt: 0,
+    exposureSince: 0,
     lastReconcileAt: 0,
     lastEmitAt: 0,
     execFailures: 0,
@@ -175,6 +179,12 @@ function sessionState(sessionId: string): HedgeSession {
     sessions.set(sessionId, s);
   }
   return s;
+}
+
+/** Release the exposure gate. The waiting-since clock resets with it. */
+function clearExposure(s: HedgeSession): void {
+  s.exposure = null;
+  s.exposureSince = 0;
 }
 
 /** Fresh rescan memory for a new engine start, exactly as a Nexus bot restart. */
@@ -279,6 +289,7 @@ async function hydrateExposure(host: HedgeHost, s: HedgeSession): Promise<void> 
     contractId: row.derivContractId ? Number(row.derivContractId) : null,
     stake: Number(row.stake),
   };
+  s.exposureSince = row.createdAt ? new Date(row.createdAt).getTime() : Date.now();
   logger.warn({ sessionId: host.sessionId, rowId: row.id }, "Autonomous engine resumed with an unresolved 1-tick exposure — gated until settled");
 }
 
@@ -296,7 +307,7 @@ async function exposureResolved(host: HedgeHost, s: HedgeSession): Promise<boole
   if (!row) {
     // The row was removed outside the engine. Nothing can settle it, so release the gate.
     logger.warn({ rowId: s.exposure.rowId }, "Autonomous 1-tick exposure row no longer exists — releasing the gate");
-    s.exposure = null;
+    clearExposure(s);
     return true;
   }
   if (row.status === "won" || row.status === "lost") {
@@ -310,8 +321,130 @@ async function exposureResolved(host: HedgeHost, s: HedgeSession): Promise<boole
     s.ctx = null;
     host.afterSettlement(await getContext(host, s, true));
   }
-  s.exposure = null;
+  clearExposure(s);
   return true;
+}
+
+// ── Hold scans: a running engine must never go silent ───────────────────────────
+//
+// Two cycle outcomes used to return without emitting anything: the exposure
+// gate (previous trade unsettled) and a null contest decision (no market
+// produced a ranked row). The dashboard then sat forever on its fallback
+// "Scanning markets…" text with no contest blocks and no reason —
+// indistinguishable from a dead engine. Every evaluated cycle now publishes a
+// throttled `scan_complete` HOLD carrying the exact human-readable cause, so
+// the UI always shows either live contest blocks or the reason there are none.
+
+/** Per-cycle classification of every watched market's tape. */
+export interface FeedDiagnosis {
+  watched: number;
+  /** Tapes fresh enough to rank (live, or simulated when paper mode allows it). */
+  fresh: number;
+  live: number;
+  simulated: number;
+  /** Fresh tapes still below the ranker's minimum tick count. */
+  thin: number;
+  stale: number;
+  missing: number;
+  /** Fresh tapes skipped because they are simulated and paper mode is off. */
+  simSkipped: number;
+  /** Fresh, thick tapes whose mode set resolved to zero family specs. */
+  noSpecs: number;
+}
+
+export function emptyFeedDiagnosis(watched: number): FeedDiagnosis {
+  return { watched, fresh: 0, live: 0, simulated: 0, thin: 0, stale: 0, missing: 0, simSkipped: 0, noSpecs: 0 };
+}
+
+/**
+ * The exact user-facing reason no contest could run this cycle. Ordered from
+ * most to least specific so the first matching cause is the one reported.
+ */
+export function describeFeedHold(d: FeedDiagnosis, paperTradeMode: boolean): string {
+  const n = d.watched;
+  if (n === 0) {
+    return "HOLD: no markets are enabled for the autonomous engine — check Settings → Allowed markets.";
+  }
+  if (d.missing === n) {
+    return `HOLD: waiting for market data — no ticks received yet on any of the ${n} watched markets. The tournament starts on the first tick.`;
+  }
+  if (!paperTradeMode && d.live === 0 && d.simSkipped > 0) {
+    return `HOLD: live feed unavailable — ${d.simSkipped}/${n} watched markets are on simulated ticks, which live trading never uses. Turn on Paper Trade Mode in Settings to trade the simulated feed, or wait for the Deriv connection to recover.`;
+  }
+  if (d.fresh === 0 && d.stale > 0) {
+    return `HOLD: waiting for fresh ticks — ${d.stale}/${n} watched markets are stale (no tick for over ${Math.round(STALE_TAPE_MS / 1000)}s). The engine resumes automatically when the feed recovers.`;
+  }
+  if (d.thin > 0 && d.fresh - d.thin - d.noSpecs <= 0) {
+    return `HOLD: warming up — ${d.thin} market${d.thin === 1 ? " has" : "s have"} fewer than ${HEDGE_MIN_TICKS} ticks so far. The tournament starts once the tapes fill.`;
+  }
+  if (d.noSpecs > 0 && d.fresh - d.thin - d.noSpecs <= 0) {
+    return "HOLD: no tradeable contracts resolved for the current mode — check Settings → Autonomous contracts.";
+  }
+  const parts: string[] = [];
+  if (d.stale > 0) parts.push(`${d.stale} stale`);
+  if (d.missing > 0) parts.push(`${d.missing} without data`);
+  if (d.simSkipped > 0) parts.push(`${d.simSkipped} simulated`);
+  if (d.thin > 0) parts.push(`${d.thin} warming up`);
+  const detail = parts.length > 0 ? ` (${parts.join(", ")})` : "";
+  return `HOLD: no candidates ranked this tick — ${d.fresh}/${n} watched markets have fresh data${detail}.`;
+}
+
+function formatWait(ms: number): string {
+  const secs = Math.max(0, Math.round(ms / 1000));
+  if (secs < 60) return `${secs}s`;
+  return `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, "0")}s`;
+}
+
+function settlingHoldReason(s: HedgeSession): string {
+  const exp = s.exposure;
+  const waiting = s.exposureSince > 0 ? formatWait(Date.now() - s.exposureSince) : null;
+  const what = exp ? ` on ${exp.symbol} (#${exp.rowId}${waiting ? `, waiting ${waiting}` : ""})` : "";
+  return `HOLD: settling previous 1-tick trade${what} — the engine resumes when Deriv confirms the outcome. Nothing is dropped while it waits.`;
+}
+
+/**
+ * Throttled HOLD `scan_complete` for cycles that evaluated but produced no
+ * contest (feed hold) or that never reached the contest (exposure gate). Shares
+ * the publish throttle with `publishScan`, so a tick-driven engine emits at
+ * most one scan burst per throttle window however the cycles interleave.
+ * `started` pulses `scan_started` first when the cycle actually evaluated the
+ * contest (feed holds); the exposure gate emits the HOLD alone (nothing ran).
+ */
+function emitHoldScan(
+  host: HedgeHost,
+  s: HedgeSession,
+  input: {
+    reason: string;
+    mode: HedgeMode;
+    lossRun: number;
+    consecutiveLossLimit: number | null;
+    marketsScanned: number;
+    feed?: FeedDiagnosis;
+    started?: { markets: number; mode: HedgeMode };
+  },
+): void {
+  const now = Date.now();
+  if (now - s.lastEmitAt < EMIT_THROTTLE_MS) return;
+  s.lastEmitAt = now;
+  if (input.started) host.emit("scan_started", { markets: input.started.markets, mode: input.started.mode });
+  host.emit("scan_complete", {
+    symbol: null,
+    quality: 0,
+    confidence: 0,
+    marketsScanned: input.marketsScanned,
+    regime: null,
+    shouldTrade: false,
+    rejectReason: input.reason,
+    sessionLossCount: input.lossRun,
+    consecutiveLossLimit: input.consecutiveLossLimit,
+    mode: input.mode,
+    contract: null,
+    barrier: null,
+    confirmations: 0,
+    requiredConfirmations: requiredConfirmations(input.lossRun),
+    rescanInProgress: false,
+    feed: input.feed ?? null,
+  });
 }
 
 // ── Cycle ─────────────────────────────────────────────────────────────────────
@@ -326,6 +459,15 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
   if (!(await exposureResolved(host, s))) {
     host.publish({ currentMarket: s.exposure?.symbol ?? null, nextScanIn: null });
+    // Gated, not dead: tell the dashboard exactly what the engine is waiting
+    // for instead of leaving it on a reasonless "Scanning markets…".
+    emitHoldScan(host, s, {
+      reason: settlingHoldReason(s),
+      mode: recoveryEngine.isInRecovery() ? "RECOVERY" : "NORMAL",
+      lossRun: recoveryEngine.getState().streakLossCount,
+      consecutiveLossLimit: null,
+      marketsScanned: 0,
+    });
     return;
   }
 
@@ -348,21 +490,31 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
 
   // 1. Read every watched market's 1-tick tape and rank its families.
+  //    Every skip is classified into the feed diagnosis so a cycle that ranks
+  //    nothing can still report WHY (see the null-decision HOLD below) instead
+  //    of returning silently and stranding the dashboard on "Scanning markets…".
   const markets = watchedMarkets(ctx);
+  const feed = emptyFeedDiagnosis(markets.length);
   const tapes: HedgeTape[] = [];
   const rows: HedgeCandidate[] = [];
   for (const market of markets) {
     const tape = readHedgeTape(market.symbol);
-    if (!tape || tape.ageMs > STALE_TAPE_MS) continue;
+    if (!tape) { feed.missing += 1; continue; }
+    if (tape.ageMs > STALE_TAPE_MS) { feed.stale += 1; continue; }
     // Live trades never rely on simulated prices. Paper mode may use either.
-    if (!tape.live && !ctx.paperTradeMode) continue;
-    tapes.push(tape);
+    if (!tape.live && !ctx.paperTradeMode) { feed.simSkipped += 1; continue; }
+    feed.fresh += 1;
+    if (tape.live) feed.live += 1;
+    else feed.simulated += 1;
     const specs = familySpecsFor({
       settings: ctx.settings,
       mode,
       digitEnabled: market.digitEnabled,
       sets: ctx.contractSets,
     });
+    if (specs.length === 0) { feed.noSpecs += 1; continue; }
+    if (tape.digits.length < HEDGE_MIN_TICKS) { feed.thin += 1; continue; }
+    tapes.push(tape);
     rows.push(...buildMarketCandidates({
       symbol: market.symbol,
       group: hedgeGroupIndex(market.symbol),
@@ -379,6 +531,16 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
   if (!decision) {
     host.publish({ currentMarket: null, nextScanIn: null });
+    // Ranked nothing this tick — HOLD with the feed cause, never silence.
+    emitHoldScan(host, s, {
+      reason: describeFeedHold(feed, ctx.paperTradeMode),
+      mode,
+      lossRun,
+      consecutiveLossLimit: ctx.consecutiveLossLimit,
+      marketsScanned: tapes.length,
+      feed,
+      started: { markets: tapes.length, mode },
+    });
     return;
   }
 
@@ -421,6 +583,9 @@ function publishScan(
   const now = Date.now();
   if (now - s.lastEmitAt < EMIT_THROTTLE_MS) return;
   s.lastEmitAt = now;
+  // The dashboard's scanning pulse. This event never existed after the 1-tick
+  // rewrite, so the UI's "running tournament" state was unreachable until now.
+  host.emit("scan_started", { markets: rankedTapes, mode: decision.mode });
   const b = decision.best;
   host.emit("scan_complete", {
     symbol: b.symbol,
@@ -632,6 +797,7 @@ async function executeDecision(
     stake,
   };
   s.exposureCheckedAt = Date.now();
+  s.exposureSince = Date.now();
   host.emit("trade_started", {
     id: openRow.id, symbol: b.symbol, contract: b.contract, barrier, stake,
     duration: HEDGE_DURATION_TICKS, regime: null, confidence: Math.round(b.probability * 100),
@@ -679,7 +845,7 @@ async function executeDecision(
         closedAt: new Date(),
         agentReasoning: `${reasoningBase} [EXECUTION FAILED: ${message}]`,
       });
-      s.exposure = null;
+      clearExposure(s);
       s.execFailures += 1;
       logger.warn({ err: message, symbol: b.symbol, failures: s.execFailures }, "Autonomous 1-tick buy rejected by Deriv");
       host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
@@ -738,7 +904,7 @@ async function executeDecision(
   if (settlement === "already") {
     logger.info({ rowId: openRow.id }, "Autonomous 1-tick: settlement already recorded by the reconciler — ledger not updated twice");
   }
-  s.exposure = null;
+  clearExposure(s);
   applySettlement(s.memory, {
     won: result.won,
     key: b.key,

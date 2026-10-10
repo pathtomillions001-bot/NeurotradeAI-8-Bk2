@@ -64,7 +64,11 @@ export function ParallelGroupScanner({ groups, isScanning, winner, lastSkipReaso
   const GROUP_ORDER = ["Volatility 1s", "Volatility", "Jump Indices", "Bull/Bear"];
   const hasAnyData = Object.keys(groups).length > 0;
 
-  if (!isScanning && !hasAnyData) return null;
+  // No early return: this panel only mounts while the engine is running, so the
+  // four contest blocks always render — pre-first-scan the groups truthfully
+  // show "Waiting…" instead of a blank card. (Previously the panel vanished
+  // entirely whenever no scan event had arrived, which is exactly what a
+  // silently-gated engine produced: "Scanning markets…" with no blocks.)
 
   return (
     <div className="rounded-lg border border-primary/15 bg-primary/3 p-3 space-y-2">
@@ -76,7 +80,11 @@ export function ParallelGroupScanner({ groups, isScanning, winner, lastSkipReaso
           ))}
         </div>
         <span className="text-[10px] font-mono text-primary/80 uppercase tracking-widest">
-          {isScanning ? "Scanning markets — rotating cursor across all groups" : "Last scan results"}
+          {!hasAnyData && !isScanning
+            ? "Waiting for first scan — tournament starts on the next tick"
+            : isScanning
+              ? "Scanning markets — rotating cursor across all groups"
+              : "Last scan results"}
         </span>
         {winner && (
           <span className="ml-auto text-[9px] font-mono text-green-400 border border-green-500/30 px-1.5 py-0.5 rounded">
@@ -283,7 +291,13 @@ export function AutonomousEngineCard({
           <div className="flex items-center gap-2 flex-1 min-w-0">
             <RefreshCw className="w-3.5 h-3.5 text-green-500 animate-spin shrink-0" />
             <span className="text-xs text-green-400 font-mono truncate">
-              {isScanning ? "Running 4-group parallel tournament…" : winner ? `Executing: ${winner}` : "Scanning markets…"}
+              {isScanning
+                ? "Running 4-group parallel tournament…"
+                : winner
+                  ? `Executing: ${winner}`
+                  : lastSkipReason
+                    ? "Holding — waiting for qualified edge…"
+                    : "Scanning markets…"}
             </span>
           </div>
           {countdown !== null && (

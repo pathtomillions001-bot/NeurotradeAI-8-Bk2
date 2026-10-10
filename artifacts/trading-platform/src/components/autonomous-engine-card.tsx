@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { RefreshCw, Clock } from "lucide-react";
 import { motion } from "framer-motion";
 
@@ -214,12 +215,14 @@ export function ParallelGroupScanner({ groups, isScanning, winner, lastSkipReaso
  * flips. Deliberately minimal header — no agent counts, no trade counters.
  */
 export function AutonomousEngineCard({
+  engineControls,
   countdown,
   groups,
   isScanning,
   winner,
   lastSkipReason,
 }: {
+  engineControls?: ReactNode;
   countdown: number | null;
   groups: Record<string, GroupScanResult | "scanning">;
   isScanning: boolean;
@@ -296,6 +299,7 @@ export function AutonomousEngineCard({
           winner={winner}
           lastSkipReason={lastSkipReason}
         />
+        {engineControls}
       </div>
     </div>
   );

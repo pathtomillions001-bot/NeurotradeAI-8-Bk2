@@ -209,7 +209,7 @@ function ContractBreakdown({ trades }: { trades: any[] }) {
   if (data.length === 0) return null;
 
   return (
-    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
+    <div className="rounded-xl border border-border/60 bg-card/70 p-4 lg:min-h-full">
       <p className="text-xs font-semibold text-foreground mb-0.5">By Contract Type</p>
       <p className="text-[10px] text-muted-foreground mb-3">Today's performance per type</p>
       <div className="space-y-2">
@@ -253,7 +253,6 @@ function OutcomeExtremes({ trades }: { trades: any[] }) {
       // most negative one and the "smallest loss" the closest to zero.
       smallestLoss: pick(losses, "max"),
       largestLoss: pick(losses, "min"),
-      lossCount: losses.length,
     };
   }, [trades]);
 
@@ -262,28 +261,34 @@ function OutcomeExtremes({ trades }: { trades: any[] }) {
   const money = (v: number | null, signed = false) =>
     v == null ? "—" : `${signed && v > 0 ? "+" : ""}${v.toFixed(2)}`;
 
-  const rows: Array<{ label: string; value: string; tone: string; sub: string }> = [
-    { label: "Smallest Stake",  value: money(extremes.smallestStake),  tone: "text-foreground",    sub: "lowest amount risked" },
-    { label: "Largest Stake",   value: money(extremes.largestStake),   tone: "text-foreground",    sub: "highest amount risked" },
-    { label: "Smallest Profit", value: money(extremes.smallestProfit, true),  tone: "text-emerald-400", sub: "thinnest win" },
-    { label: "Largest Profit",  value: money(extremes.largestProfit, true),   tone: "text-emerald-400", sub: "best trade" },
-    { label: "Smallest Loss",   value: money(extremes.smallestLoss),   tone: "text-red-400",       sub: "closest loss to break-even" },
-    { label: "Largest Loss",    value: money(extremes.largestLoss),    tone: "text-red-400",       sub: `${extremes.lossCount} losing trade${extremes.lossCount === 1 ? "" : "s"} today` },
+  const rows = [
+    { label: "Stake", min: money(extremes.smallestStake), max: money(extremes.largestStake), tone: "text-foreground" },
+    { label: "Profit", min: money(extremes.smallestProfit, true), max: money(extremes.largestProfit, true), tone: "text-emerald-400" },
+    { label: "Loss", min: money(extremes.smallestLoss), max: money(extremes.largestLoss), tone: "text-red-400" },
   ];
 
   return (
-    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
-      <p className="text-xs font-semibold text-foreground mb-0.5">Stake &amp; Outcome Extremes</p>
-      <p className="text-[10px] text-muted-foreground mb-3">Today's smallest and largest figures</p>
-      <div className="grid grid-cols-2 gap-2">
-        {rows.map(r => (
-          <div key={r.label} className="rounded-lg border border-border/50 bg-secondary/20 px-2.5 py-2">
-            <div className="text-[9px] uppercase tracking-wider text-muted-foreground truncate">{r.label}</div>
-            <div className={`text-sm font-mono font-bold leading-tight mt-0.5 ${r.tone}`}>{r.value}</div>
-            <div className="text-[9px] text-muted-foreground/70 truncate">{r.sub}</div>
-          </div>
-        ))}
-      </div>
+    <div className="shrink-0 rounded-xl border border-border/60 bg-card/70 p-3">
+      <p className="text-[11px] font-semibold text-foreground mb-2">Stake &amp; Outcome Extremes</p>
+      <table className="w-full text-[10px] tabular-nums">
+        <caption className="sr-only">Today's smallest and largest stakes, profits and losses</caption>
+        <thead className="text-muted-foreground">
+          <tr>
+            <th scope="col" className="text-left font-normal pb-1">Today</th>
+            <th scope="col" className="text-right font-normal pb-1">Smallest</th>
+            <th scope="col" className="text-right font-normal pb-1">Largest</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(r => (
+            <tr key={r.label} className="border-t border-border/40">
+              <th scope="row" className="py-1 text-left font-normal text-muted-foreground">{r.label}</th>
+              <td className={`py-1 text-right font-mono font-semibold ${r.tone}`}>{r.min}</td>
+              <td className={`py-1 text-right font-mono font-semibold ${r.tone}`}>{r.max}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -293,8 +298,8 @@ function TradeTimeline({ trades }: { trades: any[] }) {
   const reversed = [...trades].reverse().slice(0, 30);
 
   return (
-    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
-      <div className="flex items-center justify-between mb-3">
+    <div className="rounded-xl border border-border/60 bg-card/70 p-4 h-full min-h-0 flex flex-col">
+      <div className="flex items-center justify-between mb-3 shrink-0">
         <div>
           <p className="text-xs font-semibold text-foreground">Trade Timeline</p>
           <p className="text-[10px] text-muted-foreground">Today's trades, newest first</p>
@@ -302,12 +307,12 @@ function TradeTimeline({ trades }: { trades: any[] }) {
         <span className="text-[10px] text-muted-foreground font-mono">{trades.length} total</span>
       </div>
       {reversed.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-8 gap-2">
+        <div className="flex flex-col items-center justify-center py-8 gap-2 flex-1">
           <Activity className="w-7 h-7 text-muted-foreground/20" />
           <p className="text-xs text-muted-foreground">No trades today yet</p>
         </div>
       ) : (
-        <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+        <div className="space-y-1.5 max-h-72 lg:max-h-none min-h-0 flex-1 overflow-auto pr-1">
           <AnimatePresence>
             {reversed.map((t, i) => {
               const profit = t.profit ?? 0;
@@ -490,17 +495,17 @@ export default function Analytics() {
           </div>
 
           {/* ── Bottom row: timeline + contract breakdown ───────────── */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:h-[360px]">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}
-              className="lg:col-span-2">
+              className="lg:col-span-2 min-h-0">
               <TradeTimeline trades={trades} />
             </motion.div>
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}
-              className="space-y-4">
-              <ContractBreakdown trades={trades} />
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}>
-                <OutcomeExtremes trades={trades} />
-              </motion.div>
+              className="flex min-h-0 flex-col gap-3">
+              <div className="min-h-0 flex-1 lg:overflow-y-auto">
+                <ContractBreakdown trades={trades} />
+              </div>
+              <OutcomeExtremes trades={trades} />
             </motion.div>
           </div>
         </>

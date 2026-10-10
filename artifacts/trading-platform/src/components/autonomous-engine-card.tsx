@@ -1,5 +1,6 @@
 import { RefreshCw, Clock } from "lucide-react";
 import { motion } from "framer-motion";
+import { EnginePowerButton } from "@/components/engine-power-button";
 
 // ── Group scan shapes (SSE: scan_started / group_scanned / scan_complete) ──────
 export interface FamilySummary {
@@ -227,12 +228,18 @@ export function AutonomousEngineCard({
   isScanning,
   winner,
   lastSkipReason,
+  togglePending,
+  onToggleEngine,
 }: {
   countdown: number | null;
   groups: Record<string, GroupScanResult | "scanning">;
   isScanning: boolean;
   winner: string | null;
   lastSkipReason: string | null;
+  /** True while the engine toggle request is in flight. */
+  togglePending?: boolean;
+  /** Stops the engine — the control that replaced the dashboard's old header STOP button. */
+  onToggleEngine?: (running: boolean) => void;
 }) {
   const status = winner ? "EXECUTING" : isScanning ? "SCANNING" : "ONLINE";
   const statusColor = winner ? "#10b981" : "#00ffff";
@@ -274,11 +281,20 @@ export function AutonomousEngineCard({
             Autonomous Engine
           </span>
           <span
-            className="ml-auto text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider"
+            className="ml-auto text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider shrink-0"
             style={{ color: statusColor, borderColor: `${statusColor}50`, background: `${statusColor}15` }}
           >
             {status}
           </span>
+          {/* Redesigned engine control — pinned to the card's top-right corner,
+              clear of the status badge (shrink-0 + gap prevents any overlap). */}
+          {onToggleEngine && (
+            <EnginePowerButton
+              running
+              pending={togglePending}
+              onToggle={onToggleEngine}
+            />
+          )}
         </div>
 
         {/* Loop status */}

@@ -634,12 +634,13 @@ export default function MarketDetail() {
   // digit analysis (e.g. 13222.146 → "13222.15" hides the true digit 6).
   const pipSize = pipSizeForSymbol(symbol);
 
-  function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
+  function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, _duration?: number) {
     if (tradeSubmittingRef.current || executeTrade.isPending) return;
     setTradeContract(contractType);
     setTradeDir(direction);
     setTradeBarrier(barrier);
-    setTradeDuration(duration ?? (rec as any)?.recommendedDuration ?? 1);
+    // Manual trading always defaults to 1 tick (user request) — ignore AI recommendation / passed duration
+    setTradeDuration(1);
     setStake(String(recommendation?.stake ?? 1));
     setTradeDialog(true);
   }

@@ -4,6 +4,7 @@ import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
 import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { EngineToggleButton } from "@/components/engine-toggle-button";
 
 // ── Contract type groups ────────────────────────────────────────────────────────
 const CONTRACT_GROUPS = [
@@ -204,34 +205,40 @@ export function MarketOpportunityFlashCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header: label + contract group selector + live dot */}
+        {/* Header: label + contract group selector + engine toggle + live dot */}
         <div className="flex items-center gap-2">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
-          <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
+          <span className="min-w-0 truncate text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
             Quick Strike
           </span>
 
-          {/* Contract group tab selector — only shows enabled families */}
-          {visibleGroups.length > 0 && (
-            <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
-              {visibleGroups.map((g, i) => (
-                <button
-                  key={g.short}
-                  onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
-                  className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
-                    i === clampedIdx
-                      ? "text-primary border border-primary/50"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                  style={i === clampedIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
-                >
-                  {g.short}
-                </button>
-              ))}
-            </div>
-          )}
+          {/* Right-hand cluster — one flex row so nothing overlaps */}
+          <div className="ml-auto flex items-center gap-1.5 shrink-0">
+            {/* Contract group tab selector — only shows enabled families */}
+            {visibleGroups.length > 0 && (
+              <div className="flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
+                {visibleGroups.map((g, i) => (
+                  <button
+                    key={g.short}
+                    onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
+                    className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
+                      i === clampedIdx
+                        ? "text-primary border border-primary/50"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    style={i === clampedIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
+                  >
+                    {g.short}
+                  </button>
+                ))}
+              </div>
+            )}
 
-          <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1 bg-green-500" />
+            {/* Start the autonomous engine straight from the card */}
+            <EngineToggleButton />
+
+            <span className="w-1.5 h-1.5 rounded-full animate-pulse bg-green-500" />
+          </div>
         </div>
 
         {/* Market info + win prob + execute */}

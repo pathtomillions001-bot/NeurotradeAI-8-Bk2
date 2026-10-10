@@ -993,17 +993,13 @@ components:
 
     AiEngineStatus:
       type: object
-      required: [isRunning, mode, agentStatuses, tradesExecutedToday, currentMarket, nextScanIn, stopReasons]
+      required: [isRunning, mode, tradesExecutedToday, currentMarket, nextScanIn, stopReasons]
       properties:
         isRunning:
           type: boolean
         mode:
           type: string
           enum: [manual, autonomous]
-        agentStatuses:
-          type: array
-          items:
-            $ref: "#/components/schemas/AgentStatus"
         tradesExecutedToday:
           type: integer
         currentMarket:
@@ -1069,19 +1065,6 @@ components:
         nextStake:
           type: ["number", "null"]
           description: The stake (USD) that will be used on this family's next recovery trade
-
-    AgentStatus:
-      type: object
-      required: [name, isActive, lastRun, confidence]
-      properties:
-        name:
-          type: string
-        isActive:
-          type: boolean
-        lastRun:
-          type: ["string", "null"]
-        confidence:
-          type: number
 
     EngineToggleInput:
       type: object
@@ -1158,6 +1141,9 @@ components:
         cooldownMinutes:
           type: integer
           description: Minutes to wait before auto-resuming after consecutive loss stop
+        cooldownEnabled:
+          type: boolean
+          description: Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.
         normalOverDigit:
           type: integer
           description: Digit barrier used for DIGITOVER trades in normal (non-recovery) mode
@@ -1254,6 +1240,9 @@ components:
           type: boolean
         cooldownMinutes:
           type: integer
+        cooldownEnabled:
+          type: boolean
+          description: Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.
         normalOverDigit:
           type: integer
         normalUnderDigit:

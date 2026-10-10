@@ -74,18 +74,25 @@ Fix the recovery ledger so a settlement timeout can never drop or understate deb
 Removed from the trade path: admission gating, quality floor, family rotation hint,
 per-symbol cap, DIGITMATCH→DIGITDIFF switch, duration guard, scheduleNext timers.
 
-## Agents (autonomous copies in `lib/autonomous-hedge/agents/`)
+## Agents — REMOVED (advisory-only layer deleted)
 
-Fourteen agents run each cycle and publish scores under the same keys the dashboard
-expects: market-scanner, tick-intelligence, digit-probability, rise-fall-agent,
+The fourteen advisory agents that lived in `lib/autonomous-hedge/agents/`
+(market-scanner, tick-intelligence, digit-probability, rise-fall-agent,
 market-regime, execution-timing, confidence-fusion, recovery-intelligence,
 duration-optimizer, portfolio-manager, risk-intelligence, learning-agent,
-pattern-discovery, trade-explainability. Each is calibrated to the 1-tick Nexus model.
+pattern-discovery, trade-explainability) were **deleted**, together with the
+dashboard's agent panel, `engine.agentStatuses`, `engine.lastAgentScores` and the
+`agentScores` field of the `scan_complete` SSE event.
 
-**Current behaviour: advisory only.** They publish scores and do not gate or veto.
-The trade decision comes from the Nexus gate, the rescan memory and the risk
-hard-stops. Nexus itself has no agent layer. This is a scope decision. If you want
-an agent to veto, tell us which one.
+They were advisory only: they published scores and never gated or vetoed a trade.
+The decision has always come from the Nexus gate, the rescan memory and the risk
+hard-stops, so removing them changes no trading behaviour — it removes a cosmetic
+score panel and the per-cycle work of computing it. Nexus itself has no agent layer.
+
+The dashboard's agent panel is replaced by the autonomous engine's own live view
+(the 4-group tournament), rendered in the Quick Strike card's slot while the engine
+runs. The shared `lib/agents/` pipeline used by FAB, the specialist bots, the
+markets ranking and the Intelligence page is untouched.
 
 ## Ledger fix
 

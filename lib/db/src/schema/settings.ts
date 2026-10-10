@@ -28,6 +28,9 @@ export const settingsTable = pgTable("settings", {
   paperTradeMode: boolean("paper_trade_mode").notNull().default(false),
   requirePositiveEv: boolean("require_positive_ev").notNull().default(true),
   cooldownMinutes: integer("cooldown_minutes").notNull().default(1),
+  // When false the engine trades straight through a consecutive-loss streak:
+  // it still stops at the loss limit, but no cooldown pause is scheduled.
+  cooldownEnabled: boolean("cooldown_enabled").notNull().default(true),
   normalOverDigit: integer("normal_over_digit").notNull().default(1),
   normalUnderDigit: integer("normal_under_digit").notNull().default(8),
   recoveryOverDigit: integer("recovery_over_digit").notNull().default(3),

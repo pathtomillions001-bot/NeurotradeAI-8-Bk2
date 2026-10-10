@@ -31,6 +31,8 @@ export interface TradingSettingsInput {
   paperTradeMode?: boolean;
   requirePositiveEv?: boolean;
   cooldownMinutes?: number;
+  /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
+  cooldownEnabled?: boolean;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;

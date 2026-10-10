@@ -259,6 +259,9 @@ export const TradeInputDurationUnit = {
   d: 'd',
 } as const;
 
+/**
+ * One contract per request. Quantity and order arrays are not supported.
+ */
 export interface TradeInput {
   symbol: string;
   contractType: string;
@@ -389,14 +392,6 @@ export const AiEngineStatusMode = {
   autonomous: 'autonomous',
 } as const;
 
-export interface AgentStatus {
-  name: string;
-  isActive: boolean;
-  /** @nullable */
-  lastRun: string | null;
-  confidence: number;
-}
-
 export type RecoveryFamilyStateFamily = typeof RecoveryFamilyStateFamily[keyof typeof RecoveryFamilyStateFamily];
 
 
@@ -441,7 +436,6 @@ export interface RecoveryStatus {
 export interface AiEngineStatus {
   isRunning: boolean;
   mode: AiEngineStatusMode;
-  agentStatuses: AgentStatus[];
   tradesExecutedToday: number;
   /** @nullable */
   currentMarket: string | null;
@@ -526,6 +520,8 @@ export interface TradingSettings {
   requirePositiveEv?: boolean;
   /** Minutes to wait before auto-resuming after consecutive loss stop */
   cooldownMinutes?: number;
+  /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
+  cooldownEnabled?: boolean;
   /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
   normalOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */
@@ -606,6 +602,8 @@ export interface TradingSettingsInput {
   paperTradeMode?: boolean;
   requirePositiveEv?: boolean;
   cooldownMinutes?: number;
+  /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
+  cooldownEnabled?: boolean;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;

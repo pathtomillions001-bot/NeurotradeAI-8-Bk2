@@ -262,25 +262,30 @@ function OutcomeExtremes({ trades }: { trades: any[] }) {
   const money = (v: number | null, signed = false) =>
     v == null ? "—" : `${signed && v > 0 ? "+" : ""}${v.toFixed(2)}`;
 
-  const rows: Array<{ label: string; value: string; tone: string; sub: string }> = [
-    { label: "Smallest Stake",  value: money(extremes.smallestStake),  tone: "text-foreground",    sub: "lowest amount risked" },
-    { label: "Largest Stake",   value: money(extremes.largestStake),   tone: "text-foreground",    sub: "highest amount risked" },
-    { label: "Smallest Profit", value: money(extremes.smallestProfit, true),  tone: "text-emerald-400", sub: "thinnest win" },
-    { label: "Largest Profit",  value: money(extremes.largestProfit, true),   tone: "text-emerald-400", sub: "best trade" },
-    { label: "Smallest Loss",   value: money(extremes.smallestLoss),   tone: "text-red-400",       sub: "closest loss to break-even" },
-    { label: "Largest Loss",    value: money(extremes.largestLoss),    tone: "text-red-400",       sub: `${extremes.lossCount} losing trade${extremes.lossCount === 1 ? "" : "s"} today` },
+  // Compact rows — label + value only. The old per-cell sub-descriptions
+  // ("lowest amount risked", "thinnest win", …) and the card subtitle were cut
+  // so this card stays tight and the bottom row of the page aligns with the
+  // Trade Timeline card instead of stretching past it.
+  const rows: Array<{ label: string; value: string; tone: string }> = [
+    { label: "Smallest Stake",  value: money(extremes.smallestStake),       tone: "text-foreground" },
+    { label: "Largest Stake",   value: money(extremes.largestStake),        tone: "text-foreground" },
+    { label: "Smallest Profit", value: money(extremes.smallestProfit, true), tone: "text-emerald-400" },
+    { label: "Largest Profit",  value: money(extremes.largestProfit, true),  tone: "text-emerald-400" },
+    { label: "Smallest Loss",   value: money(extremes.smallestLoss),        tone: "text-red-400" },
+    { label: "Largest Loss",    value: money(extremes.largestLoss),         tone: "text-red-400" },
   ];
 
   return (
     <div className="rounded-xl border border-border/60 bg-card/70 p-4">
-      <p className="text-xs font-semibold text-foreground mb-0.5">Stake &amp; Outcome Extremes</p>
-      <p className="text-[10px] text-muted-foreground mb-3">Today's smallest and largest figures</p>
-      <div className="grid grid-cols-2 gap-2">
+      <p className="text-xs font-semibold text-foreground mb-2">
+        Stake &amp; Outcome Extremes
+        <span className="ml-1.5 font-normal text-[10px] text-muted-foreground">today</span>
+      </p>
+      <div className="grid grid-cols-2 gap-1.5">
         {rows.map(r => (
-          <div key={r.label} className="rounded-lg border border-border/50 bg-secondary/20 px-2.5 py-2">
+          <div key={r.label} className="rounded-md border border-border/50 bg-secondary/20 px-2 py-1.5">
             <div className="text-[9px] uppercase tracking-wider text-muted-foreground truncate">{r.label}</div>
-            <div className={`text-sm font-mono font-bold leading-tight mt-0.5 ${r.tone}`}>{r.value}</div>
-            <div className="text-[9px] text-muted-foreground/70 truncate">{r.sub}</div>
+            <div className={`text-xs font-mono font-bold leading-tight mt-0.5 ${r.tone}`}>{r.value}</div>
           </div>
         ))}
       </div>
@@ -293,7 +298,7 @@ function TradeTimeline({ trades }: { trades: any[] }) {
   const reversed = [...trades].reverse().slice(0, 30);
 
   return (
-    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
+    <div className="rounded-xl border border-border/60 bg-card/70 p-4 h-full flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <div>
           <p className="text-xs font-semibold text-foreground">Trade Timeline</p>
@@ -307,7 +312,12 @@ function TradeTimeline({ trades }: { trades: any[] }) {
           <p className="text-xs text-muted-foreground">No trades today yet</p>
         </div>
       ) : (
-        <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+        /* flex-1 (with a small floor) instead of the old fixed max-h-72: the
+           list now fills whatever height the row's right column needs, so the
+           Trade Timeline card bottom-aligns with the cards beside it instead
+           of leaving a gap underneath. min-h-52 keeps a useful height when the
+           card is not being stretched (mobile / short right column). */
+        <div className="space-y-1.5 flex-1 min-h-52 overflow-y-auto pr-1">
           <AnimatePresence>
             {reversed.map((t, i) => {
               const profit = t.profit ?? 0;

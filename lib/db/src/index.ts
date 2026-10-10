@@ -107,7 +107,6 @@ CREATE TABLE IF NOT EXISTS settings (
   paper_trade_mode BOOLEAN NOT NULL DEFAULT FALSE,
   require_positive_ev BOOLEAN NOT NULL DEFAULT TRUE,
   cooldown_minutes INTEGER NOT NULL DEFAULT 1,
-  cooldown_enabled BOOLEAN NOT NULL DEFAULT TRUE,
   normal_over_digit INTEGER NOT NULL DEFAULT 1,
   normal_under_digit INTEGER NOT NULL DEFAULT 8,
   recovery_over_digit INTEGER NOT NULL DEFAULT 3,
@@ -125,7 +124,6 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT '
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS bot_recovery_markup NUMERIC(5, 2) NOT NULL DEFAULT '10';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS autonomous_normal_contracts TEXT NOT NULL DEFAULT '';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS autonomous_recovery_contracts TEXT NOT NULL DEFAULT '';
-ALTER TABLE settings ADD COLUMN IF NOT EXISTS cooldown_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 -- Legacy global rows remain inaccessible and get distinct owners so older
 -- deployments with multiple settings rows can migrate safely.
 UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy';

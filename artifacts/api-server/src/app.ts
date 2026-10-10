@@ -77,7 +77,6 @@ async function bootstrapDb() {
       `ALTER TABLE settings ADD COLUMN IF NOT EXISTS bot_recovery_markup NUMERIC(5, 2) NOT NULL DEFAULT '10'`,
       `ALTER TABLE settings ADD COLUMN IF NOT EXISTS autonomous_normal_contracts TEXT NOT NULL DEFAULT ''`,
       `ALTER TABLE settings ADD COLUMN IF NOT EXISTS autonomous_recovery_contracts TEXT NOT NULL DEFAULT ''`,
-      `ALTER TABLE settings ADD COLUMN IF NOT EXISTS cooldown_enabled BOOLEAN NOT NULL DEFAULT TRUE`,
       `ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_payout NUMERIC(20, 6)`,
       `ALTER TABLE trades ADD COLUMN IF NOT EXISTS session_id TEXT NOT NULL DEFAULT 'legacy'`,
       `UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy'`,

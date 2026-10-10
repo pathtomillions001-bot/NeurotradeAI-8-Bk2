@@ -1,9 +1,7 @@
 # Autonomous engine: Nexus Hedge Forge logic
 
-Status: IMPLEMENTED on branch `arena/df06b251-neurotradeai-8-bk2`; this is the
-original implementation record. As of 2026-10-09, the advisory per-cycle agent
-copies and their dashboard score display have been retired; the active engine
-continues to use the Nexus gate, tournament memory, and risk hard-stops.
+Status: IMPLEMENTED on branch `arena/df06b251-neurotradeai-8-bk2`. Decisions below
+are the user's answers. One item (agents advisory-only) still needs confirmation.
 
 ## Goal
 
@@ -17,17 +15,16 @@ Fix the recovery ledger so a settlement timeout can never drop or understate deb
 1. The Nexus Hedge Forge bot (dbot-builder Ticks.js / Purchase.js / Total.js,
    nexus-hedge-dbot.ts, nexus-hedge-analysis.js) is NOT modified and shares no
    code path with the autonomous engine. Logic is copied, not imported.
-2. FAB and Bot Arena bot behavior remains unchanged. The former autonomous-only
-   score copies under `lib/autonomous-hedge/agents/` were advisory and have since
-   been removed; the shared `lib/agents/` risk manager has only an additive,
-   setting-controlled consecutive-loss cooldown gate.
-3. The recovery stake ladder (`recovery-math.ts`, Auto Instant / Auto Split /
-   Manual) is unchanged. A later additive `cooldownEnabled` preference controls
-   only the consecutive-loss cooldown and defaults to enabled.
+2. Shared agents under `lib/agents/` are NOT edited: FAB engines and specialist
+   bots import them. The autonomous engine has its own copies under
+   `lib/autonomous-hedge/agents/`.
+3. Autonomous settings and the recovery stake ladder (`recovery-math.ts`
+   Auto Instant / Auto Split / Manual) are unchanged. `recovery-engine.ts` gained
+   one additive export (`flushRecoveryState`) and its existing persistence path is
+   unchanged.
 4. Ledger changes are scoped to autonomous rows by the agentReasoning prefix
    `[Autonomous 1T] `. `isAutonomous` cannot scope them: bots and FAB also set it.
-5. The follow-up cooldown preference adds `settings.cooldown_enabled` with a
-   `DEFAULT TRUE` migration; the earlier ledger implementation itself made no DB change.
+5. No DB schema change.
 
 ## Nexus logic ported (from source)
 
@@ -50,7 +47,7 @@ Fix the recovery ledger so a settlement timeout can never drop or understate deb
   across 2 distinct fresh ticks, or 3 when the loss run is ≥ 3. A settlement clears it.
 - Rematch: after a loss, the losing tuple is penalised by 8 + 2·(lossRun−1), decaying
   ×0.8 per fresh tick. A win clears all penalties.
-- Breaker (autonomous): when `cooldownEnabled` is true, the consecutive-loss limit stops the session for the configured cooldown. Turning it off bypasses only that pause; daily-loss and all other hard limits still stop the engine. Separately, 3 consecutive definitive buy rejections by Deriv stop the session with no cooldown and show the reason in `stopReasons`.
+- Breaker (autonomous): the consecutive-loss limit from the existing risk settings stops the session with the cooldown from settings. Separately, 3 consecutive definitive buy rejections by Deriv stop the session with no cooldown and show the reason in stopReasons.
 
 ## Decisions (user answers)
 
@@ -77,14 +74,18 @@ Fix the recovery ledger so a settlement timeout can never drop or understate deb
 Removed from the trade path: admission gating, quality floor, family rotation hint,
 per-symbol cap, DIGITMATCH→DIGITDIFF switch, duration guard, scheduleNext timers.
 
-## Retired advisory agent-score layer
+## Agents (autonomous copies in `lib/autonomous-hedge/agents/`)
 
-The earlier implementation ran fourteen autonomous-only score modules per cycle
-and displayed their confidence values in the dashboard. They were advisory only:
-they did not gate or veto a trade. The modules, API score fields, and dashboard
-grid have since been removed. The live engine still makes decisions through the
-Nexus gate, rescan memory, and risk hard-stops; Bot Arena bots and their separate
-analysis paths were not changed.
+Fourteen agents run each cycle and publish scores under the same keys the dashboard
+expects: market-scanner, tick-intelligence, digit-probability, rise-fall-agent,
+market-regime, execution-timing, confidence-fusion, recovery-intelligence,
+duration-optimizer, portfolio-manager, risk-intelligence, learning-agent,
+pattern-discovery, trade-explainability. Each is calibrated to the 1-tick Nexus model.
+
+**Current behaviour: advisory only.** They publish scores and do not gate or veto.
+The trade decision comes from the Nexus gate, the rescan memory and the risk
+hard-stops. Nexus itself has no agent layer. This is a scope decision. If you want
+an agent to veto, tell us which one.
 
 ## Ledger fix
 

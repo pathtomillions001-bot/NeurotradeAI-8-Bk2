@@ -274,7 +274,7 @@ export function analyzeMarket(
   let digitContractType: "DIGITOVER" | "DIGITUNDER" | null = null;
   let digitConfidence = 0;
   let tickWindow: number | undefined;
-  let recommendedDuration = settings.tradeDurationSec ?? 5;
+  let recommendedDuration = settings.tradeDurationSec ?? 1;
 
   if (digits && digits.length >= 30) {
     digitStats = analyzeDigits(digits);
@@ -284,7 +284,7 @@ export function analyzeMarket(
       digitBarrier = digitML.barrier;
       digitConfidence = digitML.confidence;
       tickWindow = digitML.optimalWindow;
-      recommendedDuration = Math.max(3, Math.min(10, Math.round(digitML.optimalWindow / 15)));
+      recommendedDuration = Math.max(1, Math.min(10, Math.round(digitML.optimalWindow / 15)));
       digitStats.streakInfo = `${digitML.reasoning}. Window: ${digitML.optimalWindow} ticks. Edge: ${(digitML.expectedEdge * 100).toFixed(1)}%`;
     }
   }

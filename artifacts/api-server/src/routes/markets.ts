@@ -66,7 +66,7 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     minConfidenceThreshold: s ? Number(s.minConfidenceThreshold) : 38,
     riskProfile:            (s?.riskProfile ?? "moderate") as "conservative" | "moderate" | "aggressive",
     preferredContractTypes,
-    tradeDurationSec:       s?.tradeDurationSec ?? 1,
+    tradeDurationSec:       s?.tradeDurationSec ?? 5,
     maxTradeStake:          s ? Number(s.maxTradeStake) : 500,
     dailyLossLimit:         s ? Number(s.dailyLossLimit) : 30,
     dailyTarget:            s ? Number(s.dailyTarget) : 50,

@@ -116,7 +116,7 @@ function RiseFallPanel({ trendStats, agentData, onTrade }: {
   const isHotStreak = hotStreak >= 3;
   const rsiOverbought = rsi > 70;
   const rsiOversold   = rsi < 30;
-  const agentDuration = agentData?.recommendedDuration ?? 1;
+  const agentDuration = agentData?.recommendedDuration ?? 5;
   const wscore = agentData?.weightedScore ?? 0;
 
   return (
@@ -302,7 +302,7 @@ function EvenOddPanel({ digitStats, agentData, onTrade }: {
   const isStrongStreak = streak >= 4;
   const reversalSide = streakType === "even" ? "ODD" : "EVEN";
 
-  const agentDuration = agentData?.recommendedDuration ?? 1;
+  const agentDuration = agentData?.recommendedDuration ?? 5;
   const wscore = agentData?.weightedScore ?? 0;
 
   // Primary win probabilities driven by Markov chain (part of agent pipeline)
@@ -464,7 +464,7 @@ export default function MarketDetail() {
   const [tradeContract, setTradeContract] = useState("");
   const [stake, setStake] = useState("");
   const [tradeBarrier, setTradeBarrier] = useState<number | undefined>(undefined);
-  const [tradeDuration, setTradeDuration] = useState(1);
+  const [tradeDuration, setTradeDuration] = useState(5);
   const [livePrice, setLivePrice] = useState<number | null>(null);
   const [priceHistory, setPriceHistory] = useState<{ timestamp: string; price: number }[]>([]);
   const [sseConnected, setSseConnected] = useState(false);
@@ -634,13 +634,12 @@ export default function MarketDetail() {
   // digit analysis (e.g. 13222.146 → "13222.15" hides the true digit 6).
   const pipSize = pipSizeForSymbol(symbol);
 
-  function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, _duration?: number) {
+  function openTradeDialog(contractType: string, direction: "up" | "down", barrier?: number, duration?: number) {
     if (tradeSubmittingRef.current || executeTrade.isPending) return;
     setTradeContract(contractType);
     setTradeDir(direction);
     setTradeBarrier(barrier);
-    // Manual trading always defaults to 1 tick (user request) — ignore AI recommendation / passed duration
-    setTradeDuration(1);
+    setTradeDuration(duration ?? (rec as any)?.recommendedDuration ?? 5);
     setStake(String(recommendation?.stake ?? 1));
     setTradeDialog(true);
   }
@@ -764,7 +763,7 @@ export default function MarketDetail() {
         const agentOutputs = (rec as any)?.agentOutputs ?? {};
         const dirAgent = agentOutputs?.direction?.data ?? agentOutputs?.riseFallAgent?.data;
         const durationAgent = agentOutputs?.durationOptimizer?.data ?? agentOutputs?.executionTiming?.data;
-        const agentRecommendedDuration = durationAgent?.duration ?? (rec as any)?.recommendedDuration ?? 1;
+        const agentRecommendedDuration = durationAgent?.duration ?? (rec as any)?.recommendedDuration ?? 5;
 
         // Use the rise-fall agent's own score to decide if Rise/Fall should be
         // highlighted. Previously this used masterAgent?.shouldTrade which was

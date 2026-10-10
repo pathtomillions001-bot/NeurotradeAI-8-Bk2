@@ -219,16 +219,12 @@ export function AutonomousEngineCard({
   isScanning,
   winner,
   lastSkipReason,
-  onToggleEngine,
-  isTogglePending,
 }: {
   countdown: number | null;
   groups: Record<string, GroupScanResult | "scanning">;
   isScanning: boolean;
   winner: string | null;
   lastSkipReason: string | null;
-  onToggleEngine?: () => void;
-  isTogglePending?: boolean;
 }) {
   const status = winner ? "EXECUTING" : isScanning ? "SCANNING" : "ONLINE";
   const statusColor = winner ? "#10b981" : "#00ffff";
@@ -263,28 +259,18 @@ export function AutonomousEngineCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header — engine toggle integrated top-right, no overlap */}
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-          <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-300/80 shrink-0">
+        {/* Header */}
+        <div className="flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+          <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-300/80">
             Autonomous Engine
           </span>
           <span
-            className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider shrink-0"
+            className="ml-auto text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider"
             style={{ color: statusColor, borderColor: `${statusColor}50`, background: `${statusColor}15` }}
           >
             {status}
           </span>
-          {onToggleEngine && (
-            <button
-              onClick={onToggleEngine}
-              disabled={!!isTogglePending}
-              className="shrink-0 ml-auto h-6 px-2.5 text-[10px] font-mono font-bold rounded-full border border-red-500/40 text-red-400 bg-red-500/10 hover:bg-red-500/15 disabled:opacity-50 flex items-center gap-1"
-            >
-              <span className="w-1 h-1 rounded-full bg-red-500" />
-              STOP ENGINE
-            </button>
-          )}
         </div>
 
         {/* Loop status */}

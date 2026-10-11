@@ -60,6 +60,18 @@ import {
   type DeskState,
 } from "../lib/multiasset/store";
 import {
+  buildWeeklyReport,
+  governanceOverlay,
+  governanceRegistry,
+  planMemory,
+  rememberPlan,
+  recordShadowDecision,
+} from "../lib/multiasset/governance-runtime";
+import { E_DISABLE, E_HALVE, resumeAgent, weekWindow } from "../lib/multiasset/governance";
+import { GOVERNED_AGENTS } from "../lib/multiasset/governance-runtime";
+import type { AgentDecision } from "../lib/multiasset/agent";
+import type { AlphaId } from "../lib/multiasset/alpha/types";
+import {
   MODE_ANALYSIS_TIMEFRAMES,
   ALL_TIMEFRAMES,
   type Bar,
@@ -158,6 +170,82 @@ function v4InputsFor(
   return inputs;
 }
 
+/**
+ * The WP9 governance overlay for one decision.
+ *
+ * Nothing here is consulted while `DESK_V4_GOVERNANCE` is off: the decision then
+ * carries no overlay at all, which is the same input the v3.05 path receives.
+ */
+function v4GovernanceInput(sessionId: string): { governance?: { disabledAgents: AlphaId[]; halvedAgents: AlphaId[] } } {
+  const v4 = deskV4();
+  if (!v4.enabled || !v4On(v4.governance)) return {};
+  const overlay = governanceOverlay(sessionId);
+  return { governance: { disabledAgents: overlay.disabled, halvedAgents: overlay.halved } };
+}
+
+/**
+ * Write one decision to the shadow ledger, and remember the plan for attribution.
+ *
+ * Both halves are the same idea: the desk's own record has to survive the process
+ * that produced it. The evaluation row is what makes "the shadow record" a file
+ * rather than a claim; the plan memory is what lets a later fill be charged to
+ * the agents that proposed it. Neither is awaited — a ledger write must never
+ * delay an arm — and neither can throw into the request.
+ */
+function recordDecisionForGovernance(input: {
+  desk: DeskState;
+  sessionId: string;
+  decision: AgentDecision;
+  nowMs: number;
+}): void {
+  const v4 = deskV4();
+  if (!v4.enabled || !v4On(v4.governance)) return;
+  const { decision } = input;
+  const gatekeeper = decision.gatekeeper;
+  const probability = gatekeeper ? null : decision.winProbability;
+  const plan = decision.plan;
+  const armed = decision.armed && plan !== null;
+  void recordShadowDecision({
+    sessionId: input.sessionId,
+    evaluatedAtMs: input.nowMs,
+    symbol: decision.symbol,
+    mode: decision.mode,
+    armed,
+    planId: plan ? plan.id : null,
+    direction: plan ? plan.side : null,
+    // The gatekeeper does not expose its probability on the decision today
+    // (`evLcbR` is what it gates on), so the calibrated point estimate is the
+    // legacy blend when there is no model and NULL when the gatekeeper refused
+    // before reaching one. NULL is a value the weekly report counts.
+    probability,
+    probabilityLowerBound: decision.sizingProbabilityLowerBound,
+    breakEvenProbability: null,
+    expectancyR: decision.expectancyR,
+    costR: decision.costR,
+    agents: decision.alphaAgents,
+    refusals: decision.rejections,
+    gateCodes: gatekeeper ? gatekeeper.codes : [],
+    payload: {
+      qualityScore: decision.qualityScore,
+      qualityThreshold: decision.qualityThreshold,
+      execution: decision.execution ? { codes: decision.execution.codes } : null,
+      portfolio: decision.portfolio ? { codes: decision.portfolio.codes, riskPct: decision.portfolio.riskPct } : null,
+    },
+  }).catch(() => {});
+  if (armed && plan) {
+    rememberPlan({
+      sessionId: input.sessionId,
+      planId: plan.id,
+      symbol: plan.symbol,
+      mode: plan.mode,
+      direction: plan.side,
+      agents: decision.alphaAgents as AlphaId[],
+      predictedProbability: probability,
+      armedAtMs: input.nowMs,
+    });
+  }
+}
+
 function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: number) {
   const readiness = symbolReadiness(desk, symbol, now);
   const resolved = resolveLiveSymbol(desk, symbol, now);
@@ -197,6 +285,7 @@ function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: numbe
     outcomes: outcomesFor(desk, symbol, mode),
     now,
     ...v4InputsFor(desk, symbol, mode),
+    ...v4GovernanceInput(desk.sessionId),
   });
   return {
     symbol,
@@ -476,6 +565,87 @@ router.get("/execution", (_req, res) => {
   });
 });
 
+/**
+ * ── WP9: learning and governance, read-only and reduce-only ─────────────────
+ *
+ * Three endpoints, and the shape of each one is the point:
+ *
+ *   GET  /governance        the per-agent e-process, its Page–Hinkley statistic,
+ *                           the status it has earned and the sentence saying why
+ *   GET  /learning/weekly   the Monday-to-Monday report, built from the durable
+ *                           rows, with its own flags list
+ *   POST /governance/resume an OPERATOR action: put one agent back to work. The
+ *                           evidence is not cleared, so an agent resumed into the
+ *                           same conditions crosses its thresholds again at once
+ *                           rather than after another full tally.
+ *
+ * All three 404 while `DESK_V4_GOVERNANCE` is off, so the shipped API surface is
+ * unchanged. None of them can raise a budget.
+ */
+router.get("/governance", (_req, res) => {
+  const v4 = deskV4();
+  if (!v4On(v4.governance)) {
+    return res.status(404).json({ error: "The v4 governance layer is switched off." });
+  }
+  const desk = getDesk(getBrowserSessionId());
+  const registry = governanceRegistry(desk.sessionId);
+  return res.json({
+    sessionId: desk.sessionId,
+    agents: registry.map((entry) => ({
+      agentId: entry.agentId,
+      status: entry.status,
+      eValue: entry.eValue,
+      halveAt: E_HALVE,
+      disableAt: E_DISABLE,
+      outcomes: entry.outcomes,
+      wins: entry.wins,
+      totalR: entry.totalR,
+      phValue: entry.phValue,
+      phAlarms: entry.phAlarms,
+      reason: entry.reason,
+      updatedAtMs: entry.updatedAtMs,
+    })),
+  });
+});
+
+router.get("/learning/weekly", async (req, res) => {
+  const v4 = deskV4();
+  if (!v4On(v4.governance)) {
+    return res.status(404).json({ error: "The v4 governance layer is switched off." });
+  }
+  const desk = getDesk(getBrowserSessionId());
+  const requestedWeek = typeof req.query.weekStart === "string" ? Date.parse(req.query.weekStart) : Number.NaN;
+  const report = await buildWeeklyReport({
+    sessionId: desk.sessionId,
+    nowMs: Date.now(),
+    weekStartMs: Number.isFinite(requestedWeek) ? requestedWeek : undefined,
+  });
+  return res.json({ source: "desk", ...report, window: weekWindow(Date.now()) });
+});
+
+router.post("/governance/resume", (req, res) => {
+  const v4 = deskV4();
+  if (!v4On(v4.governance)) {
+    return res.status(404).json({ error: "The v4 governance layer is switched off." });
+  }
+  const desk = getDesk(getBrowserSessionId());
+  const agentId = String(req.body?.agentId ?? "");
+  const note = String(req.body?.note ?? "").trim();
+  if (!(GOVERNED_AGENTS as readonly string[]).includes(agentId)) {
+    return res.status(400).json({ error: `agentId must be one of ${GOVERNED_AGENTS.join(", ")}` });
+  }
+  if (note.length < 3) {
+    // A resume with no reason is a silent un-halt, and the whole point of the
+    // one-way rule is that somebody has to say why.
+    return res.status(400).json({ error: "a note is required when resuming an agent" });
+  }
+  const now = Date.now();
+  const next = resumeAgent(governanceRegistry(desk.sessionId), agentId as AlphaId, now, note);
+  const entry = next.find((candidate) => candidate.agentId === agentId);
+  journal(desk, "risk", null, `Agent ${agentId} resumed by the operator: ${note}`);
+  return res.json({ ok: true, agent: entry ?? null });
+});
+
 router.get("/performance", (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
   const now = Date.now();
@@ -560,7 +730,9 @@ router.get("/analysis", (req, res) => {
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
     ...v4InputsFor(desk, symbol, mode),
+    ...v4GovernanceInput(desk.sessionId),
   });
+  recordDecisionForGovernance({ desk, sessionId: desk.sessionId, decision, nowMs: Date.now() });
 
   return res.json({
     source: "mt5",
@@ -671,7 +843,9 @@ router.post("/arm", (req, res) => {
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
     ...v4InputsFor(desk, symbol, mode),
+    ...v4GovernanceInput(desk.sessionId),
   });
+  recordDecisionForGovernance({ desk, sessionId: desk.sessionId, decision, nowMs: Date.now() });
 
   if (!decision.armed || !decision.plan) {
     journal(desk, "no_trade", symbol, decision.summary, decision.rejections);

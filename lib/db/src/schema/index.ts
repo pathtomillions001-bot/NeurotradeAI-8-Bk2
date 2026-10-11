@@ -8,3 +8,4 @@ export * from "./trade_intelligence";
 export * from "./session_links";
 export * from "./deriv_journal";
 export * from "./mt5_account_claims";
+export * from "./desk";

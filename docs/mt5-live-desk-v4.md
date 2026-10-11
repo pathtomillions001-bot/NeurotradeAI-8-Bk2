@@ -1280,6 +1280,218 @@ risk is never above the 0.35% cap — holds at exactly 1.0000×.
   printed number. The heat ceiling (a correlation-weighted bound) and the cluster
   ceiling (a hard sum) are the layers that do not assume a distribution.
 
+## 15. WP9 — learning and governance, and the difference between a counter and an e-value
+
+### 15.1 The question the layer answers
+
+Every earlier layer answers a question about the *market*. WP9 answers one about
+the desk: **is what we are doing still working?** That question has a property the
+others do not — it can be asked after every single trade, forever, without the
+answer's error rate inflating out of control, *if* the statistic is built for it.
+Most attempts are not, and the failure mode is expensive: a test that fires too
+often halves a working agent, and one that never fires is a decoration.
+
+WP9 therefore ships exactly one acting statistic per agent (an e-process), one
+reporting statistic (a change detector), and a durable record of both.
+
+### 15.2 The e-process — and the direction bug it exists to avoid
+
+An e-value is a nonnegative random variable whose expectation is at most 1 under
+the null. A running product of such factors can be watched **continuously**: Ville's
+inequality bounds the probability of *ever* reaching a threshold K by 1/K, for any
+stopping rule and any amount of peeking. That is the whole reason this layer may
+look after every trade while the gatekeeper's p-values must be corrected for
+multiplicity.
+
+The null is one-sided and it is the desk's own: **this agent's realised R still has
+mean ≥ 0**. Evidence against it is a run of losses, so each trade contributes a
+factor that grows when the outcome is negative:
+
+```
+w(x) = (1/|β|) Σ_β (1 − β·x)        β ∈ {1/3, 1/6, 1/12, 1/24, 1/48, 1/96}
+```
+
+* `x` is the trade's realised R, clipped to **[−1R, +3R]** — the ±1R stop against
+  the 2–3R target the plan itself chose. The clip is not cosmetic: `1 − βx ≥ 0`
+  requires `β ≤ 1/|lower bound|`, and a nonnegative factor is what makes the
+  product a supermartingale. The +3R cap keeps a single outsized winner from
+  retiring an agent that has not actually been tested.
+* The β grid is a **uniform mixture of martingales**, which is itself a martingale.
+  No single β is best for every alternative; the mixture costs 1.6 trades of speed
+  at full strength and buys coverage of the slow bleed (measured §15.8).
+* The running value is floored at `1e-9`. A long winning streak drives it toward
+  zero, and a float that has reached exactly 0 can never grow again; the floor makes
+  the test *slower* to alarm by nine orders of magnitude, never faster.
+
+| e ≥ | action | consequence |
+| --- | --- | --- |
+| 5 | **halve** | the agent keeps proposing; the plan's risk budget is multiplied by 0.5 |
+| 20 | **disable** | the agent's reading is removed from the view before the gatekeeper sees it |
+
+Both are **one-way**. A winning streak decays the e-value but never restores the
+status (W9.3), and `POST /governance/resume` is the only way back — an operator
+action that requires a note, keeps the evidence intact (W9.4), and writes a journal
+line. The e-value is not reset by a halving either: the number that caused the
+action stays visible in the API and the journal, which is what makes the action
+auditable a month later.
+
+> **The direction bug.** The first implementation grew on **wins** (`1 + λx`), which
+> would have disabled the desk's best agents and left its worst alone. It was caught
+> by a unit test that asserted a −1R stream is *caught* and was replaced by `1 − βx`
+> with the derivation written into the constants. It is recorded here because the
+> mistake is invisible in a report that only prints e-values.
+
+### 15.3 The thresholds are arithmetic, not taste
+
+Every outcome's contribution on the ±1R scale:
+
+| outcome | step wealth | meaning |
+| --- | --- | --- |
+| −1R | ×1.109375 | evidence against |
+| −0.5R | ×1.054687 | evidence against, weaker |
+| 0R | ×1.000000 | no information |
+| +1R | ×0.890625 | evidence for |
+| +3R | ×0.671875 | the strongest single win the geometry allows |
+
+Measured by iterating (W9.3, and the study repeats it): **16 consecutive −1R trades**
+reach the halve bar (e = 5.263) and **29** reach the disable bar (e = 20.290).
+A mixed stream takes as long as its mean drift deserves, which is the point of a
+sequential test — the study's power table (§15.8) is the honest version of "how
+long does it take".
+
+### 15.4 The change detector, and a degenerate statistic caught by measurement
+
+`pageHinkleyStep` is a **lower CUSUM** against break-even: the statistic accumulates
+`−r − δ` and resets at zero, so it measures the *recent* stream on its own terms.
+
+The first version measured the running mean recursively. On a constant stream of
+losses the recursive mean converges to the very value being tested, the deviations
+telescope to zero, and the statistic degenerates into a straight line of slope δ —
+measured, printed, and discarded (`+0.05R` per trade forever, no signal).
+
+It is **reported, never acted on**. Unlike the e-process it has no false-alarm
+guarantee, so a crossing earns a journal sentence and a field in the report, not a
+budget change.
+
+Its pair of constants is the only threshold in the desk chosen from a stored grid
+(§15.8). The rule is stated so it cannot be bent:
+
+> **the shipped cell is the fastest-detecting cell whose measured null rate is ≤ 5%
+> AND whose detection of a −0.35R stream is ≥ 90%.**
+
+At δ = 0.25R, h = 12R, 1 of the 18 measured cells satisfies both, and the study
+asserts that (G9.5b). The neighbouring cell (h = 10R) is 1.9 trades faster and was
+rejected for a measured null rate of 6.20% — the rejection is in the report.
+
+### 15.5 The overlay, and why it can only ever reduce
+
+`desk.ts` reads the registry and hands `evaluate()` two lists: `disabledAgents` and
+`halvedAgents`. In `agent.ts`:
+
+* a **disabled** proposer's reading is removed from the alpha view *before* the
+  gatekeeper prices it, with a `[GOV] removed …` warning; if that empties the view
+  the plan is refused with a sentence naming every agent that was dropped (the
+  alternative — "the gatekeeper had no model" — would hide a governance action
+  behind a model message);
+* if any **surviving** proposer is halved, the risk budget is multiplied by 0.5
+  exactly once, after every other budget rule (portfolio included), with a `[GOV]`
+  warning naming who caused it.
+
+The multiplier is 0.5 **however many** proposers are halved. Compounding was
+rejected deliberately: the sizing layer cannot express a quarter-budget trade in
+whole lots, and a rule whose size depends on an agent count stops being checkable
+by reading the journal.
+
+The reduce-only claim is proven by **enumeration**, not sampling: every non-empty
+proposer set (2⁵ − 1) crossed with every status assignment (3⁵) — **7,533
+combinations**, maximum composed multiplier **1.0000**, 781 blocked by an emptied
+view, 4,651 halved, 2,101 unchanged (G9.6, W9.11).
+
+### 15.6 The durable layer
+
+Five tables, added to `lib/db/src/schema/desk.ts` and to the in-process `INIT_DDL`
+that is the only guaranteed schema path on a runtime without drizzle-kit:
+
+| table | what it holds | key columns that matter |
+| --- | --- | --- |
+| `desk_shadow_evaluations` | one row per decision the desk made, armed or refused | `plan_id`, `probability`, `probability_lower_bound`, `refusals`, `gate_codes`, `outcome_r` (written **once**, by `resolveShadowEvaluation`) |
+| `desk_trades` | one row per closed position | `ticket`, `risk_money` (the EA's stamp), `realised_r` **NULL when no risk was stamped**, `predicted_probability`, `agents` |
+| `desk_journal` | the audit trail, no longer capped at 200 entries or lost on deploy | the in-process journal's own id, so a restart cannot duplicate a line |
+| `desk_calibrators` | persisted calibrators (a WP5 fit, the HMM parameters) | unique `(kind, ref_key, version)` |
+| `desk_governance_state` | the per-agent e-value **and** the change detector's state | PK `(session_id, agent_id)`, `ph_mean` / `ph_cumulative` / `ph_max` |
+
+The writes are **best-effort and never awaited on a request path**: a ledger write
+must not delay an arm, and a database that is down must not turn a decision into an
+error. Reads fall back to a bounded in-process mirror, so the desk keeps governing
+itself within a process even when the store is unavailable.
+
+Two details that are easy to get wrong and are pinned by tests:
+
+* **`ph_mean`, `ph_cumulative` and `ph_max` are persisted** because the CUSUM's
+  statistic is not a function of the observable stream alone. A restart that
+  reconstructed it from the mean would silently desynchronise the detector; a
+  restart that resumed it sees the same number the previous process would have
+  (W9.5, W9.14).
+* **`realised_r` is NULL when the EA gave no risk** (`initialRiskMoney`). The weekly
+  report counts those trades as *unmeasured* rather than dropping them or charging
+  them a fabricated R, and the study's rehearsal asserts the count.
+
+### 15.7 Wiring — where the layer meets the desk
+
+| point | file | what happens |
+| --- | --- | --- |
+| decision | `routes/desk.ts` | the overlay is read once per decision; every decision (analyse, scan row, arm) is written to the shadow ledger; an armed plan is remembered for attribution |
+| fill | `routes/bridge.ts` | a filled `arm_plan` binds the ticket to its plan id — the only moment the desk learns which plan became which position |
+| close | `routes/bridge.ts` | one `desk_trades` row, one resolved shadow evaluation, and one outcome per proposing agent; a crossing is journalled as `[GOV] Agent X halved/DISABLED …` |
+| boot | `app.ts` | `setJournalSink` installs the durable journal mirror at the composition root, so `store.ts` (imported by every test) never pulls the database into its module graph |
+| model | `governance-runtime.ts` | `persistRegimeModel` / `loadRegimeModel` reuse a fitted HMM **by window identity** |
+
+**The stored HMM cannot change a decision.** `regimeModelVersion` keys the model on
+`(symbol, frame, fitBars, states, window length, last bar open time)`; a version that
+matches the *current* window is, because the fit is deterministic and seeded, the
+model the call would have fitted. A moved window re-fits. The reuse exists to stop
+the desk paying for the same EM run on every restart, and W9.10 asserts that a stale
+version is **not** served.
+
+### 15.8 The study — `2026-10-11-wp9-governance-{intraday,swing}-study.json`
+
+```bash
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --governance --mode intraday|swing
+```
+
+Both modes **PASS**. Measured, intraday (swing in brackets):
+
+| gate | what it asks | measured |
+| --- | --- | --- |
+| G9.1 null bound | break-even streams alarm at most 1/K | halve **11.000%** (bound 20%), disable **0.700%** (bound 5%) over 2,000 streams × 200 trades |
+| G9.2 power | a −0.35R stream is caught ≥ 90% | **100.0%**, median **59** trades |
+| G9.3 speed | and inside 120 trades | median **59**, mean 61.5 |
+| G9.4 arithmetic | thresholds at the 16th / 29th loss | **16 / 29**, e = 5.263 / 20.290 |
+| G9.5 operating point | change detector: null ≤ 5%, catch ≥ 90% | null **1.60%**, catch **94.7%** in 78.5 trades |
+| G9.5b selection | the shipped cell is the fastest *qualifying* one | **1 of 18 cells** qualified; the h = 10R neighbour was 1.9 trades faster and rejected at a 6.20% null rate |
+| G9.6 reduce-only | every proposer × status multiplier ≤ 1 | **7,533 combinations**, max **1.0000** |
+| G9.7 corpus patient | no action on a positive-expectancy stream | **0 of 2** (swing 0 of 3) streams acted on; worst sup-e on those 1.014 |
+| G9.9 corpus responsive | every stream at mean ≤ −0.15R is disabled | **9 of 9** (swing 3 of 3), group mean −0.1902R |
+| G9.8 weekly recount | the report recounts a hand-checkable week | 3 closed / 2 measured / 1 unmeasured, hit 0.5, mean 0.5R, gap 0 pts, Brier 0.25, 1 armed / 2 refused |
+
+The corpus half is deliberately **two claims, not one**. The fixtures include traps
+(driftless noise, shuffled returns, mean-reversion) that a governance layer *should*
+react to; a single "must not fire" gate would have been a claim about the fixtures
+rather than about the layer. Sup-e over the whole corpus reaches 42,904 on the
+mean-reverting trap — the layer is not asleep — while the streams the desk's own
+simulator measured with positive expectancy are left untouched.
+
+### 15.9 What WP9 does NOT measure
+
+* **Whether the live agents will degrade.** The layer's operating characteristics are
+  measured; the market's are not.
+* **The durable round-trip is not in the study** (the study opens no database). It is
+  verified by `wp9-governance.test.ts` (W9.10, W9.14) against PGlite, which is what
+  §14's command list runs.
+* **No forecast.** The rollout's kill rule (`e ≥ 20`) is now a wired, observable
+  number; what the desk will do about it is a human decision, recorded in the journal.
+
 ## 11. Documented assumptions and conservative choices
 
 Each of these was a fork in the road where the conservative option was taken and
@@ -1549,6 +1761,28 @@ the reasoning recorded.
 | 44 | The CVaR remedy replaced by a solve (`affordableRiskForCvar`), and 0 when the book is already over the ceiling | **tighter, and now actually enforced** — the old `riskPct *= ceiling / cvar` left the book at 1.93% against a 1.5% ceiling (concavity of heat); pinned by W8.17 |
 | 45 | WP7/WP8 wiring: spread samples at all three `evaluate()` sites, the desk's own cross-asset covariance in the decision, slippage at fill (in-flight command read BEFORE the ack), one timing outcome per closed position, read-only `GET /execution` | **added, off by default** — both layers are behind their flags and every one of their effects is a reduction or a refusal |
 | 46 | The WP7/WP8 studies and their two test files joined the harness and the standing `package.json` test script | coverage only |
+| 47 | The per-agent e-process and its two thresholds (halve at e ≥ 5, disable at e ≥ 20) | **added, off by default** (`DESK_V4_GOVERNANCE`); every effect is a reduction or a refusal |
+| 48 | The e-process grows on losses, with the outcome clipped to [−1R, +3R] and the running value floored at `1e-9` | **correctness** — the first form grew on wins (it would have disabled the best agents); the clip and the floor are what make the 1/K bound true |
+| 49 | Governance actions are one-way, and `POST /governance/resume` (with a note) is the only way back | **conservative** — and the resume does NOT clear the evidence, so an unchanged world halts again at once (W9.4) |
+| 50 | A disabled agent's reading is removed from the alpha view before the gatekeeper, and an emptied view is a refusal that names every dropped agent | **tighter** — a plan with no surviving proposer is no longer priced |
+| 51 | The halving factor (0.5, once, applied after the portfolio composition) | **tighter** — applied last so no other rule can scale it back up |
+| 52 | The lower CUSUM change detector | **reporting only** — it has no false-alarm bound, so it never acts; its pair of constants is the only one in the desk chosen from a stored grid |
+| 53 | Five `desk_*` tables, their `INIT_DDL` block, and the durable journal sink wired at the composition root | **observability** — no decision reads them back except the governance state (which is what makes governance survive a deploy) |
+| 54 | `desk_trades` on every closed position, with `realised_r` NULL when no risk was stamped | **honest reporting** — an unmeasurable trade is counted as unmeasured |
+| 55 | The fitted HMM is persisted and reused by window identity | **performance only** — a matching version is the model the call would have fitted; a moved window re-fits (W9.10) |
+| 56 | `GET /governance`, `GET /learning/weekly`, `POST /governance/resume` | added, 404 while `DESK_V4_GOVERNANCE` is off — the shipped API surface is unchanged |
+| 57 | The WP9 study, its two stored reports and `wp9-governance.test.ts` joined the harness and the standing test script | coverage only |
+| 47 | The e-process grows on LOSSES: `1 − βx` with `β ≤ 1/|lower bound|`, not `1 + λx` | **correctness** — the first form grows on wins and would have disabled the desk's best agents; the derivation, not a preference, is what fixes the sign |
+| 48 | Realised R is clipped to **[−1R, +3R]** for the e-process only; the raw R is what the ledger and the weekly report carry | **required for validity** — `1 − βx ≥ 0` needs β ≤ 1/|lower bound|, and a bounded outcome is what makes the running product a supermartingale |
+| 49 | The running e-value is floored at `1e-9` | **correctness, conservative** — a float at exactly 0 can never grow again; the floor makes the test slower to alarm by nine orders of magnitude, never faster |
+| 50 | The change detector is the LOWER CUSUM (drop below the running peak), not the textbook upper arm | **correctness** — a trader's change of concern is a mean moving down; the recursive-mean version was degenerate (measured) and was discarded |
+| 51 | `PH_DELTA_R = 0.25`, `PH_THRESHOLD_R = 12`, chosen by the stated selection rule from an 18-cell grid | **measured** — the grid, both candidate rejections and the 1-of-18 result are stored in the study; re-tuning without re-running it is not permitted |
+| 52 | The overlay's halving factor is 0.5 **once**, however many proposers are halved | **conservative** — compounding cannot be expressed in whole lots at desk budgets and makes the journal sentence unverifiable |
+| 53 | Governance actions are ONE-WAY; only `POST /governance/resume` (with a note) restores an agent, and it keeps the evidence | **conservative** — a threshold crossed and recrossed silently is the failure mode the layer exists to prevent |
+| 54 | A disabled proposer's reading is removed BEFORE the gatekeeper, and an emptied view is a refusal naming the dropped agents | **conservative** — a plan with no surviving proposer must not be priced as if it had one |
+| 55 | Ledger writes are fire-and-forget and reads fall back to a bounded in-process mirror | **availability** — a database outage must not stop the desk trading, and a ledger write must not delay an arm |
+| 56 | The stored HMM is reused only when its version keys the CURRENT window exactly | **safety** — reuse must be identical to re-fitting, or it is a stale model changing a permit |
+| 57 | `realised_r` is NULL when the EA stamped no `initialRiskMoney`, and such a trade is counted as unmeasured | **honest reporting** — a trade the desk cannot measure must be visible as unmeasured, not dropped and not fabricated |
 
 ### Gate ledger
 
@@ -1608,7 +1842,18 @@ the reasoning recorded.
   the linear rescale left the book at 1.93% against 1.5% (measured, §10.3). Replaced
   by a solve that lands on the ceiling, with the old behaviour pinned as
   demonstrably insufficient in W8.17.
-* **Removed**: **none.** No safety gate was removed in WP0–WP8. Everything in
+* **Added (WP9)**: the per-agent e-process as a governance action (halve at e ≥ 5,
+  disable at e ≥ 20) and its overlay on the desk's decisions; the one-way rule with
+  an operator-only resume that requires a note; the removal of a disabled agent's
+  reading before the gatekeeper; the 0.5× budget factor, applied after the portfolio
+  composition; and the study's ten gates (§15.8), including the selection rule that
+  picks the change detector's constants out of a stored grid.
+* **Fixed (WP9)**: two statistics that were wrong in the direction a report would
+  not have revealed. The e-process grew on wins; the change detector's
+  recursive-mean form degenerated into `+0.05R` per trade on a constant stream.
+  Both were caught by measurement and are recorded in §15.2 and §15.4 rather than
+  changed quietly.
+* **Removed**: **none.** No safety gate was removed in WP0–WP9. Everything in
   §1's constraint list (fail-closed news gate, quote integrity, clock
   normalisation, one-account-one-desk, live-off default, daily-loss and drawdown
   limits) is intact, and the position-manager tests assert the ones that touch
@@ -1776,6 +2021,33 @@ the reasoning recorded.
     daily-loss limit, the drawdown halt and the rollout's 6% ceiling are the
     operational answers.
 
+44. **The e-process has a false-alarm rate by construction, and at the halve bar it
+   is not small.** Ville's inequality allows 1/5 at e ≥ 5 and 1/20 at e ≥ 20, and the
+   study measures 11.0% and 0.7% on break-even streams of 200 trades. The disable
+   bar is the safety-relevant one and it is tight; the *halve* bar is a budget
+   reduction that a long-lived desk can expect to see wrongly from time to time.
+   That is why a halving is visible (a warning and a journal line), reversible by an
+   operator, and never a refusal.
+45. **The corpus half of the study is synthetic.** The fixtures the desk's own
+   simulator measured with positive expectancy are left untouched (G9.7), and every
+   clearly degraded stream is disabled (G9.9) — but both statements are about
+   generated series. The live equivalents are the shadow phase's stored
+   `desk_trades` rows, which is what the weekly report exists to read.
+46. **Governance depends on the EA stamping `initialRiskMoney`.** Without it a trade
+   carries no R, is charged to nobody, and the e-process simply does not learn from
+   it. The weekly report counts those trades as unmeasured and flags them, but a
+   chronic absence would quietly make the layer blind — check the flag.
+47. **The ledger is best-effort.** A store outage loses shadow evaluations and trade
+   rows for the duration (the in-process mirrors keep the current process governing
+   itself, but they are bounded and do not survive a restart). The layer is
+   deliberately built so that this is an observability loss rather than a trading
+   one; it is still a loss.
+48. **The stored HMM's reuse is only as good as its version key.** The key covers
+   symbol, frame, fit bars, states, window length and the last bar's open time; a
+   future change to the fit's features or config that is not added to that key would
+   let a stale model be reused. W9.10 pins the current key; any change to
+   `regime-hmm.ts`'s inputs must visit it.
+
 ## 14. Tests and commands
 
 ```bash
@@ -1796,7 +2068,14 @@ cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
   --meta --mode intraday --meta-calibrator isotonic|platt|platt-shrunk
 
-# typecheck (all packages)
+# the WP9 governance study (writes research-reports/2026-10-11-wp9-governance-<mode>-study.json)
+# the durable half of WP9 is NOT in this study — it opens no database; W9.10/W9.14
+# verify the five tables and their round-trip against PGlite instead
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --governance --mode intraday|swing
+
+# typecheck (all packages) — lib/db must be built first:
+#   corepack pnpm run typecheck:libs && corepack pnpm run typecheck
 pnpm run typecheck
 
 # the WP6 gatekeeper study, per mode (≈ 85 s intraday, ≈ 75 s swing; writes
@@ -1865,8 +2144,10 @@ Stored reports (`artifacts/api-server/research-reports/`):
 | `2026-10-11-wp7-execution-swing-study.json` | the same, H1 | **PASS** — paired ΔR +0.081 (better in 68.7%) |
 | `2026-10-11-wp8-portfolio-intraday-study.json` | WP8: a constructed book, the estimator's recovery of it, the ceilings on the accumulated book | **PASS** — ρ̂ 0.818 vs 0.85, heat 0.727% vs 1.885% flat, CVaR 1.5000% vs 3.889% flat |
 | `2026-10-11-wp8-portfolio-swing-study.json` | the same, H1 | **PASS** — ρ̂ 0.818, composed CVaR on its 1.5% ceiling, mirrored DD 10.07% vs 193% flat |
+| `2026-10-11-wp9-governance-intraday-study.json` | WP9: the e-process's null bound and power, the change detector's 18-cell grid, the overlay's 7,533-combination sweep, the layer over the desk's own corpus | **PASS** — 0.700% false alarm vs a 5% bound, 100% catch of −0.35R in a median 59 trades, 1 of 18 grid cells qualifying |
+| `2026-10-11-wp9-governance-swing-study.json` | the same, H1 | **PASS** — same thresholds; 3 of 3 degraded streams disabled and 0 of 3 positive ones touched |
 
-Current state: **1,201/1,201** api-server tests (151 suites) and **542/542** desk
+Current state: **1,203/1,203** api-server tests (**146** suites) and **551/551** desk
 tests (multiasset + research + alpha + meta; the counts wander by a handful between
 runs because a few pre-existing suites build their cases from data), **37/37**
 trading-platform tests (including the 6/6 EA-download parity check that keeps
@@ -1877,7 +2158,14 @@ tests (`research/meta-eval.test.ts` — a well-calibrated model passes, an
 overconfident one fails, a broken `p_LCB` promise is caught by decile, and refusing
 to trade on a null is a pass). WP6 added 32 (`meta/gatekeeper.test.ts` — the
 step-up BH bar, the fail-closed codes, the MC geometry, and the demeaned-GARCH
-regression) and 7 wiring tests. WP7 added 13 (`wp7-execution.test.ts` — the spread
+regression) and 7 wiring tests. WP9 added 14 (`wp9-governance.test.ts` — the martingale's
+non-negativity and the direction of the step wealth, the measured false-alarm rate
+against its 1/K bound, the power and the speed on degraded streams, the two
+thresholds at the 16th and 29th consecutive loss, the one-way rule and the resume
+that keeps the evidence, the change detector's statefulness and its measured
+operating point, the weekly recount, the refusal histogram's once-per-decision rule,
+the overlay's reduce-only vocabulary, plan/ticket attribution, and the durable
+round-trip of all five tables). WP7 added 13 (`wp7-execution.test.ts` — the spread
 z with its sample floor, the timing ledger's shrinkage and refusal, the slippage
 EWMA and the 0.15R pause, the measured allowance's one-way rule, the pending
 expiry, and the plan projection's flag-off invariance). WP8 added 17

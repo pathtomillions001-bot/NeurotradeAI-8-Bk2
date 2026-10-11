@@ -32,6 +32,7 @@ import { recordTick } from "../lib/multiasset/subminute";
 import { getSlippageLedger, getSpreadHistory, getTimingLedger } from "../lib/multiasset/agent";
 import { recordSlippage, recordSpread, recordTimingOutcome, signedSlippageR } from "../lib/multiasset/execution";
 import { deskV4, v4On } from "../lib/multiasset/desk-v4-config";
+import { bindTicket, recordClosedTrade } from "../lib/multiasset/governance-runtime";
 import {
   computeHistoryNeeded,
   parseBarsAvailable,
@@ -975,6 +976,48 @@ router.post("/sync", async (req, res) => {
       journal(desk, "execution", position.symbol, `Position #${position.ticket} closed: ${net >= 0 ? "+" : ""}${net.toFixed(2)}.`, {
         consecutiveLosses: desk.riskState.consecutiveLosses,
       });
+      // ── WP9: the durable close, and the e-process ────────────────────────
+      //
+      // One trade row, one resolved shadow evaluation and one outcome per agent
+      // that proposed it. `initialRiskMoney` is the denominator and it is the
+      // EA's own stamp — when it is absent the row is still written, with a NULL
+      // realised R, because a trade the desk cannot measure is a fact the weekly
+      // report has to be able to count. Any agent whose threshold is crossed is
+      // named in the journal: an agent going out of service is not a silent
+      // event. Fire-and-forget, so a ledger write can never delay a heartbeat.
+      if (v4On(deskV4().governance)) {
+        void recordClosedTrade({
+          sessionId: desk.sessionId,
+          ticket: position.ticket,
+          symbol: position.symbol,
+          mode: desk.mode,
+          side: position.side,
+          lots: position.volume,
+          openedAtMs: position.openTime,
+          closedAtMs: now,
+          netProfit: net,
+          riskMoney: position.initialRiskMoney ?? null,
+          slippageR: null,
+          entryPrice: position.openPrice ?? null,
+          // MT5 reports the closed position without an exit price in this
+          // payload; the trade row carries the entry and the realised money, and
+          // the exit reason stays NULL rather than being guessed from profit.
+          exitPrice: null,
+          exitReason: null,
+        })
+          .then(({ actions }) => {
+            for (const action of actions) {
+              if (action.action === "none") continue;
+              journal(
+                desk,
+                "risk",
+                position.symbol,
+                `Agent ${action.agentId} ${action.action === "disable" ? "DISABLED" : "halved"} by the WP9 e-process (e=${action.eValue.toFixed(1)}): ${action.reason}`,
+              );
+            }
+          })
+          .catch(() => {});
+      }
       if (desk.riskState.haltedUntilNextSession) {
         journal(desk, "risk", null, desk.riskState.haltReason ?? "Desk halted.");
       }
@@ -1004,6 +1047,13 @@ router.post("/sync", async (req, res) => {
             ? signedSlippageR({ side: command.plan.side, plannedPrice: command.plan.trigger, fillPrice: fill, riskPrice: risk })
             : null;
         if (slippage !== null) recordSlippage(getSlippageLedger(), slippage);
+      }
+      // WP9's attribution join: the fill is the only moment the desk learns that
+      // THIS ticket came from THAT plan, and the plan is what remembers which
+      // agents proposed it. Recorded whenever governance is on, independently of
+      // whether the execution layer is measuring slippage.
+      if (result.status === "filled" && result.ticket !== undefined && command?.type === "arm_plan") {
+        if (v4On(deskV4().governance)) bindTicket(result.ticket, command.plan.id);
       }
       if (result.status === "rejected") {
         journal(desk, "execution", null, `Command rejected by the terminal: ${result.error ?? "unknown error"}.`, result);

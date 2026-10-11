@@ -617,6 +617,20 @@ export interface RegimePermitInput {
   /** Override the state a trade needs (default: up-trend for a buy). */
   requiredState?: RegimeState;
   config?: Partial<RegimeHmmConfig>;
+  /**
+   * A MODEL already fitted on this input's own feature window (WP9 persistence).
+   *
+   * The fit is deterministic and seeded (see the file header), so a model fitted
+   * on the same window is the model this call would have produced — the caller
+   * supplies it only when it can prove that, by keying the stored artifact on the
+   * window's identity (symbol, frame, fitBars, states, window length and the last
+   * bar's open time). Anything less exact must re-fit.
+   *
+   * When supplied, the model is used as-is and `permit.fit.reused` says so, so a
+   * decision taken from a stored artifact is distinguishable in the journal from
+   * one taken from a fresh fit.
+   */
+  model?: HmmModel | null;
 }
 
 export interface RegimePermit {
@@ -654,7 +668,21 @@ export interface RegimePermit {
     minimum: number;
     /** `bars >= minimum`. False means "read this permit with suspicion". */
     adequate: boolean;
+    /**
+     * True when the model came from a stored artifact rather than a fresh fit.
+     * The two are the same model (the fit is deterministic and the version keys
+     * the window), but the journal should be able to say which happened.
+     */
+    reused: boolean;
   };
+  /**
+   * The fitted model itself, so a caller can persist it (WP9).
+   *
+   * Absent when the permit could not be computed. The model is the expensive
+   * part of this function, and handing it back is what makes "store the fit for
+   * the next process" possible without fitting twice.
+   */
+  model?: HmmModel;
 }
 
 /** Which state a trade needs. Buys need an up-trend; sells a down-trend. */
@@ -695,6 +723,7 @@ export function regimePermit(input: RegimePermitInput): RegimePermit {
       wanted: cfg.fitBars,
       minimum: cfg.windowBars,
       adequate: false,
+      reused: false,
     },
   };
 
@@ -710,8 +739,14 @@ export function regimePermit(input: RegimePermitInput): RegimePermit {
   }
 
   let model: HmmModel;
+  let reusedModel = false;
   try {
-    model = fitHmm(features.matrix, cfg);
+    if (input.model) {
+      model = input.model;
+      reusedModel = true;
+    } else {
+      model = fitHmm(features.matrix, cfg);
+    }
   } catch (error) {
     return {
       ...base,
@@ -774,12 +809,14 @@ export function regimePermit(input: RegimePermitInput): RegimePermit {
       wanted: cfg.fitBars,
       minimum: cfg.windowBars,
       adequate: features.matrix.length >= cfg.windowBars,
+      reused: reusedModel,
     },
   };
 
   if (codes.length === 0) {
     return {
       ...base2,
+      model,
       permit: true,
       codes: ["REGIME_PERMIT"],
       reason:
@@ -807,7 +844,7 @@ export function regimePermit(input: RegimePermitInput): RegimePermit {
       `a change point in the last ${cfg.changeRecentBars} bars is ${(change.changeProbability * 100).toFixed(0)}% likely (limit ${(cfg.maxChangeProbability * 100).toFixed(0)}%).`,
     );
   }
-  return { ...base2, permit: false, codes, reason: `Regime does not permit this trade: ${parts.join(" ")}` };
+  return { ...base2, model, permit: false, codes, reason: `Regime does not permit this trade: ${parts.join(" ")}` };
 }
 
 /**

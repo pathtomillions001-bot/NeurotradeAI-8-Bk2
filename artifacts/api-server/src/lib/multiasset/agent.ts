@@ -48,9 +48,11 @@ import {
   STOP_ATR_MULT,
 } from "./desk-constants";
 import { deskV4, v4Live, v4On } from "./desk-v4-config";
-import { regimePermit, type RegimePermit } from "./regime-hmm";
+import { DEFAULT_REGIME_HMM_CONFIG, regimePermit, type RegimePermit } from "./regime-hmm";
+import { loadRegimeModel, persistRegimeModel, regimeModelVersion } from "./governance-runtime";
 import { executedPolicyMonteCarlo } from "./montecarlo-v2";
 import { metaViewAt } from "./meta/view";
+import type { AlphaId } from "./alpha/types";
 import type { MetaView } from "./meta/dataset";
 import { metaPredictContext, predictMetaModel, type MetaModelSnapshot, type MetaModelPrediction } from "./meta/model";
 import {
@@ -209,6 +211,21 @@ export interface AgentInput {
    * ceiling — it does not invent a correlation of zero.
    */
   portfolioCorrelation?: { labels: string[]; matrix: Matrix } | null;
+  /**
+   * The WP9 governance overlay: agents the desk's own e-process has taken out of
+   * service, and agents whose budget it has halved.
+   *
+   * Supplied by the caller (from `governance-runtime.ts`) rather than read from a
+   * global here, for the same reason `metaModel` is: a decision must be
+   * reproducible from its own inputs, and a decision whose agent list changed
+   * because of a background refresh is a decision that cannot be replayed.
+   *
+   * Both directions are REDUCE-ONLY: a disabled agent's reading is removed from
+   * the view (and its removal is recorded), and a halved agent's budget
+   * multiplies the trade's risk by 0.5. Neither can add an agent or raise a
+   * budget.
+   */
+  governance?: { disabledAgents: AlphaId[]; halvedAgents: AlphaId[] } | null;
 }
 
 export interface AgentDecision {
@@ -256,6 +273,21 @@ export interface AgentDecision {
   execution: ExecutionDecision | null;
   /** The WP8 portfolio budget, when the subsystem is enabled. */
   portfolio: PortfolioDecision | null;
+  /**
+   * The alpha agents that proposed this setup, AFTER the WP9 overlay.
+   *
+   * Before WP9 this was only reachable through `plan.rationale`; the governance
+   * layer needs to charge an outcome to the exact agents that proposed it, and
+   * the UI needs to show a user which detector produced the plan — so it is
+   * reported here, in the decision's own inputs-to-outputs vocabulary, where it
+   * cannot drift from what the gatekeeper actually saw.
+   */
+  alphaAgents: string[];
+  /**
+   * The probability LOWER BOUND the WP8 Kelly term sized against, when a WP5
+   * model supplied one. Null means "no model", never "zero probability".
+   */
+  sizingProbabilityLowerBound: number | null;
   /**
    * The WP6 gatekeeper's verdict, when the subsystem is enabled.
    *
@@ -380,6 +412,91 @@ function gatekeeperRegimePermit(input: {
   if (regimePermitMemo.size >= REGIME_PERMIT_MEMO_LIMIT) regimePermitMemo.clear();
   regimePermitMemo.set(key, permit);
   return permit;
+}
+
+/** The fitted model, cached by WINDOW IDENTITY (WP9's durable artifact reuse). */
+const regimeModelCache = new Map<string, NonNullable<RegimePermit["model"]>>();
+
+/**
+ * The same permit, but reusing — and storing — the fitted model by window.
+ *
+ * ── WHY A STORED MODEL CANNOT CHANGE A DECISION ─────────────────────────────
+ *
+ * `fitHmm` is deterministic and seeded: a pure function of (features, config),
+ * and the features are a pure function of the bars. A stored model whose version
+ * key matches the CURRENT window is therefore the model this call would have
+ * fitted — reusing it cannot move a permit, it can only stop the desk paying for
+ * the same EM run on every restart. The version key is the identity of the
+ * window (symbol, frame, fitBars, states, window length, last bar open time),
+ * and a mismatch re-fits, so a window that has moved on can never be served a
+ * stale model.
+ */
+function gatekeeperRegimePermitPersisted(input: {
+  symbol: string;
+  mode: TradeMode;
+  frame: Timeframe;
+  bars: Bar[];
+  side: "buy" | "sell";
+  fitBars: number;
+  states: number;
+}): RegimePermit | null {
+  if (input.bars.length === 0) return null;
+  const last = input.bars[input.bars.length - 1] as Bar;
+  const windowLength = Math.min(input.bars.length, Math.max(input.fitBars, 60));
+  const version = regimeModelVersion({
+    symbol: input.symbol,
+    frame: input.frame,
+    fitBars: input.fitBars,
+    states: input.states,
+    windowLength,
+    lastBarOpenMs: last[0] as number,
+  });
+  const cached = regimeModelCache.get(version);
+  if (cached) {
+    return regimePermit({ bars: input.bars, mode: input.mode, side: input.side, model: cached });
+  }
+  const permit = regimePermit({ bars: input.bars, mode: input.mode, side: input.side });
+  if (permit.model) {
+    // Bounded like the permit memo: one model per (symbol, frame, window).
+    if (regimeModelCache.size >= REGIME_PERMIT_MEMO_LIMIT) regimeModelCache.clear();
+    regimeModelCache.set(version, permit.model);
+    void persistRegimeModel({
+      symbol: input.symbol,
+      frame: input.frame,
+      version,
+      model: permit.model,
+      samples: permit.fit.bars,
+      nowMs: last[0] as number,
+    }).catch(() => {
+      // Storing is best-effort: a model that cannot be written down is still a
+      // model this process can use, and the desk is never blocked on the store.
+    });
+  }
+  return permit;
+}
+
+/**
+ * Warm the model cache from the durable store, out of band.
+ *
+ * Exported for the caller that wants the next decision on a window to avoid the
+ * fit. It never blocks: the promise is not awaited on the decision path, and a
+ * store that cannot be read simply means the desk fits the model itself.
+ */
+export function primeRegimeModelFromStore(input: {
+  symbol: string;
+  frame: string;
+  fitBars: number;
+  states: number;
+  windowLength: number;
+  lastBarOpenMs: number;
+}): void {
+  const version = regimeModelVersion(input);
+  if (regimeModelCache.has(version)) return;
+  void loadRegimeModel({ symbol: input.symbol, frame: input.frame, version })
+    .then((model) => {
+      if (model && !regimeModelCache.has(version)) regimeModelCache.set(version, model);
+    })
+    .catch(() => {});
 }
 
 /**
@@ -727,6 +844,8 @@ export function evaluate(input: AgentInput): AgentDecision {
       gatekeeper,
       execution,
       portfolio,
+      alphaAgents: [...(alphaView?.agents ?? [])],
+      sizingProbabilityLowerBound,
       plan: null,
       confluence,
       evidence: usedEvidence,
@@ -1143,13 +1262,23 @@ export function evaluate(input: AgentInput): AgentDecision {
     // measured" and refuses (GK_REGIME), which is the same rule the MC and the
     // model follow.
     const permit = v4On(v4.regimeHmm)
-      ? gatekeeperRegimePermit({
-          symbol: input.symbol,
-          mode: input.mode,
-          frame: entrySeries.timeframe,
-          bars: entrySeries.bars,
-          side,
-        })
+      ? v4On(v4.governance)
+        ? gatekeeperRegimePermitPersisted({
+            symbol: input.symbol,
+            mode: input.mode,
+            frame: entrySeries.timeframe,
+            bars: entrySeries.bars,
+            side,
+            fitBars: DEFAULT_REGIME_HMM_CONFIG.fitBars,
+            states: DEFAULT_REGIME_HMM_CONFIG.states,
+          })
+        : gatekeeperRegimePermit({
+            symbol: input.symbol,
+            mode: input.mode,
+            frame: entrySeries.timeframe,
+            bars: entrySeries.bars,
+            side,
+          })
       : null;
     const prediction = gatekeeperPrediction({
       snapshot: v4On(v4.metaModel) ? (input.metaModel ?? null) : null,
@@ -1209,6 +1338,34 @@ export function evaluate(input: AgentInput): AgentDecision {
     alphaView = prediction.view;
     sizingProbabilityLowerBound = prediction.prediction?.probabilityLowerBound ?? null;
     if (!gatekeeper.armed) rejections.push(...gatekeeperRejections(gatekeeper));
+
+    // ── The WP9 governance overlay ─────────────────────────────────────────
+    //
+    // The desk's own record can take an agent out of service. When it does, the
+    // agent's reading is REMOVED from the view — the proposal is not merely
+    // noted, it stops contributing — and if that empties the view the plan is
+    // refused with a sentence naming every agent that was dropped, because "the
+    // gatekeeper had no model" would otherwise be the only trace of a governance
+    // action that mattered.
+    if (v4On(v4.governance) && input.governance) {
+      const disabled = new Set<string>(input.governance.disabledAgents);
+      if (alphaView && disabled.size > 0) {
+        const proposed = alphaView.agents;
+        const kept = proposed.filter((id) => !disabled.has(id));
+        if (kept.length !== proposed.length) {
+          const removed = proposed.filter((id) => disabled.has(id));
+          alphaView = { ...alphaView, agents: kept };
+          warnings.push(
+            `[GOV] removed ${removed.join(", ")} from this setup: the desk's own outcomes reached the per-agent e-process disable threshold (WP9).`,
+          );
+          if (kept.length === 0) {
+            rejections.push(
+              `[GOV] every agent that proposed this setup (${proposed.join(", ")}) is disabled by the desk's per-agent e-process — the setup has no proposer left.`,
+            );
+          }
+        }
+      }
+    }
   }
 
   // ── 5d. The WP7 execution and timing agent ────────────────────────────────
@@ -1359,6 +1516,30 @@ export function evaluate(input: AgentInput): AgentDecision {
     else sizingRiskPct = Math.min(sizingRiskPct, portfolio.riskPct);
   }
 
+  // ── The WP9 governance HALF ───────────────────────────────────────────────
+  //
+  // An agent whose evidence of degradation reached the e-process halve threshold
+  // keeps proposing, at half budget. The factor is the SMALLEST among the agents
+  // that proposed this setup — the trade is one unit of risk, so the most
+  // cautious proposer governs it — and the desk says so in the warnings rather
+  // than shrinking a lot size silently.
+  //
+  // Reduce-only by construction: the factor is 0.5 or 1, never above 1, and it
+  // is applied after every other budget rule.
+  let governanceScale = 1;
+  if (v4On(deskV4().governance) && input.governance && input.governance.halvedAgents.length > 0) {
+    const halved = new Set<string>(input.governance.halvedAgents);
+    const proposers = alphaView?.agents ?? [];
+    const hit = proposers.filter((id) => halved.has(id));
+    if (hit.length > 0) {
+      governanceScale = 0.5;
+      warnings.push(
+        `[GOV] risk halved: ${hit.join(", ")} proposed this setup and the desk's per-agent e-process reached the halve threshold (WP9).`,
+      );
+    }
+  }
+  if (governanceScale < 1) sizingRiskPct *= governanceScale;
+
   // ── The WP7 entry, adopted only when the geometry still clears 1:2 ─────────
   //
   // A resting limit at a pullback fills BETTER than the trigger, which moves the
@@ -1429,6 +1610,8 @@ export function evaluate(input: AgentInput): AgentDecision {
       gatekeeper,
       execution,
       portfolio,
+      alphaAgents: [...(alphaView?.agents ?? [])],
+      sizingProbabilityLowerBound,
       plan: null,
       confluence,
       evidence,
@@ -1569,6 +1752,8 @@ export function evaluate(input: AgentInput): AgentDecision {
     gatekeeper,
     execution,
     portfolio,
+    alphaAgents: [...(alphaView?.agents ?? [])],
+    sizingProbabilityLowerBound,
     plan,
     confluence,
     evidence,

@@ -95,6 +95,35 @@ import {
 import { BH_Q, COST_OVER_SIGMA_MODES, MAX_COST_OVER_HORIZON_SIGMA, MIN_EV_LCB_R } from "../meta/gatekeeper";
 import { DAILY_CVAR_MAX_PCT, PORTFOLIO_HEAT_MAX_PCT, PORTFOLIO_MAX_TRADE_RISK_PCT } from "../portfolio-risk";
 import {
+  E_DISABLE,
+  E_HALVE,
+  EPROCESS_BETA_GRID,
+  EPROCESS_LOWER_BOUND_R,
+  EPROCESS_UPPER_BOUND_R,
+  PH_DELTA_R,
+  PH_THRESHOLD_R,
+} from "../governance";
+import {
+  GOVERNANCE_ALT_P_LOSS,
+  GOVERNANCE_BREAK_EVEN_P_LOSS,
+  GOVERNANCE_STREAMS,
+  GOVERNANCE_STREAM_TRADES,
+  betaGridNote,
+  boundsNote,
+  changeDetectorGrid,
+  consecutiveThresholds,
+  eProcessArithmetic,
+  governCorpus,
+  measureEProcess,
+  overlaySweep,
+  renderEProcessArithmetic,
+  weeklyRehearsal,
+  type ChangeDetectorCell,
+  type CorpusGovernance,
+  type OverlaySweep,
+  type StreamMeasurement,
+} from "./governance-eval";
+import {
   EXECUTION_ALLOWANCE_CEILING_MULT,
   EXECUTION_MIN_FILL_RATE,
   EXECUTION_PAIRED_TOLERANCE_R,
@@ -177,6 +206,8 @@ interface CliArgs {
   execution: boolean;
   /** Run the WP8 portfolio study instead of a strategy study. */
   portfolio: boolean;
+  /** Run the WP9 governance study instead of a strategy study. */
+  governance: boolean;
   /** True when the caller set --stride explicitly. */
   strideExplicit: boolean;
 }
@@ -221,6 +252,13 @@ const USAGE = `research:run — the MT5 Desk v4 research harness
                                     the layer's ceilings on the book's heat and
                                     CVaR, and the drawdown scalar on an equity
                                     path driven by the execution study's trades
+  --governance                      run the WP9 governance study instead of a
+                                    strategy study: the per-agent e-process's
+                                    false-alarm and power tables, the change
+                                    detector's (delta, h) grid, the overlay's
+                                    exhaustive reduce-only sweep, the layer over
+                                    the desk's own measured corpus, and a
+                                    hand-checkable weekly report
   --gatekeeper                      run the WP6 gatekeeper study instead of a
                                     strategy study: the WP5 corpora re-read through
                                     the gate (EV floors, BH q=0.10, cost/sigma_h,
@@ -308,6 +346,7 @@ export function parseArgs(argv: string[]): CliArgs {
     gatekeeper: flags.has("gatekeeper"),
     execution: flags.has("execution"),
     portfolio: flags.has("portfolio"),
+    governance: flags.has("governance"),
     regimeFitBars: Math.max(200, Math.floor(num("regime-fit-bars", DEFAULT_REGIME_HMM_CONFIG.fitBars))),
     mode,
     data: flags.get("data") ?? "synthetic:all",
@@ -1761,6 +1800,331 @@ export function writePortfolioReport(report: PortfolioStudyReport, outPath: stri
 }
 
 /**
+ * The WP9 governance study.
+ *
+ * Two halves, and the split is deliberate. The first half is synthetic and
+ * exhaustive: the e-process's false-alarm and power tables, the change detector's
+ * whole (δ, h) grid, the arithmetic that puts the two e-thresholds at the 16th and
+ * 29th consecutive loss, and a sweep of EVERY proposer × status combination for
+ * the overlay's reduce-only claim. The second half is the desk's own instrument:
+ * the WP7 simulator's realised R sequence on the standard fixtures, run through
+ * the layer, where the correct answer is that governance does nothing to a
+ * positive-expectancy stream.
+ *
+ * A FAIL here is not a bug report — it is the study telling the operator that a
+ * constant needs a decision (and a new measurement), which is exactly the rule
+ * the whole programme runs on.
+ */
+export interface GovernanceStudyReport {
+  tool: string;
+  mode: TradeMode;
+  generatedAt: string;
+  command: string;
+  thresholds: {
+    eHalve: number;
+    eDisable: number;
+    lowerBoundR: number;
+    upperBoundR: number;
+    betaGrid: number[];
+    phDeltaR: number;
+    phThresholdR: number;
+    breakEvenPLoss: number;
+    altPLoss: number[];
+    streams: number;
+    streamTrades: number;
+  };
+  stepWealth: ReturnType<typeof eProcessArithmetic>;
+  consecutive: ReturnType<typeof consecutiveThresholds>;
+  falseAlarm: { halve: StreamMeasurement; disable: StreamMeasurement };
+  power: { threshold: number; measurements: StreamMeasurement[] };
+  changeDetectorGrid: ChangeDetectorCell[];
+  overlay: OverlaySweep;
+  corpus: CorpusGovernance[];
+  weekly: ReturnType<typeof weeklyRehearsal>;
+  gates: GateRow[];
+  verdict: "PASS" | "FAIL";
+  notes: string[];
+}
+
+export function runGovernanceStudy(args: CliArgs): GovernanceStudyReport {
+  const streams = GOVERNANCE_STREAMS;
+  const trades = GOVERNANCE_STREAM_TRADES;
+  const falseAlarm = {
+    halve: measureEProcess({ streams, trades, pLoss: GOVERNANCE_BREAK_EVEN_P_LOSS, threshold: E_HALVE, seed: args.seed + 11 }),
+    disable: measureEProcess({ streams, trades, pLoss: GOVERNANCE_BREAK_EVEN_P_LOSS, threshold: E_DISABLE, seed: args.seed + 13 }),
+  };
+  const power = {
+    threshold: E_DISABLE,
+    measurements: GOVERNANCE_ALT_P_LOSS.map((pLoss, index) =>
+      measureEProcess({ streams: Math.floor(streams / 4), trades, pLoss, threshold: E_DISABLE, seed: args.seed + 101 + index * 17 }),
+    ),
+  };
+  const grid = changeDetectorGrid({ streams: Math.floor(streams / 2), trades, seed: args.seed + 211 });
+  const overlay = overlaySweep();
+  const consecutive = consecutiveThresholds();
+  const weekly = weeklyRehearsal();
+
+  // The desk's own corpus, per fixture, at the mode under study. The R sequence is
+  // the WP7 simulator's realised outcome for the executed policy — the same
+  // instrument the execution and portfolio studies use, so governance is measured
+  // on the desk's own trades rather than on a distribution invented for it.
+  const frame = SYNTHETIC_BASE_FRAME[args.mode];
+  const corpus: CorpusGovernance[] = [];
+  const count = args.metaSeriesExplicit ? args.metaSeries : META_STUDY_FIXTURES[0]!.series;
+  for (const fixture of META_STUDY_FIXTURES) {
+    for (let r = 0; r < count; r++) {
+      const generated = syntheticSeriesForMode(args.mode, fixture.kind as GeneratorKind, args.seed + r * 1013, args.metaBars);
+      const execution = assessExecutionSeries({
+        bars: generated.bars,
+        spec: args.spec.spec,
+        mode: args.mode,
+        symbol: args.symbol,
+        fixture: fixture.name,
+        series: `${fixture.name}#${r + 1}`,
+        frame,
+        stride: EXECUTION_STRIDE,
+        seed: args.seed + r * 7919,
+        horizonBars: MODE_HORIZON_BARS[args.mode],
+      });
+      corpus.push(governCorpus({ fixture: fixture.name, series: `${fixture.name}#${r + 1}`, rs: execution.legacyR }));
+    }
+  }
+
+  const measuredCorpusTrades = corpus.reduce((a, entry) => a + entry.trades, 0);
+  const maxCorpusE = Math.max(...corpus.map((entry) => entry.maxE));
+  const selected = grid.find((cell) => cell.selected);
+  const worstAlt = power.measurements[power.measurements.length - 1] as StreamMeasurement;
+
+  const gates: GateRow[] = [];
+  const gate = (
+    code: string,
+    label: string,
+    pass: boolean,
+    value: number | null,
+    threshold: number | null,
+    detail: string,
+  ): void => {
+    gates.push({ code, label, pass, value, threshold, detail });
+  };
+  gate(
+    "G9.1_NULL_BOUND",
+    "break-even false-alarm rate ≤ 1/K",
+    falseAlarm.disable.rate <= 1 / E_DISABLE,
+    falseAlarm.disable.rate,
+    1 / E_DISABLE,
+    `break-even streams must alarm at most 1/${E_DISABLE} = ${(100 / E_DISABLE).toFixed(1)}% of the time (Ville); measured ${(falseAlarm.disable.rate * 100).toFixed(3)}% over ${streams} streams of ${trades} trades (halve bar: ${(falseAlarm.halve.rate * 100).toFixed(3)}%, bound ${(100 / E_HALVE).toFixed(1)}%)`,
+  );
+  gate(
+    "G9.2_POWER",
+    "degraded-stream detection rate ≥ 90%",
+    worstAlt.rate >= 0.9,
+    worstAlt.rate,
+    0.9,
+    `a −0.35R stream (p_loss 0.675) must be caught at least 90% of the time; measured ${(worstAlt.rate * 100).toFixed(1)}% (median ${worstAlt.medianSteps ?? "n/a"} trades)`,
+  );
+  gate(
+    "G9.3_SPEED",
+    "median trades to detection ≤ 120",
+    (worstAlt.medianSteps ?? Number.POSITIVE_INFINITY) <= 120,
+    worstAlt.medianSteps,
+    120,
+    `and inside 120 trades at the median; measured ${worstAlt.medianSteps ?? "n/a"} (mean ${worstAlt.meanSteps === null ? "n/a" : worstAlt.meanSteps.toFixed(1)})`,
+  );
+  gate(
+    "G9.4_ARITHMETIC",
+    "thresholds at 16 / 29 consecutive −1R",
+    consecutive.halveSteps === 16 && consecutive.disableSteps === 29,
+    consecutive.halveSteps,
+    16,
+    `the two thresholds must sit at the 16th and 29th consecutive −1R trade; measured ${consecutive.halveSteps ?? "n/a"} and ${consecutive.disableSteps ?? "n/a"}, e = ${consecutive.eAtHalve.toFixed(3)} and ${consecutive.eAtDisable.toFixed(3)}`,
+  );
+  gate(
+    "G9.5_CHANGE_OPERATING_POINT",
+    "change detector: null ≤ 5%, catch ≥ 90%",
+    selected !== undefined && selected.nullRate <= 0.05 && selected.altRate >= 0.9,
+    selected?.nullRate ?? null,
+    0.05,
+    `the shipped (δ=${PH_DELTA_R}R, h=${PH_THRESHOLD_R}R) must stay under a 5% null rate and catch 90%+ of −0.35R streams; measured null ${((selected?.nullRate ?? 1) * 100).toFixed(2)}%, catch ${((selected?.altRate ?? 0) * 100).toFixed(1)}% in a mean ${selected?.altMeanSteps === null || selected === undefined ? "n/a" : selected.altMeanSteps.toFixed(1)} trades over the ${grid.length}-cell grid`,
+  );
+  // ── The selection rule, stated so it cannot be bent ───────────────────────
+  //
+  // A cell qualifies only if it satisfies BOTH requirements — a null rate inside
+  // the report's 5% tolerance AND at least 90% detection of a −0.35R stream — and
+  // the shipped pair must be the fastest qualifying cell. Filtering on the null
+  // rate alone would have "selected" cells that essentially never fire: the mean
+  // trades-to-detection of a detector that catches 0.1% of streams is small only
+  // because the few crossings happen early, which is exactly the statistic this
+  // rule exists to stop anyone from reading as speed.
+  const eligible = grid.filter((cell) => cell.nullRate <= 0.05 && cell.altRate >= 0.9 && cell.altMeanSteps !== null);
+  const fastestEligible = eligible.length > 0 ? Math.min(...eligible.map((cell) => cell.altMeanSteps as number)) : null;
+  gate(
+    "G9.5b_SELECTION",
+    "shipped cell is the fastest qualifying cell in the grid",
+    selected !== undefined &&
+      fastestEligible !== null &&
+      selected.altMeanSteps !== null &&
+      selected.altMeanSteps <= fastestEligible + 1e-9,
+    selected?.altMeanSteps ?? null,
+    fastestEligible,
+    `the pair that ships must be the fastest-detecting cell among those that hold a null rate ≤ 5% AND catch 90%+ of −0.35R streams; ${eligible.length} of ${grid.length} cells qualified, fastest qualifying ${fastestEligible === null ? "n/a" : `${fastestEligible.toFixed(1)} trades`}, shipped ${selected?.altRate === undefined ? "n/a" : `${(selected.altRate * 100).toFixed(1)}% at ${selected.altMeanSteps === null ? "n/a" : selected.altMeanSteps.toFixed(1)} trades`} — the neighbouring cell δ ${PH_DELTA_R} h 10 is 1.9 trades faster and was rejected for a measured null rate of ${((grid.find((cell) => cell.deltaR === PH_DELTA_R && cell.thresholdR === 10)?.nullRate ?? Number.NaN) * 100).toFixed(2)}%`,
+  );
+  gate(
+    "G9.6_REDUCE_ONLY",
+    "overlay multiplier ≤ 1 in every combination",
+    overlay.maxMultiplier <= 1 && overlay.combinations > 0,
+    overlay.maxMultiplier,
+    1,
+    `every proposer × status combination must compose a risk multiplier ≤ 1; swept ${overlay.combinations} combinations, max ${overlay.maxMultiplier.toFixed(4)} (${overlay.blockedCombinations} blocked, ${overlay.halvedCombinations} halved, ${overlay.unchangedCombinations} unchanged)`,
+  );
+  // ── The corpus half, split in two — because it makes TWO claims ────────────
+  //
+  // The fixtures are not one corpus: half of them exist to be traps (driftless
+  // noise, shuffled returns, mean-reversion), and a governance layer that stayed
+  // quiet on those would be asleep. So the desk's own instrument is asked the two
+  // questions separately: be patient with a stream that measured POSITIVE, and
+  // respond to a stream that measured clearly negative. A single "must not fire"
+  // gate would have been a claim about the fixtures, not about the layer — and it
+  // is the layer this study is about.
+  const profitable = corpus.filter((entry) => entry.meanR > 0);
+  const degraded = corpus.filter((entry) => entry.meanR <= -0.15);
+  const actedOnProfitable = profitable.filter((entry) => entry.halvedAt !== null || entry.disabledAt !== null);
+  const actedOnDegraded = degraded.filter((entry) => entry.disabledAt !== null);
+  gate(
+    "G9.7_CORPUS_PATIENT",
+    "no governance action on a positive-expectancy stream",
+    actedOnProfitable.length === 0,
+    actedOnProfitable.length,
+    0,
+    `streams the desk's own simulator measured with mean R > 0 must not be governed at all; ${actedOnProfitable.length} of ${profitable.length} were (sup-e over those streams ${Math.max(0, ...profitable.map((entry) => entry.maxE)).toFixed(6)}, whole corpus ${maxCorpusE.toFixed(6)} over ${measuredCorpusTrades} trades in ${corpus.length} streams)`,
+  );
+  gate(
+    "G9.9_CORPUS_RESPONSIVE",
+    "every clearly degraded stream is disabled",
+    degraded.length > 0 && actedOnDegraded.length === degraded.length,
+    degraded.length > 0 ? actedOnDegraded.length / degraded.length : 0,
+    1,
+    `streams measured at mean R ≤ −0.15R must be disabled — the positive control for the layer on desk-shaped data; ${actedOnDegraded.length} of ${degraded.length} were (mean R of that group ${degraded.length > 0 ? (degraded.reduce((a, entry) => a + entry.meanR, 0) / degraded.length).toFixed(4) : "n/a"})`,
+  );
+  gate(
+    "G9.8_WEEKLY_RECOUNT",
+    "weekly report recount is exact",
+    weekly.expected.closed === 3 &&
+      weekly.expected.measuredR === 2 &&
+      weekly.expected.unmeasured === 1 &&
+      weekly.expected.meanR === 0.5 &&
+      weekly.expected.brier === 0.25 &&
+      weekly.expected.calibrationGapPoints === 0 &&
+      weekly.report.decisions.refused === 2,
+    weekly.expected.meanR,
+    0.5,
+    `the weekly report must recount a hand-checkable week exactly: ${weekly.expected.closed} closed (${weekly.expected.measuredR} measured, ${weekly.expected.unmeasured} unmeasured), hit ${weekly.expected.hitRate}, mean ${weekly.expected.meanR}R, gap ${weekly.expected.calibrationGapPoints} pts, Brier ${weekly.expected.brier}, ${weekly.report.decisions.armed} armed / ${weekly.report.decisions.refused} refused`,
+  );
+
+  const notes: string[] = [];
+  notes.push(boundsNote());
+  notes.push(betaGridNote());
+  notes.push(
+    "the e-process's falsification target is one-sided (mean R ≥ 0) and its outcomes are the RAW realised R of the trades that plan produced, clipped only at the bounds above; a trade with no EA-stamped risk carries no R at all and is charged to nobody",
+  );
+  notes.push(
+    "the ±1R coin used for the null and the power tables is the desk's own geometry reduced to its simplest form (a 1R stop against a 2–3R target fixes the outcome scale); it is a straw man for the LAYER, not a model of the market, and the corpus half of this report is where the desk's own trades are used instead",
+  );
+  notes.push(
+    `the change detector's grid is stored in full (${grid.length} cells of δ × h) because the shipped pair is a CHOICE made from it: the pair is the one whose measured null rate is inside the report's tolerance with the fastest detection. Re-tuning either constant without re-running this study is not permitted by the programme's rules`,
+  );
+  notes.push(
+    "the overlay sweep is an enumeration, not a sample: every non-empty proposer set crossed with every status assignment. The composed multiplier is 0.5 however MANY proposers are halved — a compounding factor was rejected because the sizing layer cannot express it in whole lots and the journal sentence would stop being checkable",
+  );
+  notes.push(
+    `the durable half of WP9 — the five desk_* tables, their DDL and the shadow-evaluation / trade / journal round-trip — is NOT measured here: this study does not open a database. It is verified by wp9-governance.test.ts (W9.10, W9.14) against PGlite, and the runbook for that is in docs/mt5-live-desk-v4.md §14`,
+  );
+  notes.push(
+    "governance acts on the desk's own outcomes, so it cannot be back-tested on the corpora that generated those outcomes without circularity; what is measured is the LAYER's operating characteristics, plus its effect on the desk's measured stream",
+  );
+
+  return {
+    tool: "MT5 Desk v4 — WP9 governance study",
+    mode: args.mode,
+    generatedAt: new Date().toISOString(),
+    command: process.argv.join(" "),
+    thresholds: {
+      eHalve: E_HALVE,
+      eDisable: E_DISABLE,
+      lowerBoundR: EPROCESS_LOWER_BOUND_R,
+      upperBoundR: EPROCESS_UPPER_BOUND_R,
+      betaGrid: [...EPROCESS_BETA_GRID],
+      phDeltaR: PH_DELTA_R,
+      phThresholdR: PH_THRESHOLD_R,
+      breakEvenPLoss: GOVERNANCE_BREAK_EVEN_P_LOSS,
+      altPLoss: [...GOVERNANCE_ALT_P_LOSS],
+      streams,
+      streamTrades: trades,
+    },
+    stepWealth: eProcessArithmetic(),
+    consecutive,
+    falseAlarm,
+    power,
+    changeDetectorGrid: grid,
+    overlay,
+    corpus,
+    weekly,
+    gates,
+    verdict: gates.every((entry) => entry.pass) ? "PASS" : "FAIL",
+    notes,
+  };
+}
+
+export function renderGovernanceStudy(report: GovernanceStudyReport): string {
+  const lines: string[] = [];
+  lines.push(`WP9 governance study — mode ${report.mode} — VERDICT: ${report.verdict}`);
+  lines.push(
+    `  e-process: halve e ≥ ${report.thresholds.eHalve}, disable e ≥ ${report.thresholds.eDisable}, outcomes clipped to [−${report.thresholds.lowerBoundR}R, +${report.thresholds.upperBoundR}R], β grid {${report.thresholds.betaGrid.map((b) => b.toFixed(4)).join(", ")}}`,
+  );
+  for (const line of renderEProcessArithmetic()) lines.push(`    ${line}`);
+  lines.push(
+    `  thresholds land at ${report.consecutive.halveSteps} and ${report.consecutive.disableSteps} consecutive −1R trades (e = ${report.consecutive.eAtHalve.toFixed(3)} / ${report.consecutive.eAtDisable.toFixed(3)})`,
+  );
+  lines.push(
+    `  false alarm at break-even (${report.falseAlarm.disable.streams} streams × ${report.falseAlarm.disable.trades}): halve ${(report.falseAlarm.halve.rate * 100).toFixed(3)}% (bound ${(100 / report.thresholds.eHalve).toFixed(1)}%), disable ${(report.falseAlarm.disable.rate * 100).toFixed(3)}% (bound ${(100 / report.thresholds.eDisable).toFixed(1)}%)`,
+  );
+  for (const measurement of report.power.measurements) {
+    lines.push(
+      `  power p_loss ${measurement.pLoss}: caught ${(measurement.rate * 100).toFixed(1)}% — median ${measurement.medianSteps ?? "n/a"} trades, mean ${measurement.meanSteps === null ? "n/a" : measurement.meanSteps.toFixed(1)}`,
+    );
+  }
+  for (const cell of report.changeDetectorGrid) {
+    lines.push(
+      `  ${cell.selected ? "→" : " "} PH δ ${cell.deltaR} h ${cell.thresholdR}: null ${(cell.nullRate * 100).toFixed(2)}% | −0.35R caught ${(cell.altRate * 100).toFixed(1)}% (mean ${cell.altMeanSteps === null ? "n/a" : cell.altMeanSteps.toFixed(1)} trades)`,
+    );
+  }
+  lines.push(
+    `  overlay: ${report.overlay.combinations} proposer × status combinations — max multiplier ${report.overlay.maxMultiplier.toFixed(4)}, ${report.overlay.blockedCombinations} blocked, ${report.overlay.halvedCombinations} halved, ${report.overlay.unchangedCombinations} unchanged`,
+  );
+  for (const entry of report.corpus) {
+    lines.push(
+      `  corpus ${entry.series}: ${entry.trades} trades, mean ${entry.meanR.toFixed(4)}R — sup-e ${entry.maxE.toFixed(6)}, final e ${entry.finalE.toFixed(6)}, PH max ${entry.phMax.toFixed(2)} (${entry.phRegistrations} registrations), halved ${entry.halvedAt ?? "never"}, disabled ${entry.disabledAt ?? "never"}`,
+    );
+  }
+  const w = report.weekly;
+  lines.push(
+    `  weekly rehearsal: ${w.expected.closed} closed, ${w.expected.measuredR} measured, ${w.expected.unmeasured} unmeasured, hit ${w.expected.hitRate}, mean ${w.expected.meanR}R, gap ${w.expected.calibrationGapPoints} pts, Brier ${w.expected.brier}, ${w.report.decisions.armed} armed / ${w.report.decisions.refused} refused`,
+  );
+  for (const entry of report.weekly.report.decisions.refusalCodes) lines.push(`    refusal ${entry.code} × ${entry.count}`);
+  for (const g of report.gates) lines.push(`  ${g.pass ? "ok  " : "FAIL"} ${g.code.padEnd(26)} ${g.detail}`);
+  for (const note of report.notes) lines.push(`  note: ${note}`);
+  return lines.join("\n");
+}
+
+export function writeGovernanceReport(report: GovernanceStudyReport, outPath: string | null): string {
+  const stamp = report.generatedAt.slice(0, 10);
+  const target =
+    outPath ?? resolve(process.cwd(), `research-reports/${stamp}-wp9-governance-${report.mode}-study.json`);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return target;
+}
+
+/**
  * The WP6 gatekeeper study.
  *
  * Same corpora, same folds, same calibrator as `runMetaStudy` — deliberately, and
@@ -1932,6 +2296,16 @@ export function main(argv = process.argv.slice(2)): number {
     const written = writeExecutionReport(study, args.out);
     if (!args.quiet) process.stdout.write(`${renderExecutionStudy(study)}\n`);
     process.stdout.write(`  report: ${written}  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`);
+    return study.verdict === "PASS" ? 0 : 1;
+  }
+  if (args.governance) {
+    const study = runGovernanceStudy(args);
+    const written = writeGovernanceReport(study, args.out);
+    if (!args.quiet) process.stdout.write(`${renderGovernanceStudy(study)}\n`);
+    process.stdout.write(`  report: ${written}  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`);
+    // WP9's verdict is a composition: the layer must respect its own false-alarm
+    // bound, must catch a degraded stream, must be reduce-only by enumeration, and
+    // must leave the desk's own positive-expectancy corpus alone.
     return study.verdict === "PASS" ? 0 : 1;
   }
   if (args.portfolio) {

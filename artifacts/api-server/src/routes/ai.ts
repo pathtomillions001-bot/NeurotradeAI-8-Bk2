@@ -408,6 +408,12 @@ function startEngineFor(sessionId: string, settingsRow?: typeof settingsTable.$i
  * reset point outside of a fully-covering win. It clears the counter that gates
  * cooldown (recoveryEngine streakLossCount), NOT the recovery debt itself
  * (unrecoveredAmount persists until a win fully covers the debt).
+ *
+ * WP1: only `streakLossCount` is zeroed. `trueLossRun` (reset only by a win)
+ * and `recoveryDepth` (uncapped episode depth) ride through the spread, so a
+ * pause can never hide how long the run actually is. A time pause changes
+ * nothing statistically about i.i.d. outcomes — the truthful counters make
+ * that visible instead of pretending the streak ended.
  */
 function resumeAfterCooldown(engine: EngineInstance, reasonLabel: string): void {
   engine.cooldownUntil = null;
@@ -604,6 +610,9 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
     consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
     cooldownMinutes: settings?.cooldownMinutes ?? 30,
     cooldownEnabled: (settings as any)?.cooldownEnabled ?? true,
+    // WP1: default "pause" keeps the legacy behaviour exactly; "sizedown"
+    // trades through the limit at halved exposure instead of pausing.
+    cooldownBehavior: (settings as any)?.cooldownBehavior === "sizedown" ? "sizedown" : "pause",
     allowedMarketSymbols,
     paperTradeMode: tradingSettings.paperTradeMode,
     daily,
@@ -834,6 +843,11 @@ function buildRecoveryPayload(visible = true) {
     totalStreakLosses: state.streakLossCount,
     totalStreakAmount: Math.round(state.streakStartAmount * 100) / 100,
     highestStep: state.inRecovery ? state.recoveryStep : 0,
+    // WP1 truthful counters: the run no cooldown can hide, and the UNCAPPED
+    // episode depth (recoveryStep saturates at maxRecoverySteps for legacy
+    // staking; the dashboard deserves the real number).
+    trueLossRun: Number.isFinite(state.trueLossRun) ? state.trueLossRun : 0,
+    recoveryDepth: Number.isFinite(state.recoveryDepth) ? state.recoveryDepth : 0,
   };
 }
 

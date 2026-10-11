@@ -91,6 +91,12 @@ export interface TradingSettings {
   recoveryMultiplier: number;
   recoveryAutoMode: boolean;
   maxRecoverySteps: number;
+  /**
+   * WP1 (recovery v2): reaction to the consecutive-loss limit — "pause"
+   * (default, legacy) or "sizedown" (halve exposure per extra loss, no pause).
+   * Optional so existing constructors keep compiling; absent means "pause".
+   */
+  cooldownBehavior?: "pause" | "sizedown";
 }
 
 export interface DailyStats {

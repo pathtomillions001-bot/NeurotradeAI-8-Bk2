@@ -66,6 +66,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     requirePositiveEv: s.requirePositiveEv,
     cooldownMinutes: s.cooldownMinutes,
     cooldownEnabled: (s as any).cooldownEnabled ?? true,
+    cooldownBehavior: (s as any).cooldownBehavior === "sizedown" ? "sizedown" : "pause",
     normalOverDigit: s.normalOverDigit,
     normalUnderDigit: s.normalUnderDigit,
     recoveryOverDigit: s.recoveryOverDigit,
@@ -141,6 +142,7 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).requirePositiveEv !== undefined) updateData.requirePositiveEv = (updates as any).requirePositiveEv;
   if ((updates as any).cooldownMinutes !== undefined) updateData.cooldownMinutes = (updates as any).cooldownMinutes;
   if ((updates as any).cooldownEnabled !== undefined) (updateData as any).cooldownEnabled = (updates as any).cooldownEnabled;
+  if ((updates as any).cooldownBehavior !== undefined) (updateData as any).cooldownBehavior = (updates as any).cooldownBehavior === "sizedown" ? "sizedown" : "pause";
   if ((updates as any).normalOverDigit !== undefined) updateData.normalOverDigit = (updates as any).normalOverDigit;
   if ((updates as any).normalUnderDigit !== undefined) updateData.normalUnderDigit = (updates as any).normalUnderDigit;
   if ((updates as any).recoveryOverDigit !== undefined) updateData.recoveryOverDigit = (updates as any).recoveryOverDigit;

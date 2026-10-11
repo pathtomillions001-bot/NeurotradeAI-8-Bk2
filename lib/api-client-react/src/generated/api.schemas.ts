@@ -464,6 +464,17 @@ export const TradingSettingsRiskProfile = {
 } as const;
 
 /**
+ * What the autonomous engine does when the consecutive-loss limit is reached. "pause" (default, legacy) stops and runs the cooldown timer; "sizedown" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes.
+ */
+export type TradingSettingsCooldownBehavior = typeof TradingSettingsCooldownBehavior[keyof typeof TradingSettingsCooldownBehavior];
+
+
+export const TradingSettingsCooldownBehavior = {
+  pause: 'pause',
+  sizedown: 'sizedown',
+} as const;
+
+/**
  * Split caps recovery attempts; Instant targets one-win recovery
  */
 export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod[keyof typeof TradingSettingsRecoveryMethod];
@@ -522,6 +533,8 @@ export interface TradingSettings {
   cooldownMinutes?: number;
   /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
   cooldownEnabled?: boolean;
+  /** What the autonomous engine does when the consecutive-loss limit is reached. "pause" (default, legacy) stops and runs the cooldown timer; "sizedown" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes. */
+  cooldownBehavior?: TradingSettingsCooldownBehavior;
   /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
   normalOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */
@@ -564,6 +577,17 @@ export const TradingSettingsInputRiskProfile = {
   aggressive: 'aggressive',
 } as const;
 
+/**
+ * "pause" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; "sizedown" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply.
+ */
+export type TradingSettingsInputCooldownBehavior = typeof TradingSettingsInputCooldownBehavior[keyof typeof TradingSettingsInputCooldownBehavior];
+
+
+export const TradingSettingsInputCooldownBehavior = {
+  pause: 'pause',
+  sizedown: 'sizedown',
+} as const;
+
 export type TradingSettingsInputRecoveryMethod = typeof TradingSettingsInputRecoveryMethod[keyof typeof TradingSettingsInputRecoveryMethod];
 
 
@@ -604,6 +628,8 @@ export interface TradingSettingsInput {
   cooldownMinutes?: number;
   /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
   cooldownEnabled?: boolean;
+  /** "pause" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; "sizedown" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply. */
+  cooldownBehavior?: TradingSettingsInputCooldownBehavior;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;

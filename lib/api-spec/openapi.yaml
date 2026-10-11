@@ -1144,6 +1144,10 @@ components:
         cooldownEnabled:
           type: boolean
           description: Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.
+        cooldownBehavior:
+          type: string
+          enum: [pause, sizedown]
+          description: What the autonomous engine does when the consecutive-loss limit is reached. "pause" (default, legacy) stops and runs the cooldown timer; "sizedown" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes.
         normalOverDigit:
           type: integer
           description: Digit barrier used for DIGITOVER trades in normal (non-recovery) mode
@@ -1243,6 +1247,10 @@ components:
         cooldownEnabled:
           type: boolean
           description: Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.
+        cooldownBehavior:
+          type: string
+          enum: [pause, sizedown]
+          description: '"pause" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; "sizedown" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply.'
         normalOverDigit:
           type: integer
         normalUnderDigit:

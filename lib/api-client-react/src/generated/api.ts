@@ -946,7 +946,7 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-  return  { mutationFn, ...mutationOptions, retry: false }}
+  return  { mutationFn, ...mutationOptions }}
 
     export type ExecuteTradeMutationResult = NonNullable<Awaited<ReturnType<typeof executeTrade>>>
     export type ExecuteTradeMutationBody = BodyType<TradeInput>

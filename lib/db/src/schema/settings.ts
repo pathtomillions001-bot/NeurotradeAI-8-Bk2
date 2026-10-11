@@ -31,6 +31,11 @@ export const settingsTable = pgTable("settings", {
   // When false the engine trades straight through a consecutive-loss streak:
   // it still stops at the loss limit, but no cooldown pause is scheduled.
   cooldownEnabled: boolean("cooldown_enabled").notNull().default(true),
+  // WP1 (recovery v2): reaction to the consecutive-loss limit. "pause" is the
+  // legacy behaviour (stop + cooldown timer). "sizedown" never pauses; the
+  // stake halves for every loss beyond the limit while daily-loss/drawdown
+  // hard stops stay authoritative.
+  cooldownBehavior: text("cooldown_behavior").notNull().default("pause"),
   normalOverDigit: integer("normal_over_digit").notNull().default(1),
   normalUnderDigit: integer("normal_under_digit").notNull().default(8),
   recoveryOverDigit: integer("recovery_over_digit").notNull().default(3),

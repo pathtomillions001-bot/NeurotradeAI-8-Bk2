@@ -476,7 +476,7 @@ export const ExecuteTradeBody = zod.object({
   "isAutonomous": zod.boolean().optional(),
   "duration": zod.number().optional(),
   "durationUnit": zod.enum(['t', 's', 'm', 'h', 'd']).optional()
-}).strict().describe('One contract per request. Quantity and order arrays are not supported.')
+}).describe('One contract per request. Quantity and order arrays are not supported.')
 
 
 /**
@@ -884,6 +884,7 @@ export const GetSettingsResponse = zod.object({
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
   "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
   "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
+  "cooldownBehavior": zod.enum(['pause', 'sizedown']).optional().describe('What the autonomous engine does when the consecutive-loss limit is reached. \"pause\" (default, legacy) stops and runs the cooldown timer; \"sizedown\" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes.'),
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
@@ -934,6 +935,7 @@ export const UpdateSettingsBody = zod.object({
   "requirePositiveEv": zod.boolean().optional(),
   "cooldownMinutes": zod.number().optional(),
   "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
+  "cooldownBehavior": zod.enum(['pause', 'sizedown']).optional().describe('\"pause\" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; \"sizedown\" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply.'),
   "normalOverDigit": zod.number().optional(),
   "normalUnderDigit": zod.number().optional(),
   "recoveryOverDigit": zod.number().optional(),
@@ -981,6 +983,7 @@ export const UpdateSettingsResponse = zod.object({
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
   "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
   "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
+  "cooldownBehavior": zod.enum(['pause', 'sizedown']).optional().describe('What the autonomous engine does when the consecutive-loss limit is reached. \"pause\" (default, legacy) stops and runs the cooldown timer; \"sizedown\" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes.'),
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),

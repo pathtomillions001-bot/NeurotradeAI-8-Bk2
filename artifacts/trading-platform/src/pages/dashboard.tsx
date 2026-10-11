@@ -105,6 +105,15 @@ function RecoveryStatCard({ engine }: { engine: any }) {
                 <span>Partial win applied — debt remains until fully recovered</span>
               )}
             </div>
+            {(engine.recovery.trueLossRun > 0 || engine.recovery.recoveryDepth > 0) && (
+              <div className="text-[11px] text-muted-foreground mt-0.5 font-mono">
+                true run {engine.recovery.trueLossRun ?? 0}
+                {engine.recovery.recoveryDepth > 0 && <> · depth {engine.recovery.recoveryDepth}</>}
+                {(engine.recovery.trueLossRun ?? 0) > (engine.recovery.totalStreakLosses ?? 0) && (
+                  <span className="text-amber-400/60"> (cooldown hid {engine.recovery.trueLossRun - engine.recovery.totalStreakLosses})</span>
+                )}
+              </div>
+            )}
             <button
               onClick={() => clearDebt.mutate()}
               disabled={clearDebt.isPending}

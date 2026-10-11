@@ -43,6 +43,7 @@ import {
   HEDGE_GROUP_NAMES,
 } from "./constants";
 import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
+import { computeStake } from "../agents/ev-calculator";
 import { recoveryEscalation } from "./recovery-risk";
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
@@ -76,6 +77,15 @@ export interface HedgeContext {
   cooldownMinutes: number;
   /** False = trade straight through a loss streak (no cooldown pause). */
   cooldownEnabled: boolean;
+  /**
+   * WP1: how the engine reacts when the consecutive-loss limit is reached.
+   *  - "pause"    (default, legacy): stop and run the cooldown timer.
+   *  - "sizedown": never pause; instead scale the stake down by half for every
+   *                loss beyond the limit and keep trading. A time pause changes
+   *                nothing statistically on i.i.d. outcomes, so this expresses
+   *                the same caution through exposure instead of waiting.
+   */
+  cooldownBehavior: "pause" | "sizedown";
   allowedMarketSymbols: string[] | null;
   paperTradeMode: boolean;
   daily: DailyStats;
@@ -275,8 +285,47 @@ function scanContext(ctx: HedgeContext, symbol: string): ScanContext {
   };
 }
 
+/**
+ * WP1 size-down multiplier: 1.0 while the consecutive-loss run is below the
+ * limit; halves for every loss at or beyond it. A time pause changes nothing
+ * statistically on i.i.d. outcomes — this expresses the same caution through
+ * exposure instead of waiting. The daily-loss / drawdown hard stops are
+ * untouched and still end the engine.
+ */
+export function sizeDownMultiplier(losses: number, limit: number): number {
+  const over = Math.max(0, Math.floor(losses) - Math.max(1, Math.floor(limit)) + 1);
+  return Math.pow(0.5, over);
+}
+
 function riskFor(ctx: HedgeContext, symbol: string) {
   return computeRiskDecision(scanContext(ctx, symbol), null);
+}
+
+/**
+ * Risk decision with the WP1 size-down override: when the ONLY breached hard
+ * stop is the consecutive-loss limit and cooldownBehavior is "sizedown", the
+ * engine keeps trading at a reduced stake instead of pausing. Every other hard
+ * stop (daily loss limit, max drawdown, daily target) passes through as-is.
+ */
+function riskWithSizeDown(ctx: HedgeContext, symbol: string): { risk: RiskDecision; factor: number } {
+  const risk = riskFor(ctx, symbol);
+  if (!risk.hardStop) return { risk, factor: 1 };
+  const consecutive = ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
+  if (!consecutive || ctx.cooldownBehavior !== "sizedown") return { risk, factor: 1 };
+  const factor = sizeDownMultiplier(ctx.daily.consecutiveLosses, ctx.consecutiveLossLimit);
+  const baseStake = computeStake(scanContext(ctx, symbol));
+  const reduced = Math.max(0.35, Math.min(baseStake * factor, ctx.settings.maxTradeStake));
+  return {
+    risk: {
+      ...risk,
+      hardStop: false,
+      allowTrade: true,
+      recommendedStake: Math.round(reduced * 100) / 100,
+      riskBudget: Math.max(risk.riskBudget, 0.05),
+      hardStopReason: undefined,
+    },
+    factor,
+  };
 }
 
 function watchedMarkets(ctx: HedgeContext) {
@@ -495,6 +544,7 @@ function emitHoldScan(
   if (now - s.lastEmitAt < EMIT_THROTTLE_MS) return;
   s.lastEmitAt = now;
   if (input.started) host.emit("scan_started", { markets: input.started.markets, mode: input.started.mode });
+  const truthful = recoveryEngine.getState();
   host.emit("scan_complete", {
     symbol: null,
     quality: 0,
@@ -504,6 +554,9 @@ function emitHoldScan(
     shouldTrade: false,
     rejectReason: input.reason,
     sessionLossCount: input.lossRun,
+    // WP1: the dashboard also gets the run a cooldown can no longer hide.
+    trueLossRun: truthful.trueLossRun ?? 0,
+    recoveryDepth: truthful.recoveryDepth ?? 0,
     consecutiveLossLimit: input.consecutiveLossLimit,
     mode: input.mode,
     contract: null,
@@ -543,13 +596,20 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   const mode: HedgeMode = recoveryEngine.isInRecovery() ? "RECOVERY" : "NORMAL";
   const ledger = recoveryEngine.getState();
   const lossRun = ledger.streakLossCount;
-  // Depth of THIS recovery episode. streakLossCount resets on any win and on a
-  // cooldown auto-resume; recoveryStep only clears when the debt is repaid, so
-  // the maximum keeps the recovery ranking honest across a cooldown.
-  const escalation = recoveryEscalation(lossRun, ledger.recoveryStep);
+  // Depth of THIS recovery episode — the TRUTHFUL counters (WP1). trueLossRun
+  // is reset only by a win (cooldown resumes never mask it) and recoveryDepth
+  // is the uncapped episode depth, so escalation can reach the risk weight's
+  // documented cap instead of saturating at maxRecoverySteps. The ranking math
+  // (recoveryRiskWeight) clamps at its own cap, so nothing downstream moves a
+  // stake — this only keeps the recovery RANKING honest on long runs.
+  const escalation = recoveryEscalation(ledger.trueLossRun, ledger.recoveryDepth);
 
-  // 0. Hard limits first. A breached limit stops the engine before anything is ranked.
-  const risk = riskFor(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
+  // 0. Hard limits first. A breached limit stops the engine before anything is
+  //    ranked — with one opt-in exception (WP1): when cooldownBehavior is
+  //    "sizedown", the CONSECUTIVE-LOSS stop is expressed as halved exposure
+  //    (riskWithSizeDown / sizeDownMultiplier) instead of a pause. Daily loss
+  //    limit, max drawdown and profit-target hard stops always apply.
+  const { risk, factor: sizeDownFactor } = riskWithSizeDown(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
   if (risk.hardStop) {
     const consecutive = ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
     if (consecutive) stopForLossLimit(host, ctx, risk.hardStopReason ?? "risk limit reached");
@@ -623,7 +683,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
 
   // 4. Trade. Re-read context on fresh data before any money moves.
   const fresh = await getContext(host, s, true);
-  const freshRisk = riskFor(fresh, decision.best.symbol);
+  const { risk: freshRisk, factor: freshSizeDown } = riskWithSizeDown(fresh, decision.best.symbol);
   if (freshRisk.hardStop) {
     const consecutive = fresh.daily.consecutiveLosses >= fresh.consecutiveLossLimit;
     if (consecutive) stopForLossLimit(host, fresh, freshRisk.hardStopReason ?? "risk limit reached");
@@ -632,7 +692,11 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
   if (!host.canExecute()) return;
   const lastPrice = tapes.find((t) => t.symbol === decision.best.symbol)?.prices.at(-1) ?? 0;
-  await executeDecision(host, s, decision, fresh, mode, freshRisk, lastPrice);
+  // The size-down factor (WP1) applies to the trade about to be placed. Use the
+  // stricter of the scan-time and fresh-context factors so exposure can only
+  // shrink as the run deepens between the scan and the buy.
+  const sizeDown = Math.min(sizeDownFactor, freshSizeDown);
+  await executeDecision(host, s, decision, fresh, mode, freshRisk, lastPrice, sizeDown);
 }
 
 function publishScan(
@@ -664,6 +728,9 @@ function publishScan(
     shouldTrade: decision.eligible,
     rejectReason: decision.eligible ? null : decision.reason,
     sessionLossCount: lossRun,
+    // WP1 truthful counters — never masked by cooldown resumes.
+    trueLossRun: recoveryEngine.getState().trueLossRun ?? 0,
+    recoveryDepth: recoveryEngine.getState().recoveryDepth ?? 0,
     consecutiveLossLimit: ctx.consecutiveLossLimit,
     mode: decision.mode,
     contract: b.contract,
@@ -769,11 +836,19 @@ async function executeDecision(
   mode: HedgeMode,
   risk: RiskDecision,
   lastPrice: number,
+  sizeDown: number = 1,
 ): Promise<void> {
   const b = decision.best;
   const sessionId = host.sessionId;
   const reasoningBase = `${AUTONOMOUS_HEDGE_PREFIX}${decision.reason}`;
-  const { stake: rawStake, payout } = await resolveStake(decision, ctx, mode, risk);
+  const { stake: resolvedStake, payout } = await resolveStake(decision, ctx, mode, risk);
+  // WP1 size-down: the NORMAL stake already carries the reduction through
+  // risk.recommendedStake (riskWithSizeDown). The RECOVERY stake is debt-driven
+  // and does not, so the factor is applied here — exposure shrinks while the
+  // run is at/past the limit; the ledger still records the actual result.
+  const rawStake = mode === "RECOVERY" && sizeDown < 1
+    ? Math.max(MIN_STAKE, resolvedStake * sizeDown)
+    : resolvedStake;
   const stake = Math.round(rawStake * 100) / 100;
   if (!Number.isFinite(stake) || stake < MIN_STAKE || stake > ctx.balance) {
     host.publish({ nextScanIn: null });
@@ -1056,13 +1131,25 @@ function finishTrade(
   logger.info({ symbol: t.symbol, won: t.won, profit: t.profit.toFixed(2), stake: t.stake, contract: t.contract }, "Trade executed");
   if (!t.won && streak >= t.ctx.consecutiveLossLimit) {
     const limit = t.ctx.consecutiveLossLimit;
-    stopForLossLimit(
-      host,
-      t.ctx,
-      t.ctx.cooldownEnabled === false
-        ? `${streak} consecutive losses — limit ${limit} reached, cooldown disabled — resuming`
-        : `${streak} consecutive losses — limit ${limit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
-    );
+    if (t.ctx.cooldownBehavior === "sizedown") {
+      // WP1: express the limit through exposure, not a pause. The stake halves
+      // for every loss beyond the limit (see riskWithSizeDown); the true loss
+      // run keeps counting and the daily-loss / drawdown stops still apply.
+      host.emit("loss_limit_sizedown", {
+        sessionLossCount: streak,
+        consecutiveLossLimit: limit,
+        sizeDownMultiplier: sizeDownMultiplier(streak, limit),
+      });
+      logger.info({ sessionId: host.sessionId, streak, limit }, "Autonomous 1-tick: loss limit reached — sizedown mode keeps trading at reduced stake");
+    } else {
+      stopForLossLimit(
+        host,
+        t.ctx,
+        t.ctx.cooldownEnabled === false
+          ? `${streak} consecutive losses — limit ${limit} reached, cooldown disabled — resuming`
+          : `${streak} consecutive losses — limit ${limit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
+      );
+    }
   }
   void s;
 }

@@ -5,6 +5,7 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { TradingSettingsCooldownBehavior } from './tradingSettingsCooldownBehavior';
 import type { TradingSettingsRecoveryMethod } from './tradingSettingsRecoveryMethod';
 import type { TradingSettingsRiskAmountType } from './tradingSettingsRiskAmountType';
 import type { TradingSettingsRiskProfile } from './tradingSettingsRiskProfile';
@@ -49,6 +50,8 @@ export interface TradingSettings {
   cooldownMinutes?: number;
   /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
   cooldownEnabled?: boolean;
+  /** What the autonomous engine does when the consecutive-loss limit is reached. "pause" (default, legacy) stops and runs the cooldown timer; "sizedown" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes. */
+  cooldownBehavior?: TradingSettingsCooldownBehavior;
   /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
   normalOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */

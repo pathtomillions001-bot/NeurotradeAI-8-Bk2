@@ -5,6 +5,7 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { TradingSettingsInputCooldownBehavior } from './tradingSettingsInputCooldownBehavior';
 import type { TradingSettingsInputRecoveryMethod } from './tradingSettingsInputRecoveryMethod';
 import type { TradingSettingsInputRiskAmountType } from './tradingSettingsInputRiskAmountType';
 import type { TradingSettingsInputRiskProfile } from './tradingSettingsInputRiskProfile';
@@ -33,6 +34,8 @@ export interface TradingSettingsInput {
   cooldownMinutes?: number;
   /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
   cooldownEnabled?: boolean;
+  /** "pause" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; "sizedown" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply. */
+  cooldownBehavior?: TradingSettingsInputCooldownBehavior;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;

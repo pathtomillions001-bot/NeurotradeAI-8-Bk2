@@ -109,6 +109,71 @@ describe("single-contract execution", () => {
     assert.equal(sent.filter((m) => m.buy).length, 1);
   });
 
+  // ── The reported failure: "Deriv rejected 3 consecutive 1-tick buys — last:
+  // Unknown contract proposal". A buy handed a proposal id the receiving session
+  // does not know created NO contract, so the purchase is completed on a fresh
+  // quote instead of costing the engine one of its three strikes.
+  const deadProposal = {
+    error: { code: "InvalidContractProposal", message: "Unknown contract proposal" },
+  };
+
+  it("completes the purchase when the broker has forgotten the proposal id", async () => {
+    let quotes = 0;
+    const sent = fakeTransport((m) => {
+      if (m.proposal) {
+        quotes += 1;
+        return { msg_type: "proposal", proposal: { id: `proposal-${quotes}`, ask_price: quotes, payout: 1.63 } };
+      }
+      return m.buy === "proposal-1" ? deadProposal : purchase;
+    });
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 2);
+    const buys = sent.filter((m) => m.buy);
+    assert.equal(buys.length, 2);
+    // The replay buys the NEW id, at that quote's OWN ask price.
+    assert.deepEqual(buys.map((m) => m.buy), ["proposal-1", "proposal-2"]);
+    assert.deepEqual(buys.map((m) => m.price), [1, 2]);
+  });
+
+  it("recognises the reported broker sentence even when it carries no error code", async () => {
+    let quotes = 0;
+    const sent = fakeTransport((m) => {
+      if (m.proposal) {
+        quotes += 1;
+        return { msg_type: "proposal", proposal: { id: `proposal-${quotes}`, ask_price: 1 } };
+      }
+      return m.buy === "proposal-1" ? { error: { message: "Unknown contract proposal" } } : purchase;
+    });
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.buy).length, 2);
+  });
+
+  it("re-quotes a dead proposal id at most once, then reports the code", async () => {
+    const sent = fakeTransport((m) => m.proposal
+      ? { msg_type: "proposal", proposal: { id: "dead", ask_price: 1 } }
+      : deadProposal);
+    await assert.rejects(
+      executeLiveTrade(token, params),
+      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
+    );
+    assert.equal(sent.filter((m) => m.proposal).length, 2);
+    assert.equal(sent.filter((m) => m.buy).length, 2);
+  });
+
+  it("never re-quotes a contract this account is not offered at all", async () => {
+    // The same words from the PROPOSAL stage are a capability verdict, not a
+    // dead quote: deterministic, so it must fail fast without a second request.
+    const sent = fakeTransport(() => deadProposal);
+    await assert.rejects(
+      executeLiveTrade(token, params),
+      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
+    );
+    assert.equal(sent.length, 1);
+    assert.equal(sent.filter((m) => m.buy).length, 0);
+  });
+
   for (const [unit, factor] of [["seconds", 1], ["milliseconds", 1000]] as const) {
     it(`preserves single-contract settlement with broker timestamps in ${unit}`, async () => {
       const sent = fakeTransport(() => ({

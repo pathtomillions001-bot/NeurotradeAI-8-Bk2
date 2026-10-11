@@ -3183,6 +3183,48 @@ export function isRetryableDerivError(msg: any): boolean {
   );
 }
 
+/**
+ * Did Deriv refuse a BUY because the proposal id it was handed is unknown to the
+ * session that received the purchase?
+ *
+ * This is Deriv's `InvalidContractProposal` / "Unknown contract proposal", and it
+ * is stage-dependent — the same words mean opposite things:
+ *
+ *  - on a `buy`: the broker resolved no proposal, so it created NO contract. The
+ *    id died on the way (the pooled socket re-handshook between the two calls, or
+ *    the quote aged out behind the socket's send pacing / a rate-limit pause).
+ *    Quoting again and buying the fresh id completes the purchase.
+ *  - on a `proposal`: this account is simply not offered that contract on that
+ *    market. Deterministic — it fails on every tick and after every restart, so
+ *    it must never be retried.
+ *
+ * Only ever call this on a BUY reply; the proposal stage throws before any buy is
+ * sent, so a capability refusal can never reach the replay path below.
+ */
+export function isUnknownProposalRejection(msg: any): boolean {
+  const code = String(msg?.error?.code ?? "");
+  const text = String(msg?.error?.message ?? "").toLowerCase();
+  return code === "InvalidContractProposal" || text.includes("unknown contract proposal");
+}
+
+/**
+ * The broker's own words, with its error code attached.
+ *
+ * A refusal travels verbatim into the UI status panels, the engine's stop reason
+ * and the trade journal's `agentReasoning`, and the raw sentence alone is
+ * ambiguous — "Unknown contract proposal" from a buy is a dead quote, from a
+ * proposal an account that cannot trade that contract. The code is what lets the
+ * next reader tell them apart, so it rides along. Callers that only ever saw the
+ * bare sentence keep matching it: the text is appended to, never rewritten.
+ */
+function describeDerivRejection(error: any): string {
+  const base = typeof error?.message === "string" && error.message.trim()
+    ? error.message
+    : "Trade rejected by Deriv";
+  const code = typeof error?.code === "string" && error.code ? error.code : null;
+  return code && !base.includes(code) ? `${base} (Deriv code ${code})` : base;
+}
+
 // ── Live trade execution via OTP WebSocket ────────────────────────────────────
 /**
  * Thrown when a buy was sent but Deriv's reply is missing or malformed, so the
@@ -3249,36 +3291,51 @@ export async function executeLiveTrade(
 
   // Quote over the account's PERSISTENT socket. A throttled quote is retried
   // with backoff instead of failing the trade; only a hard rejection settles it.
-  let proposalMsg: any = null;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    proposalMsg = await accountRequest(
-      bearerToken, accountId, { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
-    );
-    if (proposalMsg && !proposalMsg.error) break;
-    if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
-    if (attempt === 3) break;
-    const backoffMs = 600 * 2 ** (attempt - 1);
-    logger.warn(
-      { backoffMs, attempt, derivError: proposalMsg?.error },
-      "executeLiveTrade: transient quote error — re-quoting",
-    );
-    await sleep(backoffMs);
-  }
+  // A function so the ONE replay below — a buy handed a proposal id the broker no
+  // longer knows — quotes through exactly the same path as the first attempt,
+  // with the same retry policy and the same ACCU/barrier parameters.
+  const quote = async (): Promise<{ proposalId: string; askPrice: number }> => {
+    let proposalMsg: any = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      proposalMsg = await accountRequest(
+        bearerToken, accountId, { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
+      );
+      if (proposalMsg && !proposalMsg.error) break;
+      if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
+      if (attempt === 3) break;
+      const backoffMs = 600 * 2 ** (attempt - 1);
+      logger.warn(
+        { backoffMs, attempt, derivError: proposalMsg?.error },
+        "executeLiveTrade: transient quote error — re-quoting",
+      );
+      await sleep(backoffMs);
+    }
 
-  if (!proposalMsg) {
-    throw new Error("Trade execution timeout — Deriv did not answer the quote request.");
-  }
-  if (proposalMsg.error) {
-    logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
-    throw new Error(proposalMsg.error.message ?? "Trade rejected by Deriv");
-  }
-  if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
-    throw new Error("Deriv returned an unexpected response to the quote request.");
-  }
+    if (!proposalMsg) {
+      throw new Error("Trade execution timeout — Deriv did not answer the quote request.");
+    }
+    if (proposalMsg.error) {
+      logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
+      throw new Error(describeDerivRejection(proposalMsg.error));
+    }
+    if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
+      throw new Error("Deriv returned an unexpected response to the quote request.");
+    }
+    return {
+      proposalId: String(proposalMsg.proposal.id),
+      askPrice: Number(proposalMsg.proposal.ask_price ?? params.stake),
+    };
+  };
 
-  const proposalId = String(proposalMsg.proposal.id);
-  const askPrice = Number(proposalMsg.proposal.ask_price ?? params.stake);
-  logger.info({ proposalId, askPrice }, "executeLiveTrade: proposal received, sending buy");
+  const purchase = (proposalId: string, askPrice: number) => accountRequest(
+    bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
+  );
+
+  let quoted = await quote();
+  logger.info(
+    { proposalId: quoted.proposalId, askPrice: quoted.askPrice },
+    "executeLiveTrade: proposal received, sending buy",
+  );
 
   // Once the buy has been SENT, a missing or malformed reply means the purchase
   // may still have happened. That is a different outcome from a rejection, so it
@@ -3286,11 +3343,35 @@ export async function executeLiveTrade(
   // as never placed.
   // A rejected request promise means the message was never sent (no connection
   // or send failure), so it propagates unchanged as a definite "not placed".
-  const buyMsg = await accountRequest(
-    bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
-  );
+  let buyMsg = await purchase(quoted.proposalId, quoted.askPrice);
+
+  // ── The one and only purchase replay ────────────────────────────────────────
+  // Deriv refused the buy because the proposal id we handed it does not exist in
+  // the session that received the purchase. Resolving that id is the step BEFORE
+  // contract creation, so this reply is proof that nothing was bought: quoting
+  // again and buying the FRESH id (at that quote's own ask price) completes the
+  // single purchase this call was asked for. It is not a second purchase, and it
+  // is capped at one attempt.
+  //
+  // Every other buy refusal (RateLimit, insufficient funds, validation) and every
+  // unacknowledged buy keep the existing rule and are never replayed.
+  if (buyMsg && isUnknownProposalRejection(buyMsg)) {
+    logger.warn(
+      {
+        derivError: buyMsg.error,
+        deadProposalId: quoted.proposalId,
+        symbol: params.symbol,
+        contractType: params.contractType,
+        barrier: params.barrier ?? null,
+      },
+      "executeLiveTrade: broker did not recognise the proposal id — re-quoting once to complete this purchase",
+    );
+    quoted = await quote();
+    buyMsg = await purchase(quoted.proposalId, quoted.askPrice);
+  }
+
   if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");
-  if (buyMsg.error) throw new Error(buyMsg.error.message ?? "Trade rejected by Deriv");
+  if (buyMsg.error) throw new Error(describeDerivRejection(buyMsg.error));
   if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
     throw new TradeOutcomeUnknownError("Deriv returned an unexpected response to the buy request.");
   }

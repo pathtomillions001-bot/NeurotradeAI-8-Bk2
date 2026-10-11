@@ -940,7 +940,7 @@ function PerfStat({ label, value, tone }: { label: string; value: string; tone?:
 
 // ── Journal ──────────────────────────────────────────────────────────────────
 
-const JOURNAL_COLOURS: Record<JournalEntry["kind"], string> = { signal: "text-emerald-400", no_trade: "text-zinc-500", execution: "text-sky-400", risk: "text-amber-400", bridge: "text-violet-400", management: "text-teal-400" };
+const JOURNAL_COLOURS: Record<JournalEntry["kind"], string> = { signal: "text-emerald-400", no_trade: "text-zinc-500", execution: "text-sky-400", risk: "text-amber-400", bridge: "text-violet-400" };
 
 export function JournalPane({ entries, timeZone = DEFAULT_DESK_TIMEZONE }: { entries: JournalEntry[]; timeZone?: string }) {
   const [filter, setFilter] = useState<"all" | JournalEntry["kind"]>("all");
@@ -948,7 +948,7 @@ export function JournalPane({ entries, timeZone = DEFAULT_DESK_TIMEZONE }: { ent
   return (
     <div>
       <div className="flex items-center justify-between gap-2 border-b border-zinc-900 px-3 py-1.5">
-        <div className="flex gap-1 overflow-x-auto">{(["all", "signal", "execution", "management", "risk"] as const).map((kind) => <button key={kind} type="button" onClick={() => setFilter(kind)} className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider transition-colors ${filter === kind ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}>{kind}</button>)}</div>
+        <div className="flex gap-1 overflow-x-auto">{(["all", "signal", "execution", "risk"] as const).map((kind) => <button key={kind} type="button" onClick={() => setFilter(kind)} className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider transition-colors ${filter === kind ? "bg-zinc-800 text-zinc-200" : "text-zinc-600 hover:text-zinc-400"}`}>{kind}</button>)}</div>
         <span className="shrink-0 font-mono text-[9px] text-zinc-600">{zoneAbbreviation(Date.now(), timeZone)}</span>
       </div>
       <ul className="max-h-72 divide-y divide-zinc-900 overflow-auto [scrollbar-width:thin]">

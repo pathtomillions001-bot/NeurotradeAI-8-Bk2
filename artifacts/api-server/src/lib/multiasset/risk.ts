@@ -33,18 +33,7 @@ export interface RiskPolicy {
   maxPositionsPerSymbol: number;
   /** Maximum netted risk on any single currency / asset class. */
   maxCurrencyExposurePct: number;
-  /**
-   * Consecutive losses that trigger a full session halt.
-   *
-   * A BACKSTOP, not the primary breaker. It used to be 5, which is inside the
-   * normal range for a healthy 1:2 system: at a 40–45% hit rate the median
-   * longest losing streak over 300 trades is 8–10, so the rule fired on books
-   * that were working exactly as designed and stopped them. The desk now halts
-   * on the terminal's per-agent e-process (WP9) and on the drawdown and
-   * daily-loss limits, which are statements about money rather than about a
-   * run of coin flips. This number exists only to catch the case where every
-   * other breaker has somehow failed.
-   */
+  /** Consecutive losses that trigger a full session halt. */
   haltAfterConsecutiveLosses: number;
   /** Minimum margin level (%) required before opening anything new. */
   minMarginLevelPct: number;
@@ -62,7 +51,7 @@ export const DEFAULT_RISK_POLICY: RiskPolicy = {
   maxOpenPositions: 12,
   maxPositionsPerSymbol: 3,
   maxCurrencyExposurePct: 2,
-  haltAfterConsecutiveLosses: 10,
+  haltAfterConsecutiveLosses: 5,
   minMarginLevelPct: 500,
   symbolCooldownMs: 15 * 60 * 1000,
   liveTradingEnabled: false,

@@ -67,7 +67,7 @@ test("the published EA is a build that reports its own version and link", () => 
   const published_body = fs.readFileSync(published, "utf8");
   // The version reported to the Desk must be the one the API expects, or the
   // "your EA is out of date" banner would fire on a current terminal.
-  assert.equal(declaredVersion(published), "4.00");
+  assert.equal(declaredVersion(published), "3.04");
   for (const marker of ["instanceId", "windowFromMs", "rawCount", "durable"]) {
     assert.match(
       published_body,

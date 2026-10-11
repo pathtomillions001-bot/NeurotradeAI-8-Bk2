@@ -186,42 +186,14 @@ test("a suspension survives the daily reset; the loss counters do not", () => {
   assert.equal(state.realisedPnlToday, 0);
 });
 
-/**
- * The streak halt is a BACKSTOP, not the primary breaker (WP1).
- *
- * It used to fire at 5. For a healthy 1:2 system with a 40–45% hit rate the
- * median longest losing streak over 300 trades is 8–10, so a rule that halted
- * at 5 stopped books that were working as designed — the failure mode the owner
- * reported. The desk now halts on the drawdown and daily-loss limits (which are
- * statements about money) and, in WP9, on the per-agent e-process. This test
- * asserts the backstop still exists at 10, and — separately — that the ladder
- * below it still de-escalates, so removing the early halt did not remove the
- * response to losses.
- */
-test("ten consecutive losses halt the desk, as a backstop", () => {
+test("five consecutive losses halt the desk for the session", () => {
   let state = createRiskState();
-  for (let i = 0; i < 10; i++) state = recordOutcome(state, loss("EURUSD", 1_000));
+  for (let i = 0; i < 5; i++) state = recordOutcome(state, loss("EURUSD", 1_000));
   assert.equal(state.haltedUntilNextSession, true);
   // Even a fresh, untouched symbol is blocked once the desk is halted.
   const decision = check({ state, symbol: "GBPUSD" });
   assert.equal(decision.allow, false);
   assert.ok(decision.breaches.some((b) => /consecutive losses/.test(b)));
-});
-
-test("a healthy losing streak is de-escalated, not halted", () => {
-  // Five losses — the old halt point, and well inside normal for a 1:2 book.
-  let state = createRiskState();
-  for (let i = 0; i < 5; i++) state = recordOutcome(state, loss("EURUSD", 1_000));
-  assert.equal(
-    state.haltedUntilNextSession,
-    false,
-    "5 consecutive losses must not end the session — the median longest streak is 8–10",
-  );
-  // The response is smaller and more selective, not a stop: the ladder has
-  // applied at every step and the symbol itself is suspended by step 4.
-  assert.ok(state.consecutiveLosses >= 5);
-  const halted = check({ state, symbol: "EURUSD" });
-  assert.equal(halted.allow, false, "the symbol that lost 4+ in a row is suspended");
 });
 
 // ── Account-level circuit breakers ───────────────────────────────────────────

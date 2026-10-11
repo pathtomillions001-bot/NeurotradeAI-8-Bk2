@@ -24,7 +24,8 @@ import * as recoveryEngine from "../agents/recovery-engine";
 import { computeRiskDecision } from "../agents/risk-manager";
 import type { DailyStats, ScanContext, TradingSettings } from "../agents/types";
 import type { RiskDecision } from "../agents/risk-manager";
-import { resolveRecoveryPayout } from "../recovery-payout";
+import { prepareRecoveryBuy, resolveRecoveryPayout } from "../recovery-payout";
+import { applyRecoveryStakeLimits } from "../recovery-math";
 import {
   AUTOMATED_DERIV_MARKETS,
   executeLiveTrade,
@@ -771,6 +772,12 @@ function publishScan(
  * Normal: the risk-adjusted settings stake (computeStake plus soft reduction, no
  * Kelly). Recovery: the unchanged recovery ladder, sized from the same base
  * stake and the payout quote. The quote is used only when it is live, as before.
+ *
+ * WP2 (gated by settings.recoveryV2Mode): after the legacy stake is computed,
+ * a buy-time proposal re-verifies the payout and re-sizes so one win clears
+ * the target at the ACTUAL multiplier (D7). "shadow" logs the plan beside the
+ * legacy number without trading it; "live" trades it; "off" (default) is
+ * byte-for-byte legacy.
  */
 async function resolveStake(
   decision: HedgeDecision,
@@ -804,7 +811,45 @@ async function resolveStake(
     ctx.settings.maxRecoverySteps,
     ctx.settings.recoveryAutoMode,
   );
-  return { stake, payout };
+
+  const v2Mode = ctx.settings.recoveryV2Mode ?? "off";
+  if (v2Mode === "off" || !ctx.settings.recoveryAutoMode) return { stake, payout };
+
+  // ── WP2 buy-time exactness (auto modes only) ─────────────────────────────
+  const ledger = recoveryEngine.getState();
+  // Legacy semantics: one win is promised to clear debt PLUS the remaining
+  // sizing target. (The adaptive method, WP4, drops the target — T′ = 0.)
+  const targetClearance = ledger.unrecoveredAmount + ledger.remainingTargetProfit;
+  const plan = await prepareRecoveryBuy({
+    symbol: b.symbol,
+    contractType: b.contract,
+    barrier: b.barrier >= 0 ? b.barrier : null,
+    duration: HEDGE_DURATION_TICKS,
+    durationUnit: HEDGE_DURATION_UNIT,
+    currency: ctx.currency,
+    targetClearance,
+    assumedPayout: payout,
+    candidateStake: stake,
+  });
+  // Split keeps its one-base-stake cap even after a live re-size.
+  const baseCap = ctx.settings.recoveryMethod === "split"
+    ? Math.max(0.35, ledger.baseStake > 0 ? ledger.baseStake : base)
+    : Number.POSITIVE_INFINITY;
+  const plannedStake = applyRecoveryStakeLimits(Math.min(plan.stake, baseCap), ctx.settings.maxTradeStake, ctx.balance);
+  logger.info(
+    {
+      symbol: b.symbol, contract: b.contract, v2Mode,
+      legacyStake: stake, v2Stake: plannedStake,
+      assumedPayout: payout, livePayout: plan.payoutMultiplier,
+      source: plan.source, reSized: plan.reSized, safetyMargin: plan.safetyMarginApplied,
+      targetClearance,
+    },
+    "Recovery v2 buy-time quote plan",
+  );
+  if (v2Mode === "live") {
+    return { stake: plannedStake, payout: plan.payoutMultiplier };
+  }
+  return { stake, payout }; // shadow: legacy trades, v2 only logged
 }
 
 function barrierFor(row: HedgeCandidate): number | null {

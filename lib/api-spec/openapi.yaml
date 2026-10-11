@@ -1167,6 +1167,10 @@ components:
         recoveryAutoMode:
           type: boolean
           description: Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit
+        recoveryV2Mode:
+          type: string
+          enum: [off, shadow, live]
+          description: Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly.
         allowedMarkets:
           type: array
           items:
@@ -1265,6 +1269,10 @@ components:
         recoveryAutoMode:
           type: boolean
           description: Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit
+        recoveryV2Mode:
+          type: string
+          enum: [off, shadow, live]
+          description: Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them).
         allowedMarkets:
           type: array
           items:

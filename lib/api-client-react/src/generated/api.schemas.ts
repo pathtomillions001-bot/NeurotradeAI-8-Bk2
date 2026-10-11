@@ -485,6 +485,18 @@ export const TradingSettingsRecoveryMethod = {
   instant: 'instant',
 } as const;
 
+/**
+ * Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly.
+ */
+export type TradingSettingsRecoveryV2Mode = typeof TradingSettingsRecoveryV2Mode[keyof typeof TradingSettingsRecoveryV2Mode];
+
+
+export const TradingSettingsRecoveryV2Mode = {
+  off: 'off',
+  shadow: 'shadow',
+  live: 'live',
+} as const;
+
 export type TradingSettingsRiskAmountType = typeof TradingSettingsRiskAmountType[keyof typeof TradingSettingsRiskAmountType];
 
 
@@ -547,6 +559,8 @@ export interface TradingSettings {
   recoveryMethod?: TradingSettingsRecoveryMethod;
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
+  /** Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly. */
+  recoveryV2Mode?: TradingSettingsRecoveryV2Mode;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.
@@ -596,6 +610,18 @@ export const TradingSettingsInputRecoveryMethod = {
   instant: 'instant',
 } as const;
 
+/**
+ * Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them).
+ */
+export type TradingSettingsInputRecoveryV2Mode = typeof TradingSettingsInputRecoveryV2Mode[keyof typeof TradingSettingsInputRecoveryV2Mode];
+
+
+export const TradingSettingsInputRecoveryV2Mode = {
+  off: 'off',
+  shadow: 'shadow',
+  live: 'live',
+} as const;
+
 export type TradingSettingsInputRiskAmountType = typeof TradingSettingsInputRiskAmountType[keyof typeof TradingSettingsInputRiskAmountType];
 
 
@@ -637,6 +663,8 @@ export interface TradingSettingsInput {
   recoveryMethod?: TradingSettingsInputRecoveryMethod;
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
+  /** Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them). */
+  recoveryV2Mode?: TradingSettingsInputRecoveryV2Mode;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

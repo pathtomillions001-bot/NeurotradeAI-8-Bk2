@@ -127,6 +127,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS autonomous_normal_contracts TEXT N
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS autonomous_recovery_contracts TEXT NOT NULL DEFAULT '';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS cooldown_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS cooldown_behavior TEXT NOT NULL DEFAULT 'pause';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_v2_mode TEXT NOT NULL DEFAULT 'off';
 -- Legacy global rows remain inaccessible and get distinct owners so older
 -- deployments with multiple settings rows can migrate safely.
 UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy';

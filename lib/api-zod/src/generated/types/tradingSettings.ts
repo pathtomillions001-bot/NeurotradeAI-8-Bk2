@@ -7,6 +7,7 @@
  */
 import type { TradingSettingsCooldownBehavior } from './tradingSettingsCooldownBehavior';
 import type { TradingSettingsRecoveryMethod } from './tradingSettingsRecoveryMethod';
+import type { TradingSettingsRecoveryV2Mode } from './tradingSettingsRecoveryV2Mode';
 import type { TradingSettingsRiskAmountType } from './tradingSettingsRiskAmountType';
 import type { TradingSettingsRiskProfile } from './tradingSettingsRiskProfile';
 
@@ -64,6 +65,8 @@ export interface TradingSettings {
   recoveryMethod?: TradingSettingsRecoveryMethod;
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
+  /** Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly. */
+  recoveryV2Mode?: TradingSettingsRecoveryV2Mode;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

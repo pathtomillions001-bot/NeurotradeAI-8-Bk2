@@ -73,6 +73,7 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     recoveryUnderDigit: s.recoveryUnderDigit,
     recoveryMethod: (s as any).recoveryMethod ?? "split",
     recoveryAutoMode: (s as any).recoveryAutoMode ?? true,
+    recoveryV2Mode: ["off", "shadow", "live"].includes((s as any).recoveryV2Mode) ? (s as any).recoveryV2Mode : "off",
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
     botRecoveryMarkup: Number((s as any).botRecoveryMarkup ?? 10),
@@ -149,6 +150,7 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).recoveryUnderDigit !== undefined) updateData.recoveryUnderDigit = (updates as any).recoveryUnderDigit;
   if ((updates as any).recoveryMethod !== undefined) (updateData as any).recoveryMethod = (updates as any).recoveryMethod;
   if ((updates as any).recoveryAutoMode !== undefined) (updateData as any).recoveryAutoMode = (updates as any).recoveryAutoMode;
+  if ((updates as any).recoveryV2Mode !== undefined) (updateData as any).recoveryV2Mode = ["off", "shadow", "live"].includes((updates as any).recoveryV2Mode) ? (updates as any).recoveryV2Mode : "off";
   if ((updates as any).riskAmountType !== undefined) (updateData as any).riskAmountType = (updates as any).riskAmountType;
   if ((updates as any).riskAmountValue !== undefined) (updateData as any).riskAmountValue = String((updates as any).riskAmountValue);
   if ((updates as any).botRecoveryMarkup !== undefined) (updateData as any).botRecoveryMarkup = String((updates as any).botRecoveryMarkup);

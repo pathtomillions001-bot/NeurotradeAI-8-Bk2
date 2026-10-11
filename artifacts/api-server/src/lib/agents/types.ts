@@ -92,6 +92,12 @@ export interface TradingSettings {
   recoveryAutoMode: boolean;
   maxRecoverySteps: number;
   /**
+   * WP2 (recovery v2) rollout gate: "off" = byte-for-byte legacy; "shadow" =
+   * compute+log the v2 decision beside the legacy one without trading it;
+   * "live" = the v2 path trades. Optional; absent means "off".
+   */
+  recoveryV2Mode?: "off" | "shadow" | "live";
+  /**
    * WP1 (recovery v2): reaction to the consecutive-loss limit — "pause"
    * (default, legacy) or "sizedown" (halve exposure per extra loss, no pause).
    * Optional so existing constructors keep compiling; absent means "pause".

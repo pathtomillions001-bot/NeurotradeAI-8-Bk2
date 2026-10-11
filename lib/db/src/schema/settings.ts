@@ -42,6 +42,10 @@ export const settingsTable = pgTable("settings", {
   recoveryUnderDigit: integer("recovery_under_digit").notNull().default(6),
   recoveryMethod: text("recovery_method").notNull().default("split"),
   recoveryAutoMode: boolean("recovery_auto_mode").notNull().default(true),
+  // Recovery v2 rollout gate (WP2+): "off" = byte-for-byte legacy behaviour;
+  // "shadow" = compute and log the v2 decision next to the legacy one without
+  // trading it; "live" = the v2 path trades. Kill switch: back to "off".
+  recoveryV2Mode: text("recovery_v2_mode").notNull().default("off"),
   recoveryStateJson: text("recovery_state_json"),
   riskAmountType: text("risk_amount_type").notNull().default("fixed"),
   riskAmountValue: numeric("risk_amount_value", { precision: 20, scale: 2 }).notNull().default("1.00"),

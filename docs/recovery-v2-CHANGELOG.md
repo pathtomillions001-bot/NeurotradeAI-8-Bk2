@@ -37,3 +37,31 @@ Safety analysis:
 - Existing persisted states hydrate with the new counters at 0.
 - No existing export removed; `reduceRecoveryOutcome` / `recordOutcome` remain
   the single writers of recovery state.
+
+## WP2 — quote freshness and stake exactness
+
+Behavioural changes:
+1. Recovery live-quote TTL cut from 60 s to **3 s** (`LIVE_QUOTE_TTL_MS`),
+   keyed by symbol/contract/barrier/duration/currency as before. Quotes carry
+   a `takenAt` timestamp.
+2. New `prepareRecoveryBuy()` — the buy-time exactness path (D7): requests a
+   fresh proposal, reads `ask_price` + `payout`, re-sizes the stake so one win
+   clears the target at the ACTUAL multiplier; re-sizes once when the live
+   payout drifted > 1 % from the assumption; falls back to the canonical table
+   with a **2 % safety margin** when no proposal arrives within the short
+   timeout (`source = "fallback"`).
+3. New rollout gate setting `recoveryV2Mode` (`off` default | `shadow` |
+   `live`) in OpenAPI, api-zod, DB schema + INIT_DDL, settings route and
+   `TradingSettings`. In `shadow` the buy-time plan is computed and logged
+   next to the legacy stake without trading it; in `live` it trades. `off`
+   (the default) is byte-for-byte legacy.
+4. The cycle records the live payout it sized on (`entryPayout`) and the
+   broker `buy_price` (`entryPrice`) on the ledger row — now from the
+   re-verified quote when v2 is live.
+
+Safety analysis:
+- Fallback OVER-pays the stake (2 % margin) rather than under-recovering.
+- Manual recovery mode (`recoveryAutoMode = false`) is never re-sized — the
+  user's multiplier ladder is used exactly as entered.
+- Split keeps its one-base-stake cap even after a live re-size.
+- Existing tests pin the pure stake math; those numbers are unchanged.

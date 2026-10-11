@@ -33,7 +33,23 @@ export interface RiskPolicy {
   maxPositionsPerSymbol: number;
   /** Maximum netted risk on any single currency / asset class. */
   maxCurrencyExposurePct: number;
-  /** Consecutive losses that trigger a full session halt. */
+  /**
+   * Consecutive losses that trigger a full session halt.
+   *
+   * THIS IS A BACKSTOP, NOT THE PRIMARY BREAKER (v4/WP1).
+   *
+   * It used to be 5. For a healthy system — say a 1:2 reward:risk at a 40–45%
+   * hit rate — the median LONGEST losing streak over 300 trades is 8 to 10, so
+   * a 5-loss breaker halts a strategy that is working exactly as designed. It
+   * was therefore measuring variance, not failure.
+   *
+   * What actually detects failure is the per-agent e-process (governance.ts,
+   * WP9): a sequential test against "E[R] ≥ 0" on this agent's own realised
+   * trades, which halves risk at e ≥ 5 and disables the agent at e ≥ 20. The
+   * streak count is kept only as a very high backstop for the pathological case
+   * the e-process has not yet seen enough trades to judge — and the ladder
+   * above it (see LOSS_LADDER) de-escalates long before either fires.
+   */
   haltAfterConsecutiveLosses: number;
   /** Minimum margin level (%) required before opening anything new. */
   minMarginLevelPct: number;
@@ -51,7 +67,7 @@ export const DEFAULT_RISK_POLICY: RiskPolicy = {
   maxOpenPositions: 12,
   maxPositionsPerSymbol: 3,
   maxCurrencyExposurePct: 2,
-  haltAfterConsecutiveLosses: 5,
+  haltAfterConsecutiveLosses: 10,
   minMarginLevelPct: 500,
   symbolCooldownMs: 15 * 60 * 1000,
   liveTradingEnabled: false,

@@ -30,7 +30,7 @@ import { buildEvidence, MODE_MIN_AGREEING_FAMILIES, type EvidenceResult } from "
 import { markovFromPrices, directionalPersistence, sampleConfidence } from "./markov";
 import { betaPosterior, blendProbability, garchVolatility } from "./analytics";
 import { assessRegime, isRegimeTradeable } from "./regime";
-import { bestTarget, simulateTrade, type MonteCarloResult } from "./montecarlo";
+import { bestTarget, MIN_TARGET_R, simulateTrade, type MonteCarloResult } from "./montecarlo";
 import { evaluateRisk, type RiskDecision, type RiskPolicy, type RiskState } from "./risk";
 import { kellyFraction, pointValuePerLot, priceToPoints, sizePosition, type SizingResult } from "./sizing";
 import { assessNewsGate, type NewsGate } from "./news";
@@ -203,6 +203,24 @@ const PLAN_TTL_MS: Record<TradeMode, number> = {
   intraday: 10 * 60_000,
   swing: 60 * 60_000,
 };
+
+/**
+ * MINIMUM REWARD:RISK, MEASURED AT THE EXPECTED FILL — the owner's hard rule.
+ *
+ * The old desk computed reward:risk from the QUOTE, then handed the EA a
+ * trigger placed 0.08–0.12 ATR BEYOND that quote. Every fill was therefore
+ * worse than the geometry the decision was made on: with a 0.10 ATR offset on
+ * a 1.5 ATR stop, a plan sold as "1:2" was really 1:1.87, and on a scalp
+ * (0.08 ATR against a minimum 0.8 ATR stop) it was 1:1.82. Small differences,
+ * but the whole edge lives in that ratio.
+ *
+ * The fill is modelled as the trigger plus the mode's slippage allowance —
+ * worst case, since the plan only fires when price is already moving — and the
+ * ratio is recomputed from THAT price. Anything under 2.0 is refused with the
+ * number in the reason, so the terminal can show exactly what was rejected and
+ * why.
+ */
+export const MIN_RR_FILL = 2.0;
 
 /**
  * How much of the final quality score comes from the evidence ensemble rather
@@ -679,8 +697,26 @@ export function evaluate(input: AgentInput): AgentDecision {
     garchSigma > 0 ? Math.min(garchSigma, regime.stepVolatility * 2.5) : regime.stepVolatility,
   );
 
+  /**
+   * The FILL price the plan will actually get: the trigger plus slippage.
+   *
+   * `trigger` is defined below as a displacement from the quote in the trade's
+   * own direction, so the fill is one more slippage allowance beyond it.
+   * Everything that depends on the entry — the target multiples, the reward:risk
+   * gate and the position size — is measured from here, not from the quote.
+   */
+  // The trigger is a small displacement beyond the current price in the trade
+  // direction: the EA fires when the market confirms the move rather than at
+  // whatever price happened to exist when the server finished thinking. It is
+  // defined HERE — before the target search — because the fill it implies is
+  // the price every reward:risk number below is measured from.
+  const triggerOffset = stop.atrValue * (input.mode === "scalp" ? 0.08 : 0.12);
+  const trigger = side === "buy" ? entry + triggerOffset : entry - triggerOffset;
+  const slippagePrice = slippagePoints * input.spec.point;
+  const expectedFill = side === "buy" ? trigger + slippagePrice : trigger - slippagePrice;
+
   const search = bestTarget({
-    entry,
+    entry: expectedFill,
     // The RISK UNIT the gate is measured in — the widened stop, not the raw
     // structural one. Target multiples are searched off this distance.
     sl,
@@ -698,6 +734,28 @@ export function evaluate(input: AgentInput): AgentDecision {
 
   if (!search) return fail(["Monte Carlo could not evaluate this setup."]);
   const monteCarlo = search.result;
+
+  // ── 5a. HARD REWARD:RISK FLOOR, AT THE EXPECTED FILL ──────────────────────
+  // `search.tp` was chosen from `expectedFill`, so `monteCarlo.rewardRisk` IS
+  // the reward:risk at the price the position is expected to pay. The explicit
+  // recomputation below is not redundant: it is the invariant stated in the
+  // units the rule is written in, and it is what the tests assert across every
+  // mode and both generators.
+  const rrFill = Math.abs(search.tp - expectedFill) / Math.abs(expectedFill - sl);
+  if (rrFill < MIN_RR_FILL - 1e-9) {
+    rejections.push(
+      `Reward:risk at the expected fill is 1:${rrFill.toFixed(2)} ` +
+        `(target ${search.tp.toFixed(input.spec.digits + 1)} vs fill ${expectedFill.toFixed(input.spec.digits + 1)}, ` +
+        `stop ${sl.toFixed(input.spec.digits + 1)}), below the required 1:${MIN_RR_FILL.toFixed(2)}.`,
+    );
+  }
+  if (search.rewardRisk < MIN_TARGET_R - 1e-9) {
+    // Unreachable by construction (bestTarget refuses to search below 2R), and
+    // kept as a belt-and-braces assertion of the same rule.
+    rejections.push(
+      `Target search returned ${search.rewardRisk.toFixed(2)}R, below the ${MIN_TARGET_R.toFixed(2)}R floor.`,
+    );
+  }
 
   // ── 5b. Bayesian blend of simulated and realised win probability ──────────
   // The simulation assumes the model is right. The desk's own history is the
@@ -820,22 +878,20 @@ export function evaluate(input: AgentInput): AgentDecision {
     Math.min(risk.riskPct, risk.riskCeilingPct),
   );
 
-  // The trigger is a small displacement beyond the current price in the trade
-  // direction: the EA fires when the market confirms the move rather than at
-  // whatever price happened to exist when the server finished thinking.
-  const triggerOffset = stop.atrValue * (input.mode === "scalp" ? 0.08 : 0.12);
-  const trigger = side === "buy" ? entry + triggerOffset : entry - triggerOffset;
+  // `trigger` and `triggerOffset` are defined above, before the target search,
+  // because the fill price they imply is what the 1:2 gate measures against.
   const invalidate =
     side === "buy" ? entry - stop.atrValue * 0.6 : entry + stop.atrValue * 0.6;
 
-  // Size against the TRIGGER, not the current quote.
+  // Size against the EXPECTED FILL, not the current quote.
   //
   // The stop is structural and fixed, so firing at the trigger puts the fill
-  // `triggerOffset` further from it than the quote was. Sizing off `entry`
-  // therefore under-states the real stop distance and silently risks more than
-  // the budget — ~8% more on an intraday plan, and up to ~16% on a scalp where
-  // a 0.08 ATR offset sits against a 0.5 ATR minimum stop. Risk has to be
-  // measured from the price we actually expect to pay.
+  // `triggerOffset` further from it than the quote was, and slippage adds a
+  // little more again. Sizing off the quote therefore UNDER-states the real
+  // stop distance, and because the lot size divides by that distance it
+  // silently risks MORE than the budget — ~8% more on an intraday plan, up to
+  // ~16% on a scalp where a 0.08 ATR offset sits against a 0.5 ATR stop. Risk
+  // is measured from the price we actually expect to pay: the fill.
   //
   // No cost ceilings are passed any more: sizing's job is to convert a risk
   // budget into a legal lot size, not to re-litigate the edge. The spread is
@@ -843,7 +899,7 @@ export function evaluate(input: AgentInput): AgentDecision {
   const sizing = sizePosition({
     spec: specForSizing,
     side,
-    entry: trigger,
+    entry: expectedFill,
     sl,
     tp: search.tp,
     equity: input.account.equity,
@@ -928,6 +984,10 @@ export function evaluate(input: AgentInput): AgentDecision {
     side,
     mode: input.mode,
     trigger,
+    // "break" is the v3.04 behaviour and stays the default until the v4
+    // execution agent (WP7) chooses between limit/stop/confirm entries per
+    // setup. The EA understands all of them; this desk simply has not earned a
+    // better entry style than the trigger yet.
     triggerType: "break",
     confirmTicks: input.mode === "scalp" ? 2 : 1,
     invalidate,
@@ -940,6 +1000,10 @@ export function evaluate(input: AgentInput): AgentDecision {
     maxSlippagePoints: input.mode === "scalp" ? 3 : 6,
     expiresAt: now + PLAN_TTL_MS[input.mode],
     createdAt: now,
+    // v3.05 execution context for the EA's position manager. Optional on the
+    // wire, so an older EA (and an older server) are unaffected.
+    entryTimeframe: entrySeries.timeframe,
+    costPrice,
     management,
     rationale: {
       confluenceScore: Number(qualityScore.toFixed(1)),
@@ -947,7 +1011,9 @@ export function evaluate(input: AgentInput): AgentDecision {
       regime: `${entrySeries.timeframe} ${regime.kind}`,
       winProbability: Number(blendedWinProbability.toFixed(3)),
       expectancyR: Number(effectiveExpectancyR.toFixed(3)),
-      rewardRisk: Number(monteCarlo.rewardRisk.toFixed(2)),
+      // The reward:risk the trade actually has — measured at the expected
+      // fill, which is the same number the 1:2 gate enforced.
+      rewardRisk: Number(rrFill.toFixed(2)),
       markovPersistence: Number(persistence.toFixed(3)),
       factors: [
         // The evidence ensemble first: it is the part of the decision with the
@@ -962,9 +1028,12 @@ export function evaluate(input: AgentInput): AgentDecision {
         ...confluence.factors,
         {
           label: "Monte Carlo",
+          // The fill the ratio is measured from is stated: a "2.4R" that was
+          // computed from the quote is not the same trade as a 2.4R at fill.
           detail:
             `${(blendedWinProbability * 100).toFixed(0)}% win (${posterior.source}) over ${horizon} ${entrySeries.timeframe} bars ` +
-            `at ${monteCarlo.rewardRisk.toFixed(1)}R, E=${effectiveExpectancyR.toFixed(2)}R after costs`,
+            `at ${rrFill.toFixed(2)}R at the expected fill ${expectedFill.toFixed(input.spec.digits + 1)}, ` +
+            `E=${effectiveExpectancyR.toFixed(2)}R after costs`,
           weight: 1,
           aligned: true,
         },

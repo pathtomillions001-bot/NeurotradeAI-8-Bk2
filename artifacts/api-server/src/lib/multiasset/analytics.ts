@@ -58,7 +58,12 @@ export const VOLUME = 5;
 
 /** Abramowitz & Stegun 26.2.17 normal CDF — |error| < 7.5e-8. */
 export function normalCdf(x: number): number {
-  if (!Number.isFinite(x)) return 0.5;
+  // Φ(+∞) = 1, Φ(−∞) = 0. This used to return 0.5 for any non-finite input,
+  // which quietly halved a probability whenever a caller passed an overflowed
+  // statistic — a z of Infinity from a degenerate variance is "certainly
+  // above", not "a coin flip". NaN keeps 0.5 because there is no answer.
+  if (Number.isNaN(x)) return 0.5;
+  if (!Number.isFinite(x)) return x > 0 ? 1 : 0;
   const sign = x < 0 ? -1 : 1;
   const z = Math.abs(x) / Math.SQRT2;
   const t = 1 / (1 + 0.3275911 * z);

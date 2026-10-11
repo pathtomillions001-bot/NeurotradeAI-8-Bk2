@@ -1,0 +1,629 @@
+{
+  "tool": "MT5 Desk v4 — WP9 governance study",
+  "mode": "intraday",
+  "generatedAt": "2026-10-11T19:04:09.989Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --governance --mode intraday --seed 1",
+  "thresholds": {
+    "eHalve": 5,
+    "eDisable": 20,
+    "lowerBoundR": 1,
+    "upperBoundR": 3,
+    "betaGrid": [
+      0.3333333333333333,
+      0.16666666666666666,
+      0.08333333333333333,
+      0.041666666666666664,
+      0.020833333333333332,
+      0.010416666666666666
+    ],
+    "phDeltaR": 0.25,
+    "phThresholdR": 12,
+    "breakEvenPLoss": 0.5,
+    "altPLoss": [
+      0.6,
+      0.675,
+      0.75
+    ],
+    "streams": 2000,
+    "streamTrades": 200
+  },
+  "stepWealth": [
+    {
+      "r": -1,
+      "stepWealth": 1.109375,
+      "note": "evidence against the agent"
+    },
+    {
+      "r": -0.5,
+      "stepWealth": 1.0546875,
+      "note": "evidence against the agent"
+    },
+    {
+      "r": 0,
+      "stepWealth": 0.9999999999999999,
+      "note": "no information"
+    },
+    {
+      "r": 0.5,
+      "stepWealth": 0.9453125,
+      "note": "evidence for the agent"
+    },
+    {
+      "r": 1,
+      "stepWealth": 0.890625,
+      "note": "evidence for the agent"
+    },
+    {
+      "r": 2,
+      "stepWealth": 0.78125,
+      "note": "evidence for the agent"
+    },
+    {
+      "r": 3,
+      "stepWealth": 0.671875,
+      "note": "evidence for the agent"
+    }
+  ],
+  "consecutive": {
+    "halveSteps": 16,
+    "disableSteps": 29,
+    "eAtHalve": 5.26324995914544,
+    "eAtDisable": 20.289571133380985
+  },
+  "falseAlarm": {
+    "halve": {
+      "rate": 0.11,
+      "meanSteps": 107.33636363636364,
+      "medianSteps": 103,
+      "streams": 2000,
+      "trades": 200,
+      "pLoss": 0.5
+    },
+    "disable": {
+      "rate": 0.007,
+      "meanSteps": 156.78571428571428,
+      "medianSteps": 165,
+      "streams": 2000,
+      "trades": 200,
+      "pLoss": 0.5
+    }
+  },
+  "power": {
+    "threshold": 20,
+    "measurements": [
+      {
+        "rate": 0.626,
+        "meanSteps": 136.07667731629394,
+        "medianSteps": 135,
+        "streams": 500,
+        "trades": 200,
+        "pLoss": 0.6
+      },
+      {
+        "rate": 0.996,
+        "meanSteps": 94.82530120481928,
+        "medianSteps": 93,
+        "streams": 500,
+        "trades": 200,
+        "pLoss": 0.675
+      },
+      {
+        "rate": 1,
+        "meanSteps": 61.45,
+        "medianSteps": 59,
+        "streams": 500,
+        "trades": 200,
+        "pLoss": 0.75
+      }
+    ]
+  },
+  "changeDetectorGrid": [
+    {
+      "deltaR": 0.25,
+      "thresholdR": 5,
+      "nullRate": 0.766,
+      "nullMeanSteps": 84.12532637075718,
+      "altRate": 1,
+      "altMeanSteps": 26.065,
+      "selected": false
+    },
+    {
+      "deltaR": 0.25,
+      "thresholdR": 6,
+      "nullRate": 0.534,
+      "nullMeanSteps": 96.7434456928839,
+      "altRate": 1,
+      "altMeanSteps": 33.872,
+      "selected": false
+    },
+    {
+      "deltaR": 0.25,
+      "thresholdR": 8,
+      "nullRate": 0.21,
+      "nullMeanSteps": 109.5904761904762,
+      "altRate": 0.996,
+      "altMeanSteps": 49.28413654618474,
+      "selected": false
+    },
+    {
+      "deltaR": 0.25,
+      "thresholdR": 10,
+      "nullRate": 0.062,
+      "nullMeanSteps": 108.51612903225806,
+      "altRate": 0.975,
+      "altMeanSteps": 65.39487179487179,
+      "selected": false
+    },
+    {
+      "deltaR": 0.25,
+      "thresholdR": 12,
+      "nullRate": 0.016,
+      "nullMeanSteps": 112.625,
+      "altRate": 0.947,
+      "altMeanSteps": 78.45617740232312,
+      "selected": true
+    },
+    {
+      "deltaR": 0.25,
+      "thresholdR": 15,
+      "nullRate": 0.003,
+      "nullMeanSteps": 71.66666666666667,
+      "altRate": 0.893,
+      "altMeanSteps": 97.85330347144456,
+      "selected": false
+    },
+    {
+      "deltaR": 0.5,
+      "thresholdR": 5,
+      "nullRate": 0.065,
+      "nullMeanSteps": 91.12307692307692,
+      "altRate": 0.839,
+      "altMeanSteps": 77.17044100119189,
+      "selected": false
+    },
+    {
+      "deltaR": 0.5,
+      "thresholdR": 6,
+      "nullRate": 0.013,
+      "nullMeanSteps": 123.3076923076923,
+      "altRate": 0.651,
+      "altMeanSteps": 91.36405529953917,
+      "selected": false
+    },
+    {
+      "deltaR": 0.5,
+      "thresholdR": 8,
+      "nullRate": 0.001,
+      "nullMeanSteps": 192,
+      "altRate": 0.313,
+      "altMeanSteps": 105.19169329073482,
+      "selected": false
+    },
+    {
+      "deltaR": 0.5,
+      "thresholdR": 10,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0.14,
+      "altMeanSteps": 112.35714285714286,
+      "selected": false
+    },
+    {
+      "deltaR": 0.5,
+      "thresholdR": 12,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0.058,
+      "altMeanSteps": 123.34482758620689,
+      "selected": false
+    },
+    {
+      "deltaR": 0.5,
+      "thresholdR": 15,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0.017,
+      "altMeanSteps": 141.41176470588235,
+      "selected": false
+    },
+    {
+      "deltaR": 0.75,
+      "thresholdR": 5,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0.019,
+      "altMeanSteps": 104.94736842105263,
+      "selected": false
+    },
+    {
+      "deltaR": 0.75,
+      "thresholdR": 6,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0.002,
+      "altMeanSteps": 89.5,
+      "selected": false
+    },
+    {
+      "deltaR": 0.75,
+      "thresholdR": 8,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0.001,
+      "altMeanSteps": 62,
+      "selected": false
+    },
+    {
+      "deltaR": 0.75,
+      "thresholdR": 10,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0.001,
+      "altMeanSteps": 70,
+      "selected": false
+    },
+    {
+      "deltaR": 0.75,
+      "thresholdR": 12,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0,
+      "altMeanSteps": null,
+      "selected": false
+    },
+    {
+      "deltaR": 0.75,
+      "thresholdR": 15,
+      "nullRate": 0,
+      "nullMeanSteps": null,
+      "altRate": 0,
+      "altMeanSteps": null,
+      "selected": false
+    }
+  ],
+  "overlay": {
+    "combinations": 7533,
+    "maxMultiplier": 1,
+    "blockedCombinations": 781,
+    "halvedCombinations": 4651,
+    "unchangedCombinations": 2101
+  },
+  "corpus": [
+    {
+      "fixture": "positive-control",
+      "series": "positive-control#1",
+      "trades": 464,
+      "meanR": 0.12571502609544954,
+      "finalE": 0.00001137937144879696,
+      "maxE": 1,
+      "halvedAt": null,
+      "disabledAt": null,
+      "phMax": 5.522338433344423,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "positive-control",
+      "series": "positive-control#2",
+      "trades": 464,
+      "meanR": -0.009992224657500031,
+      "finalE": 0.023056231066595635,
+      "maxE": 1.7072783210387645,
+      "halvedAt": null,
+      "disabledAt": null,
+      "phMax": 7.101522889880044,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "positive-control",
+      "series": "positive-control#3",
+      "trades": 464,
+      "meanR": 0.08603653615215154,
+      "finalE": 0.00011934387879469196,
+      "maxE": 1.0142954885077042,
+      "halvedAt": null,
+      "disabledAt": null,
+      "phMax": 4.798430837656196,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "seasonal",
+      "series": "seasonal#1",
+      "trades": 464,
+      "meanR": -0.08750967866323814,
+      "finalE": 2.092385669562078,
+      "maxE": 4.074731067606454,
+      "halvedAt": null,
+      "disabledAt": null,
+      "phMax": 6.506543075897167,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "seasonal",
+      "series": "seasonal#2",
+      "trades": 464,
+      "meanR": -0.022034265538768676,
+      "finalE": 0.04917918754720588,
+      "maxE": 1.4895849533337036,
+      "halvedAt": null,
+      "disabledAt": null,
+      "phMax": 6.239185813127151,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "seasonal",
+      "series": "seasonal#3",
+      "trades": 464,
+      "meanR": -0.028047430877384504,
+      "finalE": 0.057624786504439605,
+      "maxE": 8.848795230320865,
+      "halvedAt": 100,
+      "disabledAt": null,
+      "phMax": 8.234954376973844,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "mean-reverting",
+      "series": "mean-reverting#1",
+      "trades": 464,
+      "meanR": -0.2576941581092361,
+      "finalE": 23840.612286819796,
+      "maxE": 42904.71324912268,
+      "halvedAt": 40,
+      "disabledAt": 150,
+      "phMax": 19.606398591858575,
+      "phRegistrations": 16
+    },
+    {
+      "fixture": "mean-reverting",
+      "series": "mean-reverting#2",
+      "trades": 464,
+      "meanR": -0.21118484762393247,
+      "finalE": 1951.713062333349,
+      "maxE": 2191.279701781573,
+      "halvedAt": 102,
+      "disabledAt": 160,
+      "phMax": 16.19806302917347,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "mean-reverting",
+      "series": "mean-reverting#3",
+      "trades": 464,
+      "meanR": -0.22475283284848904,
+      "finalE": 4806.218803622358,
+      "maxE": 6028.854309993479,
+      "halvedAt": 67,
+      "disabledAt": 135,
+      "phMax": 14.597339790426878,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "null-driftless",
+      "series": "null-driftless#1",
+      "trades": 464,
+      "meanR": -0.2075251729294688,
+      "finalE": 1622.1131555475292,
+      "maxE": 2394.0407032307608,
+      "halvedAt": 49,
+      "disabledAt": 189,
+      "phMax": 13.055335712990548,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "null-driftless",
+      "series": "null-driftless#2",
+      "trades": 464,
+      "meanR": -0.15797325623381622,
+      "finalE": 100.50417295298452,
+      "maxE": 138.42878770596923,
+      "halvedAt": 109,
+      "disabledAt": 174,
+      "phMax": 8.746131426517278,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "null-driftless",
+      "series": "null-driftless#3",
+      "trades": 464,
+      "meanR": -0.16112791783985872,
+      "finalE": 109.85455589614237,
+      "maxE": 302.927613370915,
+      "halvedAt": 70,
+      "disabledAt": 146,
+      "phMax": 9.215945492372796,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "null-shuffled",
+      "series": "null-shuffled#1",
+      "trades": 464,
+      "meanR": -0.16587956484736335,
+      "finalE": 170.7275512477074,
+      "maxE": 287.7525410047649,
+      "halvedAt": 58,
+      "disabledAt": 209,
+      "phMax": 8.635458204755128,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "null-shuffled",
+      "series": "null-shuffled#2",
+      "trades": 464,
+      "meanR": -0.16747163413235883,
+      "finalE": 173.7621528709068,
+      "maxE": 303.30955582788965,
+      "halvedAt": 99,
+      "disabledAt": 292,
+      "phMax": 10.981104435296304,
+      "phRegistrations": 0
+    },
+    {
+      "fixture": "null-shuffled",
+      "series": "null-shuffled#3",
+      "trades": 464,
+      "meanR": -0.15814267654938147,
+      "finalE": 101.78106965696999,
+      "maxE": 101.78106965696999,
+      "halvedAt": 137,
+      "disabledAt": 335,
+      "phMax": 9.648538294016316,
+      "phRegistrations": 0
+    }
+  ],
+  "weekly": {
+    "report": {
+      "weekStart": "2025-01-06",
+      "weekEnd": "2025-01-13",
+      "generatedAtMs": 1736812800000,
+      "trades": {
+        "closed": 3,
+        "measuredR": 2,
+        "unmeasured": 1,
+        "wins": 1,
+        "hitRate": 0.5,
+        "meanR": 0.5,
+        "totalR": 1,
+        "meanPredictedProbability": 0.5,
+        "calibrationGapPoints": 0,
+        "brier": 0.25,
+        "meanSlippageR": null,
+        "worstR": -1,
+        "bestR": 2
+      },
+      "decisions": {
+        "evaluated": 3,
+        "armed": 1,
+        "refused": 2,
+        "refusalCodes": [
+          {
+            "code": "GK_EV_LCB",
+            "count": 2
+          }
+        ]
+      },
+      "perSymbol": [
+        {
+          "symbol": "EURUSD",
+          "trades": 2,
+          "totalR": 1,
+          "meanR": 0.5
+        },
+        {
+          "symbol": "XAUUSD",
+          "trades": 1,
+          "totalR": 0,
+          "meanR": null
+        }
+      ],
+      "agents": [],
+      "flags": [
+        "1 closed trade(s) carry no realised R — the EA did not stamp a risk at fill, so the desk cannot measure them"
+      ]
+    },
+    "expected": {
+      "closed": 3,
+      "measuredR": 2,
+      "unmeasured": 1,
+      "hitRate": 0.5,
+      "meanR": 0.5,
+      "totalR": 1,
+      "calibrationGapPoints": 0,
+      "brier": 0.25,
+      "armed": 1,
+      "refused": 2
+    }
+  },
+  "gates": [
+    {
+      "code": "G9.1_NULL_BOUND",
+      "label": "break-even false-alarm rate ≤ 1/K",
+      "pass": true,
+      "value": 0.007,
+      "threshold": 0.05,
+      "detail": "break-even streams must alarm at most 1/20 = 5.0% of the time (Ville); measured 0.700% over 2000 streams of 200 trades (halve bar: 11.000%, bound 20.0%)"
+    },
+    {
+      "code": "G9.2_POWER",
+      "label": "degraded-stream detection rate ≥ 90%",
+      "pass": true,
+      "value": 1,
+      "threshold": 0.9,
+      "detail": "a −0.35R stream (p_loss 0.675) must be caught at least 90% of the time; measured 100.0% (median 59 trades)"
+    },
+    {
+      "code": "G9.3_SPEED",
+      "label": "median trades to detection ≤ 120",
+      "pass": true,
+      "value": 59,
+      "threshold": 120,
+      "detail": "and inside 120 trades at the median; measured 59 (mean 61.5)"
+    },
+    {
+      "code": "G9.4_ARITHMETIC",
+      "label": "thresholds at 16 / 29 consecutive −1R",
+      "pass": true,
+      "value": 16,
+      "threshold": 16,
+      "detail": "the two thresholds must sit at the 16th and 29th consecutive −1R trade; measured 16 and 29, e = 5.263 and 20.290"
+    },
+    {
+      "code": "G9.5_CHANGE_OPERATING_POINT",
+      "label": "change detector: null ≤ 5%, catch ≥ 90%",
+      "pass": true,
+      "value": 0.016,
+      "threshold": 0.05,
+      "detail": "the shipped (δ=0.25R, h=12R) must stay under a 5% null rate and catch 90%+ of −0.35R streams; measured null 1.60%, catch 94.7% in a mean 78.5 trades over the 18-cell grid"
+    },
+    {
+      "code": "G9.5b_SELECTION",
+      "label": "shipped cell is the fastest qualifying cell in the grid",
+      "pass": true,
+      "value": 78.45617740232312,
+      "threshold": 78.45617740232312,
+      "detail": "the pair that ships must be the fastest-detecting cell among those that hold a null rate ≤ 5% AND catch 90%+ of −0.35R streams; 1 of 18 cells qualified, fastest qualifying 78.5 trades, shipped 94.7% at 78.5 trades — the neighbouring cell δ 0.25 h 10 is 1.9 trades faster and was rejected for a measured null rate of 6.20%"
+    },
+    {
+      "code": "G9.6_REDUCE_ONLY",
+      "label": "overlay multiplier ≤ 1 in every combination",
+      "pass": true,
+      "value": 1,
+      "threshold": 1,
+      "detail": "every proposer × status combination must compose a risk multiplier ≤ 1; swept 7533 combinations, max 1.0000 (781 blocked, 4651 halved, 2101 unchanged)"
+    },
+    {
+      "code": "G9.7_CORPUS_PATIENT",
+      "label": "no governance action on a positive-expectancy stream",
+      "pass": true,
+      "value": 0,
+      "threshold": 0,
+      "detail": "streams the desk's own simulator measured with mean R > 0 must not be governed at all; 0 of 2 were (sup-e over those streams 1.014295, whole corpus 42904.713249 over 6960 trades in 15 streams)"
+    },
+    {
+      "code": "G9.9_CORPUS_RESPONSIVE",
+      "label": "every clearly degraded stream is disabled",
+      "pass": true,
+      "value": 1,
+      "threshold": 1,
+      "detail": "streams measured at mean R ≤ −0.15R must be disabled — the positive control for the layer on desk-shaped data; 9 of 9 were (mean R of that group -0.1902)"
+    },
+    {
+      "code": "G9.8_WEEKLY_RECOUNT",
+      "label": "weekly report recount is exact",
+      "pass": true,
+      "value": 0.5,
+      "threshold": 0.5,
+      "detail": "the weekly report must recount a hand-checkable week exactly: 3 closed (2 measured, 1 unmeasured), hit 0.5, mean 0.5R, gap 0 pts, Brier 0.25, 1 armed / 2 refused"
+    }
+  ],
+  "verdict": "PASS",
+  "notes": [
+    "outcomes are clipped to [−1R, +3R]: the lower bound is what makes the wealth nonnegative (λ ≤ 1/|lower|), and the upper one keeps a single outsized win from retiring an agent",
+    "the per-step bet is mixed uniformly over β ∈ {0.333333, 0.166667, 0.083333, 0.041667, 0.020833, 0.010417} — a mixture of martingales is a martingale, so the 1/K bound survives the hedge",
+    "the e-process's falsification target is one-sided (mean R ≥ 0) and its outcomes are the RAW realised R of the trades that plan produced, clipped only at the bounds above; a trade with no EA-stamped risk carries no R at all and is charged to nobody",
+    "the ±1R coin used for the null and the power tables is the desk's own geometry reduced to its simplest form (a 1R stop against a 2–3R target fixes the outcome scale); it is a straw man for the LAYER, not a model of the market, and the corpus half of this report is where the desk's own trades are used instead",
+    "the change detector's grid is stored in full (18 cells of δ × h) because the shipped pair is a CHOICE made from it: the pair is the one whose measured null rate is inside the report's tolerance with the fastest detection. Re-tuning either constant without re-running this study is not permitted by the programme's rules",
+    "the overlay sweep is an enumeration, not a sample: every non-empty proposer set crossed with every status assignment. The composed multiplier is 0.5 however MANY proposers are halved — a compounding factor was rejected because the sizing layer cannot express it in whole lots and the journal sentence would stop being checkable",
+    "the durable half of WP9 — the five desk_* tables, their DDL and the shadow-evaluation / trade / journal round-trip — is NOT measured here: this study does not open a database. It is verified by wp9-governance.test.ts (W9.10, W9.14) against PGlite, and the runbook for that is in docs/mt5-live-desk-v4.md §14",
+    "governance acts on the desk's own outcomes, so it cannot be back-tested on the corpora that generated those outcomes without circularity; what is measured is the LAYER's operating characteristics, plus its effect on the desk's measured stream"
+  ]
+}

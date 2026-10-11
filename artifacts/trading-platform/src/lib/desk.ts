@@ -527,6 +527,96 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+/**
+ * WP10 — the learning and governance surfaces.
+ *
+ * Everything here is READ-ONLY except the operator resume, which is the one action
+ * a human takes on this page. Each endpoint is absent (404) while its v4 subsystem
+ * is switched off, so a component must treat "not available" as a normal answer
+ * rather than an error — the desk has simply never had those layers switched on.
+ */
+export interface GovernanceAgent {
+  agentId: string;
+  status: "active" | "halved" | "disabled";
+  /** Evidence against the agent's edge; grows on losses, decays on wins. */
+  eValue: number;
+  /** The bars the e-value is compared against. */
+  halveAt: number;
+  disableAt: number;
+  outcomes: number;
+  wins: number;
+  totalR: number;
+  /** The change detector's statistic, and how many times it has registered. */
+  phValue: number;
+  phAlarms: number;
+  reason: string | null;
+  updatedAtMs: number | null;
+}
+
+export interface WeeklyReport {
+  source: "desk";
+  weekStart: string;
+  weekEnd: string;
+  generatedAtMs: number;
+  trades: {
+    closed: number;
+    measuredR: number;
+    unmeasured: number;
+    wins: number;
+    hitRate: number | null;
+    meanR: number | null;
+    totalR: number;
+    meanPredictedProbability: number | null;
+    calibrationGapPoints: number | null;
+    brier: number | null;
+    meanSlippageR: number | null;
+    worstR: number | null;
+    bestR: number | null;
+  };
+  decisions: {
+    evaluated: number;
+    armed: number;
+    refused: number;
+    armRate: number | null;
+    refusalCodes: { code: string; count: number }[];
+  };
+  perSymbol: { symbol: string; trades: number; totalR: number; meanR: number | null }[];
+  agents: { agentId: string; status: string; eValue: number; outcomes: number; totalR: number; reason: string | null }[];
+  flags: string[];
+  window: { weekStartMs: number; weekEndMs: number };
+}
+
+export interface JournalEntryRow {
+  id: string;
+  ts: number;
+  kind: string;
+  symbol: string | null;
+  message: string;
+  detail: unknown;
+}
+
+export interface RegimeRead {
+  symbol: string;
+  frame: string;
+  mode: TradeMode;
+  state: string;
+  posterior: Record<string, number>;
+  expectedDwellBars: number;
+  changeProbability: number;
+  fit: { bars: number; iterations: number; logLikelihood: number; reused: boolean; adequate: boolean };
+  sides: {
+    buy: { required: string; probability: number; permit: boolean; codes: string[]; reason: string };
+    sell: { required: string; probability: number; permit: boolean; codes: string[]; reason: string };
+  };
+  asOfMs: number;
+  ageMs: number;
+  cached: boolean;
+  available: boolean;
+  reason: string;
+  bars: number;
+  lastBarAtMs: number | null;
+}
+
 export const deskApi = {
   state: () => request<DeskStateResponse>("/desk/state"),
   markets: () => request<{ source: "mt5" | "unlinked"; markets: Market[]; catalogCount: number }>("/desk/markets"),
@@ -549,6 +639,51 @@ export const deskApi = {
   flatten: (reason: string) => request<{ ok: true }>("/desk/flatten", { method: "POST", body: JSON.stringify({ reason }) }),
   settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy; timezone: string; timezones: DeskTimezone[] }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
   resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
+  /**
+   * The per-agent governance registry.
+   *
+   * `available: false` means the endpoint 404'd — the layer is off, which is the
+   * shipped state, not a failure to report as one.
+   */
+  governance: () =>
+    request<{ sessionId: string; agents: GovernanceAgent[] }>("/desk/governance").then(
+      (data) => ({ available: true as const, ...data }),
+      () => ({ available: false as const, sessionId: "", agents: [] as GovernanceAgent[] }),
+    ),
+  /** The Monday-to-Monday report, rebuilt from the durable rows on every read. */
+  weeklyReport: (weekStart?: string) =>
+    request<WeeklyReport>(`/desk/learning/weekly${weekStart ? `?weekStart=${encodeURIComponent(weekStart)}` : ""}`).then(
+      (data) => ({ available: true as const, report: data }),
+      () => ({ available: false as const, report: null }),
+    ),
+  /** The durable journal, newest first. */
+  journal: (params: { kind?: string | null; limit?: number } = {}) => {
+    const query = new URLSearchParams();
+    if (params.kind) query.set("kind", params.kind);
+    if (params.limit) query.set("limit", String(params.limit));
+    return request<{ sessionId: string; entries: JournalEntryRow[] }>(`/desk/learning/journal?${query.toString()}`).then(
+      (data) => ({ available: true as const, entries: data.entries }),
+      () => ({ available: false as const, entries: [] as JournalEntryRow[] }),
+    );
+  },
+  /** The desk-timeframe regime state, memoised server-side for two seconds. */
+  regime: (symbol?: string, mode?: TradeMode) => {
+    const query = new URLSearchParams();
+    if (symbol) query.set("symbol", symbol);
+    if (mode) query.set("mode", mode);
+    return request<{ mode: TradeMode; frame: string; ttlMs: number; asOfMs: number; states: RegimeRead[] }>(
+      `/desk/regime?${query.toString()}`,
+    ).then(
+      (data) => ({ available: true as const, ...data }),
+      () => ({ available: false as const, mode: (mode ?? "intraday") as TradeMode, frame: "", ttlMs: 0, asOfMs: 0, states: [] as RegimeRead[] }),
+    );
+  },
+  /** An OPERATOR action: put an agent back to work. The note is required. */
+  resumeAgent: (agentId: string, note: string) =>
+    request<{ ok: true; agent: GovernanceAgent | null }>("/desk/governance/resume", {
+      method: "POST",
+      body: JSON.stringify({ agentId, note }),
+    }),
   projection: (params: { winProbability: number; rewardRisk: number; trades: number }) => request<{ assumptions: Record<string, number>; disciplined: ProjectionResult; martingale: ProjectionResult; note: string }>(`/desk/risk/projection?winProbability=${params.winProbability}&rewardRisk=${params.rewardRisk}&trades=${params.trades}`),
   /**
    * The session's pairing code.

@@ -353,6 +353,106 @@ CREATE TABLE IF NOT EXISTS mt5_pairing_codes (
   redeemed_at_ms BIGINT               -- first successful use
 );
 CREATE INDEX IF NOT EXISTS mt5_pairing_codes_session_idx ON mt5_pairing_codes (session_id);
+
+-- ── WP9: the Desk's durable learning and governance record ───────────────────
+-- Every claim the v4 pipeline makes about itself ("this is the desk's
+-- out-of-sample record", "this agent was disabled by its own e-process") is only
+-- true if it survives a restart. These five tables are that record; the Drizzle
+-- definitions live in src/schema/desk.ts and must stay in step with this DDL.
+CREATE TABLE IF NOT EXISTS desk_shadow_evaluations (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  evaluated_at_ms BIGINT NOT NULL,
+  symbol TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  armed BOOLEAN NOT NULL,
+  plan_id TEXT,
+  direction TEXT,
+  probability DOUBLE PRECISION,
+  probability_lower_bound DOUBLE PRECISION,
+  break_even_probability DOUBLE PRECISION,
+  expectancy_r DOUBLE PRECISION,
+  cost_r DOUBLE PRECISION,
+  agents_json TEXT NOT NULL DEFAULT '[]',
+  refusals_json TEXT NOT NULL DEFAULT '[]',
+  gate_codes_json TEXT NOT NULL DEFAULT '[]',
+  outcome_r DOUBLE PRECISION,
+  resolved_at_ms BIGINT,
+  payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS desk_shadow_session_idx ON desk_shadow_evaluations (session_id, evaluated_at_ms);
+CREATE INDEX IF NOT EXISTS desk_shadow_symbol_idx ON desk_shadow_evaluations (session_id, symbol, mode);
+
+CREATE TABLE IF NOT EXISTS desk_trades (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  ticket BIGINT NOT NULL,
+  plan_id TEXT,
+  symbol TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  side TEXT NOT NULL,
+  opened_at_ms BIGINT NOT NULL,
+  closed_at_ms BIGINT NOT NULL,
+  lots DOUBLE PRECISION NOT NULL,
+  risk_money DOUBLE PRECISION,
+  net_profit DOUBLE PRECISION NOT NULL,
+  realised_r DOUBLE PRECISION,
+  predicted_probability DOUBLE PRECISION,
+  slippage_r DOUBLE PRECISION,
+  entry_price DOUBLE PRECISION,
+  exit_price DOUBLE PRECISION,
+  exit_reason TEXT,
+  agents_json TEXT NOT NULL DEFAULT '[]',
+  payload_json TEXT
+);
+CREATE INDEX IF NOT EXISTS desk_trades_session_idx ON desk_trades (session_id, closed_at_ms);
+CREATE INDEX IF NOT EXISTS desk_trades_symbol_idx ON desk_trades (session_id, symbol, mode);
+
+CREATE TABLE IF NOT EXISTS desk_journal (
+  id SERIAL PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  entry_id TEXT NOT NULL,
+  ts_ms BIGINT NOT NULL,
+  kind TEXT NOT NULL,
+  symbol TEXT,
+  message TEXT NOT NULL,
+  detail_json TEXT
+);
+CREATE INDEX IF NOT EXISTS desk_journal_session_idx ON desk_journal (session_id, ts_ms);
+CREATE UNIQUE INDEX IF NOT EXISTS desk_journal_entry_idx ON desk_journal (session_id, entry_id);
+
+CREATE TABLE IF NOT EXISTS desk_calibrators (
+  id SERIAL PRIMARY KEY,
+  kind TEXT NOT NULL,
+  ref_key TEXT NOT NULL DEFAULT '*',
+  version TEXT NOT NULL,
+  mode TEXT,
+  symbol TEXT,
+  samples INTEGER NOT NULL DEFAULT 0,
+  payload_json TEXT NOT NULL,
+  created_at_ms BIGINT NOT NULL,
+  active BOOLEAN NOT NULL DEFAULT TRUE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS desk_calibrators_version_idx ON desk_calibrators (kind, ref_key, version);
+CREATE INDEX IF NOT EXISTS desk_calibrators_kind_idx ON desk_calibrators (kind, ref_key, created_at_ms);
+
+CREATE TABLE IF NOT EXISTS desk_governance_state (
+  session_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  e_value DOUBLE PRECISION NOT NULL DEFAULT 1,
+  outcomes INTEGER NOT NULL DEFAULT 0,
+  wins INTEGER NOT NULL DEFAULT 0,
+  total_r DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ph_value DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ph_alarms INTEGER NOT NULL DEFAULT 0,
+  ph_mean DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ph_cumulative DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ph_max DOUBLE PRECISION NOT NULL DEFAULT 0,
+  updated_at_ms BIGINT NOT NULL,
+  reason TEXT,
+  PRIMARY KEY (session_id, agent_id)
+);
 `;
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

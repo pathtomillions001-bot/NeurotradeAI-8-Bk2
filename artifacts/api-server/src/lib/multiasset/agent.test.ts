@@ -307,7 +307,9 @@ test("an account too small for the minimum lot is refused, not over-risked", () 
 
 test("a halted desk is refused before any analysis cost is paid", () => {
   let state = createRiskState();
-  for (let i = 0; i < 5; i++) {
+  // 10, not 5: see the risk.test.ts note on why a five-loss halt was a
+  // false-positive machine for a healthy 1:2 system.
+  for (let i = 0; i < 10; i++) {
     state = recordOutcome(state, { symbol: "EURUSD", profit: -10, closedAt: 1 });
   }
   const decision = run({ riskState: state });

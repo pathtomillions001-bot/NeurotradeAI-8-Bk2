@@ -9,6 +9,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { makeRng } from "./math";
+
 import {
   DEFAULT_RISK_POLICY,
   confirmRegimeChange,
@@ -186,14 +188,49 @@ test("a suspension survives the daily reset; the loss counters do not", () => {
   assert.equal(state.realisedPnlToday, 0);
 });
 
-test("five consecutive losses halt the desk for the session", () => {
+test("TEN consecutive losses halt the desk for the session", () => {
+  // WAS FIVE. For a healthy 1:2 system at a 40-45% hit rate the median longest
+  // losing streak over 300 trades is 8-10 (the test below measures it), so a
+  // five-loss breaker halts a strategy that is performing exactly as designed.
+  // The streak count is now a backstop; the per-agent e-process (WP9) is the
+  // primary breaker and the LOSS_LADDER de-escalates long before this fires.
   let state = createRiskState();
-  for (let i = 0; i < 5; i++) state = recordOutcome(state, loss("EURUSD", 1_000));
+  for (let i = 0; i < 9; i++) {
+    state = recordOutcome(state, loss("EURUSD", 1_000));
+    assert.equal(state.haltedUntilNextSession, false, `halted after only ${i + 1} losses`);
+  }
+  state = recordOutcome(state, loss("EURUSD", 1_000));
   assert.equal(state.haltedUntilNextSession, true);
   // Even a fresh, untouched symbol is blocked once the desk is halted.
   const decision = check({ state, symbol: "GBPUSD" });
   assert.equal(decision.allow, false);
   assert.ok(decision.breaches.some((b) => /consecutive losses/.test(b)));
+});
+
+test("why 5 was wrong: a healthy 1:2 system routinely runs 8-loss streaks", () => {
+  // Deterministic: seeded RNG only. 300 trades at a 42% hit rate (the middle of
+  // the 40-45% band a 1:2 system needs to be profitable) — measure the longest
+  // losing streak of each run and take the median.
+  const rng = makeRng(20260105);
+  const streaks: number[] = [];
+  for (let run = 0; run < 400; run++) {
+    let current = 0;
+    let worst = 0;
+    for (let t = 0; t < 300; t++) {
+      if (rng() < 0.42) {
+        current = 0;
+      } else {
+        current++;
+        if (current > worst) worst = current;
+      }
+    }
+    streaks.push(worst);
+  }
+  streaks.sort((a, b) => a - b);
+  const median = streaks[Math.floor(streaks.length / 2)] ?? 0;
+  assert.ok(median >= 8, `median longest losing streak was ${median}; a 5-loss halt would fire on a healthy system`);
+  const pctFiveOrMore = streaks.filter((s) => s >= 5).length / streaks.length;
+  assert.ok(pctFiveOrMore > 0.95, `only ${(pctFiveOrMore * 100).toFixed(0)}% of healthy runs reached 5 losses`);
 });
 
 // ── Account-level circuit breakers ───────────────────────────────────────────

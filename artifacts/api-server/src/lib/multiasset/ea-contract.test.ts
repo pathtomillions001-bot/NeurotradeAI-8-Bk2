@@ -20,6 +20,11 @@ import { strict as assert } from "node:assert";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import {
+  decodePositionState,
+  encodePositionState,
+  initialPositionState,
+} from "./position-manager";
 import type { ArmedPlan, BridgeCommand, SyncResponse } from "./types";
 
 // ── Port of the EA's readers ────────────────────────────────────────────────
@@ -124,6 +129,9 @@ function samplePlan(): ArmedPlan {
     maxSlippagePoints: 6,
     expiresAt: 1791372196872,
     createdAt: 1791371596872,
+    entryTimeframe: "M15",
+    costPrice: 0.00025,
+    riskPoints: Number((Math.abs(1.0931769352942222 - 1.0925433088222214) / 0.00001).toFixed(4)),
     management: {
       breakeven: { triggerR: 1.2, offsetR: 0.2, structureBuffer: true },
       partials: [
@@ -300,4 +308,99 @@ test("sizing round-trips through the wire without precision loss", () => {
   // And the lots the EA receives must reproduce exactly from that distance.
   const lots = Math.floor(plan.riskMoney / (triggerToStop * 1.0) / 0.01) * 0.01;
   assert.equal(Number(lots.toFixed(2)), plan.lots);
+});
+
+
+// ── v3.05 contract: the position state wire format ──────────────────────────
+//
+// The EA persists one pipe-delimited record per managed ticket. The TypeScript
+// side and the MQL5 side must agree EXACTLY: field order, the mode letter, the
+// empty-TP convention and the version tag. A silent drift here means the EA
+// reads a different stop than it wrote, or resurrects management for the wrong
+// mode — a scalp managed as a swing gets a 3.0xATR trail and a 25-bar time
+// stop that were never planned for it.
+//
+// The reader below is a port of the EA's `PsDecode()`, deliberately including
+// its strictness (29 fields, v1 tag, known timeframe).
+
+function eaPsDecode(text: string): Record<string, string | number | boolean> | null {
+  const f = text.split("|");
+  if (f.length !== 29) return null;
+  if (f[0] !== "v1") return null;
+  const MODES: Record<string, string> = { S: "scalp", I: "intraday", W: "swing" };
+  const mode = MODES[f[5] as string];
+  if (!mode) return null;
+  // Mirrors the MQL5 `TfIndexFromName(f[6]) >= 0` guard in PsDecode.
+  const FRAMES = new Set(["M1", "M2", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1"]);
+  if (!FRAMES.has(f[6] as string)) return null;
+  return {
+    ticket: Number(f[1]),
+    planId: f[2] as string,
+    symbol: f[3] as string,
+    side: f[4] === "b" ? "buy" : "sell",
+    mode,
+    entryTimeframe: f[6] as string,
+    entry: Number(f[7]),
+    sl: Number(f[9]),
+    tp: f[10] === "" ? 0 : Number(f[10]),
+    riskPrice: Number(f[11]),
+    volume: Number(f[13]),
+    stage: f[19] as string,
+    partialsDone: Number(f[20]),
+    beDone: f[21] === "1",
+    trailArmed: f[22] === "1",
+    pyramidAdds: Number(f[23]),
+  };
+}
+
+test("v3.05 — the EA's PsEncode/PsDecode agree with the TypeScript wire format", () => {
+  const state = initialPositionState({
+    ticket: 88123,
+    planId: "b1e0f1c2-0000-4000-8000-abcdefabcdef",
+    symbol: "XAUUSD",
+    side: "sell",
+    mode: "swing",
+    entryTimeframe: "H1",
+    entry: 2412.55,
+    sl: 2420.05,
+    tp: null,
+    volume: 0.25,
+    costPrice: 0.6,
+    atrEntry: 3.2,
+    openedAt: 1_767_603_600_000,
+  });
+  const encoded = encodePositionState(state);
+  const decoded = eaPsDecode(encoded);
+  assert.ok(decoded, "the EA reader must accept the encoder's output");
+  if (!decoded) return;
+  assert.equal(decoded.ticket, 88123);
+  assert.equal(decoded.mode, "swing");
+  assert.equal(decoded.side, "sell");
+  assert.equal(decoded.entryTimeframe, "H1");
+  assert.equal(decoded.tp, 0, "a null TP is an empty field, which the EA reads as 0");
+  assert.equal(decoded.stage, "OPEN_RISK");
+  // And the round trip through the v3.05 encoder/decoder itself.
+  assert.deepEqual(decodePositionState(encoded), state);
+});
+
+test("v3.05 — the wire format rejects a truncated or mis-versioned record", () => {
+  const state = initialPositionState({
+    ticket: 1,
+    planId: "p",
+    symbol: "EURUSD",
+    side: "buy",
+    mode: "scalp",
+    entryTimeframe: "M2",
+    entry: 1.1,
+    sl: 1.099,
+    tp: 1.102,
+    volume: 0.1,
+    costPrice: 0.0001,
+    atrEntry: 0.0002,
+    openedAt: 0,
+  });
+  const encoded = encodePositionState(state);
+  assert.equal(eaPsDecode(encoded.split("|").slice(0, 28).join("|")), null);
+  assert.equal(eaPsDecode(encoded.replace("v1|", "v2|")), null);
+  assert.equal(eaPsDecode(encoded.replace("|M2|", "|X9|")), null);
 });

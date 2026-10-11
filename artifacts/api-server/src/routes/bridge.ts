@@ -29,6 +29,11 @@ import {
   terminalStaleWindowMs,
 } from "../lib/multiasset/live";
 import { recordTick } from "../lib/multiasset/subminute";
+import { getSlippageLedger, getSpreadHistory, getTimingLedger } from "../lib/multiasset/agent";
+import { recordSlippage, recordSpread, recordTimingOutcome, signedSlippageR } from "../lib/multiasset/execution";
+import { deskV4, v4On } from "../lib/multiasset/desk-v4-config";
+import { bindTicket, recordClosedTrade } from "../lib/multiasset/governance-runtime";
+import { deskAlertNow } from "../lib/multiasset/alerts";
 import {
   computeHistoryNeeded,
   parseBarsAvailable,
@@ -903,6 +908,10 @@ router.post("/sync", async (req, res) => {
         continue;
       }
       desk.quotes.set(quote.symbol, quote);
+      // WP7's spread z-score compares this quote with the ones this symbol has
+      // actually shown the desk. The flag is checked once per heartbeat, not per
+      // quote, so a switched-off desk pays nothing for the check.
+      if (v4On(deskV4().execution)) recordSpread(getSpreadHistory(), quote.symbol, quote.spreadPoints);
       const spec = desk.specs.get(quote.symbol);
       if (spec) spec.spreadPoints = quote.spreadPoints;
       // Feed the tick into the sub-minute bar builder. MetaTrader has no
@@ -955,11 +964,82 @@ router.post("/sync", async (req, res) => {
     for (const position of closed) {
       const net = position.profit + position.swap + position.commission;
       desk.riskState = recordOutcome(desk.riskState, { symbol: position.symbol, profit: net, closedAt: now }, desk.policy);
+      // WP7's timing ledger: one realised outcome, in R, against the moment the
+      // desk acted. The terminal does not report which plan produced the fill,
+      // so the position's own open time is the timestamp — exact for immediate
+      // entries, and an approximation for a resting one (documented in
+      // docs/mt5-live-desk-v4.md, §9). The denominator is the risk the EA
+      // recorded at fill (`initialRiskMoney`); without it the trade carries no
+      // R and is not recorded at all, rather than recorded as a fabricated one.
+      if (v4On(deskV4().execution) && position.initialRiskMoney && position.initialRiskMoney > 0) {
+        recordTimingOutcome(getTimingLedger(), { timestampMs: position.openTime, rMultiple: net / position.initialRiskMoney });
+      }
       journal(desk, "execution", position.symbol, `Position #${position.ticket} closed: ${net >= 0 ? "+" : ""}${net.toFixed(2)}.`, {
         consecutiveLosses: desk.riskState.consecutiveLosses,
       });
+      // ── WP9: the durable close, and the e-process ────────────────────────
+      //
+      // One trade row, one resolved shadow evaluation and one outcome per agent
+      // that proposed it. `initialRiskMoney` is the denominator and it is the
+      // EA's own stamp — when it is absent the row is still written, with a NULL
+      // realised R, because a trade the desk cannot measure is a fact the weekly
+      // report has to be able to count. Any agent whose threshold is crossed is
+      // named in the journal: an agent going out of service is not a silent
+      // event. Fire-and-forget, so a ledger write can never delay a heartbeat.
+      if (v4On(deskV4().governance)) {
+        void recordClosedTrade({
+          sessionId: desk.sessionId,
+          ticket: position.ticket,
+          symbol: position.symbol,
+          mode: desk.mode,
+          side: position.side,
+          lots: position.volume,
+          openedAtMs: position.openTime,
+          closedAtMs: now,
+          netProfit: net,
+          riskMoney: position.initialRiskMoney ?? null,
+          slippageR: null,
+          entryPrice: position.openPrice ?? null,
+          // MT5 reports the closed position without an exit price in this
+          // payload; the trade row carries the entry and the realised money, and
+          // the exit reason stays NULL rather than being guessed from profit.
+          exitPrice: null,
+          exitReason: null,
+        })
+          .then(({ actions }) => {
+            for (const action of actions) {
+              if (action.action === "none") continue;
+              const verb = action.action === "disable" ? "DISABLED" : "halved";
+              journal(
+                desk,
+                "risk",
+                position.symbol,
+                `Agent ${action.agentId} ${verb} by the WP9 e-process (e=${action.eValue.toFixed(1)}): ${action.reason}`,
+              );
+              // The one event in this layer a human must not have to go looking
+              // for: an agent has just taken itself out of service.
+              deskAlertNow({
+                kind: "governance",
+                title: `Agent ${action.agentId} ${verb} (e=${action.eValue.toFixed(1)})`,
+                body: [action.reason, `${position.symbol} · ticket #${position.ticket}`],
+                dedupeKey: `governance:${action.agentId}:${action.action}`,
+                sessionId: desk.sessionId,
+              });
+            }
+          })
+          .catch(() => {});
+      }
       if (desk.riskState.haltedUntilNextSession) {
         journal(desk, "risk", null, desk.riskState.haltReason ?? "Desk halted.");
+        // A halt is the loudest thing the desk does. De-duped on the reason, so a
+        // long halt is one message however many positions close inside it.
+        deskAlertNow({
+          kind: "risk",
+          title: "Desk halted",
+          body: [desk.riskState.haltReason ?? "Desk halted.", `consecutive losses ${desk.riskState.consecutiveLosses}`],
+          dedupeKey: `halt:${desk.riskState.haltReason ?? "unknown"}`,
+          sessionId: desk.sessionId,
+        });
       }
     }
   }
@@ -967,7 +1047,34 @@ router.post("/sync", async (req, res) => {
   if (Array.isArray(body.results)) {
     for (const raw of body.results) {
       const result = parseResult(raw);
-      if (!result || !acknowledgeResult(desk, result)) continue;
+      if (!result) continue;
+      // Read the command BEFORE acknowledging it: the acknowledgement clears the
+      // in-flight entry, and the plan embedded in an `arm_plan` command carries
+      // the trigger and the risk unit the fill must be judged against.
+      const command = desk.inflight.get(result.commandId)?.command ?? null;
+      if (!acknowledgeResult(desk, result)) continue;
+      if (
+        result.status === "filled" &&
+        v4On(deskV4().execution) &&
+        command?.type === "arm_plan" &&
+        command.plan.side !== undefined
+      ) {
+        const spec = desk.specs.get(command.plan.symbol);
+        const risk = (command.plan.riskPoints ?? 0) * (spec?.point ?? 0);
+        const fill = result.price ?? null;
+        const slippage =
+          fill !== null && risk > 0
+            ? signedSlippageR({ side: command.plan.side, plannedPrice: command.plan.trigger, fillPrice: fill, riskPrice: risk })
+            : null;
+        if (slippage !== null) recordSlippage(getSlippageLedger(), slippage);
+      }
+      // WP9's attribution join: the fill is the only moment the desk learns that
+      // THIS ticket came from THAT plan, and the plan is what remembers which
+      // agents proposed it. Recorded whenever governance is on, independently of
+      // whether the execution layer is measuring slippage.
+      if (result.status === "filled" && result.ticket !== undefined && command?.type === "arm_plan") {
+        if (v4On(deskV4().governance)) bindTicket(result.ticket, command.plan.id);
+      }
       if (result.status === "rejected") {
         journal(desk, "execution", null, `Command rejected by the terminal: ${result.error ?? "unknown error"}.`, result);
       } else if (result.status === "filled") {

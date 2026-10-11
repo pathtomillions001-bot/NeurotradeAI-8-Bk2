@@ -582,7 +582,24 @@ export function journal(
   };
   desk.journal.unshift(entry);
   if (desk.journal.length > MAX_JOURNAL) desk.journal.length = MAX_JOURNAL;
+  // WP9: the in-process journal is capped and dies on the next deploy, and the
+  // question "why did the desk not take that trade last Tuesday?" is asked the
+  // week after. The durable mirror is written best-effort and never awaited on
+  // this path — journalling must not slow a heartbeat, and a database that is
+  // down must not turn a decision into an error.
+  journalSink?.(desk.sessionId, entry);
   return entry;
+}
+
+/**
+ * Where journal entries also go (set once at boot by the module that owns the
+ * durable store). Kept as a plain callback so `store.ts` — which every test
+ * imports — never pulls the database into its own module graph.
+ */
+let journalSink: ((sessionId: string, entry: JournalEntry) => void) | null = null;
+
+export function setJournalSink(sink: ((sessionId: string, entry: JournalEntry) => void) | null): void {
+  journalSink = sink;
 }
 
 // ── Plans ────────────────────────────────────────────────────────────────────

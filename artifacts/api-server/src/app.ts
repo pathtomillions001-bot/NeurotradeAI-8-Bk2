@@ -17,6 +17,9 @@ import { loadFromDb as loadDynamicConfidence } from "./lib/agents/dynamic-confid
 import { startTradeReconciler } from "./lib/trade-reconciler";
 import { pool, db, marketWinRatesTable, schemaReady } from "@workspace/db";
 import { browserSession } from "./lib/session";
+import { setJournalSink } from "./lib/multiasset/store";
+import { deskV4, v4On } from "./lib/multiasset/desk-v4-config";
+import { recordJournalEntry } from "./lib/multiasset/governance-store";
 
 /** Ensure DB schema is applied — runs drizzle-kit push if tables or columns are missing. */
 async function bootstrapDb() {
@@ -159,6 +162,30 @@ app.use("/api", router);
 // ── Startup ──────────────────────────────────────────────────────────────────
 // Ensure DB schema is applied before anything else touches the database
 dbReady.then(() => {
+  // ── WP9: the journal becomes durable ───────────────────────────────────────
+  //
+  // The in-process journal is capped at 200 entries and dies on the next deploy,
+  // and the question a human actually asks ("why did the desk not take that trade
+  // last Tuesday?") is asked the week after. The sink is installed here, at the
+  // composition root, rather than inside `store.ts`: the store is imported by
+  // every test, and it must not pull the database into its own module graph.
+  // Best-effort by design — a journal write never blocks a heartbeat and never
+  // turns a decision into an error.
+  setJournalSink((sessionId, entry) => {
+    // Flag-gated at CALL time, not at install time: `deskV4()` is read live so a
+    // desk that has never switched WP9 on writes nothing at all — the durable
+    // journal is an addition to the desk's behaviour, not a side effect of it.
+    if (!v4On(deskV4().governance)) return;
+    void recordJournalEntry({
+      sessionId,
+      entryId: entry.id,
+      tsMs: entry.ts,
+      kind: entry.kind,
+      symbol: entry.symbol,
+      message: entry.message,
+      detail: entry.detail,
+    }).catch(() => {});
+  });
   loadPersistedToken().catch((err) => logger.warn({ err }, "Token load on startup failed"));
   loadWinRatesFromDb().catch((err) => logger.warn({ err }, "Win rate load on startup failed"));
   loadCalibrationCache().catch((err) => logger.warn({ err }, "Calibration load on startup failed"));

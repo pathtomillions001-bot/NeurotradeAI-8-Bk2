@@ -67,7 +67,7 @@ test("the published EA is a build that reports its own version and link", () => 
   const published_body = fs.readFileSync(published, "utf8");
   // The version reported to the Desk must be the one the API expects, or the
   // "your EA is out of date" banner would fire on a current terminal.
-  assert.equal(declaredVersion(published), "3.04");
+  assert.equal(declaredVersion(published), "3.05");
   for (const marker of ["instanceId", "windowFromMs", "rawCount", "durable"]) {
     assert.match(
       published_body,
@@ -75,6 +75,45 @@ test("the published EA is a build that reports its own version and link", () => 
       `the published EA must carry the ${marker} contract`,
     );
   }
+});
+
+/**
+ * v3.05 — the position-management contract.
+ *
+ * The defect this version fixes was a MISSING execution path: the plan carried
+ * breakeven, partials, a trail, a time stop and session guards, and the EA
+ * implemented none of them after a fill. The only automated protection against
+ * that returning is asserting the shipped EA contains the state machine, the
+ * persistence, the pending-order path and the set_management command.
+ */
+test("the published EA carries the v3.05 position-management contract", () => {
+  const published_body = fs.readFileSync(published, "utf8");
+  for (const marker of [
+    "PositionState",
+    "PsRestoreAll",
+    "ManageOnePosition",
+    "ReconcileFilledPositions",
+    "OnTradeTransaction",
+    "set_management",
+    "managementEvents",
+    "UsePendingOrders",
+    "BuyLimit",
+    "SellStop",
+    "ReleaseAtrHandles",
+  ]) {
+    assert.match(
+      published_body,
+      new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+      `the published EA must carry the v3.05 ${marker} contract`,
+    );
+  }
+  // And the v3.04 defect must be gone: the plan is no longer the lookup path
+  // for management.
+  assert.doesNotMatch(
+    published_body,
+    /FindPlanForSymbol\(symbol, plan\)/,
+    "management must not be looked up through the armed plan",
+  );
 });
 
 test("the published EA carries the v3.04 heartbeat-reliability contract", () => {

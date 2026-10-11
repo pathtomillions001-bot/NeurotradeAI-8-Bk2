@@ -1,0 +1,3664 @@
+{
+  "label": "regime-weight-control",
+  "generatedAt": "2026-10-11T19:41:08.303Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --meta --mode swing --label regime-weight-control --out research-reports/2026-10-11-wp10-meta-swing-control.json",
+  "mode": "swing",
+  "symbol": "EURUSD",
+  "seed": 1,
+  "dataSource": "synthetic (positive-control, seasonal, mean-reverting, driftless, block-shuffled)",
+  "barsPerSeries": 2500,
+  "seriesPerFixture": 0,
+  "stride": 1,
+  "horizonBars": 48,
+  "targetMultipleR": 2,
+  "calibrator": "platt",
+  "contractSpec": {
+    "symbol": "EURUSD",
+    "assetClass": "forex",
+    "point": 0.00001,
+    "digits": 5,
+    "tickSize": 0.00001,
+    "tickValue": 1,
+    "contractSize": 100000,
+    "volumeMin": 0.01,
+    "volumeMax": 100,
+    "volumeStep": 0.01,
+    "stopsLevel": 0,
+    "freezeLevel": 0,
+    "marginInitial": 0,
+    "swapLong": 0,
+    "swapShort": 0,
+    "commissionPerLot": 0,
+    "spreadPoints": 12
+  },
+  "assumedSpecValues": [
+    "assetClass=forex",
+    "point=0.00001",
+    "digits=5",
+    "tickSize=0.00001",
+    "tickValue=1",
+    "contractSize=100000",
+    "volumeMin=0.01",
+    "volumeStep=0.01",
+    "spreadPoints=12",
+    "commissionPerLot=0"
+  ],
+  "fixtures": [
+    {
+      "name": "positive-control",
+      "kind": "positive-control",
+      "home": true,
+      "null": false,
+      "note": "regime-switching drift + AR(1) residual: the desk's own positive control, where the trend structure is real",
+      "pooled": {
+        "rows": 3302,
+        "hitRate": 0.5039370078740157,
+        "hitRateLower": 0.48688842959944767,
+        "baseRate": 0.4544632319499408,
+        "brier": 0.1601795089593991,
+        "brierSkill": 0.3539231514711675,
+        "logLoss": 0.4878887454171091,
+        "reliability": {
+          "slope": 0.9256206271092395,
+          "intercept": 0.0431280640895134,
+          "identifiable": true,
+          "reason": "ok",
+          "effectiveSampleSize": 1992.1154759804072,
+          "iterations": 4
+        },
+        "buckets": [
+          {
+            "bucket": 0,
+            "rows": 331,
+            "meanPredicted": 0.04029683318273867,
+            "meanLowerBound": 0.017245561578349534,
+            "observed": 0.06042296072507553
+          },
+          {
+            "bucket": 1,
+            "rows": 331,
+            "meanPredicted": 0.08331653038024775,
+            "meanLowerBound": 0.04568085406808539,
+            "observed": 0.03927492447129909
+          },
+          {
+            "bucket": 2,
+            "rows": 331,
+            "meanPredicted": 0.25242199721254555,
+            "meanLowerBound": 0.18363415483730955,
+            "observed": 0.2990936555891239
+          },
+          {
+            "bucket": 3,
+            "rows": 331,
+            "meanPredicted": 0.4705770863749245,
+            "meanLowerBound": 0.38090340927126226,
+            "observed": 0.5377643504531722
+          },
+          {
+            "bucket": 4,
+            "rows": 331,
+            "meanPredicted": 0.5755102244965652,
+            "meanLowerBound": 0.4843947733441423,
+            "observed": 0.595166163141994
+          },
+          {
+            "bucket": 5,
+            "rows": 331,
+            "meanPredicted": 0.6385587620017675,
+            "meanLowerBound": 0.5483664246356293,
+            "observed": 0.6978851963746223
+          },
+          {
+            "bucket": 6,
+            "rows": 331,
+            "meanPredicted": 0.6880431678440552,
+            "meanLowerBound": 0.5994173203036927,
+            "observed": 0.6706948640483383
+          },
+          {
+            "bucket": 7,
+            "rows": 331,
+            "meanPredicted": 0.7338396161513611,
+            "meanLowerBound": 0.6474438266752626,
+            "observed": 0.6948640483383686
+          },
+          {
+            "bucket": 8,
+            "rows": 331,
+            "meanPredicted": 0.7857207976296524,
+            "meanLowerBound": 0.7041702995267758,
+            "observed": 0.7009063444108762
+          },
+          {
+            "bucket": 9,
+            "rows": 323,
+            "meanPredicted": 0.8625648684605335,
+            "meanLowerBound": 0.7918309207825899,
+            "observed": 0.7492260061919505
+          }
+        ],
+        "violationBuckets": [],
+        "judgeableBuckets": 10,
+        "reference": {
+          "armed": 0,
+          "armedRate": 0,
+          "hitRate": 0,
+          "meanR": 0,
+          "meanRLower": 0
+        },
+        "fitted": {
+          "armed": 2252,
+          "armedRate": 0,
+          "hitRate": 0.6682948490230906,
+          "meanR": 1.2083730900909755,
+          "meanRLower": 1.1654076553755985,
+          "meanLowerBound": 0.4394570957105954
+        },
+        "corpus": {
+          "hitRate": 0.5039370078740157,
+          "meanR": 0.7022225009842583
+        }
+      },
+      "series": [
+        {
+          "series": "positive-control#1",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 1166,
+          "viewRate": 0.5065160729800173,
+          "labelled": 1166,
+          "independentObservations": 115.31969983633333,
+          "kishEffectiveSampleSize": 653.104394129819,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 1075,
+              "calibration": 1075,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 90,
+              "purged": 1,
+              "evidence": 97
+            },
+            {
+              "fold": 1,
+              "train": 985,
+              "calibration": 985,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 159,
+              "purged": 22,
+              "evidence": 83
+            },
+            {
+              "fold": 2,
+              "train": 893,
+              "calibration": 893,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 246,
+              "purged": 27,
+              "evidence": 87
+            },
+            {
+              "fold": 3,
+              "train": 812,
+              "calibration": 812,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 311,
+              "purged": 43,
+              "evidence": 90
+            },
+            {
+              "fold": 4,
+              "train": 754,
+              "calibration": 754,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 360,
+              "purged": 52,
+              "evidence": 91
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 15,
+          "cpcvMeanR": {
+            "min": 0.8047218814940353,
+            "median": 1.3664177925516978,
+            "max": 1.882738902564157
+          },
+          "stats": {
+            "rows": 1166,
+            "hitRate": 0.6020583190394511,
+            "hitRateLower": 0.5736719029863987,
+            "baseRate": 0.5018010261427079,
+            "brier": 0.14778433200138155,
+            "brierSkill": 0.4088550020177838,
+            "logLoss": 0.4679126846136026,
+            "reliability": {
+              "slope": 0.9114661870610575,
+              "intercept": 0.0734508529978835,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 653.104394129819,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 117,
+                "meanPredicted": 0.050216799764327434,
+                "meanLowerBound": 0.02410877467484714,
+                "observed": 0.09401709401709402
+              },
+              {
+                "bucket": 1,
+                "rows": 117,
+                "meanPredicted": 0.11055789151068107,
+                "meanLowerBound": 0.06717812585783278,
+                "observed": 0.008547008547008548
+              },
+              {
+                "bucket": 2,
+                "rows": 117,
+                "meanPredicted": 0.3751918164583961,
+                "meanLowerBound": 0.2993106462298197,
+                "observed": 0.49572649572649574
+              },
+              {
+                "bucket": 3,
+                "rows": 117,
+                "meanPredicted": 0.5951565199537802,
+                "meanLowerBound": 0.5083091568806168,
+                "observed": 0.8034188034188035
+              },
+              {
+                "bucket": 4,
+                "rows": 117,
+                "meanPredicted": 0.673982534045148,
+                "meanLowerBound": 0.588344673922158,
+                "observed": 0.7948717948717948
+              },
+              {
+                "bucket": 5,
+                "rows": 117,
+                "meanPredicted": 0.7318839376760209,
+                "meanLowerBound": 0.6489649702379501,
+                "observed": 0.7777777777777778
+              },
+              {
+                "bucket": 6,
+                "rows": 117,
+                "meanPredicted": 0.7751785318652507,
+                "meanLowerBound": 0.6951425729125429,
+                "observed": 0.7606837606837606
+              },
+              {
+                "bucket": 7,
+                "rows": 117,
+                "meanPredicted": 0.8139481290390227,
+                "meanLowerBound": 0.7370661410410566,
+                "observed": 0.6923076923076923
+              },
+              {
+                "bucket": 8,
+                "rows": 117,
+                "meanPredicted": 0.8512485659012984,
+                "meanLowerBound": 0.779197867031588,
+                "observed": 0.7435897435897436
+              },
+              {
+                "bucket": 9,
+                "rows": 113,
+                "meanPredicted": 0.893796935542176,
+                "meanLowerBound": 0.828852241118157,
+                "observed": 0.8584070796460177
+              }
+            ],
+            "violationBuckets": [
+              1
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 874,
+              "armedRate": 0,
+              "hitRate": 0.7723112128146453,
+              "meanR": 1.453038417019866,
+              "meanRLower": 1.3924077573832263,
+              "meanLowerBound": 0.5165799193092585
+            },
+            "corpus": {
+              "hitRate": 0.6020583190394511,
+              "meanR": 0.9217307139593557
+            }
+          },
+          "elapsedMs": 6503
+        },
+        {
+          "series": "positive-control#2",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 964,
+          "viewRate": 0.41876629018245004,
+          "labelled": 964,
+          "independentObservations": 98.91561078585144,
+          "kishEffectiveSampleSize": 599.2128236163398,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 863,
+              "calibration": 863,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 100,
+              "purged": 1,
+              "evidence": 83
+            },
+            {
+              "fold": 1,
+              "train": 780,
+              "calibration": 780,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 159,
+              "purged": 25,
+              "evidence": 71
+            },
+            {
+              "fold": 2,
+              "train": 725,
+              "calibration": 725,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 211,
+              "purged": 28,
+              "evidence": 79
+            },
+            {
+              "fold": 3,
+              "train": 705,
+              "calibration": 705,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 227,
+              "purged": 32,
+              "evidence": 77
+            },
+            {
+              "fold": 4,
+              "train": 649,
+              "calibration": 649,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 267,
+              "purged": 48,
+              "evidence": 74
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 15,
+          "cpcvMeanR": {
+            "min": 0.17167117228621162,
+            "median": 1.025920873702024,
+            "max": 1.3931226285087537
+          },
+          "stats": {
+            "rows": 964,
+            "hitRate": 0.3620331950207469,
+            "hitRateLower": 0.33229786838736747,
+            "baseRate": 0.3563635021891831,
+            "brier": 0.169049838216445,
+            "brierSkill": 0.26297727640397306,
+            "logLoss": 0.5018164660163271,
+            "reliability": {
+              "slope": 0.8729913306950208,
+              "intercept": 0.15476855750015872,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 599.2128236163398,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 97,
+                "meanPredicted": 0.02607849250228328,
+                "meanLowerBound": 0.009102003252724086,
+                "observed": 0.05154639175257732
+              },
+              {
+                "bucket": 1,
+                "rows": 97,
+                "meanPredicted": 0.05492205350713867,
+                "meanLowerBound": 0.025358414230104365,
+                "observed": 0.041237113402061855
+              },
+              {
+                "bucket": 2,
+                "rows": 97,
+                "meanPredicted": 0.09407152530334947,
+                "meanLowerBound": 0.052335439849691114,
+                "observed": 0.030927835051546393
+              },
+              {
+                "bucket": 3,
+                "rows": 97,
+                "meanPredicted": 0.2634897295767881,
+                "meanLowerBound": 0.19012921466072366,
+                "observed": 0.44329896907216493
+              },
+              {
+                "bucket": 4,
+                "rows": 97,
+                "meanPredicted": 0.3692312884193475,
+                "meanLowerBound": 0.28417975315370997,
+                "observed": 0.4845360824742268
+              },
+              {
+                "bucket": 5,
+                "rows": 97,
+                "meanPredicted": 0.4325336428905551,
+                "meanLowerBound": 0.34304182833437014,
+                "observed": 0.4742268041237113
+              },
+              {
+                "bucket": 6,
+                "rows": 97,
+                "meanPredicted": 0.4872977134280506,
+                "meanLowerBound": 0.39494059219484007,
+                "observed": 0.4845360824742268
+              },
+              {
+                "bucket": 7,
+                "rows": 97,
+                "meanPredicted": 0.5499832229787313,
+                "meanLowerBound": 0.45596904983544656,
+                "observed": 0.5567010309278351
+              },
+              {
+                "bucket": 8,
+                "rows": 97,
+                "meanPredicted": 0.6233159469349275,
+                "meanLowerBound": 0.5297724217440157,
+                "observed": 0.5567010309278351
+              },
+              {
+                "bucket": 9,
+                "rows": 91,
+                "meanPredicted": 0.7444384828302764,
+                "meanLowerBound": 0.6548381089238261,
+                "observed": 0.5054945054945055
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 442,
+              "armedRate": 0,
+              "hitRate": 0.5180995475113123,
+              "meanR": 0.9764282186856293,
+              "meanRLower": 0.8780422363714037,
+              "meanLowerBound": 0.29172059490234803
+            },
+            "corpus": {
+              "hitRate": 0.3620331950207469,
+              "meanR": 0.4254870465544118
+            }
+          },
+          "elapsedMs": 5367
+        },
+        {
+          "series": "positive-control#3",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 1172,
+          "viewRate": 0.5091225021720244,
+          "labelled": 1172,
+          "independentObservations": 105.61196974401105,
+          "kishEffectiveSampleSize": 760.6919467413295,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 1074,
+              "calibration": 1074,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 95,
+              "purged": 3,
+              "evidence": 86
+            },
+            {
+              "fold": 1,
+              "train": 956,
+              "calibration": 956,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 194,
+              "purged": 22,
+              "evidence": 78
+            },
+            {
+              "fold": 2,
+              "train": 891,
+              "calibration": 891,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 253,
+              "purged": 28,
+              "evidence": 80
+            },
+            {
+              "fold": 3,
+              "train": 820,
+              "calibration": 820,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 304,
+              "purged": 48,
+              "evidence": 81
+            },
+            {
+              "fold": 4,
+              "train": 802,
+              "calibration": 802,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 326,
+              "purged": 44,
+              "evidence": 82
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 15,
+          "cpcvMeanR": {
+            "min": 0.8938948916709311,
+            "median": 0.973592247187237,
+            "max": 1.7931595955646575
+          },
+          "stats": {
+            "rows": 1172,
+            "hitRate": 0.523037542662116,
+            "hitRateLower": 0.49441322402366894,
+            "baseRate": 0.494653889129013,
+            "brier": 0.16540613290384698,
+            "brierSkill": 0.33829982043414064,
+            "logLoss": 0.49665635336998,
+            "reliability": {
+              "slope": 1.102640575237661,
+              "intercept": -0.17843959972145665,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 760.6919467413295,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 118,
+                "meanPredicted": 0.051807366775788996,
+                "meanLowerBound": 0.024173527265165022,
+                "observed": 0.025423728813559324
+              },
+              {
+                "bucket": 1,
+                "rows": 118,
+                "meanPredicted": 0.12149625761623378,
+                "meanLowerBound": 0.07573474583554632,
+                "observed": 0.07627118644067797
+              },
+              {
+                "bucket": 2,
+                "rows": 118,
+                "meanPredicted": 0.5446897609347017,
+                "meanLowerBound": 0.4540842431839254,
+                "observed": 0.5254237288135594
+              },
+              {
+                "bucket": 3,
+                "rows": 118,
+                "meanPredicted": 0.6065110657352757,
+                "meanLowerBound": 0.5151810188316587,
+                "observed": 0.6186440677966102
+              },
+              {
+                "bucket": 4,
+                "rows": 118,
+                "meanPredicted": 0.6445407450014758,
+                "meanLowerBound": 0.5537752327655553,
+                "observed": 0.6610169491525424
+              },
+              {
+                "bucket": 5,
+                "rows": 118,
+                "meanPredicted": 0.6735257505507152,
+                "meanLowerBound": 0.5834539520975173,
+                "observed": 0.6440677966101694
+              },
+              {
+                "bucket": 6,
+                "rows": 118,
+                "meanPredicted": 0.6992287571018557,
+                "meanLowerBound": 0.6101154630506107,
+                "observed": 0.652542372881356
+              },
+              {
+                "bucket": 7,
+                "rows": 118,
+                "meanPredicted": 0.725373077464693,
+                "meanLowerBound": 0.63724423238271,
+                "observed": 0.6779661016949152
+              },
+              {
+                "bucket": 8,
+                "rows": 118,
+                "meanPredicted": 0.754034062551246,
+                "meanLowerBound": 0.667846505403345,
+                "observed": 0.7203389830508474
+              },
+              {
+                "bucket": 9,
+                "rows": 110,
+                "meanPredicted": 0.8184015061789185,
+                "meanLowerBound": 0.7380603452693942,
+                "observed": 0.6363636363636364
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 936,
+              "armedRate": 0,
+              "hitRate": 0.6420940170940171,
+              "meanR": 1.0894437497334026,
+              "meanRLower": 1.0183400579872621,
+              "meanLowerBound": 0.48424615241973173
+            },
+            "corpus": {
+              "hitRate": 0.523037542662116,
+              "meanR": 0.7114600451322188
+            }
+          },
+          "elapsedMs": 6327
+        }
+      ],
+      "calibration": {
+        "gates": [
+          {
+            "name": "labelled rows",
+            "pass": true,
+            "detail": "3302 rows with a finished label (need ≥ 120)"
+          },
+          {
+            "name": "reliability slope",
+            "pass": true,
+            "detail": "slope 0.926 (need 0.8–1.2)"
+          },
+          {
+            "name": "Brier skill",
+            "pass": true,
+            "detail": "skill 0.3539 against the constant base-rate forecast (need > 0)"
+          },
+          {
+            "name": "p_LCB coverage",
+            "pass": true,
+            "detail": "0/10 judgeable deciles realised below their own mean p_LCB by > 5pp (allowed ≤ 25%)"
+          },
+          {
+            "name": "fitted policy arms",
+            "pass": true,
+            "detail": "2252 armed at EV_LCB > 0 (need ≥ 20)"
+          },
+          {
+            "name": "fitted beats corpus",
+            "pass": true,
+            "detail": "fitted mean R 1.208 vs corpus 0.702 (hit 66.8% vs 50.4%)"
+          }
+        ],
+        "pass": true
+      },
+      "nullGates": null
+    },
+    {
+      "name": "seasonal",
+      "kind": "seasonal",
+      "home": false,
+      "null": false,
+      "note": "hour-of-day drift: the fixture where the hour feature carries information (report-only; see the calibration caveat in the report notes)",
+      "pooled": {
+        "rows": 2602,
+        "hitRate": 0.19561875480399693,
+        "hitRateLower": 0.1808302284480546,
+        "baseRate": 0.2040875499553571,
+        "brier": 0.15810106035111296,
+        "brierSkill": 0.026685995161238263,
+        "logLoss": 0.49278514377994864,
+        "reliability": {
+          "slope": 0.6372188495964805,
+          "intercept": -0.46126354238240624,
+          "identifiable": true,
+          "reason": "ok",
+          "effectiveSampleSize": 2208.151656594844,
+          "iterations": 4
+        },
+        "buckets": [
+          {
+            "bucket": 0,
+            "rows": 261,
+            "meanPredicted": 0.055329871117114175,
+            "meanLowerBound": 0.023957117887515412,
+            "observed": 0.10344827586206896
+          },
+          {
+            "bucket": 1,
+            "rows": 261,
+            "meanPredicted": 0.0866234521077131,
+            "meanLowerBound": 0.043784259623081544,
+            "observed": 0.11494252873563218
+          },
+          {
+            "bucket": 2,
+            "rows": 261,
+            "meanPredicted": 0.11063815962376326,
+            "meanLowerBound": 0.060587777160179435,
+            "observed": 0.13409961685823754
+          },
+          {
+            "bucket": 3,
+            "rows": 261,
+            "meanPredicted": 0.13741220834703108,
+            "meanLowerBound": 0.08022285915630267,
+            "observed": 0.19923371647509577
+          },
+          {
+            "bucket": 4,
+            "rows": 261,
+            "meanPredicted": 0.16859431198132932,
+            "meanLowerBound": 0.10447174715380808,
+            "observed": 0.14559386973180077
+          },
+          {
+            "bucket": 5,
+            "rows": 261,
+            "meanPredicted": 0.20190656162850484,
+            "meanLowerBound": 0.13117315546783967,
+            "observed": 0.23754789272030652
+          },
+          {
+            "bucket": 6,
+            "rows": 261,
+            "meanPredicted": 0.24143491667198935,
+            "meanLowerBound": 0.16397588127061766,
+            "observed": 0.1724137931034483
+          },
+          {
+            "bucket": 7,
+            "rows": 261,
+            "meanPredicted": 0.2801192831868601,
+            "meanLowerBound": 0.1968786486682492,
+            "observed": 0.24904214559386972
+          },
+          {
+            "bucket": 8,
+            "rows": 261,
+            "meanPredicted": 0.3351011106066827,
+            "meanLowerBound": 0.24539040635255197,
+            "observed": 0.2413793103448276
+          },
+          {
+            "bucket": 9,
+            "rows": 253,
+            "meanPredicted": 0.4373686617716272,
+            "meanLowerBound": 0.3396481934761895,
+            "observed": 0.36363636363636365
+          }
+        ],
+        "violationBuckets": [],
+        "judgeableBuckets": 10,
+        "reference": {
+          "armed": 0,
+          "armedRate": 0,
+          "hitRate": 0,
+          "meanR": 0,
+          "meanRLower": 0
+        },
+        "fitted": {
+          "armed": 95,
+          "armedRate": 0,
+          "hitRate": 0.3684210526315789,
+          "meanR": 0.5386692216691752,
+          "meanRLower": 0.3117290140456914,
+          "meanLowerBound": 0.13839212779194998
+        },
+        "corpus": {
+          "hitRate": 0.19561875480399693,
+          "meanR": -0.0024323885900362926
+        }
+      },
+      "series": [
+        {
+          "series": "seasonal#1",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 873,
+          "viewRate": 0.3792354474370113,
+          "labelled": 873,
+          "independentObservations": 79.19179837831079,
+          "kishEffectiveSampleSize": 728.6715812646037,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 782,
+              "calibration": 782,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 88,
+              "purged": 3,
+              "evidence": 69
+            },
+            {
+              "fold": 1,
+              "train": 648,
+              "calibration": 648,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 189,
+              "purged": 36,
+              "evidence": 60
+            },
+            {
+              "fold": 2,
+              "train": 635,
+              "calibration": 635,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 204,
+              "purged": 34,
+              "evidence": 59
+            },
+            {
+              "fold": 3,
+              "train": 636,
+              "calibration": 636,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 206,
+              "purged": 31,
+              "evidence": 59
+            },
+            {
+              "fold": 4,
+              "train": 651,
+              "calibration": 651,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 186,
+              "purged": 36,
+              "evidence": 59
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 1,
+          "cpcvMeanR": {
+            "min": -1.0142204292070502,
+            "median": -0.20840659504163198,
+            "max": 0.9849712680284558
+          },
+          "stats": {
+            "rows": 873,
+            "hitRate": 0.17869415807560138,
+            "hitRateLower": 0.1547055055192787,
+            "baseRate": 0.18240011272665255,
+            "brier": 0.15404466545468637,
+            "brierSkill": -0.032953420386999,
+            "logLoss": 0.491809414411209,
+            "reliability": {
+              "slope": 0.14517145869061426,
+              "intercept": -1.2703922770447715,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 728.6715812646037,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 88,
+                "meanPredicted": 0.06934359853120294,
+                "meanLowerBound": 0.03215208718677205,
+                "observed": 0.125
+              },
+              {
+                "bucket": 1,
+                "rows": 88,
+                "meanPredicted": 0.10024078107747085,
+                "meanLowerBound": 0.05288193101423955,
+                "observed": 0.18181818181818182
+              },
+              {
+                "bucket": 2,
+                "rows": 88,
+                "meanPredicted": 0.12258544595371591,
+                "meanLowerBound": 0.06864360788701473,
+                "observed": 0.18181818181818182
+              },
+              {
+                "bucket": 3,
+                "rows": 88,
+                "meanPredicted": 0.14076675860155471,
+                "meanLowerBound": 0.0822107535564519,
+                "observed": 0.25
+              },
+              {
+                "bucket": 4,
+                "rows": 88,
+                "meanPredicted": 0.16240935797532455,
+                "meanLowerBound": 0.09897679395965843,
+                "observed": 0.10227272727272728
+              },
+              {
+                "bucket": 5,
+                "rows": 88,
+                "meanPredicted": 0.18569390645098566,
+                "meanLowerBound": 0.11711578496949557,
+                "observed": 0.19318181818181818
+              },
+              {
+                "bucket": 6,
+                "rows": 88,
+                "meanPredicted": 0.21088529355129887,
+                "meanLowerBound": 0.1377421588871875,
+                "observed": 0.2840909090909091
+              },
+              {
+                "bucket": 7,
+                "rows": 88,
+                "meanPredicted": 0.24402308124961633,
+                "meanLowerBound": 0.16523626455961118,
+                "observed": 0.06818181818181818
+              },
+              {
+                "bucket": 8,
+                "rows": 88,
+                "meanPredicted": 0.2755982980564912,
+                "meanLowerBound": 0.1918516180585704,
+                "observed": 0.19318181818181818
+              },
+              {
+                "bucket": 9,
+                "rows": 81,
+                "meanPredicted": 0.3452267687691725,
+                "meanLowerBound": 0.25479695292667554,
+                "observed": 0.20987654320987653
+              }
+            ],
+            "violationBuckets": [
+              7
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 2,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": -0.07844680944832455,
+              "meanRLower": -1.6177944139514282,
+              "meanLowerBound": 0.11908123848111425
+            },
+            "corpus": {
+              "hitRate": 0.17869415807560138,
+              "meanR": -0.02917254863175241
+            }
+          },
+          "elapsedMs": 4688
+        },
+        {
+          "series": "seasonal#2",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 903,
+          "viewRate": 0.39226759339704603,
+          "labelled": 903,
+          "independentObservations": 82.8790409179514,
+          "kishEffectiveSampleSize": 759.2935670223715,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 808,
+              "calibration": 808,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 93,
+              "purged": 2,
+              "evidence": 72
+            },
+            {
+              "fold": 1,
+              "train": 704,
+              "calibration": 704,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 172,
+              "purged": 27,
+              "evidence": 62
+            },
+            {
+              "fold": 2,
+              "train": 654,
+              "calibration": 654,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 215,
+              "purged": 34,
+              "evidence": 62
+            },
+            {
+              "fold": 3,
+              "train": 647,
+              "calibration": 647,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 221,
+              "purged": 35,
+              "evidence": 62
+            },
+            {
+              "fold": 4,
+              "train": 669,
+              "calibration": 669,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 202,
+              "purged": 32,
+              "evidence": 63
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 6,
+          "cpcvMeanR": {
+            "min": -1.0168903117803467,
+            "median": 1.149406475071127,
+            "max": 1.9848727898526153
+          },
+          "stats": {
+            "rows": 903,
+            "hitRate": 0.17829457364341086,
+            "hitRateLower": 0.15470763675862476,
+            "baseRate": 0.2008182340370207,
+            "brier": 0.15670152045776714,
+            "brierSkill": 0.023607352868798892,
+            "logLoss": 0.49178228145723696,
+            "reliability": {
+              "slope": 0.6251822221970266,
+              "intercept": -0.47631313568251665,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 759.2935670223715,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 91,
+                "meanPredicted": 0.058980490514261796,
+                "meanLowerBound": 0.02662595212631992,
+                "observed": 0.13186813186813187
+              },
+              {
+                "bucket": 1,
+                "rows": 91,
+                "meanPredicted": 0.09049600160340311,
+                "meanLowerBound": 0.04668083256986078,
+                "observed": 0.06593406593406594
+              },
+              {
+                "bucket": 2,
+                "rows": 91,
+                "meanPredicted": 0.11318785555821091,
+                "meanLowerBound": 0.06288501830031766,
+                "observed": 0.17582417582417584
+              },
+              {
+                "bucket": 3,
+                "rows": 91,
+                "meanPredicted": 0.14477723306552043,
+                "meanLowerBound": 0.08650801925323781,
+                "observed": 0.1978021978021978
+              },
+              {
+                "bucket": 4,
+                "rows": 91,
+                "meanPredicted": 0.17730600306700728,
+                "meanLowerBound": 0.1120793040263589,
+                "observed": 0.16483516483516483
+              },
+              {
+                "bucket": 5,
+                "rows": 91,
+                "meanPredicted": 0.20772977314376398,
+                "meanLowerBound": 0.13659822645256675,
+                "observed": 0.1978021978021978
+              },
+              {
+                "bucket": 6,
+                "rows": 91,
+                "meanPredicted": 0.2407829053103817,
+                "meanLowerBound": 0.1642144389080298,
+                "observed": 0.13186813186813187
+              },
+              {
+                "bucket": 7,
+                "rows": 91,
+                "meanPredicted": 0.2701665441504484,
+                "meanLowerBound": 0.18927719539332488,
+                "observed": 0.27472527472527475
+              },
+              {
+                "bucket": 8,
+                "rows": 91,
+                "meanPredicted": 0.3150405513319376,
+                "meanLowerBound": 0.2282869899001824,
+                "observed": 0.1978021978021978
+              },
+              {
+                "bucket": 9,
+                "rows": 84,
+                "meanPredicted": 0.3948582511349897,
+                "meanLowerBound": 0.300538854273566,
+                "observed": 0.25
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 7,
+              "armedRate": 0,
+              "hitRate": 0.5714285714285714,
+              "meanR": 1.2134970795068312,
+              "meanRLower": 0.4965963873613525,
+              "meanLowerBound": 0.13408910039825875
+            },
+            "corpus": {
+              "hitRate": 0.17829457364341086,
+              "meanR": -0.07601165897330349
+            }
+          },
+          "elapsedMs": 4842
+        },
+        {
+          "series": "seasonal#3",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 826,
+          "viewRate": 0.35881841876629017,
+          "labelled": 826,
+          "independentObservations": 81.52237136200527,
+          "kishEffectiveSampleSize": 720.8858825000583,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 721,
+              "calibration": 721,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 103,
+              "purged": 2,
+              "evidence": 68
+            },
+            {
+              "fold": 1,
+              "train": 637,
+              "calibration": 637,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 162,
+              "purged": 27,
+              "evidence": 61
+            },
+            {
+              "fold": 2,
+              "train": 603,
+              "calibration": 603,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 185,
+              "purged": 38,
+              "evidence": 59
+            },
+            {
+              "fold": 3,
+              "train": 601,
+              "calibration": 601,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 191,
+              "purged": 34,
+              "evidence": 61
+            },
+            {
+              "fold": 4,
+              "train": 612,
+              "calibration": 612,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 185,
+              "purged": 29,
+              "evidence": 63
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 15,
+          "cpcvMeanR": {
+            "min": 0.41381729982747834,
+            "median": 0.7094405724864554,
+            "max": 1.4850511088249787
+          },
+          "stats": {
+            "rows": 826,
+            "hitRate": 0.2324455205811138,
+            "hitRateLower": 0.2049183038816873,
+            "baseRate": 0.2284787065287775,
+            "brier": 0.16346432105566186,
+            "brierSkill": 0.07268064019400866,
+            "logLoss": 0.49475253050140844,
+            "reliability": {
+              "slope": 0.7984795102827276,
+              "intercept": -0.2327579931563938,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 720.8858825000583,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 83,
+                "meanPredicted": 0.04565020518295548,
+                "meanLowerBound": 0.01810616733334795,
+                "observed": 0.060240963855421686
+              },
+              {
+                "bucket": 1,
+                "rows": 83,
+                "meanPredicted": 0.07089867609168686,
+                "meanLowerBound": 0.033376822480422876,
+                "observed": 0.10843373493975904
+              },
+              {
+                "bucket": 2,
+                "rows": 83,
+                "meanPredicted": 0.09278173023885743,
+                "meanLowerBound": 0.04810981783815505,
+                "observed": 0.0963855421686747
+              },
+              {
+                "bucket": 3,
+                "rows": 83,
+                "meanPredicted": 0.12171751825386398,
+                "meanLowerBound": 0.06887068685859886,
+                "observed": 0.04819277108433735
+              },
+              {
+                "bucket": 4,
+                "rows": 83,
+                "meanPredicted": 0.17057822168640135,
+                "meanLowerBound": 0.1067000179524692,
+                "observed": 0.24096385542168675
+              },
+              {
+                "bucket": 5,
+                "rows": 83,
+                "meanPredicted": 0.24847258365344146,
+                "meanLowerBound": 0.1703266147544069,
+                "observed": 0.3253012048192771
+              },
+              {
+                "bucket": 6,
+                "rows": 83,
+                "meanPredicted": 0.3068602788024929,
+                "meanLowerBound": 0.21968665867278417,
+                "observed": 0.3493975903614458
+              },
+              {
+                "bucket": 7,
+                "rows": 83,
+                "meanPredicted": 0.36019670750259386,
+                "meanLowerBound": 0.26765251846624344,
+                "observed": 0.3373493975903614
+              },
+              {
+                "bucket": 8,
+                "rows": 83,
+                "meanPredicted": 0.4129136524050477,
+                "meanLowerBound": 0.3154279290349127,
+                "observed": 0.40963855421686746
+              },
+              {
+                "bucket": 9,
+                "rows": 79,
+                "meanPredicted": 0.4988498663200595,
+                "meanLowerBound": 0.3981086998674957,
+                "observed": 0.35443037974683544
+              }
+            ],
+            "violationBuckets": [],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 86,
+              "armedRate": 0,
+              "hitRate": 0.36046511627906974,
+              "meanR": 0.49809290838279635,
+              "meanRLower": 0.2576770906080662,
+              "meanLowerBound": 0.16350597779783704
+            },
+            "corpus": {
+              "hitRate": 0.2324455205811138,
+              "meanR": 0.10626766089241947
+            }
+          },
+          "elapsedMs": 4724
+        }
+      ],
+      "calibration": {
+        "gates": [
+          {
+            "name": "labelled rows",
+            "pass": true,
+            "detail": "2602 rows with a finished label (need ≥ 120)"
+          },
+          {
+            "name": "reliability slope",
+            "pass": false,
+            "detail": "slope 0.637 (need 0.8–1.2)"
+          },
+          {
+            "name": "Brier skill",
+            "pass": true,
+            "detail": "skill 0.0267 against the constant base-rate forecast (need > 0)"
+          },
+          {
+            "name": "p_LCB coverage",
+            "pass": true,
+            "detail": "0/10 judgeable deciles realised below their own mean p_LCB by > 5pp (allowed ≤ 25%)"
+          },
+          {
+            "name": "fitted policy arms",
+            "pass": true,
+            "detail": "95 armed at EV_LCB > 0 (need ≥ 20)"
+          },
+          {
+            "name": "fitted beats corpus",
+            "pass": true,
+            "detail": "fitted mean R 0.539 vs corpus -0.002 (hit 36.8% vs 19.6%)"
+          }
+        ],
+        "pass": false
+      },
+      "nullGates": null
+    },
+    {
+      "name": "mean-reverting",
+      "kind": "mean-reverting",
+      "home": false,
+      "null": false,
+      "note": "OU around a level: the structure a meta-model should be able to rank",
+      "pooled": {
+        "rows": 1712,
+        "hitRate": 0.1080607476635514,
+        "hitRateLower": 0.09422216610896321,
+        "baseRate": 0.1263397192949425,
+        "brier": 0.11028141715535311,
+        "brierSkill": 0.0008749703090209504,
+        "logLoss": 0.3776416659847877,
+        "reliability": {
+          "slope": 0.5093853245942389,
+          "intercept": -0.8918529831530506,
+          "identifiable": true,
+          "reason": "ok",
+          "effectiveSampleSize": 1399.6554452371347,
+          "iterations": 4
+        },
+        "buckets": [
+          {
+            "bucket": 0,
+            "rows": 172,
+            "meanPredicted": 0.02296070725085228,
+            "meanLowerBound": 0.0063996246055666416,
+            "observed": 0.03488372093023256
+          },
+          {
+            "bucket": 1,
+            "rows": 172,
+            "meanPredicted": 0.05038390999701544,
+            "meanLowerBound": 0.019924341519436693,
+            "observed": 0.046511627906976744
+          },
+          {
+            "bucket": 2,
+            "rows": 172,
+            "meanPredicted": 0.07002629390315646,
+            "meanLowerBound": 0.03178273520125305,
+            "observed": 0.09302325581395349
+          },
+          {
+            "bucket": 3,
+            "rows": 172,
+            "meanPredicted": 0.08824027844921715,
+            "meanLowerBound": 0.04353889417071121,
+            "observed": 0.13372093023255813
+          },
+          {
+            "bucket": 4,
+            "rows": 172,
+            "meanPredicted": 0.10755449661344366,
+            "meanLowerBound": 0.057168172346399045,
+            "observed": 0.10465116279069768
+          },
+          {
+            "bucket": 5,
+            "rows": 172,
+            "meanPredicted": 0.12531307357988347,
+            "meanLowerBound": 0.07013620804342674,
+            "observed": 0.11627906976744186
+          },
+          {
+            "bucket": 6,
+            "rows": 172,
+            "meanPredicted": 0.14358340785749982,
+            "meanLowerBound": 0.08356899250563112,
+            "observed": 0.1686046511627907
+          },
+          {
+            "bucket": 7,
+            "rows": 172,
+            "meanPredicted": 0.16378409012244027,
+            "meanLowerBound": 0.09942452239464611,
+            "observed": 0.12790697674418605
+          },
+          {
+            "bucket": 8,
+            "rows": 172,
+            "meanPredicted": 0.19102186805393837,
+            "meanLowerBound": 0.12077774395005506,
+            "observed": 0.0872093023255814
+          },
+          {
+            "bucket": 9,
+            "rows": 164,
+            "meanPredicted": 0.2611471771724881,
+            "meanLowerBound": 0.17891370003853294,
+            "observed": 0.17073170731707318
+          }
+        ],
+        "violationBuckets": [],
+        "judgeableBuckets": 10,
+        "reference": {
+          "armed": 0,
+          "armedRate": 0,
+          "hitRate": 0,
+          "meanR": 0,
+          "meanRLower": 0
+        },
+        "fitted": {
+          "armed": 2,
+          "armedRate": 0,
+          "hitRate": 1,
+          "meanR": 1.9813016748497052,
+          "meanRLower": 1.9796209860382044,
+          "meanLowerBound": 0.07065998783943059
+        },
+        "corpus": {
+          "hitRate": 0.1080607476635514,
+          "meanR": -0.16745523221559327
+        }
+      },
+      "series": [
+        {
+          "series": "mean-reverting#1",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 552,
+          "viewRate": 0.23979148566463945,
+          "labelled": 552,
+          "independentObservations": 74.25953114576116,
+          "kishEffectiveSampleSize": 479.2837079119741,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 469,
+              "calibration": 469,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 80,
+              "purged": 3,
+              "evidence": 65
+            },
+            {
+              "fold": 1,
+              "train": 408,
+              "calibration": 408,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 124,
+              "purged": 20,
+              "evidence": 55
+            },
+            {
+              "fold": 2,
+              "train": 403,
+              "calibration": 403,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 126,
+              "purged": 23,
+              "evidence": 55
+            },
+            {
+              "fold": 3,
+              "train": 417,
+              "calibration": 417,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 110,
+              "purged": 25,
+              "evidence": 56
+            },
+            {
+              "fold": 4,
+              "train": 417,
+              "calibration": 417,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 112,
+              "purged": 23,
+              "evidence": 55
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 0,
+          "cpcvMeanR": {
+            "min": 0,
+            "median": 0,
+            "max": 0
+          },
+          "stats": {
+            "rows": 552,
+            "hitRate": 0.1068840579710145,
+            "hitRateLower": 0.08377204084862416,
+            "baseRate": 0.1270008970247161,
+            "brier": 0.11127474496091865,
+            "brierSkill": -0.003635516487372703,
+            "logLoss": 0.38378901608515553,
+            "reliability": {
+              "slope": 0.4108132258721642,
+              "intercept": -1.0697885007875958,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 479.2837079119741,
+              "iterations": 5
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 56,
+                "meanPredicted": 0.022418496232808345,
+                "meanLowerBound": 0.006000037963559977,
+                "observed": 0.017857142857142856
+              },
+              {
+                "bucket": 1,
+                "rows": 56,
+                "meanPredicted": 0.04706708947563986,
+                "meanLowerBound": 0.018026990945342776,
+                "observed": 0.08928571428571429
+              },
+              {
+                "bucket": 2,
+                "rows": 56,
+                "meanPredicted": 0.06888045152397412,
+                "meanLowerBound": 0.030999294436130236,
+                "observed": 0.08928571428571429
+              },
+              {
+                "bucket": 3,
+                "rows": 56,
+                "meanPredicted": 0.0878591566873523,
+                "meanLowerBound": 0.0432182060402766,
+                "observed": 0.125
+              },
+              {
+                "bucket": 4,
+                "rows": 56,
+                "meanPredicted": 0.10855991947512537,
+                "meanLowerBound": 0.05739125435971647,
+                "observed": 0.03571428571428571
+              },
+              {
+                "bucket": 5,
+                "rows": 56,
+                "meanPredicted": 0.12783038212477155,
+                "meanLowerBound": 0.07130993431982006,
+                "observed": 0.17857142857142858
+              },
+              {
+                "bucket": 6,
+                "rows": 56,
+                "meanPredicted": 0.14879657284091094,
+                "meanLowerBound": 0.0872225140353956,
+                "observed": 0.125
+              },
+              {
+                "bucket": 7,
+                "rows": 56,
+                "meanPredicted": 0.16896225365975853,
+                "meanLowerBound": 0.1030496520883999,
+                "observed": 0.10714285714285714
+              },
+              {
+                "bucket": 8,
+                "rows": 56,
+                "meanPredicted": 0.19176587557443778,
+                "meanLowerBound": 0.12102259441663336,
+                "observed": 0.07142857142857142
+              },
+              {
+                "bucket": 9,
+                "rows": 48,
+                "meanPredicted": 0.23198356409314028,
+                "meanLowerBound": 0.15339362158707084,
+                "observed": 0.25
+              }
+            ],
+            "violationBuckets": [],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0,
+              "meanLowerBound": 0.06794268231535291
+            },
+            "corpus": {
+              "hitRate": 0.1068840579710145,
+              "meanR": -0.1719522672359507
+            }
+          },
+          "elapsedMs": 3298
+        },
+        {
+          "series": "mean-reverting#2",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 588,
+          "viewRate": 0.2554300608166811,
+          "labelled": 588,
+          "independentObservations": 78.90355670403282,
+          "kishEffectiveSampleSize": 444.62269965333667,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 507,
+              "calibration": 507,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 77,
+              "purged": 4,
+              "evidence": 67
+            },
+            {
+              "fold": 1,
+              "train": 434,
+              "calibration": 434,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 140,
+              "purged": 14,
+              "evidence": 61
+            },
+            {
+              "fold": 2,
+              "train": 440,
+              "calibration": 440,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 127,
+              "purged": 21,
+              "evidence": 59
+            },
+            {
+              "fold": 3,
+              "train": 430,
+              "calibration": 430,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 136,
+              "purged": 22,
+              "evidence": 58
+            },
+            {
+              "fold": 4,
+              "train": 462,
+              "calibration": 462,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 108,
+              "purged": 18,
+              "evidence": 59
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 1,
+          "cpcvMeanR": {
+            "min": 1.9823233701758456,
+            "median": 1.9823233701758456,
+            "max": 1.9823233701758456
+          },
+          "stats": {
+            "rows": 588,
+            "hitRate": 0.12244897959183673,
+            "hitRateLower": 0.09837625628455889,
+            "baseRate": 0.14511770978642288,
+            "brier": 0.12431778840812296,
+            "brierSkill": -0.002089564115226983,
+            "logLoss": 0.41691307502008607,
+            "reliability": {
+              "slope": 0.4231640876146682,
+              "intercept": -0.9738571046047326,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 444.62269965333667,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 59,
+                "meanPredicted": 0.03222753713126155,
+                "meanLowerBound": 0.0113182098474124,
+                "observed": 0.05084745762711865
+              },
+              {
+                "bucket": 1,
+                "rows": 59,
+                "meanPredicted": 0.06695745727791477,
+                "meanLowerBound": 0.030469989714268664,
+                "observed": 0.11864406779661017
+              },
+              {
+                "bucket": 2,
+                "rows": 59,
+                "meanPredicted": 0.09249654245657653,
+                "meanLowerBound": 0.047269819249758795,
+                "observed": 0.13559322033898305
+              },
+              {
+                "bucket": 3,
+                "rows": 59,
+                "meanPredicted": 0.11026094146587084,
+                "meanLowerBound": 0.05987041079871825,
+                "observed": 0.1016949152542373
+              },
+              {
+                "bucket": 4,
+                "rows": 59,
+                "meanPredicted": 0.12527076679911678,
+                "meanLowerBound": 0.07130501433297642,
+                "observed": 0.11864406779661017
+              },
+              {
+                "bucket": 5,
+                "rows": 59,
+                "meanPredicted": 0.14100414811288656,
+                "meanLowerBound": 0.08281301877573989,
+                "observed": 0.1694915254237288
+              },
+              {
+                "bucket": 6,
+                "rows": 59,
+                "meanPredicted": 0.15700805264530615,
+                "meanLowerBound": 0.09496811524539873,
+                "observed": 0.15254237288135594
+              },
+              {
+                "bucket": 7,
+                "rows": 59,
+                "meanPredicted": 0.17467964403537384,
+                "meanLowerBound": 0.108967305772637,
+                "observed": 0.15254237288135594
+              },
+              {
+                "bucket": 8,
+                "rows": 59,
+                "meanPredicted": 0.20527999929708307,
+                "meanLowerBound": 0.13389296905838474,
+                "observed": 0.05084745762711865
+              },
+              {
+                "bucket": 9,
+                "rows": 57,
+                "meanPredicted": 0.2799809779293094,
+                "meanLowerBound": 0.19618673163048733,
+                "observed": 0.17543859649122806
+              }
+            ],
+            "violationBuckets": [
+              8
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 1,
+              "armedRate": 0,
+              "hitRate": 1,
+              "meanR": 1.9823233701758456,
+              "meanRLower": 1.9823233701758456,
+              "meanLowerBound": 0.08332357145894592
+            },
+            "corpus": {
+              "hitRate": 0.12244897959183673,
+              "meanR": -0.16375445160745916
+            }
+          },
+          "elapsedMs": 3369
+        },
+        {
+          "series": "mean-reverting#3",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 572,
+          "viewRate": 0.24847958297132927,
+          "labelled": 572,
+          "independentObservations": 71.65673384612451,
+          "kishEffectiveSampleSize": 484.2365628439139,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 484,
+              "calibration": 484,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 86,
+              "purged": 2,
+              "evidence": 59
+            },
+            {
+              "fold": 1,
+              "train": 435,
+              "calibration": 435,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 117,
+              "purged": 20,
+              "evidence": 54
+            },
+            {
+              "fold": 2,
+              "train": 424,
+              "calibration": 424,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 126,
+              "purged": 22,
+              "evidence": 54
+            },
+            {
+              "fold": 3,
+              "train": 420,
+              "calibration": 420,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 133,
+              "purged": 19,
+              "evidence": 55
+            },
+            {
+              "fold": 4,
+              "train": 441,
+              "calibration": 441,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 110,
+              "purged": 21,
+              "evidence": 54
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 3,
+          "cpcvMeanR": {
+            "min": -0.11668503216165176,
+            "median": 0.07877528501463635,
+            "max": 1.0295276322691007
+          },
+          "stats": {
+            "rows": 572,
+            "hitRate": 0.0944055944055944,
+            "hitRateLower": 0.07307665341833566,
+            "baseRate": 0.10497747036748693,
+            "brier": 0.09379610434841128,
+            "brierSkill": 0.001714575705349497,
+            "logLoss": 0.32802800101450663,
+            "reliability": {
+              "slope": 0.6415421988590324,
+              "intercept": -0.7385104558815013,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 484.2365628439139,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 58,
+                "meanPredicted": 0.019511718356837224,
+                "meanLowerBound": 0.004888512214919306,
+                "observed": 0.017241379310344827
+              },
+              {
+                "bucket": 1,
+                "rows": 58,
+                "meanPredicted": 0.042472118183714366,
+                "meanLowerBound": 0.015361646238163766,
+                "observed": 0.034482758620689655
+              },
+              {
+                "bucket": 2,
+                "rows": 58,
+                "meanPredicted": 0.058668404698570924,
+                "meanLowerBound": 0.02452104747800231,
+                "observed": 0.06896551724137931
+              },
+              {
+                "bucket": 3,
+                "rows": 58,
+                "meanPredicted": 0.07281444305447593,
+                "meanLowerBound": 0.033217788542725606,
+                "observed": 0.034482758620689655
+              },
+              {
+                "bucket": 4,
+                "rows": 58,
+                "meanPredicted": 0.086435283198911,
+                "meanLowerBound": 0.04200772104731549,
+                "observed": 0.15517241379310345
+              },
+              {
+                "bucket": 5,
+                "rows": 58,
+                "meanPredicted": 0.10380240705575525,
+                "meanLowerBound": 0.053891322806701204,
+                "observed": 0.13793103448275862
+              },
+              {
+                "bucket": 6,
+                "rows": 58,
+                "meanPredicted": 0.12449840876757516,
+                "meanLowerBound": 0.06849669567280911,
+                "observed": 0.10344827586206896
+              },
+              {
+                "bucket": 7,
+                "rows": 58,
+                "meanPredicted": 0.1441319232575778,
+                "meanLowerBound": 0.08305813611749546,
+                "observed": 0.13793103448275862
+              },
+              {
+                "bucket": 8,
+                "rows": 58,
+                "meanPredicted": 0.17677006457533304,
+                "meanLowerBound": 0.10794995326091579,
+                "observed": 0.13793103448275862
+              },
+              {
+                "bucket": 9,
+                "rows": 50,
+                "meanPredicted": 0.27226959648340787,
+                "meanLowerBound": 0.18668989538370515,
+                "observed": 0.12
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 1,
+              "armedRate": 0,
+              "hitRate": 1,
+              "meanR": 1.980279979523565,
+              "meanRLower": 1.980279979523565,
+              "meanLowerBound": 0.06026447294610145
+            },
+            "corpus": {
+              "hitRate": 0.0944055944055944,
+              "meanR": -0.1669197351287851
+            }
+          },
+          "elapsedMs": 3233
+        }
+      ],
+      "calibration": {
+        "gates": [
+          {
+            "name": "labelled rows",
+            "pass": true,
+            "detail": "1712 rows with a finished label (need ≥ 120)"
+          },
+          {
+            "name": "reliability slope",
+            "pass": false,
+            "detail": "slope 0.509 (need 0.8–1.2)"
+          },
+          {
+            "name": "Brier skill",
+            "pass": true,
+            "detail": "skill 0.0009 against the constant base-rate forecast (need > 0)"
+          },
+          {
+            "name": "p_LCB coverage",
+            "pass": true,
+            "detail": "0/10 judgeable deciles realised below their own mean p_LCB by > 5pp (allowed ≤ 25%)"
+          },
+          {
+            "name": "fitted policy arms",
+            "pass": false,
+            "detail": "2 armed at EV_LCB > 0 (need ≥ 20)"
+          },
+          {
+            "name": "fitted beats corpus",
+            "pass": true,
+            "detail": "fitted mean R 1.981 vs corpus -0.167 (hit 100.0% vs 10.8%)"
+          }
+        ],
+        "pass": false
+      },
+      "nullGates": null
+    },
+    {
+      "name": "null-driftless",
+      "kind": "driftless",
+      "home": false,
+      "null": true,
+      "note": "driftless random walk: nothing to learn, so the fitted policy must not claim an edge",
+      "pooled": {
+        "rows": 1807,
+        "hitRate": 0.16325401217487548,
+        "hitRateLower": 0.14693008412237013,
+        "baseRate": 0.1746844412546619,
+        "brier": 0.14836109004004808,
+        "brierSkill": -0.02907199131059568,
+        "logLoss": 0.4744546502297669,
+        "reliability": {
+          "slope": 0.31113450733521303,
+          "intercept": -1.0488927647140591,
+          "identifiable": true,
+          "reason": "ok",
+          "effectiveSampleSize": 1450.6327766153247,
+          "iterations": 4
+        },
+        "buckets": [
+          {
+            "bucket": 0,
+            "rows": 181,
+            "meanPredicted": 0.043270577011958286,
+            "meanLowerBound": 0.017261756417448287,
+            "observed": 0.049723756906077346
+          },
+          {
+            "bucket": 1,
+            "rows": 181,
+            "meanPredicted": 0.08700214440837449,
+            "meanLowerBound": 0.044379297112144535,
+            "observed": 0.12154696132596685
+          },
+          {
+            "bucket": 2,
+            "rows": 181,
+            "meanPredicted": 0.1147382706901894,
+            "meanLowerBound": 0.06363518112627854,
+            "observed": 0.16022099447513813
+          },
+          {
+            "bucket": 3,
+            "rows": 181,
+            "meanPredicted": 0.1379755166600296,
+            "meanLowerBound": 0.08049935288067687,
+            "observed": 0.19889502762430938
+          },
+          {
+            "bucket": 4,
+            "rows": 181,
+            "meanPredicted": 0.15987635690400953,
+            "meanLowerBound": 0.09764351664167058,
+            "observed": 0.1878453038674033
+          },
+          {
+            "bucket": 5,
+            "rows": 181,
+            "meanPredicted": 0.18086646897867678,
+            "meanLowerBound": 0.113855685286129,
+            "observed": 0.14917127071823205
+          },
+          {
+            "bucket": 6,
+            "rows": 181,
+            "meanPredicted": 0.2066363426500333,
+            "meanLowerBound": 0.13478976920569657,
+            "observed": 0.19337016574585636
+          },
+          {
+            "bucket": 7,
+            "rows": 181,
+            "meanPredicted": 0.23231035636619118,
+            "meanLowerBound": 0.15569896508580933,
+            "observed": 0.1712707182320442
+          },
+          {
+            "bucket": 8,
+            "rows": 181,
+            "meanPredicted": 0.26938815320994397,
+            "meanLowerBound": 0.18719700473926112,
+            "observed": 0.24861878453038674
+          },
+          {
+            "bucket": 9,
+            "rows": 178,
+            "meanPredicted": 0.3771676585334324,
+            "meanLowerBound": 0.28389551038610294,
+            "observed": 0.15168539325842698
+          }
+        ],
+        "violationBuckets": [
+          9
+        ],
+        "judgeableBuckets": 10,
+        "reference": {
+          "armed": 0,
+          "armedRate": 0,
+          "hitRate": 0,
+          "meanR": 0,
+          "meanRLower": 0
+        },
+        "fitted": {
+          "armed": 35,
+          "armedRate": 0,
+          "hitRate": 0.17142857142857143,
+          "meanR": 0.06902018403912809,
+          "meanRLower": -0.26884433337797253,
+          "meanLowerBound": 0.11760999253256328
+        },
+        "corpus": {
+          "hitRate": 0.16325401217487548,
+          "meanR": -0.08350567713562086
+        }
+      },
+      "series": [
+        {
+          "series": "null-driftless#1",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 568,
+          "viewRate": 0.2467419635099913,
+          "labelled": 568,
+          "independentObservations": 76.82288989720249,
+          "kishEffectiveSampleSize": 479.10477599072084,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 491,
+              "calibration": 491,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 73,
+              "purged": 4,
+              "evidence": 66
+            },
+            {
+              "fold": 1,
+              "train": 416,
+              "calibration": 416,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 129,
+              "purged": 23,
+              "evidence": 58
+            },
+            {
+              "fold": 2,
+              "train": 408,
+              "calibration": 408,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 139,
+              "purged": 21,
+              "evidence": 57
+            },
+            {
+              "fold": 3,
+              "train": 422,
+              "calibration": 422,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 124,
+              "purged": 22,
+              "evidence": 56
+            },
+            {
+              "fold": 4,
+              "train": 439,
+              "calibration": 439,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 103,
+              "purged": 26,
+              "evidence": 59
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 5,
+          "cpcvMeanR": {
+            "min": -1.0201034429210998,
+            "median": 0.49960916003073125,
+            "max": 0.8270886955882518
+          },
+          "stats": {
+            "rows": 568,
+            "hitRate": 0.15845070422535212,
+            "hitRateLower": 0.1307275042429161,
+            "baseRate": 0.1724900287975783,
+            "brier": 0.14982831844802957,
+            "brierSkill": -0.04967940209634536,
+            "logLoss": 0.48944756264145883,
+            "reliability": {
+              "slope": -0.07428667947465208,
+              "intercept": -1.6909797487353246,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 479.10477599072084,
+              "iterations": 5
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 57,
+                "meanPredicted": 0.04968557063530739,
+                "meanLowerBound": 0.02052169068261743,
+                "observed": 0.10526315789473684
+              },
+              {
+                "bucket": 1,
+                "rows": 57,
+                "meanPredicted": 0.10303132400840988,
+                "meanLowerBound": 0.054302084758399954,
+                "observed": 0.14035087719298245
+              },
+              {
+                "bucket": 2,
+                "rows": 57,
+                "meanPredicted": 0.12952651810484853,
+                "meanLowerBound": 0.07356918358522516,
+                "observed": 0.17543859649122806
+              },
+              {
+                "bucket": 3,
+                "rows": 57,
+                "meanPredicted": 0.14693329751210443,
+                "meanLowerBound": 0.08657967331231846,
+                "observed": 0.12280701754385964
+              },
+              {
+                "bucket": 4,
+                "rows": 57,
+                "meanPredicted": 0.16743088787415872,
+                "meanLowerBound": 0.10206673165744402,
+                "observed": 0.15789473684210525
+              },
+              {
+                "bucket": 5,
+                "rows": 57,
+                "meanPredicted": 0.18459443416473936,
+                "meanLowerBound": 0.1156430374873985,
+                "observed": 0.15789473684210525
+              },
+              {
+                "bucket": 6,
+                "rows": 57,
+                "meanPredicted": 0.20932129447511177,
+                "meanLowerBound": 0.1353631319431278,
+                "observed": 0.17543859649122806
+              },
+              {
+                "bucket": 7,
+                "rows": 57,
+                "meanPredicted": 0.2342294780226443,
+                "meanLowerBound": 0.15641159588143266,
+                "observed": 0.22807017543859648
+              },
+              {
+                "bucket": 8,
+                "rows": 57,
+                "meanPredicted": 0.26680956239093406,
+                "meanLowerBound": 0.18367752201352236,
+                "observed": 0.21052631578947367
+              },
+              {
+                "bucket": 9,
+                "rows": 55,
+                "meanPredicted": 0.33588501684764044,
+                "meanLowerBound": 0.24400559692410398,
+                "observed": 0.10909090909090909
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 3,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": -1.0201034429210998,
+              "meanRLower": -1.0207494197973157,
+              "meanLowerBound": 0.11676757562702546
+            },
+            "corpus": {
+              "hitRate": 0.15845070422535212,
+              "meanR": -0.09421799177314194
+            }
+          },
+          "elapsedMs": 3242
+        },
+        {
+          "series": "null-driftless#2",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 629,
+          "viewRate": 0.2732406602953953,
+          "labelled": 629,
+          "independentObservations": 87.01909680081722,
+          "kishEffectiveSampleSize": 468.2517372026801,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 546,
+              "calibration": 546,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 81,
+              "purged": 2,
+              "evidence": 75
+            },
+            {
+              "fold": 1,
+              "train": 480,
+              "calibration": 480,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 132,
+              "purged": 17,
+              "evidence": 67
+            },
+            {
+              "fold": 2,
+              "train": 455,
+              "calibration": 455,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 146,
+              "purged": 28,
+              "evidence": 65
+            },
+            {
+              "fold": 3,
+              "train": 457,
+              "calibration": 457,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 151,
+              "purged": 21,
+              "evidence": 63
+            },
+            {
+              "fold": 4,
+              "train": 493,
+              "calibration": 493,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 119,
+              "purged": 17,
+              "evidence": 66
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 4,
+          "cpcvMeanR": {
+            "min": -1.0174858784933474,
+            "median": -0.0684137953744602,
+            "max": 0.9480094843692711
+          },
+          "stats": {
+            "rows": 629,
+            "hitRate": 0.1494435612082671,
+            "hitRateLower": 0.12371232863189593,
+            "baseRate": 0.16227932670801257,
+            "brier": 0.13502670250094254,
+            "brierSkill": 0.006753069549675472,
+            "logLoss": 0.43352646438087644,
+            "reliability": {
+              "slope": 0.6326286969208729,
+              "intercept": -0.5534294749187397,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 468.2517372026801,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 63,
+                "meanPredicted": 0.034338792260408646,
+                "meanLowerBound": 0.012542929497423581,
+                "observed": 0.06349206349206349
+              },
+              {
+                "bucket": 1,
+                "rows": 63,
+                "meanPredicted": 0.06202875169558653,
+                "meanLowerBound": 0.02853130347459415,
+                "observed": 0.015873015873015872
+              },
+              {
+                "bucket": 2,
+                "rows": 63,
+                "meanPredicted": 0.09162116169371297,
+                "meanLowerBound": 0.04884975524806596,
+                "observed": 0.12698412698412698
+              },
+              {
+                "bucket": 3,
+                "rows": 63,
+                "meanPredicted": 0.11635367275059205,
+                "meanLowerBound": 0.06630165823143484,
+                "observed": 0.1111111111111111
+              },
+              {
+                "bucket": 4,
+                "rows": 63,
+                "meanPredicted": 0.14284339519069184,
+                "meanLowerBound": 0.0858354342476012,
+                "observed": 0.1746031746031746
+              },
+              {
+                "bucket": 5,
+                "rows": 63,
+                "meanPredicted": 0.16348288265030778,
+                "meanLowerBound": 0.10211776206826115,
+                "observed": 0.2222222222222222
+              },
+              {
+                "bucket": 6,
+                "rows": 63,
+                "meanPredicted": 0.18588844703968024,
+                "meanLowerBound": 0.1200464587485442,
+                "observed": 0.15873015873015872
+              },
+              {
+                "bucket": 7,
+                "rows": 63,
+                "meanPredicted": 0.21333851269606924,
+                "meanLowerBound": 0.1421498016574145,
+                "observed": 0.2222222222222222
+              },
+              {
+                "bucket": 8,
+                "rows": 63,
+                "meanPredicted": 0.2415558284551126,
+                "meanLowerBound": 0.16580437322362943,
+                "observed": 0.19047619047619047
+              },
+              {
+                "bucket": 9,
+                "rows": 62,
+                "meanPredicted": 0.34335434568576406,
+                "meanLowerBound": 0.2571117942477943,
+                "observed": 0.20967741935483872
+              }
+            ],
+            "violationBuckets": [],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 12,
+              "armedRate": 0,
+              "hitRate": 0.08333333333333333,
+              "meanR": -0.04710952684661814,
+              "meanRLower": -0.5475579407626979,
+              "meanLowerBound": 0.10268400358723735
+            },
+            "corpus": {
+              "hitRate": 0.1494435612082671,
+              "meanR": -0.13590011989839984
+            }
+          },
+          "elapsedMs": 3530
+        },
+        {
+          "series": "null-driftless#3",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 610,
+          "viewRate": 0.26498696785403997,
+          "labelled": 610,
+          "independentObservations": 78.58432326686477,
+          "kishEffectiveSampleSize": 513.6004148270646,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 511,
+              "calibration": 511,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 97,
+              "purged": 2,
+              "evidence": 65
+            },
+            {
+              "fold": 1,
+              "train": 476,
+              "calibration": 476,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 114,
+              "purged": 20,
+              "evidence": 61
+            },
+            {
+              "fold": 2,
+              "train": 444,
+              "calibration": 444,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 139,
+              "purged": 27,
+              "evidence": 57
+            },
+            {
+              "fold": 3,
+              "train": 446,
+              "calibration": 446,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 144,
+              "purged": 20,
+              "evidence": 57
+            },
+            {
+              "fold": 4,
+              "train": 471,
+              "calibration": 471,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 116,
+              "purged": 23,
+              "evidence": 60
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 9,
+          "cpcvMeanR": {
+            "min": -0.12670118824408827,
+            "median": 0.4639065546123793,
+            "max": 1.9834289024326048
+          },
+          "stats": {
+            "rows": 610,
+            "hitRate": 0.1819672131147541,
+            "hitRateLower": 0.1533709496091281,
+            "baseRate": 0.1905662726207142,
+            "brier": 0.1616923702503126,
+            "brierSkill": -0.0482435320696446,
+            "logLoss": 0.505118971135623,
+            "reliability": {
+              "slope": 0.23752226010574756,
+              "intercept": -1.0959897696435166,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 513.6004148270646,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 61,
+                "meanPredicted": 0.06094526656149213,
+                "meanLowerBound": 0.027511655388423324,
+                "observed": 0.04918032786885246
+              },
+              {
+                "bucket": 1,
+                "rows": 61,
+                "meanPredicted": 0.1011144833202413,
+                "meanLowerBound": 0.053041051434353004,
+                "observed": 0.14754098360655737
+              },
+              {
+                "bucket": 2,
+                "rows": 61,
+                "meanPredicted": 0.12245131617480792,
+                "meanLowerBound": 0.06858357436444909,
+                "observed": 0.26229508196721313
+              },
+              {
+                "bucket": 3,
+                "rows": 61,
+                "meanPredicted": 0.14688304848992823,
+                "meanLowerBound": 0.08697580529242335,
+                "observed": 0.26229508196721313
+              },
+              {
+                "bucket": 4,
+                "rows": 61,
+                "meanPredicted": 0.17214585768871202,
+                "meanLowerBound": 0.10620718688634558,
+                "observed": 0.14754098360655737
+              },
+              {
+                "bucket": 5,
+                "rows": 61,
+                "meanPredicted": 0.19749622111662046,
+                "meanLowerBound": 0.12666368080571508,
+                "observed": 0.11475409836065574
+              },
+              {
+                "bucket": 6,
+                "rows": 61,
+                "meanPredicted": 0.2241671975030811,
+                "meanLowerBound": 0.14824270326596384,
+                "observed": 0.22950819672131148
+              },
+              {
+                "bucket": 7,
+                "rows": 61,
+                "meanPredicted": 0.25364807917147436,
+                "meanLowerBound": 0.17302430205017585,
+                "observed": 0.21311475409836064
+              },
+              {
+                "bucket": 8,
+                "rows": 61,
+                "meanPredicted": 0.304936898349444,
+                "meanLowerBound": 0.2173708402788312,
+                "observed": 0.21311475409836064
+              },
+              {
+                "bucket": 9,
+                "rows": 61,
+                "meanPredicted": 0.4279709718869684,
+                "meanLowerBound": 0.330232237836915,
+                "observed": 0.18032786885245902
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 20,
+              "armedRate": 0,
+              "hitRate": 0.25,
+              "meanR": 0.30206655461461007,
+              "meanRLower": -0.18398994665187807,
+              "meanLowerBound": 0.13378530376035955
+            },
+            "corpus": {
+              "hitRate": 0.1819672131147541,
+              "meanR": -0.019504530886604803
+            }
+          },
+          "elapsedMs": 3562
+        }
+      ],
+      "calibration": {
+        "gates": [
+          {
+            "name": "labelled rows",
+            "pass": true,
+            "detail": "1807 rows with a finished label (need ≥ 120)"
+          },
+          {
+            "name": "reliability slope",
+            "pass": false,
+            "detail": "slope 0.311 (need 0.8–1.2)"
+          },
+          {
+            "name": "Brier skill",
+            "pass": false,
+            "detail": "skill -0.0291 against the constant base-rate forecast (need > 0)"
+          },
+          {
+            "name": "p_LCB coverage",
+            "pass": true,
+            "detail": "1/10 judgeable deciles realised below their own mean p_LCB by > 5pp (allowed ≤ 25%)"
+          },
+          {
+            "name": "fitted policy arms",
+            "pass": true,
+            "detail": "35 armed at EV_LCB > 0 (need ≥ 20)"
+          },
+          {
+            "name": "fitted beats corpus",
+            "pass": true,
+            "detail": "fitted mean R 0.069 vs corpus -0.084 (hit 17.1% vs 16.3%)"
+          }
+        ],
+        "pass": false
+      },
+      "nullGates": {
+        "gates": [
+          {
+            "name": "null: no positive edge",
+            "pass": true,
+            "detail": "35 armed, mean R 0.069 with 95% lower bound -0.269 (need ≤ 0)"
+          },
+          {
+            "name": "null: bound stays honest",
+            "pass": true,
+            "detail": "mean p_LCB 0.118 vs base rate 0.175"
+          }
+        ],
+        "pass": true
+      }
+    },
+    {
+      "name": "null-shuffled",
+      "kind": "block-shuffled",
+      "home": false,
+      "null": true,
+      "note": "block-shuffled returns: marginals kept, temporal structure destroyed",
+      "pooled": {
+        "rows": 1769,
+        "hitRate": 0.17297908422837763,
+        "hitRateLower": 0.15606683039366348,
+        "baseRate": 0.1703143979946908,
+        "brier": 0.15271990878671532,
+        "brierSkill": -0.08076367300623777,
+        "logLoss": 0.49728920207184607,
+        "reliability": {
+          "slope": -0.04598727191772853,
+          "intercept": -1.6594881178748224,
+          "identifiable": true,
+          "reason": "ok",
+          "effectiveSampleSize": 1348.9800586404922,
+          "iterations": 5
+        },
+        "buckets": [
+          {
+            "bucket": 0,
+            "rows": 177,
+            "meanPredicted": 0.05323569146337699,
+            "meanLowerBound": 0.022778608263204905,
+            "observed": 0.23163841807909605
+          },
+          {
+            "bucket": 1,
+            "rows": 177,
+            "meanPredicted": 0.08956501700632598,
+            "meanLowerBound": 0.04576890131704636,
+            "observed": 0.1638418079096045
+          },
+          {
+            "bucket": 2,
+            "rows": 177,
+            "meanPredicted": 0.11249264946964958,
+            "meanLowerBound": 0.06203168385078234,
+            "observed": 0.11864406779661017
+          },
+          {
+            "bucket": 3,
+            "rows": 177,
+            "meanPredicted": 0.13384152929591833,
+            "meanLowerBound": 0.07781572061313953,
+            "observed": 0.15254237288135594
+          },
+          {
+            "bucket": 4,
+            "rows": 177,
+            "meanPredicted": 0.15202773808233822,
+            "meanLowerBound": 0.09166904102394036,
+            "observed": 0.2033898305084746
+          },
+          {
+            "bucket": 5,
+            "rows": 177,
+            "meanPredicted": 0.17357804353081138,
+            "meanLowerBound": 0.10869833757061358,
+            "observed": 0.12429378531073447
+          },
+          {
+            "bucket": 6,
+            "rows": 177,
+            "meanPredicted": 0.19931083659874266,
+            "meanLowerBound": 0.1295559778659665,
+            "observed": 0.1864406779661017
+          },
+          {
+            "bucket": 7,
+            "rows": 177,
+            "meanPredicted": 0.22833359610112478,
+            "meanLowerBound": 0.15360612695403045,
+            "observed": 0.2033898305084746
+          },
+          {
+            "bucket": 8,
+            "rows": 177,
+            "meanPredicted": 0.2703964051418267,
+            "meanLowerBound": 0.18894134894612846,
+            "observed": 0.22033898305084745
+          },
+          {
+            "bucket": 9,
+            "rows": 176,
+            "meanPredicted": 0.3899810878721766,
+            "meanLowerBound": 0.29808211487044534,
+            "observed": 0.125
+          }
+        ],
+        "violationBuckets": [
+          9
+        ],
+        "judgeableBuckets": 10,
+        "reference": {
+          "armed": 0,
+          "armedRate": 0,
+          "hitRate": 0,
+          "meanR": 0,
+          "meanRLower": 0
+        },
+        "fitted": {
+          "armed": 39,
+          "armedRate": 0,
+          "hitRate": 0.1794871794871795,
+          "meanR": -0.060442910412741246,
+          "meanRLower": -0.3925795679502879,
+          "meanLowerBound": 0.11779292782976677
+        },
+        "corpus": {
+          "hitRate": 0.17297908422837763,
+          "meanR": -0.0603777880916826
+        }
+      },
+      "series": [
+        {
+          "series": "null-shuffled#1",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 650,
+          "viewRate": 0.28236316246741966,
+          "labelled": 650,
+          "independentObservations": 79.7257596261979,
+          "kishEffectiveSampleSize": 518.5112384690821,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 559,
+              "calibration": 559,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 90,
+              "purged": 1,
+              "evidence": 67
+            },
+            {
+              "fold": 1,
+              "train": 510,
+              "calibration": 510,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 114,
+              "purged": 26,
+              "evidence": 59
+            },
+            {
+              "fold": 2,
+              "train": 491,
+              "calibration": 491,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 141,
+              "purged": 18,
+              "evidence": 59
+            },
+            {
+              "fold": 3,
+              "train": 467,
+              "calibration": 467,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 161,
+              "purged": 22,
+              "evidence": 62
+            },
+            {
+              "fold": 4,
+              "train": 476,
+              "calibration": 476,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 144,
+              "purged": 30,
+              "evidence": 61
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 4,
+          "cpcvMeanR": {
+            "min": -1.018348617067299,
+            "median": 0.08385763876932012,
+            "max": 1.5740502790185613
+          },
+          "stats": {
+            "rows": 650,
+            "hitRate": 0.17846153846153845,
+            "hitRateLower": 0.15094011500771254,
+            "baseRate": 0.1716438528787325,
+            "brier": 0.15778280267456743,
+            "brierSkill": -0.10972229693262925,
+            "logLoss": 0.5077535994597444,
+            "reliability": {
+              "slope": -0.3430758720939415,
+              "intercept": -2.143951660658229,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 518.5112384690821,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 65,
+                "meanPredicted": 0.06680018663764208,
+                "meanLowerBound": 0.030952175671897668,
+                "observed": 0.3230769230769231
+              },
+              {
+                "bucket": 1,
+                "rows": 65,
+                "meanPredicted": 0.09819091665063252,
+                "meanLowerBound": 0.05170626763027541,
+                "observed": 0.13846153846153847
+              },
+              {
+                "bucket": 2,
+                "rows": 65,
+                "meanPredicted": 0.11609601794958468,
+                "meanLowerBound": 0.06440169616929359,
+                "observed": 0.16923076923076924
+              },
+              {
+                "bucket": 3,
+                "rows": 65,
+                "meanPredicted": 0.13375822905253576,
+                "meanLowerBound": 0.07745163154102576,
+                "observed": 0.13846153846153847
+              },
+              {
+                "bucket": 4,
+                "rows": 65,
+                "meanPredicted": 0.14846630441601913,
+                "meanLowerBound": 0.08866236581840009,
+                "observed": 0.27692307692307694
+              },
+              {
+                "bucket": 5,
+                "rows": 65,
+                "meanPredicted": 0.16677604428305542,
+                "meanLowerBound": 0.10272378954512526,
+                "observed": 0.13846153846153847
+              },
+              {
+                "bucket": 6,
+                "rows": 65,
+                "meanPredicted": 0.1892626089079474,
+                "meanLowerBound": 0.12056532178147497,
+                "observed": 0.09230769230769231
+              },
+              {
+                "bucket": 7,
+                "rows": 65,
+                "meanPredicted": 0.21536721693884125,
+                "meanLowerBound": 0.14222795164821925,
+                "observed": 0.16923076923076924
+              },
+              {
+                "bucket": 8,
+                "rows": 65,
+                "meanPredicted": 0.25214100774182485,
+                "meanLowerBound": 0.1727487991645917,
+                "observed": 0.2153846153846154
+              },
+              {
+                "bucket": 9,
+                "rows": 65,
+                "meanPredicted": 0.34384864293880346,
+                "meanLowerBound": 0.25419141273058865,
+                "observed": 0.12307692307692308
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 7,
+              "armedRate": 0,
+              "hitRate": 0.2857142857142857,
+              "meanR": 0.17319627105633514,
+              "meanRLower": -0.7600441495909624,
+              "meanLowerBound": 0.11056314117008921
+            },
+            "corpus": {
+              "hitRate": 0.17846153846153845,
+              "meanR": -0.05671167682153941
+            }
+          },
+          "elapsedMs": 3867
+        },
+        {
+          "series": "null-shuffled#2",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 565,
+          "viewRate": 0.24543874891398784,
+          "labelled": 565,
+          "independentObservations": 81.37658841335471,
+          "kishEffectiveSampleSize": 416.1913128964895,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 493,
+              "calibration": 493,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 71,
+              "purged": 1,
+              "evidence": 68
+            },
+            {
+              "fold": 1,
+              "train": 405,
+              "calibration": 405,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 130,
+              "purged": 30,
+              "evidence": 60
+            },
+            {
+              "fold": 2,
+              "train": 408,
+              "calibration": 408,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 139,
+              "purged": 18,
+              "evidence": 61
+            },
+            {
+              "fold": 3,
+              "train": 427,
+              "calibration": 427,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 109,
+              "purged": 29,
+              "evidence": 61
+            },
+            {
+              "fold": 4,
+              "train": 429,
+              "calibration": 429,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 116,
+              "purged": 20,
+              "evidence": 61
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 6,
+          "cpcvMeanR": {
+            "min": -1.019331907874128,
+            "median": 0.4241560296786271,
+            "max": 1.9816243074903186
+          },
+          "stats": {
+            "rows": 565,
+            "hitRate": 0.15221238938053097,
+            "hitRateLower": 0.12494698629333174,
+            "baseRate": 0.1627436596083403,
+            "brier": 0.14000104618875492,
+            "brierSkill": -0.02746907267316745,
+            "logLoss": 0.46596176986927346,
+            "reliability": {
+              "slope": 0.2229334658829752,
+              "intercept": -1.2624919088360307,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 416.1913128964895,
+              "iterations": 4
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 57,
+                "meanPredicted": 0.04282287419646801,
+                "meanLowerBound": 0.016658115039413245,
+                "observed": 0.10526315789473684
+              },
+              {
+                "bucket": 1,
+                "rows": 57,
+                "meanPredicted": 0.07125593077774175,
+                "meanLowerBound": 0.033535863922042136,
+                "observed": 0.24561403508771928
+              },
+              {
+                "bucket": 2,
+                "rows": 57,
+                "meanPredicted": 0.09151648364118564,
+                "meanLowerBound": 0.04702794053036527,
+                "observed": 0.07017543859649122
+              },
+              {
+                "bucket": 3,
+                "rows": 57,
+                "meanPredicted": 0.1136263877456775,
+                "meanLowerBound": 0.06275238492078325,
+                "observed": 0.10526315789473684
+              },
+              {
+                "bucket": 4,
+                "rows": 57,
+                "meanPredicted": 0.13712140324577587,
+                "meanLowerBound": 0.08023038956286359,
+                "observed": 0.17543859649122806
+              },
+              {
+                "bucket": 5,
+                "rows": 57,
+                "meanPredicted": 0.16268629537586932,
+                "meanLowerBound": 0.10003479816190908,
+                "observed": 0.14035087719298245
+              },
+              {
+                "bucket": 6,
+                "rows": 57,
+                "meanPredicted": 0.1974200517240051,
+                "meanLowerBound": 0.12779912663412576,
+                "observed": 0.15789473684210525
+              },
+              {
+                "bucket": 7,
+                "rows": 57,
+                "meanPredicted": 0.22987491966454013,
+                "meanLowerBound": 0.15423648169489138,
+                "observed": 0.19298245614035087
+              },
+              {
+                "bucket": 8,
+                "rows": 57,
+                "meanPredicted": 0.27679597302763226,
+                "meanLowerBound": 0.19388014448240726,
+                "observed": 0.15789473684210525
+              },
+              {
+                "bucket": 9,
+                "rows": 52,
+                "meanPredicted": 0.3794554070702637,
+                "meanLowerBound": 0.2856397188043572,
+                "observed": 0.17307692307692307
+              }
+            ],
+            "violationBuckets": [
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 8,
+              "armedRate": 0,
+              "hitRate": 0.125,
+              "meanR": -0.1244903085853595,
+              "meanRLower": -0.8656336385217928,
+              "meanLowerBound": 0.10862675104408535
+            },
+            "corpus": {
+              "hitRate": 0.15221238938053097,
+              "meanR": -0.05256914615137115
+            }
+          },
+          "elapsedMs": 3399
+        },
+        {
+          "series": "null-shuffled#3",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "swing",
+          "frame": "H1",
+          "evaluations": 2302,
+          "views": 554,
+          "viewRate": 0.24066029539530842,
+          "labelled": 554,
+          "independentObservations": 83.8339721840836,
+          "kishEffectiveSampleSize": 431.0789527634883,
+          "unfinished": 0,
+          "missingAtr": 0,
+          "folds": [
+            {
+              "fold": 0,
+              "train": 456,
+              "calibration": 456,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 97,
+              "purged": 1,
+              "evidence": 71
+            },
+            {
+              "fold": 1,
+              "train": 414,
+              "calibration": 414,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 118,
+              "purged": 22,
+              "evidence": 63
+            },
+            {
+              "fold": 2,
+              "train": 411,
+              "calibration": 411,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 123,
+              "purged": 20,
+              "evidence": 62
+            },
+            {
+              "fold": 3,
+              "train": 422,
+              "calibration": 422,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 108,
+              "purged": 24,
+              "evidence": 61
+            },
+            {
+              "fold": 4,
+              "train": 424,
+              "calibration": 424,
+              "calibrated": false,
+              "shrinkage": 1,
+              "test": 108,
+              "purged": 22,
+              "evidence": 67
+            }
+          ],
+          "cpcvPaths": 15,
+          "cpcvPositivePaths": 3,
+          "cpcvMeanR": {
+            "min": -1.162669047523032,
+            "median": -0.2301479347882017,
+            "max": 0.27755566551109606
+          },
+          "stats": {
+            "rows": 554,
+            "hitRate": 0.18772563176895307,
+            "hitRateLower": 0.15739971357743784,
+            "baseRate": 0.17639891299312352,
+            "brier": 0.16025115857907912,
+            "brierSkill": -0.10303263598979151,
+            "logLoss": 0.5177467502582668,
+            "reliability": {
+              "slope": -0.14259250513121396,
+              "intercept": -1.7717560553072598,
+              "identifiable": true,
+              "reason": "ok",
+              "effectiveSampleSize": 431.0789527634883,
+              "iterations": 5
+            },
+            "buckets": [
+              {
+                "bucket": 0,
+                "rows": 56,
+                "meanPredicted": 0.058274763123052645,
+                "meanLowerBound": 0.026218538450038558,
+                "observed": 0.26785714285714285
+              },
+              {
+                "bucket": 1,
+                "rows": 56,
+                "meanPredicted": 0.10647753474212966,
+                "meanLowerBound": 0.05800131108534256,
+                "observed": 0.10714285714285714
+              },
+              {
+                "bucket": 2,
+                "rows": 56,
+                "meanPredicted": 0.13283780688972247,
+                "meanLowerBound": 0.07758893608615287,
+                "observed": 0.17857142857142858
+              },
+              {
+                "bucket": 3,
+                "rows": 56,
+                "meanPredicted": 0.1512186471717718,
+                "meanLowerBound": 0.09130573248318706,
+                "observed": 0.125
+              },
+              {
+                "bucket": 4,
+                "rows": 56,
+                "meanPredicted": 0.17052377955029122,
+                "meanLowerBound": 0.10696734673674176,
+                "observed": 0.17857142857142858
+              },
+              {
+                "bucket": 5,
+                "rows": 56,
+                "meanPredicted": 0.1906549197711534,
+                "meanLowerBound": 0.12331192951944743,
+                "observed": 0.17857142857142858
+              },
+              {
+                "bucket": 6,
+                "rows": 56,
+                "meanPredicted": 0.2155432201232393,
+                "meanLowerBound": 0.14389023940486975,
+                "observed": 0.26785714285714285
+              },
+              {
+                "bucket": 7,
+                "rows": 56,
+                "meanPredicted": 0.24678289261616287,
+                "meanLowerBound": 0.17028177397501118,
+                "observed": 0.30357142857142855
+              },
+              {
+                "bucket": 8,
+                "rows": 56,
+                "meanPredicted": 0.3015786031357261,
+                "meanLowerBound": 0.21818398441342893,
+                "observed": 0.125
+              },
+              {
+                "bucket": 9,
+                "rows": 50,
+                "meanPredicted": 0.4583106201752607,
+                "meanLowerBound": 0.3650708973950944,
+                "observed": 0.14
+              }
+            ],
+            "violationBuckets": [
+              8,
+              9
+            ],
+            "judgeableBuckets": 10,
+            "reference": {
+              "armed": 0,
+              "armedRate": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRLower": 0
+            },
+            "fitted": {
+              "armed": 24,
+              "armedRate": 0,
+              "hitRate": 0.16666666666666666,
+              "meanR": -0.10723853895034911,
+              "meanRLower": -0.5218311373907477,
+              "meanLowerBound": 0.13562370619204167
+            },
+            "corpus": {
+              "hitRate": 0.18772563176895307,
+              "meanR": -0.07264286935859426
+            }
+          },
+          "elapsedMs": 3286
+        }
+      ],
+      "calibration": {
+        "gates": [
+          {
+            "name": "labelled rows",
+            "pass": true,
+            "detail": "1769 rows with a finished label (need ≥ 120)"
+          },
+          {
+            "name": "reliability slope",
+            "pass": false,
+            "detail": "slope -0.046 (need 0.8–1.2)"
+          },
+          {
+            "name": "Brier skill",
+            "pass": false,
+            "detail": "skill -0.0808 against the constant base-rate forecast (need > 0)"
+          },
+          {
+            "name": "p_LCB coverage",
+            "pass": true,
+            "detail": "1/10 judgeable deciles realised below their own mean p_LCB by > 5pp (allowed ≤ 25%)"
+          },
+          {
+            "name": "fitted policy arms",
+            "pass": true,
+            "detail": "39 armed at EV_LCB > 0 (need ≥ 20)"
+          },
+          {
+            "name": "fitted beats corpus",
+            "pass": false,
+            "detail": "fitted mean R -0.060 vs corpus -0.060 (hit 17.9% vs 17.3%)"
+          }
+        ],
+        "pass": false
+      },
+      "nullGates": {
+        "gates": [
+          {
+            "name": "null: no positive edge",
+            "pass": true,
+            "detail": "39 armed, mean R -0.060 with 95% lower bound -0.393 (need ≤ 0)"
+          },
+          {
+            "name": "null: bound stays honest",
+            "pass": true,
+            "detail": "mean p_LCB 0.118 vs base rate 0.170"
+          }
+        ],
+        "pass": true
+      }
+    }
+  ],
+  "verdict": "pass",
+  "notes": [
+    "report-only fixture seasonal fails \"reliability slope\" (slope 0.637 (need 0.8–1.2)) — it does not decide this work package's verdict, but it is a measured limitation of the model on that corpus.",
+    "report-only fixture mean-reverting fails \"reliability slope\" (slope 0.509 (need 0.8–1.2)) — it does not decide this work package's verdict, but it is a measured limitation of the model on that corpus.",
+    "report-only fixture mean-reverting fails \"fitted policy arms\" (2 armed at EV_LCB > 0 (need ≥ 20)) — it does not decide this work package's verdict, but it is a measured limitation of the model on that corpus.",
+    "p_LCB is computed from the Kish effective sample size of the fold's training weights; it is deliberately the sample the calibration rests on, not the size of the test set.",
+    "row-level records are not persisted in the artifact; the run is deterministic, so the same command reproduces them.",
+    "spec assumptions: assetClass=forex, point=0.00001, digits=5, tickSize=0.00001, tickValue=1, contractSize=100000, volumeMin=0.01, volumeStep=0.01, spreadPoints=12, commissionPerLot=0"
+  ]
+}

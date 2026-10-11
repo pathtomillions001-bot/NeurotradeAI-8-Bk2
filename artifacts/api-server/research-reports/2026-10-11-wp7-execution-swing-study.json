@@ -1,0 +1,1341 @@
+{
+  "tool": "MT5 Desk v4 — WP7 execution study",
+  "mode": "swing",
+  "generatedAt": "2026-10-11T18:08:53.687Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --execution --mode swing",
+  "contractSpec": {
+    "symbol": "EURUSD",
+    "assetClass": "forex",
+    "point": 0.00001,
+    "digits": 5,
+    "tickSize": 0.00001,
+    "tickValue": 1,
+    "contractSize": 100000,
+    "volumeMin": 0.01,
+    "volumeMax": 100,
+    "volumeStep": 0.01,
+    "stopsLevel": 0,
+    "freezeLevel": 0,
+    "marginInitial": 0,
+    "swapLong": 0,
+    "swapShort": 0,
+    "commissionPerLot": 0,
+    "spreadPoints": 12
+  },
+  "thresholds": {
+    "stride": 5,
+    "warmupBars": 150,
+    "minFillRate": 0.5,
+    "pairedToleranceR": 0.05,
+    "timingRefusalMax": 0.5,
+    "allowanceCeilingMult": 3
+  },
+  "fixtures": [
+    {
+      "name": "positive-control",
+      "kind": "positive-control",
+      "note": "regime-switching drift + AR(1) residual: the desk's own positive control, where the trend structure is real",
+      "home": true,
+      "pooled": {
+        "decisions": 1377,
+        "legacyMeanR": 0.13621111143408046,
+        "restingMeanR": 0.2502749988646215,
+        "restingFillRate": 1,
+        "pairedMeanDeltaR": 0.08096410239133477,
+        "betterShare": 0.6870007262164125,
+        "timingRefusalRate": 0,
+        "gates": [
+          {
+            "code": "W7_FILL_RATE",
+            "label": "the resting entry actually gets filled",
+            "pass": true,
+            "value": 1,
+            "threshold": 0.5,
+            "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+          },
+          {
+            "code": "W7_PAIRED_EDGE",
+            "label": "resting the limit does not cost the trade its edge",
+            "pass": true,
+            "value": 0.08096410239133477,
+            "threshold": -0.05,
+            "detail": "pooled paired mean ΔR 0.0810R over 1377 pairs (better in 68.7%)"
+          },
+          {
+            "code": "W7_TIMING_FILTER",
+            "label": "the timing gate is a filter, not an exit",
+            "pass": true,
+            "value": 0,
+            "threshold": 0.5,
+            "detail": "the permit rule refuses 0.0% of pooled decision bars"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "positive-control",
+          "series": "positive-control#1",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": 0.21990278232321883,
+            "hitRate": 0.4596949891067538
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.32651403447026217,
+            "hitRate": 0.4749455337690632,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.06413399129636295,
+            "betterShare": 0.644880174291939
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.06413399129636295,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.0641R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "positive-control",
+          "series": "positive-control#2",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": 0.07200414036699335,
+            "hitRate": 0.45751633986928103
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.17188695201162768,
+            "hitRate": 0.4793028322440087,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.07631376617984985,
+            "betterShare": 0.7320261437908496
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.07631376617984985,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.0763R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "positive-control",
+          "series": "positive-control#3",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": 0.11672641161202917,
+            "hitRate": 0.4596949891067538
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.2524240101119747,
+            "hitRate": 0.47276688453159044,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.10244454969779151,
+            "betterShare": 0.6840958605664488
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.10244454969779151,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1024R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "seasonal",
+      "kind": "seasonal",
+      "note": "hour-of-day drift: the fixture where the hour feature carries information (report-only; see the calibration caveat in the report notes)",
+      "home": false,
+      "pooled": {
+        "decisions": 1377,
+        "legacyMeanR": -0.1028386647175755,
+        "restingMeanR": 0.023060245739582742,
+        "restingFillRate": 1,
+        "pairedMeanDeltaR": 0.1216879569053192,
+        "betterShare": 0.7981118373275236,
+        "timingRefusalRate": 0,
+        "gates": [
+          {
+            "code": "W7_FILL_RATE",
+            "label": "the resting entry actually gets filled",
+            "pass": true,
+            "value": 1,
+            "threshold": 0.5,
+            "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+          },
+          {
+            "code": "W7_PAIRED_EDGE",
+            "label": "resting the limit does not cost the trade its edge",
+            "pass": true,
+            "value": 0.1216879569053192,
+            "threshold": -0.05,
+            "detail": "pooled paired mean ΔR 0.1217R over 1377 pairs (better in 79.8%)"
+          },
+          {
+            "code": "W7_TIMING_FILTER",
+            "label": "the timing gate is a filter, not an exit",
+            "pass": true,
+            "value": 0,
+            "threshold": 0.5,
+            "detail": "the permit rule refuses 0.0% of pooled decision bars"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "seasonal",
+          "series": "seasonal#1",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.13759803007382382,
+            "hitRate": 0.4226579520697168
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": -0.026111601756546022,
+            "hitRate": 0.43790849673202614,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.11323008077738222,
+            "betterShare": 0.8017429193899782
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.11323008077738222,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1132R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "seasonal",
+          "series": "seasonal#2",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.11129206340187336,
+            "hitRate": 0.4139433551198257
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.013334442600439846,
+            "hitRate": 0.4531590413943355,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.12202363320653688,
+            "betterShare": 0.803921568627451
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.12202363320653688,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1220R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "seasonal",
+          "series": "seasonal#3",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.059625900677029366,
+            "hitRate": 0.4117647058823529
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.0819578963748544,
+            "hitRate": 0.46187363834422657,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.1298101567320385,
+            "betterShare": 0.7886710239651417
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.1298101567320385,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1298R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "mean-reverting",
+      "kind": "mean-reverting",
+      "note": "OU around a level: the structure a meta-model should be able to rank",
+      "home": false,
+      "pooled": {
+        "decisions": 1377,
+        "legacyMeanR": -0.19026440800906194,
+        "restingMeanR": -0.0709339330068055,
+        "restingFillRate": 1,
+        "pairedMeanDeltaR": 0.12770359559606573,
+        "betterShare": 0.8366013071895425,
+        "timingRefusalRate": 0,
+        "gates": [
+          {
+            "code": "W7_FILL_RATE",
+            "label": "the resting entry actually gets filled",
+            "pass": true,
+            "value": 1,
+            "threshold": 0.5,
+            "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+          },
+          {
+            "code": "W7_PAIRED_EDGE",
+            "label": "resting the limit does not cost the trade its edge",
+            "pass": true,
+            "value": 0.12770359559606573,
+            "threshold": -0.05,
+            "detail": "pooled paired mean ΔR 0.1277R over 1377 pairs (better in 83.7%)"
+          },
+          {
+            "code": "W7_TIMING_FILTER",
+            "label": "the timing gate is a filter, not an exit",
+            "pass": true,
+            "value": 0,
+            "threshold": 0.5,
+            "detail": "the permit rule refuses 0.0% of pooled decision bars"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "mean-reverting",
+          "series": "mean-reverting#1",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.21933307323923748,
+            "hitRate": 0.4008714596949891
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": -0.1029287531895374,
+            "hitRate": 0.4422657952069717,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.12870939356580022,
+            "betterShare": 0.8213507625272332
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.12870939356580022,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1287R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "mean-reverting",
+          "series": "mean-reverting#2",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.1407253371479983,
+            "hitRate": 0.4095860566448802
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": -0.019316610333388416,
+            "hitRate": 0.45098039215686275,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.1234414938328696,
+            "betterShare": 0.8474945533769063
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.1234414938328696,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1234R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "mean-reverting",
+          "series": "mean-reverting#3",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.21073481363995,
+            "hitRate": 0.40522875816993464
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": -0.0905564354974907,
+            "hitRate": 0.4357298474945534,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.1309598993895273,
+            "betterShare": 0.840958605664488
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.1309598993895273,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1310R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "null-driftless",
+      "kind": "driftless",
+      "note": "driftless random walk: nothing to learn, so the fitted policy must not claim an edge",
+      "home": false,
+      "pooled": {
+        "decisions": 1377,
+        "legacyMeanR": -0.11337878677778682,
+        "restingMeanR": 0.0007356701788266303,
+        "restingFillRate": 1,
+        "pairedMeanDeltaR": 0.11408174863960581,
+        "betterShare": 0.7908496732026143,
+        "timingRefusalRate": 0,
+        "gates": [
+          {
+            "code": "W7_FILL_RATE",
+            "label": "the resting entry actually gets filled",
+            "pass": true,
+            "value": 1,
+            "threshold": 0.5,
+            "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+          },
+          {
+            "code": "W7_PAIRED_EDGE",
+            "label": "resting the limit does not cost the trade its edge",
+            "pass": true,
+            "value": 0.11408174863960581,
+            "threshold": -0.05,
+            "detail": "pooled paired mean ΔR 0.1141R over 1377 pairs (better in 79.1%)"
+          },
+          {
+            "code": "W7_TIMING_FILTER",
+            "label": "the timing gate is a filter, not an exit",
+            "pass": true,
+            "value": 0,
+            "threshold": 0.5,
+            "detail": "the permit rule refuses 0.0% of pooled decision bars"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "null-driftless",
+          "series": "null-driftless#1",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.1490054584018059,
+            "hitRate": 0.4095860566448802
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": -0.038343024346696564,
+            "hitRate": 0.4444444444444444,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.11554993328671469,
+            "betterShare": 0.7973856209150327
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.11554993328671469,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1155R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "null-driftless",
+          "series": "null-driftless#2",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.07117521862851288,
+            "hitRate": 0.41612200435729846
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.028428331980534714,
+            "hitRate": 0.4531590413943355,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.09655383075029592,
+            "betterShare": 0.7777777777777778
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.09655383075029592,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.0966R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "null-driftless",
+          "series": "null-driftless#3",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.11995568330304163,
+            "hitRate": 0.4139433551198257
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.01212170290264174,
+            "hitRate": 0.4466230936819172,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.1301414818818068,
+            "betterShare": 0.7973856209150327
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.1301414818818068,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1301R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "null-shuffled",
+      "kind": "block-shuffled",
+      "note": "block-shuffled returns: marginals kept, temporal structure destroyed",
+      "home": false,
+      "pooled": {
+        "decisions": 1377,
+        "legacyMeanR": -0.12289476570441918,
+        "restingMeanR": -0.010325593847088437,
+        "restingFillRate": 1,
+        "pairedMeanDeltaR": 0.11377367405748029,
+        "betterShare": 0.794480755265069,
+        "timingRefusalRate": 0,
+        "gates": [
+          {
+            "code": "W7_FILL_RATE",
+            "label": "the resting entry actually gets filled",
+            "pass": true,
+            "value": 1,
+            "threshold": 0.5,
+            "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+          },
+          {
+            "code": "W7_PAIRED_EDGE",
+            "label": "resting the limit does not cost the trade its edge",
+            "pass": true,
+            "value": 0.11377367405748029,
+            "threshold": -0.05,
+            "detail": "pooled paired mean ΔR 0.1138R over 1377 pairs (better in 79.4%)"
+          },
+          {
+            "code": "W7_TIMING_FILTER",
+            "label": "the timing gate is a filter, not an exit",
+            "pass": true,
+            "value": 0,
+            "threshold": 0.5,
+            "detail": "the permit rule refuses 0.0% of pooled decision bars"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "null-shuffled",
+          "series": "null-shuffled#1",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.15895504948951,
+            "hitRate": 0.4074074074074074
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": -0.05423252039236642,
+            "hitRate": 0.43137254901960786,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.11114899660865389,
+            "betterShare": 0.7886710239651417
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.11114899660865389,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1111R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "null-shuffled",
+          "series": "null-shuffled#2",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.09641575056220646,
+            "hitRate": 0.4139433551198257
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.0030134737078124584,
+            "hitRate": 0.4466230936819172,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.09929927454174757,
+            "betterShare": 0.7952069716775599
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.09929927454174757,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.0993R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        },
+        {
+          "fixture": "null-shuffled",
+          "series": "null-shuffled#3",
+          "mode": "swing",
+          "decisions": 459,
+          "legacy": {
+            "filled": 459,
+            "unfilled": 0,
+            "meanR": -0.11331349706154105,
+            "hitRate": 0.40522875816993464
+          },
+          "resting": {
+            "filled": 459,
+            "unfilled": 0,
+            "fillRate": 1,
+            "meanR": 0.020242265143288654,
+            "hitRate": 0.4400871459694989,
+            "medianBarsToFill": 1,
+            "filledOnFirstBarShare": 1
+          },
+          "paired": {
+            "bothFilled": 459,
+            "meanDeltaR": 0.13087275102203938,
+            "betterShare": 0.7995642701525054
+          },
+          "timing": {
+            "buckets": 168,
+            "evidence": "insufficient",
+            "requiredBucketSamples": 20,
+            "measuredBuckets": 0,
+            "refused": 0,
+            "refusalRate": 0,
+            "bestBucket": null,
+            "bestMeanR": null,
+            "worstBucket": null,
+            "worstMeanR": null
+          },
+          "gates": [
+            {
+              "code": "W7_FILL_RATE",
+              "label": "the resting entry actually gets filled",
+              "pass": true,
+              "value": 1,
+              "threshold": 0.5,
+              "detail": "100.0% of 459 decisions filled at the resting level (floor 50%)"
+            },
+            {
+              "code": "W7_PAIRED_EDGE",
+              "label": "resting the limit does not cost the trade its edge",
+              "pass": true,
+              "value": 0.13087275102203938,
+              "threshold": -0.05,
+              "detail": "paired mean ΔR (resting − legacy, both fills, legacy risk unit) 0.1309R over 459 pairs, tolerance −0.05R"
+            },
+            {
+              "code": "W7_TIMING_FILTER",
+              "label": "the timing gate is a filter, not an exit",
+              "pass": true,
+              "value": 0,
+              "threshold": 0.5,
+              "detail": "the permit rule refuses 0.0% of decision bars on this corpus (ceiling 50%); 0 of 168 minute-of-week buckets reach the ledger's own 20-sample minimum, so the evidence is INSUFFICIENT — nothing to refuse on; measured bucket means range n/aR…n/aR"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "code": "W7_FILL_RATE",
+      "label": "the resting entry actually gets filled",
+      "pass": true,
+      "value": 1,
+      "threshold": 0.5,
+      "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+    },
+    {
+      "code": "W7_PAIRED_EDGE",
+      "label": "resting the limit does not cost the trade its edge",
+      "pass": true,
+      "value": 0.08096410239133477,
+      "threshold": -0.05,
+      "detail": "pooled paired mean ΔR 0.0810R over 1377 pairs (better in 68.7%)"
+    },
+    {
+      "code": "W7_TIMING_FILTER",
+      "label": "the timing gate is a filter, not an exit",
+      "pass": true,
+      "value": 0,
+      "threshold": 0.5,
+      "detail": "the permit rule refuses 0.0% of pooled decision bars"
+    },
+    {
+      "code": "W7_FILL_RATE",
+      "label": "the resting entry actually gets filled",
+      "pass": true,
+      "value": 1,
+      "threshold": 0.5,
+      "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+    },
+    {
+      "code": "W7_PAIRED_EDGE",
+      "label": "resting the limit does not cost the trade its edge",
+      "pass": true,
+      "value": 0.1216879569053192,
+      "threshold": -0.05,
+      "detail": "pooled paired mean ΔR 0.1217R over 1377 pairs (better in 79.8%)"
+    },
+    {
+      "code": "W7_TIMING_FILTER",
+      "label": "the timing gate is a filter, not an exit",
+      "pass": true,
+      "value": 0,
+      "threshold": 0.5,
+      "detail": "the permit rule refuses 0.0% of pooled decision bars"
+    },
+    {
+      "code": "W7_FILL_RATE",
+      "label": "the resting entry actually gets filled",
+      "pass": true,
+      "value": 1,
+      "threshold": 0.5,
+      "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+    },
+    {
+      "code": "W7_PAIRED_EDGE",
+      "label": "resting the limit does not cost the trade its edge",
+      "pass": true,
+      "value": 0.12770359559606573,
+      "threshold": -0.05,
+      "detail": "pooled paired mean ΔR 0.1277R over 1377 pairs (better in 83.7%)"
+    },
+    {
+      "code": "W7_TIMING_FILTER",
+      "label": "the timing gate is a filter, not an exit",
+      "pass": true,
+      "value": 0,
+      "threshold": 0.5,
+      "detail": "the permit rule refuses 0.0% of pooled decision bars"
+    },
+    {
+      "code": "W7_FILL_RATE",
+      "label": "the resting entry actually gets filled",
+      "pass": true,
+      "value": 1,
+      "threshold": 0.5,
+      "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+    },
+    {
+      "code": "W7_PAIRED_EDGE",
+      "label": "resting the limit does not cost the trade its edge",
+      "pass": true,
+      "value": 0.11408174863960581,
+      "threshold": -0.05,
+      "detail": "pooled paired mean ΔR 0.1141R over 1377 pairs (better in 79.1%)"
+    },
+    {
+      "code": "W7_TIMING_FILTER",
+      "label": "the timing gate is a filter, not an exit",
+      "pass": true,
+      "value": 0,
+      "threshold": 0.5,
+      "detail": "the permit rule refuses 0.0% of pooled decision bars"
+    },
+    {
+      "code": "W7_FILL_RATE",
+      "label": "the resting entry actually gets filled",
+      "pass": true,
+      "value": 1,
+      "threshold": 0.5,
+      "detail": "100.0% of 1377 pooled decisions filled at the resting level"
+    },
+    {
+      "code": "W7_PAIRED_EDGE",
+      "label": "resting the limit does not cost the trade its edge",
+      "pass": true,
+      "value": 0.11377367405748029,
+      "threshold": -0.05,
+      "detail": "pooled paired mean ΔR 0.1138R over 1377 pairs (better in 79.4%)"
+    },
+    {
+      "code": "W7_TIMING_FILTER",
+      "label": "the timing gate is a filter, not an exit",
+      "pass": true,
+      "value": 0,
+      "threshold": 0.5,
+      "detail": "the permit rule refuses 0.0% of pooled decision bars"
+    }
+  ],
+  "verdict": "PASS",
+  "notes": [
+    "the spread z-score and the slippage ledger are NOT measured here: the synthetic corpora carry no SPREAD column and no fills of their own. Both layers only refuse when a measurement exists, both are unit-tested (wp7-execution.test.ts), and the live desk's own quote and fill records are their measurement",
+    "the entry-style comparison is PAIRED: same decision bar, same stop LEVEL, same target rule, same management policy, two triggers. Each trade is measured in its own R, and the resting plan is additionally re-expressed in the legacy plan's R before the difference is taken",
+    "directions alternate deterministically (buy, sell, buy, …) because the entry-style question is direction-symmetric; always going long on a drifting generator would answer a different question",
+    "every simulation starts at bar 150 and scans FORWARD from the decision bar (see executed-policy.ts: nothing at or before the decision bar is ever read for a price)",
+    "the simulator's fill window is executed-policy.ts's own MAX_FILL_WAIT_BARS: the live desk's pending-order EXPIRY (PENDING_EXPIRY_BARS) and its 0.5R cancel rule are EA/desk wiring rules and are covered by wp7-execution.test.ts, not by this study. The plan's invalidation LEVEL is the desk's 0.6 ATR rule, so a pullback that goes too deep kills the plan rather than filling it",
+    "the timing layer is measured as a REFUSAL RATE, not as an edge: the synthetic generators carry no calendar structure, so bucket means on them are noise by construction. What the corpus can say is that the rule is a filter and not a blanket ban; the ledger's own value has to come from the live desk's fills (bridge.ts) and is reported by GET /execution"
+  ]
+}

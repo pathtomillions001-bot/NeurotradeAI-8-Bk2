@@ -54,6 +54,17 @@ export interface MonteCarloResult {
   timeoutMeanR: number;
   /** Expectancy in R, net of costs. */
   expectancyR: number;
+  /**
+   * Standard deviation of the per-path R outcome.
+   *
+   * Without it there is no way to tell a target that is better from a target
+   * that merely LOOKS better on this seed: with 3000 paths, a win-rate
+   * difference of one or two percent is inside the noise, and choosing the
+   * argmax of a noisy statistic is the winner's curse.
+   */
+  rStdDev: number;
+  /** Standard error of the expectancy estimate: rStdDev / sqrt(paths). */
+  expectancyStdErrR: number;
   /** Expectancy in R ignoring costs — the gross edge, for diagnostics. */
   grossExpectancyR: number;
   rewardRisk: number;
@@ -105,6 +116,8 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
       expectancyR: -1,
       grossExpectancyR: -1,
       rewardRisk,
+      rStdDev: 0,
+      expectancyStdErrR: 0,
       meanBarsToResolve: 0,
       paths: 0,
     };
@@ -128,6 +141,8 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
       expectancyR: -costPrice / riskPrice,
       grossExpectancyR: 0,
       rewardRisk,
+      rStdDev: 0,
+      expectancyStdErrR: 0,
       meanBarsToResolve: horizon,
       paths: 0,
     };
@@ -140,6 +155,10 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
   let timeouts = 0;
   let timeoutRSum = 0;
   let barsSum = 0;
+  // The R distribution, accumulated path by path so the standard error of the
+  // expectancy is measured rather than assumed.
+  let rSum = 0;
+  let rSumSquares = 0;
 
   for (let p = 0; p < paths; p++) {
     let price = entry;
@@ -165,12 +184,16 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
         // Conservative tie-break: ambiguous bars are losses.
         losses++;
         barsSum += s + 1;
+        rSum += -1;
+        rSumSquares += 1;
         resolved = true;
         break;
       }
       if (hitTp) {
         wins++;
         barsSum += s + 1;
+        rSum += rewardRisk;
+        rSumSquares += rewardRisk * rewardRisk;
         resolved = true;
         break;
       }
@@ -180,7 +203,10 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
       timeouts++;
       barsSum += steps;
       const pnlPrice = long ? price - entry : entry - price;
-      timeoutRSum += pnlPrice / riskPrice;
+      const pathR = pnlPrice / riskPrice;
+      timeoutRSum += pathR;
+      rSum += pathR;
+      rSumSquares += pathR * pathR;
     }
   }
 
@@ -194,6 +220,15 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
     winProbability * rewardRisk - lossProbability * 1 + timeoutProbability * timeoutMeanR;
   const costR = costPrice / riskPrice;
 
+  // Sample standard deviation of the path outcomes, and the standard error of
+  // the mean. `rSumSquares` counts every path (wins, losses and timeouts), so
+  // the variance is over the whole R distribution — which is what a target
+  // choice has to be judged on.
+  const meanR = total > 0 ? rSum / total : 0;
+  const variance = total > 1 ? Math.max(0, (rSumSquares - total * meanR * meanR) / (total - 1)) : 0;
+  const rStdDev = Math.sqrt(variance);
+  const expectancyStdErrR = total > 0 ? rStdDev / Math.sqrt(total) : 0;
+
   return {
     winProbability,
     lossProbability,
@@ -202,35 +237,69 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
     grossExpectancyR,
     expectancyR: grossExpectancyR - costR,
     rewardRisk,
+    rStdDev,
+    expectancyStdErrR,
     meanBarsToResolve: barsSum / total,
     paths: total,
   };
 }
 
 /**
- * Search a set of reward:risk multiples and return the best by expectancy.
+ * The reward:risk multiples a target may be chosen from.
  *
- * A fixed 1:2 target is arbitrary — the right target depends on volatility,
- * drift and cost. Letting the simulator choose is how the agent decides
- * between "bank it at 1R" and "let it run to 3R".
+ * NOTHING BELOW 2.0 IS IN THIS LIST, and that is the owner's hard constraint:
+ * the desk may not arm a plan whose reward:risk is under 1:2 at the price it
+ * expects to FILL at. The old set started at 1.0, so on a noisy market the
+ * winner's-curse argmax could (and did) return a 1R target that looked best on
+ * one sample of 3000 paths.
+ */
+export const TARGET_MULTIPLES: readonly number[] = [2, 2.5, 3] as const;
+
+/**
+ * Choose a target with the ONE-STANDARD-ERROR rule, not the argmax.
+ *
+ * Why this matters: `simulateTrade` estimates each multiple's expectancy from a
+ * finite number of paths. The difference between the best multiple and the
+ * runner-up is frequently smaller than the standard error of either estimate,
+ * so picking the maximum is picking the LUCKIEST multiple — on a different
+ * seed it would have picked another one. Standard practice (and what the
+ * research harness asserts) is to take the SMALLEST multiple whose expectancy
+ * is within one standard error of the best: statistically indistinguishable,
+ * but nearer, faster to reach, and therefore more robust to the drift estimate
+ * being wrong.
  */
 export function bestTarget(
   base: Omit<MonteCarloInput, "tp">,
-  multiples: number[] = [1, 1.5, 2, 2.5, 3, 4],
+  multiples: number[] = [...TARGET_MULTIPLES],
 ): { rewardRisk: number; tp: number; result: MonteCarloResult } | null {
   const risk = Math.abs(base.entry - base.sl);
   if (risk <= 0) return null;
+  // The constraint is enforced here as well as at the call site: this function
+  // is the only place a target is produced, so a multiple below 2.0 must be
+  // impossible to reach by accident (a test passes [1,2,3] to prove the guard).
+  const allowed = multiples.filter((m) => m >= MIN_TARGET_R).sort((a, b) => a - b);
+  if (allowed.length === 0) return null;
 
-  let best: { rewardRisk: number; tp: number; result: MonteCarloResult } | null = null;
-  for (const m of multiples) {
+  const candidates = allowed.map((m) => {
     const tp = base.side === "buy" ? base.entry + risk * m : base.entry - risk * m;
-    const result = simulateTrade({ ...base, tp });
-    if (!best || result.expectancyR > best.result.expectancyR) {
-      best = { rewardRisk: m, tp, result };
-    }
+    return { rewardRisk: m, tp, result: simulateTrade({ ...base, tp }) };
+  });
+
+  let best = candidates[0] as (typeof candidates)[number];
+  for (const candidate of candidates) {
+    if (candidate.result.expectancyR > best.result.expectancyR) best = candidate;
+  }
+  // One standard error below the best: everything at or above this is
+  // statistically indistinguishable from it.
+  const threshold = best.result.expectancyR - best.result.expectancyStdErrR;
+  for (const candidate of candidates) {
+    if (candidate.result.expectancyR >= threshold) return candidate;
   }
   return best;
 }
+
+/** The hard floor on reward:risk, enforced wherever a target is chosen. */
+export const MIN_TARGET_R = 2.0;
 
 /**
  * Probability that price retraces to `level` before reaching `target`.

@@ -1,0 +1,4099 @@
+{
+  "label": "agent-study",
+  "generatedAt": "2026-10-11T15:30:37.526Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --alphas --mode intraday --seed 1 --label agent-study --alpha-series 12 --alpha-bars 3000",
+  "mode": "intraday",
+  "symbol": "EURUSD",
+  "seed": 1,
+  "dataSource": "synthetic (WP4 alpha fixtures)",
+  "barsPerSeries": 3000,
+  "stride": 3,
+  "contractSpec": {
+    "symbol": "EURUSD",
+    "assetClass": "forex",
+    "point": 0.00001,
+    "digits": 5,
+    "tickSize": 0.00001,
+    "tickValue": 1,
+    "contractSize": 100000,
+    "volumeMin": 0.01,
+    "volumeMax": 100,
+    "volumeStep": 0.01,
+    "stopsLevel": 0,
+    "freezeLevel": 0,
+    "marginInitial": 0,
+    "swapLong": 0,
+    "swapShort": 0,
+    "commissionPerLot": 0,
+    "spreadPoints": 12
+  },
+  "assumedSpecValues": [
+    "assetClass=forex",
+    "point=0.00001",
+    "digits=5",
+    "tickSize=0.00001",
+    "tickValue=1",
+    "contractSize=100000",
+    "volumeMin=0.01",
+    "volumeStep=0.01",
+    "spreadPoints=12",
+    "commissionPerLot=0"
+  ],
+  "fixtures": [
+    {
+      "name": "trend-control",
+      "kind": "positive-control",
+      "series": 12,
+      "bars": 3000,
+      "note": "regime-switching drift + AR(1) residual: the desk's own positive control, and the fixture the trend claim is about"
+    },
+    {
+      "name": "mean-reverting",
+      "kind": "mean-reverting",
+      "series": 12,
+      "bars": 3000,
+      "note": "OU around a level with a 16-bar half-life: the structure a fade is supposed to trade"
+    },
+    {
+      "name": "sweep-rich",
+      "kind": "mean-reverting",
+      "series": 12,
+      "bars": 3000,
+      "note": "the same level plus a raid every ~100 bars that is absorbed: sweep-rich on purpose, because a setup that happens twice a series cannot be measured"
+    },
+    {
+      "name": "vol-clustered",
+      "kind": "vol-clustered",
+      "series": 12,
+      "bars": 3000,
+      "note": "GARCH(1,1): quiet stretches and shock clusters, the one property of real returns no null generator has"
+    },
+    {
+      "name": "seasonal",
+      "kind": "seasonal",
+      "series": 12,
+      "bars": 3000,
+      "note": "a drift that depends only on the UTC hour: clock structure and nothing else"
+    },
+    {
+      "name": "regime-labelled",
+      "kind": "three-regime",
+      "series": 12,
+      "bars": 3000,
+      "note": "the WP3 labelled control: bull/bear/range, useful for the trend agent's direction rather than its probability"
+    },
+    {
+      "name": "null-driftless",
+      "kind": "driftless",
+      "series": 12,
+      "bars": 3000,
+      "note": "driftless random walk: no structure of any kind"
+    },
+    {
+      "name": "null-phase",
+      "kind": "phase-randomised",
+      "series": 12,
+      "bars": 3000,
+      "note": "phase-randomised: linear structure survives, non-linear does not — the strictest null"
+    },
+    {
+      "name": "null-shuffled",
+      "kind": "block-shuffled",
+      "series": 12,
+      "bars": 3000,
+      "note": "block-shuffled returns: the marginal distribution kept exactly, every temporal dependence destroyed"
+    }
+  ],
+  "agents": [
+    {
+      "agent": "trend",
+      "label": "A · trend continuation",
+      "home": "trend-control",
+      "fixture": {
+        "agent": "trend",
+        "label": "A · trend continuation",
+        "series": "trend-control#1, trend-control#2, trend-control#3, trend-control#4, trend-control#5, trend-control#6, trend-control#7, trend-control#8, trend-control#9, trend-control#10, trend-control#11, trend-control#12",
+        "kind": "positive-control",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11424,
+        "views": 936,
+        "viewRate": 0.0819327731092437,
+        "hits": 366,
+        "hitRate": 0.391025641025641,
+        "hitRateLower": 0.3602695987089447,
+        "hitRateUpper": 0.4226725481379282,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.47309925226230537,
+        "baselineOutcomes": 0,
+        "buyViews": 769,
+        "sellViews": 167,
+        "edgeOverBaseline": -0.08207361123666435,
+        "rr": 2,
+        "meanProbability": 0.4299498152916525,
+        "probabilityGap": 0.03892417426601147,
+        "brier": 0.24405019831501312,
+        "brierSkill": -0.010756573552443527,
+        "meanSamples": 124.66880341880344,
+        "meanStrength": 0.09661648195831898,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 289,
+            "hitRate": 0.3944636678200692,
+            "meanProbability": 0.4788912404917389
+          },
+          {
+            "third": 1,
+            "views": 338,
+            "hitRate": 0.38461538461538464,
+            "meanProbability": 0.4062847832372405
+          },
+          {
+            "third": 2,
+            "views": 309,
+            "hitRate": 0.3948220064724919,
+            "meanProbability": 0.41006214199575
+          }
+        ],
+        "elapsedMs": 979
+      },
+      "null": {
+        "agent": "trend",
+        "label": "A · trend continuation",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12, null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12, null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+        "kind": "driftless,phase-randomised,block-shuffled",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 30468,
+        "views": 2910,
+        "viewRate": 0.09551004332414337,
+        "hits": 454,
+        "hitRate": 0.15601374570446735,
+        "hitRateLower": 0.14328379828761686,
+        "hitRateUpper": 0.16965071400708032,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.16864541053535295,
+        "baselineOutcomes": 0,
+        "buyViews": 1472,
+        "sellViews": 1438,
+        "edgeOverBaseline": -0.012631664830885597,
+        "rr": 2,
+        "meanProbability": 0.153617301959278,
+        "probabilityGap": -0.0023964437451893528,
+        "brier": 0.1355413416839354,
+        "brierSkill": 0.16904781397418822,
+        "meanSamples": 132.65463917525773,
+        "meanStrength": -0.1797160313740553,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 874,
+            "hitRate": 0.12471395881006865,
+            "meanProbability": 0.15576051420876252
+          },
+          {
+            "third": 1,
+            "views": 1059,
+            "hitRate": 0.16241737488196412,
+            "meanProbability": 0.1483732591449212
+          },
+          {
+            "third": 2,
+            "views": 977,
+            "hitRate": 0.17707267144319344,
+            "meanProbability": 0.15738421478870943
+          }
+        ],
+        "elapsedMs": 1750
+      },
+      "fixtureGates": {
+        "pass": false,
+        "gates": [
+          {
+            "gate": "alpha: at least 60 views on the fixture (else UNIDENTIFIABLE)",
+            "pass": true,
+            "measured": 936,
+            "threshold": 60,
+            "detail": "936 views in 11424 decisions (8.2%) on trend-control#1, trend-control#2, trend-control#3, trend-control#4, trend-control#5, trend-control#6, trend-control#7, trend-control#8, trend-control#9, trend-control#10, trend-control#11, trend-control#12"
+          },
+          {
+            "gate": "alpha: hit rate beats the measured random-entry baseline (floor 3 points and 2 SE)",
+            "pass": false,
+            "measured": -0.08207361123666435,
+            "threshold": 0.03190025782162294,
+            "detail": "39.1% hit rate on 936 views vs a 47.3% random-entry baseline in the same direction (edge -8.2 points, 95% CI 36.0–42.3%; 769 long / 167 short)"
+          },
+          {
+            "gate": "alpha: stated probability within 15 points of the realised hit rate",
+            "pass": true,
+            "measured": 0.03892417426601147,
+            "threshold": 0.15,
+            "detail": "states 43.0%, realises 39.1% (gap 3.9 points)"
+          },
+          {
+            "gate": "alpha: Brier skill ≥ 0 against the break-even forecast",
+            "pass": false,
+            "measured": -0.010756573552443527,
+            "threshold": 0,
+            "detail": "Brier 0.2441 (skill -0.0108 against the 1:2 constant)"
+          }
+        ]
+      },
+      "nullGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 15% of structureless decisions",
+            "pass": true,
+            "measured": 0.09551004332414337,
+            "threshold": 0.15,
+            "detail": "2910 views in 30468 decisions over 36 structureless series"
+          },
+          {
+            "gate": "alpha: no demonstrable edge on noise (within 2 standard errors of the baseline)",
+            "pass": true,
+            "measured": -0.012631664830885597,
+            "threshold": 0.01345341749940785,
+            "detail": "15.6% hit rate on 2910 null views vs a 16.9% baseline (edge -1.3 points, 2 SE = 1.3 points)"
+          }
+        ]
+      },
+      "driftless": {
+        "agent": "trend",
+        "label": "A · trend continuation",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+        "kind": "driftless",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11424,
+        "views": 1120,
+        "viewRate": 0.09803921568627451,
+        "hits": 168,
+        "hitRate": 0.15,
+        "hitRateLower": 0.13028559850389865,
+        "hitRateUpper": 0.1721071942170684,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.16733993555418636,
+        "baselineOutcomes": 0,
+        "buyViews": 597,
+        "sellViews": 523,
+        "edgeOverBaseline": -0.017339935554186364,
+        "rr": 2,
+        "meanProbability": 0.14504838037238577,
+        "probabilityGap": -0.004951619627614229,
+        "brier": 0.1312187608798869,
+        "brierSkill": 0.1855387255731158,
+        "meanSamples": 147.00714285714284,
+        "meanStrength": -0.18828495296094752,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 317,
+            "hitRate": 0.12618296529968454,
+            "meanProbability": 0.1506771322757731
+          },
+          {
+            "third": 1,
+            "views": 419,
+            "hitRate": 0.15274463007159905,
+            "meanProbability": 0.14038812077877377
+          },
+          {
+            "third": 2,
+            "views": 384,
+            "hitRate": 0.16666666666666666,
+            "meanProbability": 0.14548675124829635
+          }
+        ],
+        "elapsedMs": 711
+      },
+      "driftlessGates": {
+        "pass": false,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 3% of driftless decisions",
+            "pass": false,
+            "measured": 0.09803921568627451,
+            "threshold": 0.03,
+            "detail": "1120 views in 11424 driftless decisions (9.80%)"
+          }
+        ]
+      },
+      "all": [
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "trend-control#1, trend-control#2, trend-control#3, trend-control#4, trend-control#5, trend-control#6, trend-control#7, trend-control#8, trend-control#9, trend-control#10, trend-control#11, trend-control#12",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 936,
+          "viewRate": 0.0819327731092437,
+          "hits": 366,
+          "hitRate": 0.391025641025641,
+          "hitRateLower": 0.3602695987089447,
+          "hitRateUpper": 0.4226725481379282,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.47309925226230537,
+          "baselineOutcomes": 0,
+          "buyViews": 769,
+          "sellViews": 167,
+          "edgeOverBaseline": -0.08207361123666435,
+          "rr": 2,
+          "meanProbability": 0.4299498152916525,
+          "probabilityGap": 0.03892417426601147,
+          "brier": 0.24405019831501312,
+          "brierSkill": -0.010756573552443527,
+          "meanSamples": 124.66880341880344,
+          "meanStrength": 0.09661648195831898,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 289,
+              "hitRate": 0.3944636678200692,
+              "meanProbability": 0.4788912404917389
+            },
+            {
+              "third": 1,
+              "views": 338,
+              "hitRate": 0.38461538461538464,
+              "meanProbability": 0.4062847832372405
+            },
+            {
+              "third": 2,
+              "views": 309,
+              "hitRate": 0.3948220064724919,
+              "meanProbability": 0.41006214199575
+            }
+          ],
+          "elapsedMs": 979
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "mean-reverting#1, mean-reverting#2, mean-reverting#3, mean-reverting#4, mean-reverting#5, mean-reverting#6, mean-reverting#7, mean-reverting#8, mean-reverting#9, mean-reverting#10, mean-reverting#11, mean-reverting#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1020,
+          "viewRate": 0.08928571428571429,
+          "hits": 48,
+          "hitRate": 0.047058823529411764,
+          "hitRateLower": 0.035675873952377125,
+          "hitRateUpper": 0.061840773153972135,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.11607000249484316,
+          "baselineOutcomes": 0,
+          "buyViews": 513,
+          "sellViews": 507,
+          "edgeOverBaseline": -0.0690111789654314,
+          "rr": 2,
+          "meanProbability": 0.05585674881922904,
+          "probabilityGap": 0.00879792528981728,
+          "brier": 0.046546969047651085,
+          "brierSkill": 0.632902769881927,
+          "meanSamples": 134.39019607843136,
+          "meanStrength": -0.27747658451410423,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 320,
+              "hitRate": 0.0375,
+              "meanProbability": 0.0730941971969266
+            },
+            {
+              "third": 1,
+              "views": 341,
+              "hitRate": 0.04105571847507331,
+              "meanProbability": 0.04958594267235575
+            },
+            {
+              "third": 2,
+              "views": 359,
+              "hitRate": 0.06128133704735376,
+              "meanProbability": 0.04644828479477385
+            }
+          ],
+          "elapsedMs": 778
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "sweep-rich#1, sweep-rich#2, sweep-rich#3, sweep-rich#4, sweep-rich#5, sweep-rich#6, sweep-rich#7, sweep-rich#8, sweep-rich#9, sweep-rich#10, sweep-rich#11, sweep-rich#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1062,
+          "viewRate": 0.09296218487394958,
+          "hits": 100,
+          "hitRate": 0.09416195856873823,
+          "hitRateLower": 0.07803013867620781,
+          "hitRateUpper": 0.11321929275900733,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.15341440889362026,
+          "baselineOutcomes": 0,
+          "buyViews": 492,
+          "sellViews": 570,
+          "edgeOverBaseline": -0.059252450324882036,
+          "rr": 2,
+          "meanProbability": 0.10569617761507381,
+          "probabilityGap": 0.011534219046335586,
+          "brier": 0.09009359798514413,
+          "brierSkill": 0.36775726171658774,
+          "meanSamples": 141.29566854990583,
+          "meanStrength": -0.22763715571825954,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 330,
+              "hitRate": 0.07575757575757576,
+              "meanProbability": 0.11935787444064365
+            },
+            {
+              "third": 1,
+              "views": 371,
+              "hitRate": 0.10512129380053908,
+              "meanProbability": 0.09718089448712358
+            },
+            {
+              "third": 2,
+              "views": 361,
+              "hitRate": 0.0997229916897507,
+              "meanProbability": 0.10195880943787572
+            }
+          ],
+          "elapsedMs": 730
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "vol-clustered#1, vol-clustered#2, vol-clustered#3, vol-clustered#4, vol-clustered#5, vol-clustered#6, vol-clustered#7, vol-clustered#8, vol-clustered#9, vol-clustered#10, vol-clustered#11, vol-clustered#12",
+          "kind": "vol-clustered",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1109,
+          "viewRate": 0.09707633053221289,
+          "hits": 156,
+          "hitRate": 0.1406672678088368,
+          "hitRateLower": 0.12144251492577911,
+          "hitRateUpper": 0.16237289959502962,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.15328277810510976,
+          "baselineOutcomes": 0,
+          "buyViews": 564,
+          "sellViews": 545,
+          "edgeOverBaseline": -0.012615510296272975,
+          "rr": 2,
+          "meanProbability": 0.13252304450547991,
+          "probabilityGap": -0.008144223303356873,
+          "brier": 0.1231039429842532,
+          "brierSkill": 0.22086210848076648,
+          "meanSamples": 142.9639314697926,
+          "meanStrength": -0.20081028882785334,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 314,
+              "hitRate": 0.1337579617834395,
+              "meanProbability": 0.12664901777471876
+            },
+            {
+              "third": 1,
+              "views": 411,
+              "hitRate": 0.13138686131386862,
+              "meanProbability": 0.13072453971985107
+            },
+            {
+              "third": 2,
+              "views": 384,
+              "hitRate": 0.15625,
+              "meanProbability": 0.13925124726681443
+            }
+          ],
+          "elapsedMs": 688
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "seasonal#1, seasonal#2, seasonal#3, seasonal#4, seasonal#5, seasonal#6, seasonal#7, seasonal#8, seasonal#9, seasonal#10, seasonal#11, seasonal#12",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1059,
+          "viewRate": 0.09269957983193278,
+          "hits": 223,
+          "hitRate": 0.210576015108593,
+          "hitRateLower": 0.1870876642937416,
+          "hitRateUpper": 0.23615658960072386,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.24335211303643453,
+          "baselineOutcomes": 0,
+          "buyViews": 596,
+          "sellViews": 463,
+          "edgeOverBaseline": -0.03277609792784153,
+          "rr": 2,
+          "meanProbability": 0.20257951570589744,
+          "probabilityGap": -0.007996499402695562,
+          "brier": 0.17493015654157873,
+          "brierSkill": 0.03515085532535489,
+          "meanSamples": 134.69877242681775,
+          "meanStrength": -0.1307538176274359,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 310,
+              "hitRate": 0.1935483870967742,
+              "meanProbability": 0.21622827277534487
+            },
+            {
+              "third": 1,
+              "views": 381,
+              "hitRate": 0.2020997375328084,
+              "meanProbability": 0.1934778623207014
+            },
+            {
+              "third": 2,
+              "views": 368,
+              "hitRate": 0.23369565217391305,
+              "meanProbability": 0.20050510061956855
+            }
+          ],
+          "elapsedMs": 698
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "regime-labelled#1, regime-labelled#2, regime-labelled#3, regime-labelled#4, regime-labelled#5, regime-labelled#6, regime-labelled#7, regime-labelled#8, regime-labelled#9, regime-labelled#10, regime-labelled#11, regime-labelled#12",
+          "kind": "three-regime",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 696,
+          "viewRate": 0.06092436974789916,
+          "hits": 195,
+          "hitRate": 0.2801724137931034,
+          "hitRateLower": 0.2480849033988957,
+          "hitRateUpper": 0.31467329788550924,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.34410409351553767,
+          "baselineOutcomes": 0,
+          "buyViews": 319,
+          "sellViews": 377,
+          "edgeOverBaseline": -0.06393167972243424,
+          "rr": 2,
+          "meanProbability": 0.27137621701236064,
+          "probabilityGap": -0.008796196780742782,
+          "brier": 0.21634961251818643,
+          "brierSkill": -0.05793440500696323,
+          "meanSamples": 91.21264367816092,
+          "meanStrength": -0.06195711632097266,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 210,
+              "hitRate": 0.21428571428571427,
+              "meanProbability": 0.2920121525759735
+            },
+            {
+              "third": 1,
+              "views": 271,
+              "hitRate": 0.2952029520295203,
+              "meanProbability": 0.2539705883681547
+            },
+            {
+              "third": 2,
+              "views": 215,
+              "hitRate": 0.32558139534883723,
+              "meanProbability": 0.27315937465990064
+            }
+          ],
+          "elapsedMs": 773
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1120,
+          "viewRate": 0.09803921568627451,
+          "hits": 168,
+          "hitRate": 0.15,
+          "hitRateLower": 0.13028559850389865,
+          "hitRateUpper": 0.1721071942170684,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.16733993555418636,
+          "baselineOutcomes": 0,
+          "buyViews": 597,
+          "sellViews": 523,
+          "edgeOverBaseline": -0.017339935554186364,
+          "rr": 2,
+          "meanProbability": 0.14504838037238577,
+          "probabilityGap": -0.004951619627614229,
+          "brier": 0.1312187608798869,
+          "brierSkill": 0.1855387255731158,
+          "meanSamples": 147.00714285714284,
+          "meanStrength": -0.18828495296094752,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 317,
+              "hitRate": 0.12618296529968454,
+              "meanProbability": 0.1506771322757731
+            },
+            {
+              "third": 1,
+              "views": 419,
+              "hitRate": 0.15274463007159905,
+              "meanProbability": 0.14038812077877377
+            },
+            {
+              "third": 2,
+              "views": 384,
+              "hitRate": 0.16666666666666666,
+              "meanProbability": 0.14548675124829635
+            }
+          ],
+          "elapsedMs": 711
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12",
+          "kind": "phase-randomised",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 7620,
+          "views": 714,
+          "viewRate": 0.09370078740157481,
+          "hits": 130,
+          "hitRate": 0.18207282913165265,
+          "hitRateLower": 0.15549232322723047,
+          "hitRateUpper": 0.21205617215113712,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1595141686000054,
+          "baselineOutcomes": 0,
+          "buyViews": 325,
+          "sellViews": 389,
+          "edgeOverBaseline": 0.022558660531647262,
+          "rr": 2,
+          "meanProbability": 0.18259511376837628,
+          "probabilityGap": 0.00052228463672363,
+          "brier": 0.15521434337407047,
+          "brierSkill": 0.09655129481723113,
+          "meanSamples": 95.23809523809524,
+          "meanStrength": -0.15073821956495706,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 203,
+              "hitRate": 0.14285714285714285,
+              "meanProbability": 0.185137192063462
+            },
+            {
+              "third": 1,
+              "views": 274,
+              "hitRate": 0.18613138686131386,
+              "meanProbability": 0.17626911801110035
+            },
+            {
+              "third": 2,
+              "views": 237,
+              "hitRate": 0.2109704641350211,
+              "meanProbability": 0.1877313202814193
+            }
+          ],
+          "elapsedMs": 344
+        },
+        {
+          "agent": "trend",
+          "label": "A · trend continuation",
+          "series": "null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1076,
+          "viewRate": 0.09418767507002801,
+          "hits": 156,
+          "hitRate": 0.1449814126394052,
+          "hitRateLower": 0.12520643288968133,
+          "hitRateUpper": 0.16728239139714002,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.17606347626095217,
+          "baselineOutcomes": 0,
+          "buyViews": 550,
+          "sellViews": 526,
+          "edgeOverBaseline": -0.031082063621546974,
+          "rr": 2,
+          "meanProbability": 0.14330785451097233,
+          "probabilityGap": -0.0016735581284328671,
+          "brier": 0.12698629270045755,
+          "brierSkill": 0.2035393403424669,
+          "meanSamples": 142.54368029739777,
+          "meanStrength": -0.19002547882236098,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 354,
+              "hitRate": 0.11299435028248588,
+              "meanProbability": 0.14346663417558073
+            },
+            {
+              "third": 1,
+              "views": 366,
+              "hitRate": 0.1557377049180328,
+              "meanProbability": 0.1366309303090814
+            },
+            {
+              "third": 2,
+              "views": 356,
+              "hitRate": 0.16573033707865167,
+              "meanProbability": 0.15001444511945755
+            }
+          ],
+          "elapsedMs": 695
+        }
+      ],
+      "paper": {
+        "fixture": {
+          "summary": {
+            "strategy": "alpha:trend (trend-control)",
+            "evaluations": 1142,
+            "arms": 71,
+            "armRate": 0,
+            "fills": 65,
+            "fillRate": 0,
+            "stats": {
+              "trades": 65,
+              "hitRate": 0.7384615384615385,
+              "meanR": 0.5934279939660234,
+              "meanRStdErr": 0.13116916489767178,
+              "rStdDev": 1.0575196160341043,
+              "cvar5R": 1,
+              "bestR": 2.626504751942251,
+              "worstR": -1,
+              "profitFactor": 4.149081857421718,
+              "longestLosingStreak": 3,
+              "maxDrawdownR": 3,
+              "meanMaeR": 0.5500711794370607,
+              "meanMfeR": 1.1691938405860745,
+              "meanBars": 21.892307692307693
+            },
+            "lowerBoundMeanR": 0.48303602478814284,
+            "dsr": 0,
+            "meanPredicted": 0.549519013361602,
+            "predictedVsRealised": 0,
+            "rHistogram": [
+              {
+                "bucket": "-1.00R",
+                "count": 10
+              },
+              {
+                "bucket": "-0.75R",
+                "count": 2
+              },
+              {
+                "bucket": "-0.50R",
+                "count": 2
+              },
+              {
+                "bucket": "-0.25R",
+                "count": 3
+              },
+              {
+                "bucket": "0.00R",
+                "count": 9
+              },
+              {
+                "bucket": "0.25R",
+                "count": 6
+              },
+              {
+                "bucket": "0.50R",
+                "count": 5
+              },
+              {
+                "bucket": "0.75R",
+                "count": 6
+              },
+              {
+                "bucket": "1.00R",
+                "count": 4
+              },
+              {
+                "bucket": "1.25R",
+                "count": 4
+              },
+              {
+                "bucket": "1.50R",
+                "count": 3
+              },
+              {
+                "bucket": "1.75R",
+                "count": 4
+              },
+              {
+                "bucket": "2.00R",
+                "count": 1
+              },
+              {
+                "bucket": "2.25R",
+                "count": 5
+              },
+              {
+                "bucket": "2.50R",
+                "count": 1
+              }
+            ],
+            "exitReasons": {
+              "time_stop": 20,
+              "horizon": 28,
+              "stop": 11,
+              "target": 6
+            },
+            "partialsFired": 12
+          },
+          "ledger": {
+            "taken": 71,
+            "desk-refused": 137,
+            "agent-no-view": 928,
+            "direction-mismatch": 6,
+            "below-probability-floor": 0
+          },
+          "decisions": 1142
+        },
+        "null": {
+          "summary": {
+            "strategy": "alpha:trend (null-driftless)",
+            "evaluations": 1142,
+            "arms": 26,
+            "armRate": 0,
+            "fills": 22,
+            "fillRate": 0,
+            "stats": {
+              "trades": 22,
+              "hitRate": 0.4090909090909091,
+              "meanR": -0.13578836903110292,
+              "meanRStdErr": 0.21324150452145554,
+              "rStdDev": 1.0001913134558942,
+              "cvar5R": 1,
+              "bestR": 2.747197082298253,
+              "worstR": -1,
+              "profitFactor": 0.711189092483439,
+              "longestLosingStreak": 4,
+              "maxDrawdownR": 5.735310403892489,
+              "meanMaeR": 0.7479451952783468,
+              "meanMfeR": 0.7150780427411335,
+              "meanBars": 19.772727272727273
+            },
+            "lowerBoundMeanR": -0.31525241923635994,
+            "dsr": 0,
+            "meanPredicted": 0.17900380404549995,
+            "predictedVsRealised": 0,
+            "rHistogram": [
+              {
+                "bucket": "-1.00R",
+                "count": 9
+              },
+              {
+                "bucket": "-0.75R",
+                "count": 2
+              },
+              {
+                "bucket": "-0.50R",
+                "count": 1
+              },
+              {
+                "bucket": "-0.25R",
+                "count": 1
+              },
+              {
+                "bucket": "0.00R",
+                "count": 3
+              },
+              {
+                "bucket": "0.25R",
+                "count": 1
+              },
+              {
+                "bucket": "0.50R",
+                "count": 2
+              },
+              {
+                "bucket": "1.25R",
+                "count": 2
+              },
+              {
+                "bucket": "2.50R",
+                "count": 1
+              }
+            ],
+            "exitReasons": {
+              "stop": 8,
+              "time_stop": 9,
+              "horizon": 4,
+              "target": 1
+            },
+            "partialsFired": 3
+          },
+          "ledger": {
+            "taken": 26,
+            "desk-refused": 926,
+            "agent-no-view": 190,
+            "direction-mismatch": 0,
+            "below-probability-floor": 0
+          },
+          "decisions": 1142
+        }
+      },
+      "verdict": "disabled",
+      "reason": "alpha: hit rate beats the measured random-entry baseline (floor 3 points and 2 SE) → 39.1% hit rate on 936 views vs a 47.3% random-entry baseline in the same direction (edge -8.2 points, 95% CI 36.0–42.3%; 769 long / 167 short); alpha: Brier skill ≥ 0 against the break-even forecast → Brier 0.2441 (skill -0.0108 against the 1:2 constant); alpha: fires on ≤ 3% of driftless decisions → 1120 views in 11424 driftless decisions (9.80%)"
+    },
+    {
+      "agent": "mean-reversion",
+      "label": "B · mean reversion",
+      "home": "mean-reverting",
+      "fixture": {
+        "agent": "mean-reversion",
+        "label": "B · mean reversion",
+        "series": "mean-reverting#1, mean-reverting#2, mean-reverting#3, mean-reverting#4, mean-reverting#5, mean-reverting#6, mean-reverting#7, mean-reverting#8, mean-reverting#9, mean-reverting#10, mean-reverting#11, mean-reverting#12",
+        "kind": "mean-reverting",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11424,
+        "views": 1390,
+        "viewRate": 0.12167366946778711,
+        "hits": 243,
+        "hitRate": 0.1748201438848921,
+        "hitRateLower": 0.15575651224256093,
+        "hitRateUpper": 0.1956762474053072,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.11576342833879857,
+        "baselineOutcomes": 0,
+        "buyViews": 703,
+        "sellViews": 687,
+        "edgeOverBaseline": 0.05905671554609351,
+        "rr": 2,
+        "meanProbability": 0.16313387139643074,
+        "probabilityGap": -0.011686272488461352,
+        "brier": 0.14682186231187197,
+        "brierSkill": 0.13320363495917031,
+        "meanSamples": 183.12805755395684,
+        "meanStrength": -0.17019946193690255,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 411,
+            "hitRate": 0.17518248175182483,
+            "meanProbability": 0.1526953177400565
+          },
+          {
+            "third": 1,
+            "views": 500,
+            "hitRate": 0.166,
+            "meanProbability": 0.16519377594069334
+          },
+          {
+            "third": 2,
+            "views": 479,
+            "hitRate": 0.1837160751565762,
+            "meanProbability": 0.16994032918482
+          }
+        ],
+        "elapsedMs": 715
+      },
+      "null": {
+        "agent": "mean-reversion",
+        "label": "B · mean reversion",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12, null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12, null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+        "kind": "driftless,phase-randomised,block-shuffled",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 30468,
+        "views": 4031,
+        "viewRate": 0.13230274386241303,
+        "hits": 644,
+        "hitRate": 0.1597618456958571,
+        "hitRateLower": 0.14877588839170305,
+        "hitRateUpper": 0.17139568909971575,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.16371263061571945,
+        "baselineOutcomes": 0,
+        "buyViews": 1960,
+        "sellViews": 2071,
+        "edgeOverBaseline": -0.003950784919862338,
+        "rr": 2,
+        "meanProbability": 0.15350188403388157,
+        "probabilityGap": -0.006259961661975538,
+        "brier": 0.13585687430769974,
+        "brierSkill": 0.17344431611453315,
+        "meanSamples": 179.21731580253038,
+        "meanStrength": -0.1798314492994517,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 1206,
+            "hitRate": 0.1583747927031509,
+            "meanProbability": 0.15421109902580588
+          },
+          {
+            "third": 1,
+            "views": 1439,
+            "hitRate": 0.1556636553161918,
+            "meanProbability": 0.15317376526209506
+          },
+          {
+            "third": 2,
+            "views": 1386,
+            "hitRate": 0.16522366522366522,
+            "meanProbability": 0.1532254407671718
+          }
+        ],
+        "elapsedMs": 1370
+      },
+      "fixtureGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: at least 60 views on the fixture (else UNIDENTIFIABLE)",
+            "pass": true,
+            "measured": 1390,
+            "threshold": 60,
+            "detail": "1390 views in 11424 decisions (12.2%) on mean-reverting#1, mean-reverting#2, mean-reverting#3, mean-reverting#4, mean-reverting#5, mean-reverting#6, mean-reverting#7, mean-reverting#8, mean-reverting#9, mean-reverting#10, mean-reverting#11, mean-reverting#12"
+          },
+          {
+            "gate": "alpha: hit rate beats the measured random-entry baseline (floor 3 points and 2 SE)",
+            "pass": true,
+            "measured": 0.05905671554609351,
+            "threshold": 0.03,
+            "detail": "17.5% hit rate on 1390 views vs a 11.6% random-entry baseline in the same direction (edge 5.9 points, 95% CI 15.6–19.6%; 703 long / 687 short)"
+          },
+          {
+            "gate": "alpha: stated probability within 15 points of the realised hit rate",
+            "pass": true,
+            "measured": -0.011686272488461352,
+            "threshold": 0.15,
+            "detail": "states 16.3%, realises 17.5% (gap -1.2 points)"
+          },
+          {
+            "gate": "alpha: Brier skill ≥ 0 against the break-even forecast",
+            "pass": true,
+            "measured": 0.13320363495917031,
+            "threshold": 0,
+            "detail": "Brier 0.1468 (skill 0.1332 against the 1:2 constant)"
+          }
+        ]
+      },
+      "nullGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 15% of structureless decisions",
+            "pass": true,
+            "measured": 0.13230274386241303,
+            "threshold": 0.15,
+            "detail": "4031 views in 30468 decisions over 36 structureless series"
+          },
+          {
+            "gate": "alpha: no demonstrable edge on noise (within 2 standard errors of the baseline)",
+            "pass": true,
+            "measured": -0.003950784919862338,
+            "threshold": 0.011541475405383788,
+            "detail": "16.0% hit rate on 4031 null views vs a 16.4% baseline (edge -0.4 points, 2 SE = 1.2 points)"
+          }
+        ]
+      },
+      "driftless": {
+        "agent": "mean-reversion",
+        "label": "B · mean reversion",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+        "kind": "driftless",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11424,
+        "views": 1497,
+        "viewRate": 0.13103991596638656,
+        "hits": 227,
+        "hitRate": 0.1516366065464262,
+        "hitRateLower": 0.13436036281863256,
+        "hitRateUpper": 0.17069621343831556,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.1575859141905016,
+        "baselineOutcomes": 0,
+        "buyViews": 749,
+        "sellViews": 748,
+        "edgeOverBaseline": -0.005949307644075419,
+        "rr": 2,
+        "meanProbability": 0.13843526607656792,
+        "probabilityGap": -0.01320134046985827,
+        "brier": 0.13074544052803086,
+        "brierSkill": 0.19121518813858607,
+        "meanSamples": 196.97862391449567,
+        "meanStrength": -0.1948980672567654,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 431,
+            "hitRate": 0.14153132250580047,
+            "meanProbability": 0.12699392784429875
+          },
+          {
+            "third": 1,
+            "views": 550,
+            "hitRate": 0.13090909090909092,
+            "meanProbability": 0.14291028762540406
+          },
+          {
+            "third": 2,
+            "views": 516,
+            "hitRate": 0.1821705426356589,
+            "meanProbability": 0.1432220004297619
+          }
+        ],
+        "elapsedMs": 553
+      },
+      "driftlessGates": {
+        "pass": false,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 3% of driftless decisions",
+            "pass": false,
+            "measured": 0.13103991596638656,
+            "threshold": 0.03,
+            "detail": "1497 views in 11424 driftless decisions (13.10%)"
+          }
+        ]
+      },
+      "all": [
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "trend-control#1, trend-control#2, trend-control#3, trend-control#4, trend-control#5, trend-control#6, trend-control#7, trend-control#8, trend-control#9, trend-control#10, trend-control#11, trend-control#12",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1613,
+          "viewRate": 0.1411939775910364,
+          "hits": 169,
+          "hitRate": 0.10477371357718537,
+          "hitRateLower": 0.09075480483608778,
+          "hitRateUpper": 0.12067072998439185,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.13855839539590212,
+          "baselineOutcomes": 0,
+          "buyViews": 271,
+          "sellViews": 1342,
+          "edgeOverBaseline": -0.033784681818716744,
+          "rr": 2,
+          "meanProbability": 0.09932290701260105,
+          "probabilityGap": -0.005450806564584326,
+          "brier": 0.09237800758436157,
+          "brierSkill": 0.3674285207065203,
+          "meanSamples": 208.778053316801,
+          "meanStrength": -0.23401042632073224,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 477,
+              "hitRate": 0.0859538784067086,
+              "meanProbability": 0.08871249700012343
+            },
+            {
+              "third": 1,
+              "views": 593,
+              "hitRate": 0.1045531197301855,
+              "meanProbability": 0.09937763892416007
+            },
+            {
+              "third": 2,
+              "views": 543,
+              "hitRate": 0.12154696132596685,
+              "meanProbability": 0.10858388224721859
+            }
+          ],
+          "elapsedMs": 843
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "mean-reverting#1, mean-reverting#2, mean-reverting#3, mean-reverting#4, mean-reverting#5, mean-reverting#6, mean-reverting#7, mean-reverting#8, mean-reverting#9, mean-reverting#10, mean-reverting#11, mean-reverting#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1390,
+          "viewRate": 0.12167366946778711,
+          "hits": 243,
+          "hitRate": 0.1748201438848921,
+          "hitRateLower": 0.15575651224256093,
+          "hitRateUpper": 0.1956762474053072,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.11576342833879857,
+          "baselineOutcomes": 0,
+          "buyViews": 703,
+          "sellViews": 687,
+          "edgeOverBaseline": 0.05905671554609351,
+          "rr": 2,
+          "meanProbability": 0.16313387139643074,
+          "probabilityGap": -0.011686272488461352,
+          "brier": 0.14682186231187197,
+          "brierSkill": 0.13320363495917031,
+          "meanSamples": 183.12805755395684,
+          "meanStrength": -0.17019946193690255,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 411,
+              "hitRate": 0.17518248175182483,
+              "meanProbability": 0.1526953177400565
+            },
+            {
+              "third": 1,
+              "views": 500,
+              "hitRate": 0.166,
+              "meanProbability": 0.16519377594069334
+            },
+            {
+              "third": 2,
+              "views": 479,
+              "hitRate": 0.1837160751565762,
+              "meanProbability": 0.16994032918482
+            }
+          ],
+          "elapsedMs": 715
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "sweep-rich#1, sweep-rich#2, sweep-rich#3, sweep-rich#4, sweep-rich#5, sweep-rich#6, sweep-rich#7, sweep-rich#8, sweep-rich#9, sweep-rich#10, sweep-rich#11, sweep-rich#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1333,
+          "viewRate": 0.11668417366946779,
+          "hits": 271,
+          "hitRate": 0.20330082520630158,
+          "hitRateLower": 0.18256248253765245,
+          "hitRateUpper": 0.225744380444469,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1559101517866482,
+          "baselineOutcomes": 0,
+          "buyViews": 647,
+          "sellViews": 686,
+          "edgeOverBaseline": 0.04739067341965339,
+          "rr": 2,
+          "meanProbability": 0.20330964621334652,
+          "probabilityGap": 0.000008821007044940155,
+          "brier": 0.16297145630725457,
+          "brierSkill": 0.08892424915278052,
+          "meanSamples": 176.55813953488374,
+          "meanStrength": -0.13002368711998674,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 427,
+              "hitRate": 0.1990632318501171,
+              "meanProbability": 0.19024498337532958
+            },
+            {
+              "third": 1,
+              "views": 443,
+              "hitRate": 0.2054176072234763,
+              "meanProbability": 0.208972958840335
+            },
+            {
+              "third": 2,
+              "views": 463,
+              "hitRate": 0.20518358531317496,
+              "meanProbability": 0.2099398050428873
+            }
+          ],
+          "elapsedMs": 573
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "vol-clustered#1, vol-clustered#2, vol-clustered#3, vol-clustered#4, vol-clustered#5, vol-clustered#6, vol-clustered#7, vol-clustered#8, vol-clustered#9, vol-clustered#10, vol-clustered#11, vol-clustered#12",
+          "kind": "vol-clustered",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1473,
+          "viewRate": 0.12893907563025211,
+          "hits": 207,
+          "hitRate": 0.14052953156822812,
+          "hitRateLower": 0.12371486122377053,
+          "hitRateUpper": 0.15921433036996577,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1449251482144207,
+          "baselineOutcomes": 0,
+          "buyViews": 736,
+          "sellViews": 737,
+          "edgeOverBaseline": -0.0043956166461925905,
+          "rr": 2,
+          "meanProbability": 0.13348935921873506,
+          "probabilityGap": -0.007040172349493057,
+          "brier": 0.12282652128273823,
+          "brierSkill": 0.22239198058965592,
+          "meanSamples": 194.49966055668702,
+          "meanStrength": -0.19984397411459828,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 428,
+              "hitRate": 0.13551401869158877,
+              "meanProbability": 0.12436418867688993
+            },
+            {
+              "third": 1,
+              "views": 536,
+              "hitRate": 0.1287313432835821,
+              "meanProbability": 0.137966370438445
+            },
+            {
+              "third": 2,
+              "views": 509,
+              "hitRate": 0.15717092337917485,
+              "meanProbability": 0.13644789552157438
+            }
+          ],
+          "elapsedMs": 543
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "seasonal#1, seasonal#2, seasonal#3, seasonal#4, seasonal#5, seasonal#6, seasonal#7, seasonal#8, seasonal#9, seasonal#10, seasonal#11, seasonal#12",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1593,
+          "viewRate": 0.13944327731092437,
+          "hits": 207,
+          "hitRate": 0.12994350282485875,
+          "hitRateLower": 0.11431764683890826,
+          "hitRateUpper": 0.14734988486868253,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.2253494063013445,
+          "baselineOutcomes": 0,
+          "buyViews": 702,
+          "sellViews": 891,
+          "edgeOverBaseline": -0.09540590347648575,
+          "rr": 2,
+          "meanProbability": 0.13336418211036466,
+          "probabilityGap": 0.0034206792855059065,
+          "brier": 0.11502401076384765,
+          "brierSkill": 0.2551493937121573,
+          "meanSamples": 205.11550533584435,
+          "meanStrength": -0.19996915122296863,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 475,
+              "hitRate": 0.12842105263157894,
+              "meanProbability": 0.14213364963171093
+            },
+            {
+              "third": 1,
+              "views": 577,
+              "hitRate": 0.11265164644714037,
+              "meanProbability": 0.13042776119876895
+            },
+            {
+              "third": 2,
+              "views": 541,
+              "hitRate": 0.14972273567467653,
+              "meanProbability": 0.12879637766184573
+            }
+          ],
+          "elapsedMs": 563
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "regime-labelled#1, regime-labelled#2, regime-labelled#3, regime-labelled#4, regime-labelled#5, regime-labelled#6, regime-labelled#7, regime-labelled#8, regime-labelled#9, regime-labelled#10, regime-labelled#11, regime-labelled#12",
+          "kind": "three-regime",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1712,
+          "viewRate": 0.14985994397759103,
+          "hits": 127,
+          "hitRate": 0.0741822429906542,
+          "hitRateLower": 0.06269876897844856,
+          "hitRateUpper": 0.08757244486786454,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.3137739977801587,
+          "baselineOutcomes": 0,
+          "buyViews": 882,
+          "sellViews": 830,
+          "edgeOverBaseline": -0.23959175478950448,
+          "rr": 2,
+          "meanProbability": 0.08164212253999818,
+          "probabilityGap": 0.007459879549343976,
+          "brier": 0.07144262370896898,
+          "brierSkill": 0.4740621375500268,
+          "meanSamples": 219.9859813084112,
+          "meanStrength": -0.25169121079333506,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 532,
+              "hitRate": 0.07706766917293233,
+              "meanProbability": 0.09193126451683578
+            },
+            {
+              "third": 1,
+              "views": 589,
+              "hitRate": 0.0730050933786078,
+              "meanProbability": 0.07942987036782691
+            },
+            {
+              "third": 2,
+              "views": 591,
+              "hitRate": 0.0727580372250423,
+              "meanProbability": 0.07458491949047417
+            }
+          ],
+          "elapsedMs": 576
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1497,
+          "viewRate": 0.13103991596638656,
+          "hits": 227,
+          "hitRate": 0.1516366065464262,
+          "hitRateLower": 0.13436036281863256,
+          "hitRateUpper": 0.17069621343831556,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1575859141905016,
+          "baselineOutcomes": 0,
+          "buyViews": 749,
+          "sellViews": 748,
+          "edgeOverBaseline": -0.005949307644075419,
+          "rr": 2,
+          "meanProbability": 0.13843526607656792,
+          "probabilityGap": -0.01320134046985827,
+          "brier": 0.13074544052803086,
+          "brierSkill": 0.19121518813858607,
+          "meanSamples": 196.97862391449567,
+          "meanStrength": -0.1948980672567654,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 431,
+              "hitRate": 0.14153132250580047,
+              "meanProbability": 0.12699392784429875
+            },
+            {
+              "third": 1,
+              "views": 550,
+              "hitRate": 0.13090909090909092,
+              "meanProbability": 0.14291028762540406
+            },
+            {
+              "third": 2,
+              "views": 516,
+              "hitRate": 0.1821705426356589,
+              "meanProbability": 0.1432220004297619
+            }
+          ],
+          "elapsedMs": 553
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12",
+          "kind": "phase-randomised",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 7620,
+          "views": 1030,
+          "viewRate": 0.13517060367454067,
+          "hits": 169,
+          "hitRate": 0.16407766990291262,
+          "hitRateLower": 0.1427159559745327,
+          "hitRateUpper": 0.18793585761083667,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.161695499408849,
+          "baselineOutcomes": 0,
+          "buyViews": 493,
+          "sellViews": 537,
+          "edgeOverBaseline": 0.0023821704940636124,
+          "rr": 2,
+          "meanProbability": 0.15507248623138997,
+          "probabilityGap": -0.009005183671522643,
+          "brier": 0.13872168753904146,
+          "brierSkill": 0.16333764249387495,
+          "meanSamples": 128.14368932038835,
+          "meanStrength": -0.17826084710194331,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 311,
+              "hitRate": 0.15112540192926044,
+              "meanProbability": 0.1550058063379425
+            },
+            {
+              "third": 1,
+              "views": 372,
+              "hitRate": 0.17473118279569894,
+              "meanProbability": 0.15579793510046552
+            },
+            {
+              "third": 2,
+              "views": 347,
+              "hitRate": 0.1642651296829971,
+              "meanProbability": 0.15435453368835286
+            }
+          ],
+          "elapsedMs": 285
+        },
+        {
+          "agent": "mean-reversion",
+          "label": "B · mean reversion",
+          "series": "null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 1504,
+          "viewRate": 0.13165266106442577,
+          "hits": 248,
+          "hitRate": 0.16489361702127658,
+          "hitRateLower": 0.14699736392036117,
+          "hitRateUpper": 0.18449740316923233,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.17119224473249312,
+          "baselineOutcomes": 0,
+          "buyViews": 718,
+          "sellViews": 786,
+          "edgeOverBaseline": -0.006298627711216531,
+          "rr": 2,
+          "meanProbability": 0.1674227662271429,
+          "probabilityGap": 0.0025291492058663045,
+          "brier": 0.13898257825708973,
+          "brierSkill": 0.163136930921723,
+          "meanSamples": 196.5159574468085,
+          "meanStrength": -0.16591056710619045,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 464,
+              "hitRate": 0.1788793103448276,
+              "meanProbability": 0.17895990679553658
+            },
+            {
+              "third": 1,
+              "views": 517,
+              "hitRate": 0.16827852998065765,
+              "meanProbability": 0.1622041743922813
+            },
+            {
+              "third": 2,
+              "views": 523,
+              "hitRate": 0.1491395793499044,
+              "meanProbability": 0.16234586136077336
+            }
+          ],
+          "elapsedMs": 532
+        }
+      ],
+      "paper": {
+        "fixture": {
+          "summary": {
+            "strategy": "alpha:mean-reversion (mean-reverting)",
+            "evaluations": 1142,
+            "arms": 0,
+            "armRate": 0,
+            "fills": 0,
+            "fillRate": 0,
+            "stats": {
+              "trades": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRStdErr": 0,
+              "rStdDev": 0,
+              "cvar5R": 0,
+              "bestR": 0,
+              "worstR": 0,
+              "profitFactor": 0,
+              "longestLosingStreak": 0,
+              "maxDrawdownR": 0,
+              "meanMaeR": 0,
+              "meanMfeR": 0,
+              "meanBars": 0
+            },
+            "lowerBoundMeanR": 0,
+            "dsr": 0,
+            "meanPredicted": 0,
+            "predictedVsRealised": 0,
+            "rHistogram": [],
+            "exitReasons": {},
+            "partialsFired": 0
+          },
+          "ledger": {
+            "taken": 0,
+            "desk-refused": 1132,
+            "agent-no-view": 7,
+            "direction-mismatch": 3,
+            "below-probability-floor": 0
+          },
+          "decisions": 1142
+        },
+        "null": {
+          "summary": {
+            "strategy": "alpha:mean-reversion (null-driftless)",
+            "evaluations": 1142,
+            "arms": 1,
+            "armRate": 0,
+            "fills": 1,
+            "fillRate": 0,
+            "stats": {
+              "trades": 1,
+              "hitRate": 1,
+              "meanR": 0.41168396390073225,
+              "meanRStdErr": 0,
+              "rStdDev": 0,
+              "cvar5R": 0.41168396390073225,
+              "bestR": 0.41168396390073225,
+              "worstR": 0.41168396390073225,
+              "profitFactor": null,
+              "longestLosingStreak": 0,
+              "maxDrawdownR": 0,
+              "meanMaeR": 0.7695098255654654,
+              "meanMfeR": 1.2521576668103889,
+              "meanBars": 24
+            },
+            "lowerBoundMeanR": 0.41168396390073225,
+            "dsr": 0,
+            "meanPredicted": 0.09767441860465116,
+            "predictedVsRealised": 0,
+            "rHistogram": [
+              {
+                "bucket": "0.25R",
+                "count": 1
+              }
+            ],
+            "exitReasons": {
+              "time_stop": 1
+            },
+            "partialsFired": 0
+          },
+          "ledger": {
+            "taken": 1,
+            "desk-refused": 867,
+            "agent-no-view": 224,
+            "direction-mismatch": 50,
+            "below-probability-floor": 0
+          },
+          "decisions": 1142
+        }
+      },
+      "verdict": "disabled",
+      "reason": "alpha: fires on ≤ 3% of driftless decisions → 1497 views in 11424 driftless decisions (13.10%)"
+    },
+    {
+      "agent": "liquidity-sweep",
+      "label": "C · liquidity sweep",
+      "home": "sweep-rich",
+      "fixture": {
+        "agent": "liquidity-sweep",
+        "label": "C · liquidity sweep",
+        "series": "sweep-rich#1, sweep-rich#2, sweep-rich#3, sweep-rich#4, sweep-rich#5, sweep-rich#6, sweep-rich#7, sweep-rich#8, sweep-rich#9, sweep-rich#10, sweep-rich#11, sweep-rich#12",
+        "kind": "mean-reverting",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11424,
+        "views": 147,
+        "viewRate": 0.012867647058823529,
+        "hits": 35,
+        "hitRate": 0.23809523809523808,
+        "hitRateLower": 0.17646825945679584,
+        "hitRateUpper": 0.31306248007394366,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.1549917271874774,
+        "baselineOutcomes": 0,
+        "buyViews": 77,
+        "sellViews": 70,
+        "edgeOverBaseline": 0.08310351090776069,
+        "rr": 2,
+        "meanProbability": 0.23355806885413236,
+        "probabilityGap": -0.004537169241105726,
+        "brier": 0.1891147049868229,
+        "brierSkill": 0.007147798819179707,
+        "meanSamples": 21.761904761904763,
+        "meanStrength": -0.09977526447920097,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 34,
+            "hitRate": 0.2647058823529412,
+            "meanProbability": 0.197065339460057
+          },
+          {
+            "third": 1,
+            "views": 59,
+            "hitRate": 0.2542372881355932,
+            "meanProbability": 0.2376981595004198
+          },
+          {
+            "third": 2,
+            "views": 54,
+            "hitRate": 0.2037037037037037,
+            "meanProbability": 0.25201154017390276
+          }
+        ],
+        "elapsedMs": 725
+      },
+      "null": {
+        "agent": "liquidity-sweep",
+        "label": "C · liquidity sweep",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12, null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12, null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+        "kind": "driftless,phase-randomised,block-shuffled",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 30468,
+        "views": 500,
+        "viewRate": 0.016410660364973087,
+        "hits": 72,
+        "hitRate": 0.144,
+        "hitRateLower": 0.11593760751948216,
+        "hitRateUpper": 0.177491120874521,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.16192860679660123,
+        "baselineOutcomes": 0,
+        "buyViews": 256,
+        "sellViews": 244,
+        "edgeOverBaseline": -0.017928606796601243,
+        "rr": 2,
+        "meanProbability": 0.16978902821563632,
+        "probabilityGap": 0.025789028215636334,
+        "brier": 0.13032709862640895,
+        "brierSkill": 0.18090510639826762,
+        "meanSamples": 26.59,
+        "meanStrength": -0.163544305117697,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 149,
+            "hitRate": 0.12751677852348994,
+            "meanProbability": 0.16269609471152005
+          },
+          {
+            "third": 1,
+            "views": 182,
+            "hitRate": 0.2087912087912088,
+            "meanProbability": 0.1747630585795189
+          },
+          {
+            "third": 2,
+            "views": 169,
+            "hitRate": 0.08875739644970414,
+            "meanProbability": 0.17068591322088308
+          }
+        ],
+        "elapsedMs": 1846
+      },
+      "fixtureGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: at least 60 views on the fixture (else UNIDENTIFIABLE)",
+            "pass": true,
+            "measured": 147,
+            "threshold": 60,
+            "detail": "147 views in 11424 decisions (1.3%) on sweep-rich#1, sweep-rich#2, sweep-rich#3, sweep-rich#4, sweep-rich#5, sweep-rich#6, sweep-rich#7, sweep-rich#8, sweep-rich#9, sweep-rich#10, sweep-rich#11, sweep-rich#12"
+          },
+          {
+            "gate": "alpha: hit rate beats the measured random-entry baseline (floor 3 points and 2 SE)",
+            "pass": true,
+            "measured": 0.08310351090776069,
+            "threshold": 0.07025820129174452,
+            "detail": "23.8% hit rate on 147 views vs a 15.5% random-entry baseline in the same direction (edge 8.3 points, 95% CI 17.6–31.3%; 77 long / 70 short)"
+          },
+          {
+            "gate": "alpha: stated probability within 15 points of the realised hit rate",
+            "pass": true,
+            "measured": -0.004537169241105726,
+            "threshold": 0.15,
+            "detail": "states 23.4%, realises 23.8% (gap -0.5 points)"
+          },
+          {
+            "gate": "alpha: Brier skill ≥ 0 against the break-even forecast",
+            "pass": true,
+            "measured": 0.007147798819179707,
+            "threshold": 0,
+            "detail": "Brier 0.1891 (skill 0.0071 against the 1:2 constant)"
+          }
+        ]
+      },
+      "nullGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 15% of structureless decisions",
+            "pass": true,
+            "measured": 0.016410660364973087,
+            "threshold": 0.15,
+            "detail": "500 views in 30468 decisions over 36 structureless series"
+          },
+          {
+            "gate": "alpha: no demonstrable edge on noise (within 2 standard errors of the baseline)",
+            "pass": true,
+            "measured": -0.017928606796601243,
+            "threshold": 0.03140242028888856,
+            "detail": "14.4% hit rate on 500 null views vs a 16.2% baseline (edge -1.8 points, 2 SE = 3.1 points)"
+          }
+        ]
+      },
+      "driftless": {
+        "agent": "liquidity-sweep",
+        "label": "C · liquidity sweep",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+        "kind": "driftless",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11424,
+        "views": 200,
+        "viewRate": 0.01750700280112045,
+        "hits": 33,
+        "hitRate": 0.165,
+        "hitRateLower": 0.11996784122663977,
+        "hitRateUpper": 0.22265898273863527,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.1545870796558326,
+        "baselineOutcomes": 0,
+        "buyViews": 93,
+        "sellViews": 107,
+        "edgeOverBaseline": 0.010412920344167409,
+        "rr": 2,
+        "meanProbability": 0.15714775455960298,
+        "probabilityGap": -0.007852245440397032,
+        "brier": 0.1401040137877669,
+        "brierSkill": 0.15656446549170422,
+        "meanSamples": 29.1,
+        "meanStrength": -0.1761855787737303,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 66,
+            "hitRate": 0.12121212121212122,
+            "meanProbability": 0.15816142366089544
+          },
+          {
+            "third": 1,
+            "views": 71,
+            "hitRate": 0.23943661971830985,
+            "meanProbability": 0.1495353456915892
+          },
+          {
+            "third": 2,
+            "views": 63,
+            "hitRate": 0.12698412698412698,
+            "meanProbability": 0.16466487946347086
+          }
+        ],
+        "elapsedMs": 740
+      },
+      "driftlessGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 3% of driftless decisions",
+            "pass": true,
+            "measured": 0.01750700280112045,
+            "threshold": 0.03,
+            "detail": "200 views in 11424 driftless decisions (1.75%)"
+          }
+        ]
+      },
+      "all": [
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "trend-control#1, trend-control#2, trend-control#3, trend-control#4, trend-control#5, trend-control#6, trend-control#7, trend-control#8, trend-control#9, trend-control#10, trend-control#11, trend-control#12",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 431,
+          "viewRate": 0.037727591036414564,
+          "hits": 42,
+          "hitRate": 0.09744779582366589,
+          "hitRateLower": 0.07290332779156358,
+          "hitRateUpper": 0.12910494372615688,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.11467374740009796,
+          "baselineOutcomes": 0,
+          "buyViews": 52,
+          "sellViews": 379,
+          "edgeOverBaseline": -0.017225951576432072,
+          "rr": 2,
+          "meanProbability": 0.08356594857014776,
+          "probabilityGap": -0.013881847253518126,
+          "brier": 0.08467924141338659,
+          "brierSkill": 0.41028585737427903,
+          "meanSamples": 61.35962877030162,
+          "meanStrength": -0.24976738476318555,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 117,
+              "hitRate": 0.1111111111111111,
+              "meanProbability": 0.07948458180437225
+            },
+            {
+              "third": 1,
+              "views": 145,
+              "hitRate": 0.10344827586206896,
+              "meanProbability": 0.08969796592515404
+            },
+            {
+              "third": 2,
+              "views": 169,
+              "hitRate": 0.08284023668639054,
+              "meanProbability": 0.08113031185488045
+            }
+          ],
+          "elapsedMs": 1363
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "mean-reverting#1, mean-reverting#2, mean-reverting#3, mean-reverting#4, mean-reverting#5, mean-reverting#6, mean-reverting#7, mean-reverting#8, mean-reverting#9, mean-reverting#10, mean-reverting#11, mean-reverting#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 146,
+          "viewRate": 0.012780112044817927,
+          "hits": 31,
+          "hitRate": 0.21232876712328766,
+          "hitRateLower": 0.15380875170473335,
+          "hitRateUpper": 0.2855992631589627,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.11851209780515543,
+          "baselineOutcomes": 0,
+          "buyViews": 79,
+          "sellViews": 67,
+          "edgeOverBaseline": 0.09381666931813223,
+          "rr": 2,
+          "meanProbability": 0.19778459591122835,
+          "probabilityGap": -0.01454417121205931,
+          "brier": 0.1774259156042854,
+          "brierSkill": 0.024528648100288764,
+          "meanSamples": 23.383561643835616,
+          "meanStrength": -0.1355487374221049,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 37,
+              "hitRate": 0.24324324324324326,
+              "meanProbability": 0.17966923559130402
+            },
+            {
+              "third": 1,
+              "views": 51,
+              "hitRate": 0.21568627450980393,
+              "meanProbability": 0.19514025486131018
+            },
+            {
+              "third": 2,
+              "views": 58,
+              "hitRate": 0.1896551724137931,
+              "meanProbability": 0.21166614290059096
+            }
+          ],
+          "elapsedMs": 898
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "sweep-rich#1, sweep-rich#2, sweep-rich#3, sweep-rich#4, sweep-rich#5, sweep-rich#6, sweep-rich#7, sweep-rich#8, sweep-rich#9, sweep-rich#10, sweep-rich#11, sweep-rich#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 147,
+          "viewRate": 0.012867647058823529,
+          "hits": 35,
+          "hitRate": 0.23809523809523808,
+          "hitRateLower": 0.17646825945679584,
+          "hitRateUpper": 0.31306248007394366,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1549917271874774,
+          "baselineOutcomes": 0,
+          "buyViews": 77,
+          "sellViews": 70,
+          "edgeOverBaseline": 0.08310351090776069,
+          "rr": 2,
+          "meanProbability": 0.23355806885413236,
+          "probabilityGap": -0.004537169241105726,
+          "brier": 0.1891147049868229,
+          "brierSkill": 0.007147798819179707,
+          "meanSamples": 21.761904761904763,
+          "meanStrength": -0.09977526447920097,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 34,
+              "hitRate": 0.2647058823529412,
+              "meanProbability": 0.197065339460057
+            },
+            {
+              "third": 1,
+              "views": 59,
+              "hitRate": 0.2542372881355932,
+              "meanProbability": 0.2376981595004198
+            },
+            {
+              "third": 2,
+              "views": 54,
+              "hitRate": 0.2037037037037037,
+              "meanProbability": 0.25201154017390276
+            }
+          ],
+          "elapsedMs": 725
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "vol-clustered#1, vol-clustered#2, vol-clustered#3, vol-clustered#4, vol-clustered#5, vol-clustered#6, vol-clustered#7, vol-clustered#8, vol-clustered#9, vol-clustered#10, vol-clustered#11, vol-clustered#12",
+          "kind": "vol-clustered",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 244,
+          "viewRate": 0.021358543417366947,
+          "hits": 36,
+          "hitRate": 0.14754098360655737,
+          "hitRateLower": 0.10851428542168974,
+          "hitRateUpper": 0.1974940683010106,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.141754753631438,
+          "baselineOutcomes": 0,
+          "buyViews": 118,
+          "sellViews": 126,
+          "edgeOverBaseline": 0.005786229975119378,
+          "rr": 2,
+          "meanProbability": 0.16072710765765982,
+          "probabilityGap": 0.013186124051102449,
+          "brier": 0.12852816556019617,
+          "brierSkill": 0.19815951258468534,
+          "meanSamples": 33.352459016393446,
+          "meanStrength": -0.17260622567567352,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 72,
+              "hitRate": 0.125,
+              "meanProbability": 0.15546251857677013
+            },
+            {
+              "third": 1,
+              "views": 93,
+              "hitRate": 0.1935483870967742,
+              "meanProbability": 0.15897960359104127
+            },
+            {
+              "third": 2,
+              "views": 79,
+              "hitRate": 0.11392405063291139,
+              "meanProbability": 0.16758240249335074
+            }
+          ],
+          "elapsedMs": 747
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "seasonal#1, seasonal#2, seasonal#3, seasonal#4, seasonal#5, seasonal#6, seasonal#7, seasonal#8, seasonal#9, seasonal#10, seasonal#11, seasonal#12",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 236,
+          "viewRate": 0.02065826330532213,
+          "hits": 31,
+          "hitRate": 0.13135593220338984,
+          "hitRateLower": 0.0941044022238481,
+          "hitRateUpper": 0.18041678175757964,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.21456626170484158,
+          "baselineOutcomes": 0,
+          "buyViews": 88,
+          "sellViews": 148,
+          "edgeOverBaseline": -0.08321032950145174,
+          "rr": 2,
+          "meanProbability": 0.1486042265934245,
+          "probabilityGap": 0.01724829439003467,
+          "brier": 0.11857882386345084,
+          "brierSkill": 0.23446376326453022,
+          "meanSamples": 35.902542372881356,
+          "meanStrength": -0.1847291067399088,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 53,
+              "hitRate": 0.11320754716981132,
+              "meanProbability": 0.16718414342443047
+            },
+            {
+              "third": 1,
+              "views": 83,
+              "hitRate": 0.1566265060240964,
+              "meanProbability": 0.14591085567853268
+            },
+            {
+              "third": 2,
+              "views": 100,
+              "hitRate": 0.12,
+              "meanProbability": 0.14099236853235161
+            }
+          ],
+          "elapsedMs": 736
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "regime-labelled#1, regime-labelled#2, regime-labelled#3, regime-labelled#4, regime-labelled#5, regime-labelled#6, regime-labelled#7, regime-labelled#8, regime-labelled#9, regime-labelled#10, regime-labelled#11, regime-labelled#12",
+          "kind": "three-regime",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 419,
+          "viewRate": 0.03667717086834734,
+          "hits": 27,
+          "hitRate": 0.06443914081145585,
+          "hitRateLower": 0.04466075292111905,
+          "hitRateUpper": 0.09213184269861185,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.297153341768391,
+          "baselineOutcomes": 0,
+          "buyViews": 207,
+          "sellViews": 212,
+          "edgeOverBaseline": -0.23271420095693512,
+          "rr": 2,
+          "meanProbability": 0.09171853710023062,
+          "probabilityGap": 0.027279396288774765,
+          "brier": 0.06397920119782974,
+          "brierSkill": 0.5174688645659681,
+          "meanSamples": 61.85202863961814,
+          "meanStrength": -0.2416147962331027,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 125,
+              "hitRate": 0.072,
+              "meanProbability": 0.09811655246304579
+            },
+            {
+              "third": 1,
+              "views": 162,
+              "hitRate": 0.06172839506172839,
+              "meanProbability": 0.09126028865127095
+            },
+            {
+              "third": 2,
+              "views": 132,
+              "hitRate": 0.06060606060606061,
+              "meanProbability": 0.08622220625462124
+            }
+          ],
+          "elapsedMs": 832
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 200,
+          "viewRate": 0.01750700280112045,
+          "hits": 33,
+          "hitRate": 0.165,
+          "hitRateLower": 0.11996784122663977,
+          "hitRateUpper": 0.22265898273863527,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1545870796558326,
+          "baselineOutcomes": 0,
+          "buyViews": 93,
+          "sellViews": 107,
+          "edgeOverBaseline": 0.010412920344167409,
+          "rr": 2,
+          "meanProbability": 0.15714775455960298,
+          "probabilityGap": -0.007852245440397032,
+          "brier": 0.1401040137877669,
+          "brierSkill": 0.15656446549170422,
+          "meanSamples": 29.1,
+          "meanStrength": -0.1761855787737303,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 66,
+              "hitRate": 0.12121212121212122,
+              "meanProbability": 0.15816142366089544
+            },
+            {
+              "third": 1,
+              "views": 71,
+              "hitRate": 0.23943661971830985,
+              "meanProbability": 0.1495353456915892
+            },
+            {
+              "third": 2,
+              "views": 63,
+              "hitRate": 0.12698412698412698,
+              "meanProbability": 0.16466487946347086
+            }
+          ],
+          "elapsedMs": 740
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12",
+          "kind": "phase-randomised",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 7620,
+          "views": 112,
+          "viewRate": 0.014698162729658792,
+          "hits": 11,
+          "hitRate": 0.09821428571428571,
+          "hitRateLower": 0.055729182313812416,
+          "hitRateUpper": 0.16734784700898697,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.16089564235097953,
+          "baselineOutcomes": 0,
+          "buyViews": 65,
+          "sellViews": 47,
+          "edgeOverBaseline": -0.06268135663669382,
+          "rr": 2,
+          "meanProbability": 0.2009471583823952,
+          "probabilityGap": 0.1027328726681095,
+          "brier": 0.10706948182017692,
+          "brierSkill": 0.255682498794908,
+          "meanSamples": 18.428571428571427,
+          "meanStrength": -0.13238617495093807,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 31,
+              "hitRate": 0.0967741935483871,
+              "meanProbability": 0.16284324739801703
+            },
+            {
+              "third": 1,
+              "views": 44,
+              "hitRate": 0.18181818181818182,
+              "meanProbability": 0.22522212536523598
+            },
+            {
+              "third": 2,
+              "views": 37,
+              "hitRate": 0,
+              "meanProbability": 0.20400452847079342
+            }
+          ],
+          "elapsedMs": 384
+        },
+        {
+          "agent": "liquidity-sweep",
+          "label": "C · liquidity sweep",
+          "series": "null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11424,
+          "views": 188,
+          "viewRate": 0.016456582633053222,
+          "hits": 28,
+          "hitRate": 0.14893617021276595,
+          "hitRateLower": 0.10509717364761709,
+          "hitRateUpper": 0.20683517053633466,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1703541251267254,
+          "baselineOutcomes": 0,
+          "buyViews": 98,
+          "sellViews": 90,
+          "edgeOverBaseline": -0.021417954913959453,
+          "rr": 2,
+          "meanProbability": 0.1646749013673899,
+          "probabilityGap": 0.01573873115462396,
+          "brier": 0.13378172655208126,
+          "brierSkill": 0.16779896571278874,
+          "meanSamples": 28.78191489361702,
+          "meanStrength": -0.16865843196594338,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 52,
+              "hitRate": 0.15384615384615385,
+              "meanProbability": 0.16836391309728563
+            },
+            {
+              "third": 1,
+              "views": 67,
+              "hitRate": 0.19402985074626866,
+              "meanProbability": 0.16835960598954072
+            },
+            {
+              "third": 2,
+              "views": 69,
+              "hitRate": 0.10144927536231885,
+              "meanProbability": 0.15831687499581482
+            }
+          ],
+          "elapsedMs": 722
+        }
+      ],
+      "paper": {
+        "fixture": {
+          "summary": {
+            "strategy": "alpha:liquidity-sweep (sweep-rich)",
+            "evaluations": 1142,
+            "arms": 0,
+            "armRate": 0,
+            "fills": 0,
+            "fillRate": 0,
+            "stats": {
+              "trades": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRStdErr": 0,
+              "rStdDev": 0,
+              "cvar5R": 0,
+              "bestR": 0,
+              "worstR": 0,
+              "profitFactor": 0,
+              "longestLosingStreak": 0,
+              "maxDrawdownR": 0,
+              "meanMaeR": 0,
+              "meanMfeR": 0,
+              "meanBars": 0
+            },
+            "lowerBoundMeanR": 0,
+            "dsr": 0,
+            "meanPredicted": 0,
+            "predictedVsRealised": 0,
+            "rHistogram": [],
+            "exitReasons": {},
+            "partialsFired": 0
+          },
+          "ledger": {
+            "taken": 0,
+            "desk-refused": 1124,
+            "agent-no-view": 18,
+            "direction-mismatch": 0,
+            "below-probability-floor": 0
+          },
+          "decisions": 1142
+        },
+        "null": {
+          "summary": {
+            "strategy": "alpha:liquidity-sweep (null-driftless)",
+            "evaluations": 1142,
+            "arms": 0,
+            "armRate": 0,
+            "fills": 0,
+            "fillRate": 0,
+            "stats": {
+              "trades": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRStdErr": 0,
+              "rStdDev": 0,
+              "cvar5R": 0,
+              "bestR": 0,
+              "worstR": 0,
+              "profitFactor": 0,
+              "longestLosingStreak": 0,
+              "maxDrawdownR": 0,
+              "meanMaeR": 0,
+              "meanMfeR": 0,
+              "meanBars": 0
+            },
+            "lowerBoundMeanR": 0,
+            "dsr": 0,
+            "meanPredicted": 0,
+            "predictedVsRealised": 0,
+            "rHistogram": [],
+            "exitReasons": {},
+            "partialsFired": 0
+          },
+          "ledger": {
+            "taken": 0,
+            "desk-refused": 867,
+            "agent-no-view": 257,
+            "direction-mismatch": 18,
+            "below-probability-floor": 0
+          },
+          "decisions": 1142
+        }
+      },
+      "verdict": "enabled",
+      "reason": "all 7 gates passed on sweep-rich and the pooled nulls"
+    },
+    {
+      "agent": "vol-regime",
+      "label": "D · volatility expansion",
+      "home": "vol-clustered",
+      "fixture": {
+        "agent": "vol-regime",
+        "label": "D · volatility expansion",
+        "series": "vol-clustered#1, vol-clustered#2, vol-clustered#3, vol-clustered#4, vol-clustered#5, vol-clustered#6, vol-clustered#7, vol-clustered#8, vol-clustered#9, vol-clustered#10, vol-clustered#11, vol-clustered#12",
+        "kind": "vol-clustered",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11064,
+        "views": 545,
+        "viewRate": 0.0492588575560376,
+        "hits": 73,
+        "hitRate": 0.13394495412844037,
+        "hitRateLower": 0.10789719593584758,
+        "hitRateUpper": 0.16511709452609993,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.1490513222585355,
+        "baselineOutcomes": 0,
+        "buyViews": 275,
+        "sellViews": 270,
+        "edgeOverBaseline": -0.015106368130095138,
+        "rr": 2,
+        "meanProbability": 0.1261418585753458,
+        "probabilityGap": -0.00780309555309458,
+        "brier": 0.12125409338812776,
+        "brierSkill": 0.22152967530266165,
+        "meanSamples": 80.17981651376147,
+        "meanStrength": -0.20719147475798755,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 148,
+            "hitRate": 0.14864864864864866,
+            "meanProbability": 0.15760686461716752
+          },
+          {
+            "third": 1,
+            "views": 153,
+            "hitRate": 0.0915032679738562,
+            "meanProbability": 0.12332894470167349
+          },
+          {
+            "third": 2,
+            "views": 244,
+            "hitRate": 0.15163934426229508,
+            "meanProbability": 0.10882036238060094
+          }
+        ],
+        "elapsedMs": 886
+      },
+      "null": {
+        "agent": "vol-regime",
+        "label": "D · volatility expansion",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12, null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12, null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+        "kind": "driftless,phase-randomised,block-shuffled",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 29388,
+        "views": 100,
+        "viewRate": 0.0034027494215325984,
+        "hits": 10,
+        "hitRate": 0.1,
+        "hitRateLower": 0.05522854161313613,
+        "hitRateUpper": 0.1743673043676654,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.1702770795858761,
+        "baselineOutcomes": 0,
+        "buyViews": 47,
+        "sellViews": 53,
+        "edgeOverBaseline": -0.07027707958587609,
+        "rr": 2,
+        "meanProbability": 0.11321105805277147,
+        "probabilityGap": 0.013211058052771465,
+        "brier": 0.08866242611906268,
+        "brierSkill": 0.3861832037911045,
+        "meanSamples": 10.84,
+        "meanStrength": -0.22012227528056183,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 38,
+            "hitRate": 0.13157894736842105,
+            "meanProbability": 0.12748645954130808
+          },
+          {
+            "third": 1,
+            "views": 21,
+            "hitRate": 0.09523809523809523,
+            "meanProbability": 0.10255233776830339
+          },
+          {
+            "third": 2,
+            "views": 41,
+            "hitRate": 0.07317073170731707,
+            "meanProbability": 0.10543954267251385
+          }
+        ],
+        "elapsedMs": 2240
+      },
+      "fixtureGates": {
+        "pass": false,
+        "gates": [
+          {
+            "gate": "alpha: at least 60 views on the fixture (else UNIDENTIFIABLE)",
+            "pass": true,
+            "measured": 545,
+            "threshold": 60,
+            "detail": "545 views in 11064 decisions (4.9%) on vol-clustered#1, vol-clustered#2, vol-clustered#3, vol-clustered#4, vol-clustered#5, vol-clustered#6, vol-clustered#7, vol-clustered#8, vol-clustered#9, vol-clustered#10, vol-clustered#11, vol-clustered#12"
+          },
+          {
+            "gate": "alpha: hit rate beats the measured random-entry baseline (floor 3 points and 2 SE)",
+            "pass": false,
+            "measured": -0.015106368130095138,
+            "threshold": 0.03,
+            "detail": "13.4% hit rate on 545 views vs a 14.9% random-entry baseline in the same direction (edge -1.5 points, 95% CI 10.8–16.5%; 275 long / 270 short)"
+          },
+          {
+            "gate": "alpha: stated probability within 15 points of the realised hit rate",
+            "pass": true,
+            "measured": -0.00780309555309458,
+            "threshold": 0.15,
+            "detail": "states 12.6%, realises 13.4% (gap -0.8 points)"
+          },
+          {
+            "gate": "alpha: Brier skill ≥ 0 against the break-even forecast",
+            "pass": true,
+            "measured": 0.22152967530266165,
+            "threshold": 0,
+            "detail": "Brier 0.1213 (skill 0.2215 against the 1:2 constant)"
+          }
+        ]
+      },
+      "nullGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 15% of structureless decisions",
+            "pass": true,
+            "measured": 0.0034027494215325984,
+            "threshold": 0.15,
+            "detail": "100 views in 29388 decisions over 36 structureless series"
+          },
+          {
+            "gate": "alpha: no demonstrable edge on noise (within 2 standard errors of the baseline)",
+            "pass": true,
+            "measured": -0.07027707958587609,
+            "threshold": 0.060000000000000005,
+            "detail": "10.0% hit rate on 100 null views vs a 17.0% baseline (edge -7.0 points, 2 SE = 6.0 points)"
+          }
+        ]
+      },
+      "driftless": {
+        "agent": "vol-regime",
+        "label": "D · volatility expansion",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+        "kind": "driftless",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 11064,
+        "views": 44,
+        "viewRate": 0.0039768618944323935,
+        "hits": 6,
+        "hitRate": 0.13636363636363635,
+        "hitRateLower": 0.06402867407860051,
+        "hitRateUpper": 0.2670973752174096,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.16730303529762602,
+        "baselineOutcomes": 0,
+        "buyViews": 20,
+        "sellViews": 24,
+        "edgeOverBaseline": -0.03093939893398967,
+        "rr": 2,
+        "meanProbability": 0.1235758182320319,
+        "probabilityGap": -0.012787818131604456,
+        "brier": 0.11195512185815103,
+        "brierSkill": 0.284931802325358,
+        "meanSamples": 12.25,
+        "meanStrength": -0.20975751510130142,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 20,
+            "hitRate": 0.15,
+            "meanProbability": 0.1427623452663614
+          },
+          {
+            "third": 1,
+            "views": 8,
+            "hitRate": 0,
+            "meanProbability": 0.11039268993637444
+          },
+          {
+            "third": 2,
+            "views": 16,
+            "hitRate": 0.1875,
+            "meanProbability": 0.10618422358694869
+          }
+        ],
+        "elapsedMs": 848
+      },
+      "driftlessGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 3% of driftless decisions",
+            "pass": true,
+            "measured": 0.0039768618944323935,
+            "threshold": 0.03,
+            "detail": "44 views in 11064 driftless decisions (0.40%)"
+          }
+        ]
+      },
+      "all": [
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "trend-control#1, trend-control#2, trend-control#3, trend-control#4, trend-control#5, trend-control#6, trend-control#7, trend-control#8, trend-control#9, trend-control#10, trend-control#11, trend-control#12",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 65,
+          "viewRate": 0.005874909616775127,
+          "hits": 36,
+          "hitRate": 0.5538461538461539,
+          "hitRateLower": 0.43337604317300876,
+          "hitRateUpper": 0.6683066603086071,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.4760679375265139,
+          "baselineOutcomes": 0,
+          "buyViews": 59,
+          "sellViews": 6,
+          "edgeOverBaseline": 0.07777821631963999,
+          "rr": 2,
+          "meanProbability": 0.43613931255057337,
+          "probabilityGap": -0.11770684129558051,
+          "brier": 0.2823290376881811,
+          "brierSkill": 0.045303543077538144,
+          "meanSamples": 15.307692307692308,
+          "meanStrength": 0.10280597921724009,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 16,
+              "hitRate": 0.5,
+              "meanProbability": 0.4208654452552838
+            },
+            {
+              "third": 1,
+              "views": 11,
+              "hitRate": 0.36363636363636365,
+              "meanProbability": 0.4174700253053757
+            },
+            {
+              "third": 2,
+              "views": 38,
+              "hitRate": 0.631578947368421,
+              "meanProbability": 0.44797468193009465
+            }
+          ],
+          "elapsedMs": 917
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "mean-reverting#1, mean-reverting#2, mean-reverting#3, mean-reverting#4, mean-reverting#5, mean-reverting#6, mean-reverting#7, mean-reverting#8, mean-reverting#9, mean-reverting#10, mean-reverting#11, mean-reverting#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 39,
+          "viewRate": 0.0035249457700650758,
+          "hits": 1,
+          "hitRate": 0.02564102564102564,
+          "hitRateLower": 0.00454058606523737,
+          "hitRateUpper": 0.13181286478627144,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1068626307416237,
+          "baselineOutcomes": 0,
+          "buyViews": 19,
+          "sellViews": 20,
+          "edgeOverBaseline": -0.08122160510059806,
+          "rr": 2,
+          "meanProbability": 0.10046167642744856,
+          "probabilityGap": 0.07482065078642292,
+          "brier": 0.03926376371272216,
+          "brierSkill": 0.671867117543679,
+          "meanSamples": 13.58974358974359,
+          "meanStrength": -0.23287165690588474,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 14,
+              "hitRate": 0.07142857142857142,
+              "meanProbability": 0.09706894415151739
+            },
+            {
+              "third": 1,
+              "views": 8,
+              "hitRate": 0,
+              "meanProbability": 0.09748740855967473
+            },
+            {
+              "third": 2,
+              "views": 17,
+              "hitRate": 0,
+              "meanProbability": 0.10465534671010894
+            }
+          ],
+          "elapsedMs": 897
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "sweep-rich#1, sweep-rich#2, sweep-rich#3, sweep-rich#4, sweep-rich#5, sweep-rich#6, sweep-rich#7, sweep-rich#8, sweep-rich#9, sweep-rich#10, sweep-rich#11, sweep-rich#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 623,
+          "viewRate": 0.05630874909616775,
+          "hits": 39,
+          "hitRate": 0.06260032102728733,
+          "hitRateLower": 0.04612849883489663,
+          "hitRateUpper": 0.08443335283544562,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.15238055571063905,
+          "baselineOutcomes": 0,
+          "buyViews": 336,
+          "sellViews": 287,
+          "edgeOverBaseline": -0.08978023468335172,
+          "rr": 2,
+          "meanProbability": 0.08371998012651073,
+          "probabilityGap": 0.021119659099223406,
+          "brier": 0.0600788293441924,
+          "brierSkill": 0.5447810863069098,
+          "meanSamples": 83.09149277688603,
+          "meanStrength": -0.2496133532068226,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 203,
+              "hitRate": 0.08374384236453201,
+              "meanProbability": 0.09678239647856977
+            },
+            {
+              "third": 1,
+              "views": 221,
+              "hitRate": 0.05429864253393665,
+              "meanProbability": 0.08186501183929505
+            },
+            {
+              "third": 2,
+              "views": 199,
+              "hitRate": 0.05025125628140704,
+              "meanProbability": 0.07245504279991119
+            }
+          ],
+          "elapsedMs": 867
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "vol-clustered#1, vol-clustered#2, vol-clustered#3, vol-clustered#4, vol-clustered#5, vol-clustered#6, vol-clustered#7, vol-clustered#8, vol-clustered#9, vol-clustered#10, vol-clustered#11, vol-clustered#12",
+          "kind": "vol-clustered",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 545,
+          "viewRate": 0.0492588575560376,
+          "hits": 73,
+          "hitRate": 0.13394495412844037,
+          "hitRateLower": 0.10789719593584758,
+          "hitRateUpper": 0.16511709452609993,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1490513222585355,
+          "baselineOutcomes": 0,
+          "buyViews": 275,
+          "sellViews": 270,
+          "edgeOverBaseline": -0.015106368130095138,
+          "rr": 2,
+          "meanProbability": 0.1261418585753458,
+          "probabilityGap": -0.00780309555309458,
+          "brier": 0.12125409338812776,
+          "brierSkill": 0.22152967530266165,
+          "meanSamples": 80.17981651376147,
+          "meanStrength": -0.20719147475798755,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 148,
+              "hitRate": 0.14864864864864866,
+              "meanProbability": 0.15760686461716752
+            },
+            {
+              "third": 1,
+              "views": 153,
+              "hitRate": 0.0915032679738562,
+              "meanProbability": 0.12332894470167349
+            },
+            {
+              "third": 2,
+              "views": 244,
+              "hitRate": 0.15163934426229508,
+              "meanProbability": 0.10882036238060094
+            }
+          ],
+          "elapsedMs": 886
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "seasonal#1, seasonal#2, seasonal#3, seasonal#4, seasonal#5, seasonal#6, seasonal#7, seasonal#8, seasonal#9, seasonal#10, seasonal#11, seasonal#12",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 39,
+          "viewRate": 0.0035249457700650758,
+          "hits": 17,
+          "hitRate": 0.4358974358974359,
+          "hitRateLower": 0.2930452416170466,
+          "hitRateUpper": 0.5902457652547789,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.22356947082377426,
+          "baselineOutcomes": 0,
+          "buyViews": 32,
+          "sellViews": 7,
+          "edgeOverBaseline": 0.21232796507366164,
+          "rr": 2,
+          "meanProbability": 0.373710602014081,
+          "probabilityGap": -0.062186833883354886,
+          "brier": 0.2871616899155613,
+          "brierSkill": -0.1199305906706889,
+          "meanSamples": 14.051282051282051,
+          "meanStrength": 0.04037726868074772,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 16,
+              "hitRate": 0.5625,
+              "meanProbability": 0.33488561949515294
+            },
+            {
+              "third": 1,
+              "views": 9,
+              "hitRate": 0.3333333333333333,
+              "meanProbability": 0.3918501917441664
+            },
+            {
+              "third": 2,
+              "views": 14,
+              "hitRate": 0.35714285714285715,
+              "meanProbability": 0.4064208457806583
+            }
+          ],
+          "elapsedMs": 852
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "regime-labelled#1, regime-labelled#2, regime-labelled#3, regime-labelled#4, regime-labelled#5, regime-labelled#6, regime-labelled#7, regime-labelled#8, regime-labelled#9, regime-labelled#10, regime-labelled#11, regime-labelled#12",
+          "kind": "three-regime",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 718,
+          "viewRate": 0.06489515545914679,
+          "hits": 604,
+          "hitRate": 0.841225626740947,
+          "hitRateLower": 0.8126865536630987,
+          "hitRateUpper": 0.8661327330058878,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.3157892294882102,
+          "baselineOutcomes": 0,
+          "buyViews": 350,
+          "sellViews": 368,
+          "edgeOverBaseline": 0.5254363972527368,
+          "rr": 2,
+          "meanProbability": 0.756606747167079,
+          "probabilityGap": -0.08461887957386804,
+          "brier": 0.15833026614933587,
+          "brierSkill": 0.5956007194241074,
+          "meanSamples": 102.87186629526462,
+          "meanStrength": 0.42327341383374556,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 177,
+              "hitRate": 0.8531073446327684,
+              "meanProbability": 0.6509404799141483
+            },
+            {
+              "third": 1,
+              "views": 332,
+              "hitRate": 0.8343373493975904,
+              "meanProbability": 0.7851798023192585
+            },
+            {
+              "third": 2,
+              "views": 209,
+              "hitRate": 0.8421052631578947,
+              "meanProbability": 0.8007056705797343
+            }
+          ],
+          "elapsedMs": 901
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 44,
+          "viewRate": 0.0039768618944323935,
+          "hits": 6,
+          "hitRate": 0.13636363636363635,
+          "hitRateLower": 0.06402867407860051,
+          "hitRateUpper": 0.2670973752174096,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.16730303529762602,
+          "baselineOutcomes": 0,
+          "buyViews": 20,
+          "sellViews": 24,
+          "edgeOverBaseline": -0.03093939893398967,
+          "rr": 2,
+          "meanProbability": 0.1235758182320319,
+          "probabilityGap": -0.012787818131604456,
+          "brier": 0.11195512185815103,
+          "brierSkill": 0.284931802325358,
+          "meanSamples": 12.25,
+          "meanStrength": -0.20975751510130142,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 20,
+              "hitRate": 0.15,
+              "meanProbability": 0.1427623452663614
+            },
+            {
+              "third": 1,
+              "views": 8,
+              "hitRate": 0,
+              "meanProbability": 0.11039268993637444
+            },
+            {
+              "third": 2,
+              "views": 16,
+              "hitRate": 0.1875,
+              "meanProbability": 0.10618422358694869
+            }
+          ],
+          "elapsedMs": 848
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12",
+          "kind": "phase-randomised",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 7260,
+          "views": 22,
+          "viewRate": 0.0030303030303030303,
+          "hits": 3,
+          "hitRate": 0.13636363636363635,
+          "hitRateLower": 0.04748917264236267,
+          "hitRateUpper": 0.3333541187947,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.14318097202184463,
+          "baselineOutcomes": 0,
+          "buyViews": 8,
+          "sellViews": 14,
+          "edgeOverBaseline": -0.006817335658208273,
+          "rr": 2,
+          "meanProbability": 0.10561592852490494,
+          "probabilityGap": -0.030747707838731417,
+          "brier": 0.13122419025257803,
+          "brierSkill": 0.16185839774159838,
+          "meanSamples": 7.545454545454546,
+          "meanStrength": -0.22771740480842842,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 7,
+              "hitRate": 0.14285714285714285,
+              "meanProbability": 0.05167417453993101
+            },
+            {
+              "third": 1,
+              "views": 7,
+              "hitRate": 0.2857142857142857,
+              "meanProbability": 0.10445645613381616
+            },
+            {
+              "third": 2,
+              "views": 8,
+              "hitRate": 0,
+              "meanProbability": 0.15382950160395983
+            }
+          ],
+          "elapsedMs": 456
+        },
+        {
+          "agent": "vol-regime",
+          "label": "D · volatility expansion",
+          "series": "null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 11064,
+          "views": 34,
+          "viewRate": 0.0030730296456977584,
+          "hits": 1,
+          "hitRate": 0.029411764705882353,
+          "hitRateLower": 0.005210771925596642,
+          "hitRateUpper": 0.1491590221634482,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.19165861826504355,
+          "baselineOutcomes": 0,
+          "buyViews": 19,
+          "sellViews": 15,
+          "edgeOverBaseline": -0.16224685355916119,
+          "rr": 2,
+          "meanProbability": 0.10471233457411275,
+          "probabilityGap": 0.07530056986823039,
+          "brier": 0.030978972487967764,
+          "brierSkill": 0.7437955248292396,
+          "meanSamples": 11.147058823529411,
+          "meanStrength": -0.22862099875922054,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 11,
+              "hitRate": 0.09090909090909091,
+              "meanProbability": 0.14795630322390554
+            },
+            {
+              "third": 1,
+              "views": 6,
+              "hitRate": 0,
+              "meanProbability": 0.08987706345111042
+            },
+            {
+              "third": 2,
+              "views": 17,
+              "hitRate": 0,
+              "meanProbability": 0.08196692113824766
+            }
+          ],
+          "elapsedMs": 936
+        }
+      ],
+      "paper": {
+        "fixture": {
+          "summary": {
+            "strategy": "alpha:vol-regime (vol-clustered)",
+            "evaluations": 1106,
+            "arms": 9,
+            "armRate": 0,
+            "fills": 6,
+            "fillRate": 0,
+            "stats": {
+              "trades": 6,
+              "hitRate": 0.3333333333333333,
+              "meanR": -0.07809856705879664,
+              "meanRStdErr": 0.12139051191404288,
+              "rStdDev": 0.29734481380464717,
+              "cvar5R": 0.4769914250260899,
+              "bestR": 0.3431859620450621,
+              "worstR": -0.4769914250260899,
+              "profitFactor": 0.5321524928610724,
+              "longestLosingStreak": 2,
+              "maxDrawdownR": 0.6671458442146424,
+              "meanMaeR": 0.4181476546176392,
+              "meanMfeR": 0.4431077609949077,
+              "meanBars": 24
+            },
+            "lowerBoundMeanR": -0.18026082188565512,
+            "dsr": 0,
+            "meanPredicted": 0.18244272048338095,
+            "predictedVsRealised": 0,
+            "rHistogram": [
+              {
+                "bucket": "-0.50R",
+                "count": 1
+              },
+              {
+                "bucket": "-0.25R",
+                "count": 3
+              },
+              {
+                "bucket": "0.00R",
+                "count": 1
+              },
+              {
+                "bucket": "0.25R",
+                "count": 1
+              }
+            ],
+            "exitReasons": {
+              "time_stop": 6
+            },
+            "partialsFired": 0
+          },
+          "ledger": {
+            "taken": 9,
+            "desk-refused": 887,
+            "agent-no-view": 208,
+            "direction-mismatch": 2,
+            "below-probability-floor": 0
+          },
+          "decisions": 1106
+        },
+        "null": {
+          "summary": {
+            "strategy": "alpha:vol-regime (null-driftless)",
+            "evaluations": 1106,
+            "arms": 2,
+            "armRate": 0,
+            "fills": 2,
+            "fillRate": 0,
+            "stats": {
+              "trades": 2,
+              "hitRate": 1,
+              "meanR": 0.7403801047614358,
+              "meanRStdErr": 0.01178110668654042,
+              "rStdDev": 0.016661000855869818,
+              "cvar5R": 0.7285989980748954,
+              "bestR": 0.7521612114479762,
+              "worstR": 0.7285989980748954,
+              "profitFactor": null,
+              "longestLosingStreak": 0,
+              "maxDrawdownR": 0,
+              "meanMaeR": 0.32821361642931557,
+              "meanMfeR": 1.2605284150918776,
+              "meanBars": 24
+            },
+            "lowerBoundMeanR": 0.7304651253740434,
+            "dsr": 0,
+            "meanPredicted": 0.23834897625816415,
+            "predictedVsRealised": 0,
+            "rHistogram": [
+              {
+                "bucket": "0.50R",
+                "count": 1
+              },
+              {
+                "bucket": "0.75R",
+                "count": 1
+              }
+            ],
+            "exitReasons": {
+              "horizon": 2
+            },
+            "partialsFired": 2
+          },
+          "ledger": {
+            "taken": 2,
+            "desk-refused": 849,
+            "agent-no-view": 255,
+            "direction-mismatch": 0,
+            "below-probability-floor": 0
+          },
+          "decisions": 1106
+        }
+      },
+      "verdict": "disabled",
+      "reason": "alpha: hit rate beats the measured random-entry baseline (floor 3 points and 2 SE) → 13.4% hit rate on 545 views vs a 14.9% random-entry baseline in the same direction (edge -1.5 points, 95% CI 10.8–16.5%; 275 long / 270 short)"
+    },
+    {
+      "agent": "seasonality",
+      "label": "E · hour-of-day seasonality",
+      "home": "seasonal",
+      "fixture": {
+        "agent": "seasonality",
+        "label": "E · hour-of-day seasonality",
+        "series": "seasonal#1, seasonal#2, seasonal#3, seasonal#4, seasonal#5, seasonal#6, seasonal#7, seasonal#8, seasonal#9, seasonal#10, seasonal#11, seasonal#12",
+        "kind": "seasonal",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 10704,
+        "views": 2156,
+        "viewRate": 0.20142002989536623,
+        "hits": 1453,
+        "hitRate": 0.6739332096474954,
+        "hitRateLower": 0.6538514156739748,
+        "hitRateUpper": 0.6933962713786315,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.23733649056765685,
+        "baselineOutcomes": 0,
+        "buyViews": 1510,
+        "sellViews": 646,
+        "edgeOverBaseline": 0.43659671907983855,
+        "rr": 2,
+        "meanProbability": 0.6546707587301202,
+        "probabilityGap": -0.019262450917375218,
+        "brier": 0.22738540607773924,
+        "brierSkill": 0.322764939442448,
+        "meanSamples": 284.1665120593692,
+        "meanStrength": 0.32133742539678684,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 360,
+            "hitRate": 0.6833333333333333,
+            "meanProbability": 0.605599172637627
+          },
+          {
+            "third": 1,
+            "views": 802,
+            "hitRate": 0.6920199501246883,
+            "meanProbability": 0.6641728590765309
+          },
+          {
+            "third": 2,
+            "views": 994,
+            "hitRate": 0.6559356136820925,
+            "meanProbability": 0.6647764795706393
+          }
+        ],
+        "elapsedMs": 2530
+      },
+      "null": {
+        "agent": "seasonality",
+        "label": "E · hour-of-day seasonality",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12, null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12, null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+        "kind": "driftless,phase-randomised,block-shuffled",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 28308,
+        "views": 411,
+        "viewRate": 0.014518863925392115,
+        "hits": 86,
+        "hitRate": 0.20924574209245742,
+        "hitRateLower": 0.17270185915743685,
+        "hitRateUpper": 0.2511746276751277,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.17763558083475953,
+        "baselineOutcomes": 0,
+        "buyViews": 198,
+        "sellViews": 213,
+        "edgeOverBaseline": 0.03161016125769789,
+        "rr": 2,
+        "meanProbability": 0.21333513448390706,
+        "probabilityGap": 0.004089392391449648,
+        "brier": 0.2021038351032205,
+        "brierSkill": -0.11746201202812045,
+        "meanSamples": 37.722627737226276,
+        "meanStrength": -0.11999819884942628,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 79,
+            "hitRate": 0.17721518987341772,
+            "meanProbability": 0.2128192042232568
+          },
+          {
+            "third": 1,
+            "views": 169,
+            "hitRate": 0.1893491124260355,
+            "meanProbability": 0.2214851384299495
+          },
+          {
+            "third": 2,
+            "views": 163,
+            "hitRate": 0.24539877300613497,
+            "meanProbability": 0.2051351824821292
+          }
+        ],
+        "elapsedMs": 6100
+      },
+      "fixtureGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: at least 60 views on the fixture (else UNIDENTIFIABLE)",
+            "pass": true,
+            "measured": 2156,
+            "threshold": 60,
+            "detail": "2156 views in 10704 decisions (20.1%) on seasonal#1, seasonal#2, seasonal#3, seasonal#4, seasonal#5, seasonal#6, seasonal#7, seasonal#8, seasonal#9, seasonal#10, seasonal#11, seasonal#12"
+          },
+          {
+            "gate": "alpha: hit rate beats the measured random-entry baseline (floor 3 points and 2 SE)",
+            "pass": true,
+            "measured": 0.43659671907983855,
+            "threshold": 0.03,
+            "detail": "67.4% hit rate on 2156 views vs a 23.7% random-entry baseline in the same direction (edge 43.7 points, 95% CI 65.4–69.3%; 1510 long / 646 short)"
+          },
+          {
+            "gate": "alpha: stated probability within 15 points of the realised hit rate",
+            "pass": true,
+            "measured": -0.019262450917375218,
+            "threshold": 0.15,
+            "detail": "states 65.5%, realises 67.4% (gap -1.9 points)"
+          },
+          {
+            "gate": "alpha: Brier skill ≥ 0 against the break-even forecast",
+            "pass": true,
+            "measured": 0.322764939442448,
+            "threshold": 0,
+            "detail": "Brier 0.2274 (skill 0.3228 against the 1:2 constant)"
+          }
+        ]
+      },
+      "nullGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 15% of structureless decisions",
+            "pass": true,
+            "measured": 0.014518863925392115,
+            "threshold": 0.15,
+            "detail": "411 views in 28308 decisions over 36 structureless series"
+          },
+          {
+            "gate": "alpha: no demonstrable edge on noise (within 2 standard errors of the baseline)",
+            "pass": true,
+            "measured": 0.03161016125769789,
+            "threshold": 0.04012898443533707,
+            "detail": "20.9% hit rate on 411 null views vs a 17.8% baseline (edge 3.2 points, 2 SE = 4.0 points)"
+          }
+        ]
+      },
+      "driftless": {
+        "agent": "seasonality",
+        "label": "E · hour-of-day seasonality",
+        "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+        "kind": "driftless",
+        "symbol": "EURUSD",
+        "mode": "intraday",
+        "frame": "M5",
+        "evaluations": 10704,
+        "views": 223,
+        "viewRate": 0.020833333333333332,
+        "hits": 56,
+        "hitRate": 0.25112107623318386,
+        "hitRateLower": 0.19874454332197758,
+        "hitRateUpper": 0.3119272205872878,
+        "breakEven": 0.3333333333333333,
+        "baselineRate": 0.18189697585565814,
+        "baselineOutcomes": 0,
+        "buyViews": 121,
+        "sellViews": 102,
+        "edgeOverBaseline": 0.06922410037752572,
+        "rr": 2,
+        "meanProbability": 0.20511537443988065,
+        "probabilityGap": -0.04600570179330321,
+        "brier": 0.2271904869187472,
+        "brierSkill": -0.16616702620441326,
+        "meanSamples": 41.85201793721973,
+        "meanStrength": -0.12821795889345267,
+        "byThird": [
+          {
+            "third": 0,
+            "views": 31,
+            "hitRate": 0.1935483870967742,
+            "meanProbability": 0.24528407885338752
+          },
+          {
+            "third": 1,
+            "views": 80,
+            "hitRate": 0.25,
+            "meanProbability": 0.18958184905815517
+          },
+          {
+            "third": 2,
+            "views": 112,
+            "hitRate": 0.26785714285714285,
+            "meanProbability": 0.20509262616951748
+          }
+        ],
+        "elapsedMs": 2431
+      },
+      "driftlessGates": {
+        "pass": true,
+        "gates": [
+          {
+            "gate": "alpha: fires on ≤ 3% of driftless decisions",
+            "pass": true,
+            "measured": 0.020833333333333332,
+            "threshold": 0.03,
+            "detail": "223 views in 10704 driftless decisions (2.08%)"
+          }
+        ]
+      },
+      "all": [
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "trend-control#1, trend-control#2, trend-control#3, trend-control#4, trend-control#5, trend-control#6, trend-control#7, trend-control#8, trend-control#9, trend-control#10, trend-control#11, trend-control#12",
+          "kind": "positive-control",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 4567,
+          "viewRate": 0.4266629297458894,
+          "hits": 2594,
+          "hitRate": 0.567987738121305,
+          "hitRateLower": 0.5535697871510262,
+          "hitRateUpper": 0.5822914074263574,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.5497494368510804,
+          "baselineOutcomes": 0,
+          "buyViews": 4562,
+          "sellViews": 5,
+          "edgeOverBaseline": 0.018238301270224633,
+          "rr": 2,
+          "meanProbability": 0.5862920238567761,
+          "probabilityGap": 0.01830428573547116,
+          "brier": 0.2520507882031808,
+          "brierSkill": 0.16106214693373244,
+          "meanSamples": 596.6625793737684,
+          "meanStrength": 0.25295869052344294,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 603,
+              "hitRate": 0.6252072968490879,
+              "meanProbability": 0.5810007398886805
+            },
+            {
+              "third": 1,
+              "views": 1694,
+              "hitRate": 0.5625737898465171,
+              "meanProbability": 0.5949097731294534
+            },
+            {
+              "third": 2,
+              "views": 2270,
+              "hitRate": 0.5568281938325991,
+              "meanProbability": 0.5812665511540653
+            }
+          ],
+          "elapsedMs": 2685
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "mean-reverting#1, mean-reverting#2, mean-reverting#3, mean-reverting#4, mean-reverting#5, mean-reverting#6, mean-reverting#7, mean-reverting#8, mean-reverting#9, mean-reverting#10, mean-reverting#11, mean-reverting#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 61,
+          "viewRate": 0.005698804185351271,
+          "hits": 11,
+          "hitRate": 0.18032786885245902,
+          "hitRateLower": 0.10379034061426573,
+          "hitRateUpper": 0.2947439336787807,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.11917894728525322,
+          "baselineOutcomes": 0,
+          "buyViews": 44,
+          "sellViews": 17,
+          "edgeOverBaseline": 0.061148921567205805,
+          "rr": 2,
+          "meanProbability": 0.10335710321262313,
+          "probabilityGap": -0.07697076563983589,
+          "brier": 0.17229993932383836,
+          "brierSkill": -0.006304964774332511,
+          "meanSamples": 18.95081967213115,
+          "meanStrength": -0.22997623012071025,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 6,
+              "hitRate": 0,
+              "meanProbability": 0.11077129967988115
+            },
+            {
+              "third": 1,
+              "views": 19,
+              "hitRate": 0.21052631578947367,
+              "meanProbability": 0.05793473205953478
+            },
+            {
+              "third": 2,
+              "views": 36,
+              "hitRate": 0.19444444444444445,
+              "meanProbability": 0.12609432190998784
+            }
+          ],
+          "elapsedMs": 2722
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "sweep-rich#1, sweep-rich#2, sweep-rich#3, sweep-rich#4, sweep-rich#5, sweep-rich#6, sweep-rich#7, sweep-rich#8, sweep-rich#9, sweep-rich#10, sweep-rich#11, sweep-rich#12",
+          "kind": "mean-reverting",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 49,
+          "viewRate": 0.004577727952167414,
+          "hits": 5,
+          "hitRate": 0.10204081632653061,
+          "hitRateLower": 0.04437889248703989,
+          "hitRateUpper": 0.21756624164970087,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.15751830651624413,
+          "baselineOutcomes": 0,
+          "buyViews": 15,
+          "sellViews": 34,
+          "edgeOverBaseline": -0.05547749018971351,
+          "rr": 2,
+          "meanProbability": 0.1347950859135277,
+          "probabilityGap": 0.03275426958699709,
+          "brier": 0.11033226606931919,
+          "brierSkill": 0.23974172911609748,
+          "meanSamples": 34.224489795918366,
+          "meanStrength": -0.19853824741980564,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 5,
+              "hitRate": 0.2,
+              "meanProbability": 0.09097087768570063
+            },
+            {
+              "third": 1,
+              "views": 10,
+              "hitRate": 0,
+              "meanProbability": 0.10885500332046874
+            },
+            {
+              "third": 2,
+              "views": 34,
+              "hitRate": 0.11764705882352941,
+              "meanProbability": 0.148869258474402
+            }
+          ],
+          "elapsedMs": 2414
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "vol-clustered#1, vol-clustered#2, vol-clustered#3, vol-clustered#4, vol-clustered#5, vol-clustered#6, vol-clustered#7, vol-clustered#8, vol-clustered#9, vol-clustered#10, vol-clustered#11, vol-clustered#12",
+          "kind": "vol-clustered",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 206,
+          "viewRate": 0.019245142002989536,
+          "hits": 49,
+          "hitRate": 0.23786407766990292,
+          "hitRateLower": 0.18485442327234958,
+          "hitRateUpper": 0.30047165125243486,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.17367512403232252,
+          "baselineOutcomes": 0,
+          "buyViews": 112,
+          "sellViews": 94,
+          "edgeOverBaseline": 0.0641889536375804,
+          "rr": 2,
+          "meanProbability": 0.21905337980897593,
+          "probabilityGap": -0.018810697860926984,
+          "brier": 0.21919934507062144,
+          "brierSkill": -0.15126228260887276,
+          "meanSamples": 44.325242718446596,
+          "meanStrength": -0.11427995352435735,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 28,
+              "hitRate": 0.2857142857142857,
+              "meanProbability": 0.21617933550133647
+            },
+            {
+              "third": 1,
+              "views": 76,
+              "hitRate": 0.21052631578947367,
+              "meanProbability": 0.22357999293730282
+            },
+            {
+              "third": 2,
+              "views": 102,
+              "hitRate": 0.24509803921568626,
+              "meanProbability": 0.21646956258212366
+            }
+          ],
+          "elapsedMs": 2406
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "seasonal#1, seasonal#2, seasonal#3, seasonal#4, seasonal#5, seasonal#6, seasonal#7, seasonal#8, seasonal#9, seasonal#10, seasonal#11, seasonal#12",
+          "kind": "seasonal",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 2156,
+          "viewRate": 0.20142002989536623,
+          "hits": 1453,
+          "hitRate": 0.6739332096474954,
+          "hitRateLower": 0.6538514156739748,
+          "hitRateUpper": 0.6933962713786315,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.23733649056765685,
+          "baselineOutcomes": 0,
+          "buyViews": 1510,
+          "sellViews": 646,
+          "edgeOverBaseline": 0.43659671907983855,
+          "rr": 2,
+          "meanProbability": 0.6546707587301202,
+          "probabilityGap": -0.019262450917375218,
+          "brier": 0.22738540607773924,
+          "brierSkill": 0.322764939442448,
+          "meanSamples": 284.1665120593692,
+          "meanStrength": 0.32133742539678684,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 360,
+              "hitRate": 0.6833333333333333,
+              "meanProbability": 0.605599172637627
+            },
+            {
+              "third": 1,
+              "views": 802,
+              "hitRate": 0.6920199501246883,
+              "meanProbability": 0.6641728590765309
+            },
+            {
+              "third": 2,
+              "views": 994,
+              "hitRate": 0.6559356136820925,
+              "meanProbability": 0.6647764795706393
+            }
+          ],
+          "elapsedMs": 2530
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "regime-labelled#1, regime-labelled#2, regime-labelled#3, regime-labelled#4, regime-labelled#5, regime-labelled#6, regime-labelled#7, regime-labelled#8, regime-labelled#9, regime-labelled#10, regime-labelled#11, regime-labelled#12",
+          "kind": "three-regime",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 2417,
+          "viewRate": 0.2258034379671151,
+          "hits": 1025,
+          "hitRate": 0.4240794373189905,
+          "hitRateLower": 0.40451262561174717,
+          "hitRateUpper": 0.4438872036046709,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.41816834583722656,
+          "baselineOutcomes": 0,
+          "buyViews": 1357,
+          "sellViews": 1060,
+          "edgeOverBaseline": 0.0059110914817639415,
+          "rr": 2,
+          "meanProbability": 0.504826116089852,
+          "probabilityGap": 0.08074667877086145,
+          "brier": 0.26436980925381953,
+          "brierSkill": -0.04712972700261009,
+          "meanSamples": 320.71493587091436,
+          "meanStrength": 0.1714927827565188,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 589,
+              "hitRate": 0.5042444821731749,
+              "meanProbability": 0.5831271623743957
+            },
+            {
+              "third": 1,
+              "views": 968,
+              "hitRate": 0.39462809917355374,
+              "meanProbability": 0.5007550282227958
+            },
+            {
+              "third": 2,
+              "views": 860,
+              "hitRate": 0.40232558139534885,
+              "meanProbability": 0.45578134491975253
+            }
+          ],
+          "elapsedMs": 2651
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "null-driftless#1, null-driftless#2, null-driftless#3, null-driftless#4, null-driftless#5, null-driftless#6, null-driftless#7, null-driftless#8, null-driftless#9, null-driftless#10, null-driftless#11, null-driftless#12",
+          "kind": "driftless",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 223,
+          "viewRate": 0.020833333333333332,
+          "hits": 56,
+          "hitRate": 0.25112107623318386,
+          "hitRateLower": 0.19874454332197758,
+          "hitRateUpper": 0.3119272205872878,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.18189697585565814,
+          "baselineOutcomes": 0,
+          "buyViews": 121,
+          "sellViews": 102,
+          "edgeOverBaseline": 0.06922410037752572,
+          "rr": 2,
+          "meanProbability": 0.20511537443988065,
+          "probabilityGap": -0.04600570179330321,
+          "brier": 0.2271904869187472,
+          "brierSkill": -0.16616702620441326,
+          "meanSamples": 41.85201793721973,
+          "meanStrength": -0.12821795889345267,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 31,
+              "hitRate": 0.1935483870967742,
+              "meanProbability": 0.24528407885338752
+            },
+            {
+              "third": 1,
+              "views": 80,
+              "hitRate": 0.25,
+              "meanProbability": 0.18958184905815517
+            },
+            {
+              "third": 2,
+              "views": 112,
+              "hitRate": 0.26785714285714285,
+              "meanProbability": 0.20509262616951748
+            }
+          ],
+          "elapsedMs": 2431
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "null-phase#1, null-phase#2, null-phase#3, null-phase#4, null-phase#5, null-phase#6, null-phase#7, null-phase#8, null-phase#9, null-phase#10, null-phase#11, null-phase#12",
+          "kind": "phase-randomised",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 6900,
+          "views": 67,
+          "viewRate": 0.009710144927536232,
+          "hits": 15,
+          "hitRate": 0.22388059701492538,
+          "hitRateLower": 0.1406360851472927,
+          "hitRateUpper": 0.33707192822338217,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1735237346618775,
+          "baselineOutcomes": 0,
+          "buyViews": 7,
+          "sellViews": 60,
+          "edgeOverBaseline": 0.05035686235304787,
+          "rr": 2,
+          "meanProbability": 0.2145547309533109,
+          "probabilityGap": -0.00932586606161448,
+          "brier": 0.2126184616664217,
+          "brierSkill": -0.14472261057903824,
+          "meanSamples": 20.074626865671643,
+          "meanStrength": -0.11877860238002239,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 13,
+              "hitRate": 0.23076923076923078,
+              "meanProbability": 0.2172484601277147
+            },
+            {
+              "third": 1,
+              "views": 35,
+              "hitRate": 0.17142857142857143,
+              "meanProbability": 0.252314263922069
+            },
+            {
+              "third": 2,
+              "views": 19,
+              "hitRate": 0.3157894736842105,
+              "meanProbability": 0.14315461868100654
+            }
+          ],
+          "elapsedMs": 1170
+        },
+        {
+          "agent": "seasonality",
+          "label": "E · hour-of-day seasonality",
+          "series": "null-shuffled#1, null-shuffled#2, null-shuffled#3, null-shuffled#4, null-shuffled#5, null-shuffled#6, null-shuffled#7, null-shuffled#8, null-shuffled#9, null-shuffled#10, null-shuffled#11, null-shuffled#12",
+          "kind": "block-shuffled",
+          "symbol": "EURUSD",
+          "mode": "intraday",
+          "frame": "M5",
+          "evaluations": 10704,
+          "views": 121,
+          "viewRate": 0.011304185351270554,
+          "hits": 15,
+          "hitRate": 0.12396694214876033,
+          "hitRateLower": 0.07658322802477276,
+          "hitRateUpper": 0.19449307987259476,
+          "breakEven": 0.3333333333333333,
+          "baselineRate": 0.1720587428506497,
+          "baselineOutcomes": 0,
+          "buyViews": 70,
+          "sellViews": 51,
+          "edgeOverBaseline": -0.04809180070188937,
+          "rr": 2,
+          "meanProbability": 0.22780863470182294,
+          "probabilityGap": 0.10384169255306261,
+          "brier": 0.15004760919746063,
+          "brierSkill": 0.015651527614249372,
+          "meanSamples": 39.88429752066116,
+          "meanStrength": -0.10552469863151033,
+          "byThird": [
+            {
+              "third": 0,
+              "views": 35,
+              "hitRate": 0.14285714285714285,
+              "meanProbability": 0.18241944878634228
+            },
+            {
+              "third": 1,
+              "views": 54,
+              "hitRate": 0.1111111111111111,
+              "meanProbability": 0.24876743023586345
+            },
+            {
+              "third": 2,
+              "views": 32,
+              "hitRate": 0.125,
+              "meanProbability": 0.24208508933318668
+            }
+          ],
+          "elapsedMs": 2499
+        }
+      ],
+      "paper": {
+        "fixture": {
+          "summary": {
+            "strategy": "alpha:seasonality (seasonal)",
+            "evaluations": 1070,
+            "arms": 58,
+            "armRate": 0,
+            "fills": 51,
+            "fillRate": 0,
+            "stats": {
+              "trades": 51,
+              "hitRate": 0.7058823529411765,
+              "meanR": 0.4674934073765433,
+              "meanRStdErr": 0.1044010002828292,
+              "rStdDev": 0.7455722713881066,
+              "cvar5R": 1,
+              "bestR": 1.512220659809025,
+              "worstR": -1,
+              "profitFactor": 4.153863880801909,
+              "longestLosingStreak": 3,
+              "maxDrawdownR": 2.264228634859304,
+              "meanMaeR": 0.4041311787174752,
+              "meanMfeR": 0.9951276491393097,
+              "meanBars": 23.431372549019606
+            },
+            "lowerBoundMeanR": 0.37962952553851426,
+            "dsr": 0,
+            "meanPredicted": 0.5564690680758462,
+            "predictedVsRealised": 0,
+            "rHistogram": [
+              {
+                "bucket": "-1.00R",
+                "count": 5
+              },
+              {
+                "bucket": "-0.75R",
+                "count": 4
+              },
+              {
+                "bucket": "-0.50R",
+                "count": 1
+              },
+              {
+                "bucket": "-0.25R",
+                "count": 5
+              },
+              {
+                "bucket": "0.00R",
+                "count": 3
+              },
+              {
+                "bucket": "0.25R",
+                "count": 5
+              },
+              {
+                "bucket": "0.50R",
+                "count": 3
+              },
+              {
+                "bucket": "0.75R",
+                "count": 10
+              },
+              {
+                "bucket": "1.00R",
+                "count": 7
+              },
+              {
+                "bucket": "1.25R",
+                "count": 7
+              },
+              {
+                "bucket": "1.50R",
+                "count": 1
+              }
+            ],
+            "exitReasons": {
+              "horizon": 27,
+              "time_stop": 19,
+              "stop": 5
+            },
+            "partialsFired": 9
+          },
+          "ledger": {
+            "taken": 58,
+            "desk-refused": 768,
+            "agent-no-view": 231,
+            "direction-mismatch": 13,
+            "below-probability-floor": 0
+          },
+          "decisions": 1070
+        },
+        "null": {
+          "summary": {
+            "strategy": "alpha:seasonality (null-driftless)",
+            "evaluations": 1070,
+            "arms": 0,
+            "armRate": 0,
+            "fills": 0,
+            "fillRate": 0,
+            "stats": {
+              "trades": 0,
+              "hitRate": 0,
+              "meanR": 0,
+              "meanRStdErr": 0,
+              "rStdDev": 0,
+              "cvar5R": 0,
+              "bestR": 0,
+              "worstR": 0,
+              "profitFactor": 0,
+              "longestLosingStreak": 0,
+              "maxDrawdownR": 0,
+              "meanMaeR": 0,
+              "meanMfeR": 0,
+              "meanBars": 0
+            },
+            "lowerBoundMeanR": 0,
+            "dsr": 0,
+            "meanPredicted": 0,
+            "predictedVsRealised": 0,
+            "rHistogram": [],
+            "exitReasons": {},
+            "partialsFired": 0
+          },
+          "ledger": {
+            "taken": 0,
+            "desk-refused": 820,
+            "agent-no-view": 249,
+            "direction-mismatch": 1,
+            "below-probability-floor": 0
+          },
+          "decisions": 1070
+        }
+      },
+      "verdict": "enabled",
+      "reason": "all 7 gates passed on seasonal and the pooled nulls"
+    }
+  ],
+  "allowlist": [
+    "liquidity-sweep",
+    "seasonality"
+  ],
+  "verdict": "pass",
+  "notes": [
+    "Every agent states a probability, and the probability is its own measured hit rate for this exact setup, shrunk toward the MEASURED random-entry baseline for the same stop and horizon (see alpha/edge.ts). The gate is whether that number beats the baseline on the fixture and fails to beat it on the nulls.",
+    "The 'baseline' column is the random-entry hit rate with identical geometry AND the same direction as each view, measured causally on windows that had closed by the decision bar. It is not 1/(1+RR): with a time horizon most setups expire, and on these M15 fixtures the coin-flip rate measures 0.10–0.34 depending on the fixture's volatility, so judging an agent against 1/3 would have measured the calendar. It is also direction-matched on purpose: a realised driftless path still ends 25–35σ from its start, buys then do better than sells, and an agent that is simply long on such a path would otherwise show an edge it does not have (measured: +8.6 points on pure noise before the comparator was matched).",
+    "Paper trading runs the agent through the SHIPPED position manager and the executed-policy simulator (alphaStrategy in research/harness.ts): the stop, targets, partials, break-even and trail are the desk's, and only the direction and the probability come from the agent. It is reported for EVERY agent with a home fixture, enabled or not — a measured zero is evidence — and it is a smaller sample by construction. The ledger beside it says which layer refused each decision.",
+    "An agent that fails its gates is left DISABLED. Its code, its fixture and its numbers stay in the repository: a measured negative result is a result, and the next person to have the same idea should find it here."
+  ]
+}

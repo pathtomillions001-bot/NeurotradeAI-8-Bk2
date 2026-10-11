@@ -65,6 +65,20 @@ import {
   type RegimePermit,
 } from "../regime-hmm";
 import { ALPHA_IDS, buildAlphaAgents, type AlphaAgent, type AlphaId } from "../alpha";
+import { MODE_HORIZON_BARS } from "../confluence";
+import {
+  META_CALIBRATOR_DEFAULT,
+  META_STUDY_FIXTURES,
+  META_TARGET_MULTIPLE_R,
+  measureMeta,
+  metaCalibrationGates,
+  metaNullGates,
+  summariseMetaRows,
+  toSeriesRecord,
+  type MetaCalibratorKind,
+  type MetaFixtureVerdict,
+  type MetaStudyReport,
+} from "./meta-eval";
 import { DEFAULT_ALPHA_CONFIG } from "../alpha/edge";
 import { lowerBoundMeanR, tradeStats } from "./metrics";
 import {
@@ -98,6 +112,8 @@ interface CliArgs {
   bars: number;
   includeTrades: boolean;
   horizonBars: number;
+  /** True when the caller set --horizon-bars explicitly. */
+  horizonBarsExplicit: boolean;
   warmupBars: number;
   trials: number;
   out: string | null;
@@ -113,6 +129,14 @@ interface CliArgs {
   /** True when the caller set --alpha-series explicitly. */
   alphaSeriesExplicit: boolean;
   alphaBars: number;
+  /** Run the WP5 meta-model study instead of a strategy study. */
+  meta: boolean;
+  metaSeries: number;
+  metaSeriesExplicit: boolean;
+  metaBars: number;
+  metaCalibrator: MetaCalibratorKind;
+  /** True when the caller set --stride explicitly. */
+  strideExplicit: boolean;
 }
 
 /** Which decision layer a study runs. */
@@ -150,6 +174,16 @@ const USAGE = `research:run — the MT5 Desk v4 research harness
   --alpha <id,id>                   restrict the study to these agents
   --alpha-series <n>                independent series per fixture (default 4)
   --alpha-bars <n>                  bars per series (default 3000)
+  --meta                            run the WP5 meta-model study: triple-barrier
+                                    labels, uniqueness weights, cross-fitted
+                                    isotonic calibration, purged folds + CPCV,
+                                    and p_hat / p_LCB on every out-of-sample row
+  --meta-series <n>                 independent series per fixture (default 3)
+  --meta-bars <n>                   bars per series (default 2500)
+  --meta-calibrator <isotonic|platt>
+                                    how the out-of-fold score becomes a
+                                    probability (default isotonic; both are
+                                    measured by the study's own gates)
   --quiet                           only the verdict line
 `;
 
@@ -209,6 +243,11 @@ export function parseArgs(argv: string[]): CliArgs {
     alphaSeries: Math.max(1, Math.floor(num("alpha-series", 4))),
     alphaSeriesExplicit: flags.has("alpha-series"),
     alphaBars: Math.max(1200, Math.floor(num("alpha-bars", 3000))),
+    meta: flags.has("meta"),
+    metaSeries: Math.max(1, Math.floor(num("meta-series", 3))),
+    metaSeriesExplicit: flags.has("meta-series"),
+    metaBars: Math.max(1200, Math.floor(num("meta-bars", 2500))),
+    metaCalibrator: (flags.get("meta-calibrator") ?? META_CALIBRATOR_DEFAULT) as MetaCalibratorKind,
     regimeFitBars: Math.max(200, Math.floor(num("regime-fit-bars", DEFAULT_REGIME_HMM_CONFIG.fitBars))),
     mode,
     data: flags.get("data") ?? "synthetic:all",
@@ -218,9 +257,11 @@ export function parseArgs(argv: string[]): CliArgs {
     seed: num("seed", 1),
     runs: Math.max(1, Math.floor(num("runs", 8))),
     stride: Math.max(1, Math.floor(num("stride", 5))),
+    strideExplicit: flags.has("stride"),
     bars: Math.max(300, Math.floor(num("bars", 2400))),
     includeTrades: flags.get("include-trades") === "true",
     horizonBars: Math.max(5, Math.floor(num("horizon-bars", 30))),
+    horizonBarsExplicit: flags.has("horizon-bars"),
     warmupBars: Math.max(60, Math.floor(num("warmup-bars", 120))),
     trials: Math.max(1, Math.floor(num("trials", 1))),
     out: flags.get("out") ?? null,
@@ -1189,6 +1230,198 @@ export function renderReport(report: StudyReport): string {
   return lines.join("\n");
 }
 
+// ── WP5 meta-model study ────────────────────────────────────────────────────
+
+/**
+ * Run the WP5 study.
+ *
+ * The verdict is pre-committed and it is not negotiable after the fact:
+ *
+ *   PASS  ⟺  every HOME fixture (the two positive controls) passes the
+ *            calibration gates  AND  every null fixture passes the null gates.
+ *
+ * Report-only fixtures (the OU series) are still measured and printed, but they
+ * do not decide the verdict — they were never claimed as the corpus where the
+ * model is supposed to work, and letting them vote would be a way to tune the
+ * rule after seeing the numbers.
+ */
+export function runMetaStudy(args: CliArgs): MetaStudyReport {
+  const notes: string[] = [];
+  const frame = SYNTHETIC_BASE_FRAME[args.mode];
+  const frameWidth = frameMinutes(frame) * 60_000;
+  const seriesCount = args.metaSeriesExplicit ? args.metaSeries : undefined;
+  // Every closed bar is a decision the desk could take, and a meta-model cannot
+  // calibrate on a corpus of a few hundred overlapping events: the WP5 run is at
+  // stride 1 unless the caller says otherwise (`uniqueness.ts` counts the corpus
+  // in INDEPENDENT observations, which is a good deal smaller than the row count).
+  const stride = args.strideExplicit ? args.stride : 1;
+  // The label's horizon is the desk's OWN holding horizon for the mode
+  // (`MODE_HORIZON_BARS`: 12 / 24 / 48). A study that labelled intraday setups on
+  // a swing horizon would be measuring a trade the desk never places, and the
+  // mode's own number is the one the gatekeeper has to price.
+  const horizonBars = args.horizonBarsExplicit ? args.horizonBars : MODE_HORIZON_BARS[args.mode];
+  const verdicts: MetaFixtureVerdict[] = [];
+
+  for (const fixture of META_STUDY_FIXTURES) {
+    const count = seriesCount ?? fixture.series;
+    const measurements = [] as ReturnType<typeof measureMeta>[];
+    for (let r = 0; r < count; r++) {
+      const series = generate(fixture.kind as GeneratorKind, {
+        ...DEFAULT_GENERATOR_SPEC,
+        seed: args.seed + r * 1013,
+        bars: args.metaBars,
+        timeframeMs: frameWidth,
+        volatility: args.mode === "scalp" ? 0.00035 : args.mode === "intraday" ? 0.0008 : 0.0016,
+      });
+      measurements.push(
+        measureMeta({
+          bars: series.bars,
+          series: `${fixture.name}#${r + 1}`,
+          kind: fixture.kind,
+          mode: args.mode,
+          spec: args.spec.spec,
+          symbol: args.symbol,
+          frame,
+          frameWidthMs: frameWidth,
+          stride: Math.max(1, Math.min(stride, 5)),
+          warmupBars: 150,
+          targetMultipleR: META_TARGET_MULTIPLE_R,
+          horizonBars,
+          calibrator: args.metaCalibrator,
+        }),
+      );
+    }
+    const pooled = summariseMetaRows(measurements.flatMap((measurement) => measurement.rows));
+    verdicts.push({
+      name: fixture.name,
+      kind: fixture.kind,
+      home: fixture.home === true,
+      null: fixture.null === true,
+      note: fixture.note,
+      pooled,
+      series: measurements.map((measurement) => toSeriesRecord(measurement)),
+      calibration: metaCalibrationGates(pooled),
+      nullGates: fixture.null ? metaNullGates(pooled) : null,
+    });
+  }
+
+  const homeFailures = verdicts.filter((verdict) => verdict.home && !verdict.calibration.pass);
+  const nullFailures = verdicts.filter((verdict) => verdict.null && verdict.nullGates !== null && !verdict.nullGates.pass);
+  const verdict: "pass" | "fail" = homeFailures.length === 0 && nullFailures.length === 0 ? "pass" : "fail";
+  for (const record of homeFailures) {
+    for (const gate of record.calibration.gates.filter((entry) => !entry.pass)) {
+      notes.push(`home fixture ${record.name} failed "${gate.name}": ${gate.detail}`);
+    }
+  }
+  for (const record of nullFailures) {
+    for (const gate of (record.nullGates?.gates ?? []).filter((entry) => !entry.pass)) {
+      notes.push(`null fixture ${record.name} failed "${gate.name}": ${gate.detail}`);
+    }
+  }
+  // A report-only fixture that fails a calibration gate is a caveat the artifact
+  // must carry: silence here would turn "measured elsewhere" into "hidden".
+  for (const record of verdicts) {
+    if (record.home || record.null) continue;
+    for (const gate of record.calibration.gates.filter((entry) => !entry.pass)) {
+      notes.push(
+        `report-only fixture ${record.name} fails "${gate.name}" (${gate.detail}) — it does not decide this ` +
+          `work package's verdict, but it is a measured limitation of the model on that corpus.`,
+      );
+    }
+  }
+  notes.push(
+    "p_LCB is computed from the Kish effective sample size of the fold's training weights; it is deliberately the " +
+      "sample the calibration rests on, not the size of the test set.",
+  );
+  notes.push(
+    "row-level records are not persisted in the artifact; the run is deterministic, so the same command reproduces them.",
+  );
+  if (args.spec.assumed.length > 0) {
+    notes.push(`spec assumptions: ${args.spec.assumed.join(", ")}`);
+  }
+
+  return {
+    label: args.label,
+    generatedAt: new Date().toISOString(),
+    command: process.argv.join(" "),
+    mode: args.mode,
+    symbol: args.symbol,
+    seed: args.seed,
+    dataSource: `synthetic (${META_STUDY_FIXTURES.map((fixture) => fixture.kind).join(", ")})`,
+    barsPerSeries: args.metaBars,
+    seriesPerFixture: seriesCount ?? 0,
+    stride,
+    horizonBars,
+    targetMultipleR: META_TARGET_MULTIPLE_R,
+    calibrator: args.metaCalibrator,
+    contractSpec: args.spec.spec as unknown as Record<string, unknown>,
+    assumedSpecValues: args.spec.assumed,
+    fixtures: verdicts,
+    verdict,
+    notes,
+  };
+}
+
+export function renderMetaStudy(report: MetaStudyReport): string {
+  const lines: string[] = [];
+  lines.push(`MT5 Desk v4 — WP5 meta-model study (${report.label})`);
+  lines.push(`  ${report.generatedAt}  |  mode ${report.mode}  |  symbol ${report.symbol}  |  seed ${report.seed}`);
+  lines.push(`  ${report.barsPerSeries} bars per series, stride ${report.stride}, ${report.horizonBars}-bar horizon, target ${report.targetMultipleR}R`);
+  lines.push("");
+  lines.push("  fixture              rows   indep base   hit   skill  slope  armed   meanR  corpusR   p_LCB cov");
+  for (const verdict of report.fixtures) {
+    const st = verdict.pooled;
+    const slope = st.reliability.identifiable ? (st.reliability.slope ?? 0).toFixed(2) : " n/a";
+    lines.push(
+      `  ${verdict.name.padEnd(18)} ${String(st.rows).padStart(5)} ${verdict.series.reduce((a, r) => a + r.independentObservations, 0).toFixed(0).padStart(5)} ` +
+        `${(st.baseRate * 100).toFixed(1).padStart(5)}% ${(st.hitRate * 100).toFixed(1).padStart(5)}% ` +
+        `${st.brierSkill.toFixed(3).padStart(6)} ${slope.padStart(6)} ${String(st.fitted.armed).padStart(5)} ` +
+        `${st.fitted.meanR.toFixed(3).padStart(7)} ${st.corpus.meanR.toFixed(3).padStart(8)} ` +
+        `${st.violationBuckets.length}/${st.judgeableBuckets}`,
+    );
+  }
+  lines.push("");
+  for (const verdict of report.fixtures) {
+    const st = verdict.pooled;
+    lines.push(`  ${verdict.name}${verdict.home ? " [home]" : ""}${verdict.null ? " [null]" : ""}`);
+    lines.push(
+      `    deciles (predicted / lower bound / observed): ` +
+        st.buckets.map((bucket) => `${(bucket.meanPredicted * 100).toFixed(0)}:${(bucket.meanLowerBound * 100).toFixed(0)}/${(bucket.observed * 100).toFixed(0)}`).join(" "),
+    );
+    lines.push(
+      `    reference policy (measured WP4 allowlist): ${st.reference.armed} taken, hit ${(st.reference.hitRate * 100).toFixed(1)}%, mean R ${st.reference.meanR.toFixed(3)}`,
+    );
+    lines.push(
+      `    fitted policy (EV_LCB > 0): ${st.fitted.armed} armed, hit ${(st.fitted.hitRate * 100).toFixed(1)}%, mean R ${st.fitted.meanR.toFixed(3)} ` +
+        `(95% lower ${st.fitted.meanRLower.toFixed(3)}), mean p_LCB ${st.fitted.meanLowerBound.toFixed(3)}`,
+    );
+    const cpcv = verdict.series.reduce(
+      (acc, record) => ({ paths: acc.paths + record.cpcvPaths, positive: acc.positive + record.cpcvPositivePaths }),
+      { paths: 0, positive: 0 },
+    );
+    lines.push(`    CPCV: ${cpcv.positive}/${cpcv.paths} out-of-sample paths with a positive mean R on the armed subset`);
+    for (const gate of verdict.calibration.gates) {
+      if (verdict.home || !gate.pass) lines.push(`      ${gate.pass ? "ok  " : "FAIL"} ${gate.name} — ${gate.detail}`);
+    }
+    for (const gate of verdict.nullGates?.gates ?? []) {
+      lines.push(`      ${gate.pass ? "ok  " : "FAIL"} ${gate.name} — ${gate.detail}`);
+    }
+    lines.push("");
+  }
+  lines.push(`  VERDICT: ${report.verdict.toUpperCase()}`);
+  for (const note of report.notes) lines.push(`  note: ${note}`);
+  return lines.join("\n");
+}
+
+export function writeMetaReport(report: MetaStudyReport, outPath: string | null): string {
+  const stamp = report.generatedAt.slice(0, 10);
+  const target =
+    outPath ?? resolve(process.cwd(), `research-reports/${stamp}-wp5-meta-${report.mode}-${report.label}.json`);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return target;
+}
+
 export function writeAlphaReport(report: AlphaStudyReport, outPath: string | null): string {
   const stamp = report.generatedAt.slice(0, 10);
   const target =
@@ -1213,6 +1446,15 @@ export function main(argv = process.argv.slice(2)): number {
   }
   const args = parseArgs(argv);
   const started = Date.now();
+  if (args.meta) {
+    const study = runMetaStudy(args);
+    const written = writeMetaReport(study, args.out);
+    if (!args.quiet) process.stdout.write(`${renderMetaStudy(study)}\n`);
+    process.stdout.write(`  report: ${written}  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`);
+    // WP5's verdict is a composition: the model must be calibrated on both
+    // positive controls AND must claim nothing on the nulls.
+    return study.verdict === "pass" ? 0 : 1;
+  }
   if (args.alphas) {
     const study = runAlphaStudy(args);
     const written = writeAlphaReport(study, args.out);

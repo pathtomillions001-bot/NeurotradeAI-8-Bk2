@@ -735,7 +735,158 @@ WP2 baseline, unchanged.
    full cross-table is in every report; WP9's e-process (halve at 5, disable at
    20) is the mechanism that will police them in production.
 
-## 7. Documented assumptions and conservative choices
+## 7. WP5 — the meta-model and its calibration
+
+WP4 answered "does this family of setups beat a matched coin flip?" one agent at a
+time. WP5 answers a different question: **given what the desk can see at this bar,
+what is the probability this trade reaches its target, and how much of that claim
+survives being checked?** It is the layer that turns five opinions into one number
+the gatekeeper is allowed to price.
+
+### 7.1 What was built
+
+Everything lives in `artifacts/api-server/src/lib/multiasset/meta/`:
+
+| file | what it is responsible for |
+| --- | --- |
+| `labels.ts` | triple-barrier labels (+1 target first, −1 stop first, 0 horizon expired), net of the round-trip cost, with the stop winning a same-bar tie |
+| `uniqueness.ts` | per-bar concurrency, per-event uniqueness, the independent-observation count, and the purge/embargo overlap test |
+| `folds.ts` | purged, embargoed k-fold and CPCV **over events** (not over bars) |
+| `logistic.ts` | weighted IRLS logistic fit with an L2 penalty, standardisation stored in the model, joint Newton step with backtracking, `predictLogistic`, Brier and log-loss |
+| `isotonic.ts` | PAV isotonic regression with equal-`x` pooling and a minimum step weight, per-cohort calibrators with a pooled fallback, and the Cox calibration slope used by the gates |
+| `pcb.ts` | `p_LCB`: the Wilson lower bound at 95% one-sided, computed from the **effective** sample size, and the desk's EV arithmetic as one function |
+| `dataset.ts` | the feature builder and the labelled corpus (17 features, documented below) |
+
+The corpus is built from the desk's own evaluation stream: at every closed bar the
+five agents are asked for a view (`readAlphaAgents`), the desk's regime reading is
+attached, and each view becomes one row with a label, a uniqueness weight and an
+`emitted` flag (whether the measured WP4 allowlist would have acted).
+
+**The `emitted` flag never filters the corpus.** If the model trained only on the
+events the reference policy would have taken, the label distribution would be
+conditioned on the rule being evaluated and the model would learn that rule's bias
+and report it back as edge. The reference policy therefore only *marks* rows; both
+policies are then measured on the same purged folds of the same corpus.
+
+### 7.2 The features, and what they deliberately are not
+
+The 17 features are: `netDirection`, `meanAgentProbability`, `emitCount`, the five
+agents' stated probabilities, `regimeTrending` (the desk's regime is a trend
+aligned with the view's direction), `regimeRange`, `regimeDuration`,
+`hourOfDay`, `dayOfWeek`, cyclic `hourSin`/`hourCos`, `atrRatio`, `spreadRatio`,
+`emitCountTrending` and `changeRisk`.
+
+There is deliberately **no HMM state index**. The WP3 states are unlabelled and the
+fit may permute them between runs, so a feature named "state 0" is a feature that
+can point at a different market next week. The features carry the *interpreted*
+reading the desk acts on, which is the only kind of regime feature that survives a
+refit. WP3's change-point probability is optional (`null` when the caller does not
+have the model); a `null` is encoded as an explicit 0.5, never as 0 — a missing
+measurement must not look like a confident "no change".
+
+### 7.3 How the calibration is fitted (and why it is cross-fitted)
+
+For every outer fold:
+
+1. the fold's training rows are split into four **inner purged folds**, and each
+   inner model predicts the rows it did not see — so every training row gets an
+   out-of-fold score from a model that never saw its label;
+2. the calibrator is fitted on **all** of those out-of-fold scores (not on a
+   slice: a step function fitted on fifty events is noise), and only when the
+   fold's independent-observation count reaches the brief's floor of 200 — below
+   it the map is the **identity** and the fold record says `calibrated: false`;
+3. the same inner models predict the **test** rows, and their average is what the
+   calibrator is applied to. This is not a convenience: the map is fitted on
+   predictions from models trained on (k−1)/k of the fold, so applying it to a
+   prediction from a model trained on the whole fold — a sharper predictor —
+   stretches the map and manufactures exactly the overconfidence the report would
+   then have to flag.
+
+Two calibrators were built and measured on identical folds: **isotonic PAV** (the
+brief's) and a two-parameter **Platt** recalibration `logit(p) = a + b·logit(p_raw)`.
+A third variant, Platt with an internally-measured shrinkage factor, was also
+measured. The results chose the default (§7.5) — the losers stay in the code
+because a measured loser is a result.
+
+### 7.4 The gates
+
+Decided on the desk's **positive control** fixture (the same home corpus the WP2
+baselines and the WP4 trend claim are measured on), at stride 1 (every closed bar —
+a meta-model cannot calibrate on a few hundred overlapping events), with the
+label's horizon fixed to the desk's own `MODE_HORIZON_BARS` (12 / 24 / 48) and the
+target at the shipped 1:2 floor:
+
+| gate | bar |
+| --- | --- |
+| labelled rows | ≥ 120 rows with a finished label |
+| reliability slope | Cox calibration slope ∈ [0.8, 1.2], and identifiable |
+| Brier skill | > 0 against the constant base-rate forecast |
+| p_LCB coverage | ≤ 25% of judgeable deciles realised below their own mean p_LCB by more than 5 points |
+| fitted policy arms | ≥ 20 armed at `EV_LCB > 0` |
+| fitted beats corpus | the fitted policy's mean R beats the corpus mean R |
+
+Null fixtures (`null-driftless`, `null-shuffled`) are gated separately: the fitted
+policy must either **refuse to arm** (fewer than 10 arms) or show a 95% lower bound
+on mean R of ≤ 0, and its mean p_LCB may not exceed the base rate by more than 5
+points. Refusing to trade is a pass — that is the correct behaviour of a model
+that has found nothing.
+
+### 7.5 The result (stored in `research-reports/2026-10-11-wp5-meta-*-meta-study.json`)
+
+| fixture | rows | indep. obs. | base | hit | Brier skill | slope | armed | mean R | corpus R | p_LCB cov |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| intraday · positive-control **[home]** | 3,525 | 511 | 35.5% | 43.8% | +0.218 | 0.816 | 2,246 | +0.979 | +0.576 | 1/10 |
+| intraday · seasonal | 2,666 | 478 | 28.7% | 40.4% | +0.192 | 0.85 | 1,085 | +1.362 | +0.515 | 1/10 |
+| intraday · mean-reverting | 1,652 | 435 | 14.0% | 12.0% | +0.018 | 0.59 | 23 | +0.503 | −0.164 | 1/10 |
+| intraday · null-driftless | 1,747 | 455 | 15.4% | 14.6% | −0.045 | 0.15 | 28 | −0.534 | −0.130 | 1/10 |
+| intraday · null-shuffled | 1,763 | 455 | 16.5% | 17.0% | −0.037 | 0.31 | 56 | −0.040 | −0.091 | 2/10 |
+| swing · positive-control **[home]** | 3,302 | 320 | 45.4% | 50.4% | +0.354 | 0.926 | 2,252 | +1.208 | +0.702 | 0/10 |
+| swing · seasonal | 2,602 | 244 | 20.4% | 19.6% | +0.027 | 0.64 | 95 | +0.539 | −0.002 | 0/10 |
+| swing · mean-reverting | 1,712 | 225 | 12.6% | 10.8% | +0.001 | 0.51 | 2 | +1.981 | −0.167 | 0/10 |
+| swing · null-driftless | 1,807 | 242 | 17.5% | 16.3% | −0.029 | 0.31 | 35 | +0.069 | −0.084 | 1/10 |
+| swing · null-shuffled | 1,769 | 245 | 17.0% | 17.3% | −0.081 | −0.05 | 39 | −0.060 | −0.060 | 1/10 |
+
+* **Verdict: PASS in both modes.** Home fixture: every calibration gate green,
+  CPCV 45/45 out-of-sample paths with a positive mean R on the armed subset.
+* **Nulls: nothing claimed.** Driftless refused on the intraday corpus (no edge,
+  95% lower bound −0.872); on swing it armed 35 times with a point estimate of
+  +0.069 R and a lower bound of −0.269, which is a pass *by design* — the gate
+  reads the lower bound, not the point estimate. Shuffled: 56/39 arms, lower
+  bounds −0.305 / −0.393.
+* **The calibrator choice was made by measurement, not preference**: on the home
+  fixture the Cox slope is 0.66 (isotonic), 0.93 (Platt), 0.40 (Platt with the
+  internally-measured shrinkage) — so Platt is the default and the shrinkage
+  variant is recorded as the measured loser. The internal split turns out to be a
+  worse estimate of period transfer than the folds themselves.
+* **Two measured limitations are stored with the report.** On the clock-driven
+  fixture the point-estimate slope is 0.85 intraday but 0.64 swing, and on the OU
+  fixture 0.59 / 0.51: the model ranks those corpora well (Brier skill +0.19,
+  +0.03) but its *point* probabilities are too spread out there. It does not
+  decide this work package's verdict — those fixtures are not the model's home —
+  and the mitigation is structural: the gatekeeper arms on `p_LCB`, which is
+  bounded well below the point estimate, and the coverage gate (1/10 and 0/10
+  deciles broken) is the test of exactly that claim. Both limitations are printed
+  in the run's notes, so they cannot be forgotten.
+
+### 7.6 What this does *not* claim
+
+1. **It is not a profitability claim.** WP5 measures whether the desk's
+   probabilities are honest. The home fixture's fitted policy makes +0.98 R per
+   armed trade out of sample, but that is on synthetic data whose structure
+   favours the desk's geometry; the real-data study is still required.
+2. **The independent-observation count is the honest size of the evidence, and it
+   is small**: 511 independent observations behind 3,525 intraday rows. That
+   number — not the row count — is what the confidence bound is built from, which
+   is why `p_LCB` sits ~4 points below `p̂` even on the biggest corpus.
+3. **The intraday home margin is 0.016 of slope** (0.816 against a 0.80 floor).
+   That is inside the band, but it is thin, and a different seed could flip it.
+   This is recorded rather than smoothed: the artifact carries the number and the
+   gate re-runs on every study.
+4. **The live path still fits nothing.** `DESK_V4_META_MODEL` defaults OFF; the
+   desk keeps using the measured allowlist until WP6 wires the gatekeeper and
+   WP9 persists the calibration online.
+
+## 8. Documented assumptions and conservative choices
 
 Each of these was a fork in the road where the conservative option was taken and
 the reasoning recorded.
@@ -833,7 +984,44 @@ the reasoning recorded.
    in §6.8 surfaced); running it only for the allowlist would have hidden the
    bottleneck.
 
-## 8. Changelog — every behavioural change, and the gate ledger
+21. **The calibration's evidence base is the SUM of the uniqueness weights, not
+   the row count and not the Kish effective size.** Kish is invariant to a common
+   scale factor, so ten identical overlapping events each carrying a weight of 0.1
+   give a Kish size of 10 — it measures how *uneven* the weights are. The number
+   of independent observations is what the weights sum to (1, for those ten), and
+   that is what `p_LCB` is built from. Both numbers are reported so the two can
+   never be confused again.
+22. **The weights themselves are the raw uniquenesses**, not rescaled to sum to
+   the row count. Rescaling would cancel the discount exactly where it matters —
+   in the ratio between the data and the L2 penalty.
+23. **A step of the isotonic map must rest on ≥ 20 units of weight**
+   (`MIN_ISOTONIC_BLOCK_WEIGHT`). PAV fits whatever it is given, and its extremes
+   are where it is thinnest: one observation above everything else becomes a step
+   at 100%, and the next trade whose raw score lands just under it is told it
+   cannot lose. 20 is the point below which a probability estimate is not worth
+   acting on (a Wilson interval on 20 observations is ±20 points), and it composes
+   with the brief's 200-observation floor: the map needs 200 to be fitted at all,
+   each step needs 20 to stand alone. Below either floor the map is the identity
+   and the fold record says `calibrated: false`.
+24. **The study is run at stride 1 (every closed bar).** The desk evaluates every
+   closed bar in live operation, so this is the honest cadence; it is also
+   required, because at stride 3 the corpus carries only ~150 independent
+   observations and the brief's 200-observation calibration floor is not met — the
+   model would run uncalibrated and report it.
+25. **The label's horizon is the desk's own per-mode holding horizon**
+   (`MODE_HORIZON_BARS` = 12 / 24 / 48) and the target is the shipped 1:2 floor.
+   Labelling a setup against a horizon or a reward:risk the desk does not trade
+   would make the model's target barrier unreachable in practice — the classic way
+   to train a model that can never be executed.
+26. **A timed-out label counts as a loss in the EV arithmetic** (`label 0` ⇒ the
+   full −1R in `EV_LCB`), while the realised R of that row is reported from the
+   time barrier's actual return. The pessimism is one-directional: it can only
+   make the desk refuse trades.
+27. **The Kaplan–Meier of `p_LCB` uses the fold's own training evidence.** A bound
+   computed from the *test* set would be reading the answer key; a bound computed
+   from the row count would be double-counting overlapping events.
+
+## 9. Changelog — every behavioural change, and the gate ledger
 
 ### Behavioural changes
 
@@ -862,6 +1050,13 @@ the reasoning recorded.
 | 21 | The WP4 gate set: ≥ 60 views, edge ≥ max(3 pts, 2 SE) over the matched baseline, \|stated − realised\| ≤ 15 pts, Brier skill ≥ 0, ≤ 3% driftless firing, ≤ 15% pooled-null firing with no edge beyond 2 SE | **added, research-side** — these decide the allowlist; they cannot be satisfied by a strategy that has not been measured |
 | 22 | `desk-v4-config.ts` agent keys renamed to the shipped agents (`volRegime`, `seasonality`) and their default mode sets set from the measurement (`volRegime` none, `seasonality` intraday) | config only — `DESK_V4_AGENT_VOLREGIME` / `…_SEASONALITY` replace `…_AGENT_FLOW` / `…_AGENT_CROSSSECTION`, which named agents that do not exist |
 | 23 | `math.atrSeries` added and `causalAtrSeries` re-implemented on top of it | performance only — was O(n²) over the harness's per-bar ATR; equivalence at every index is asserted in `executed-policy.test.ts` |
+| 24 | The WP5 meta layer: triple-barrier labels, uniqueness weights, purged event folds + CPCV, a weighted L2 logistic and two calibrators (`meta/`) | **added, not wired**: `DESK_V4_META_MODEL` and `DESK_V4_GATEKEEPER` default OFF; no live decision reads a meta probability yet |
+| 25 | `p_LCB` — the Wilson lower bound at 95%, computed from the corpus's independent-observation count — becomes the only probability the gate may price | **tighter** in effect: the estimator's point estimate is never used for a decision |
+| 26 | The calibration is cross-fitted: isotonic/Platt maps are fitted on out-of-fold scores from inner purged folds, and the test prediction is the average of the same inner models | **correctness** — fitting the map on in-sample scores or applying it to a sharper model inflates the calibration (measured: home-fixture slope 0.66 → 0.93) |
+| 27 | Isotonic maps pool equal scores and steps below 20 units of weight; the map's reported effective size is the sample's, not its block count | **tighter**: a singleton step can no longer become a 0%/100% claim |
+| 28 | The logistic fit takes a joint Newton step with backtracking over the intercept and the coefficients and declares convergence on the step size | **correctness**: the split-step version reported `converged: false` on fits that had arrived — the objective-based test cannot resolve 1e-8 at a log-likelihood of −215 |
+| 29 | `eventWeights` reports the independent-observation count (the sum of uniquenesses) beside Kish, and the two are never interchanged | **correctness**: ten identical events were being counted as ten observations by the Kish reading |
+| 30 | `defaultAllowlistForMode()` in `desk-v4-config.ts` exposes the measured WP4 allowlist per mode as data | config only — one table maps the shipped agent ids onto their flag keys so the study and the desk cannot answer "who may propose in swing?" differently |
 
 ### Gate ledger
 
@@ -882,7 +1077,15 @@ the reasoning recorded.
   direction-matched baseline as the comparator for both the estimator and the
   edge test, and the "UNIDENTIFIABLE is a failure" rule for an agent with fewer
   than 60 views.
-* **Removed**: **none.** No safety gate was removed in WP0–WP4. Everything in
+* **Added (WP5)**: the six meta-model gates of §7.4 (labelled rows ≥ 120, Cox
+  calibration slope ∈ [0.8, 1.2] *and identifiable*, Brier skill > 0, p_LCB
+  coverage ≤ 25% of judgeable deciles, ≥ 20 arms at `EV_LCB > 0`, fitted mean R >
+  corpus mean R); the null gate (a 95% lower bound on mean R of ≤ 0, or fewer
+  than 10 arms) and the "bound stays honest" gate; `MIN_ISOTONIC_BLOCK_WEIGHT =
+  20`; the 200-independent-observation floor on fitting a calibrator at all; and
+  the rule that an unidentifiable calibration slope is a failure rather than a
+  number to report.
+* **Removed**: **none.** No safety gate was removed in WP0–WP5. Everything in
   §1's constraint list (fail-closed news gate, quote integrity, clock
   normalisation, one-account-one-desk, live-off default, daily-loss and drawdown
   limits) is intact, and the position-manager tests assert the ones that touch
@@ -890,7 +1093,7 @@ the reasoning recorded.
   loosened, and no agent can place a trade — the alpha layer has no order path at
   all.
 
-## 9. Open risks and unverifiable items
+## 10. Open risks and unverifiable items
 
 1. **The EA has never been compiled** (no MetaEditor here). Compile
    `NeurotradeBridge.mq5` in MetaEditor before any live or demo use; the
@@ -907,7 +1110,7 @@ the reasoning recorded.
    slope inside [0.8, 1.2] on held-out data.
 5. **Slippage is modelled, not measured.** The ledger (WP7) replaces the
    allowance with observed slippage by symbol, session and order type.
-6. **Portfolio effects are not yet simulated** (see §7.5); WP8 owns them.
+6. **Portfolio effects are not yet simulated** (see §8.5); WP8 owns them.
 7. **The harness's own blind spots**: uniform spread when the file has no SPREAD
    column, no queue position at the trigger, no partial fills at the entry,
    intrabar ambiguity resolved pessimistically (stop first), and a decision
@@ -969,8 +1172,33 @@ the reasoning recorded.
     reported separately, the cross-table is in every report, and the correction
     belongs to WP5 (Benjamini–Hochberg at q = 0.10) and the governance layer
     (WP9).
+16. **The meta-model's home-fixture slope has a 0.016 margin intraday** (0.816
+    against the 0.80 floor, §7.5). The gates pass on both modes, but this one is
+    close enough that a different seed or a different corpus could flip it, and
+    the right response then is to fit on more evidence — not to widen the band.
+    The number is in the artifact so the next run can be compared to it.
+17. **The model's point probabilities are demonstrably too spread out on two
+    corpora** (Cox slope 0.64 swing-seasonal, 0.59/0.51 on the OU fixture) while
+    its ranking and its `p_LCB` coverage hold. Those fixtures are not the model's
+    home and do not decide WP5's verdict, but a live symbol whose behaviour
+    resembles clock structure or mean reversion would be priced from
+    probabilities the study has already measured as over-spread. The mitigation
+    is structural (`p_LCB` is what the gatekeeper prices, and the coverage gate is
+    the test of that bound), and the operational answer is WP9's online
+    calibration fitted on the account's own accumulated history — with the
+    rollout's slope ∈ [0.8, 1.2] window as the live monitor.
+18. **Benjamini–Hochberg at q = 0.10 is designed but not yet applied.** The agent
+    probabilities entering the meta-model are five families' own self-measured
+    estimates; the multiplicity control belongs to the composition layer and is
+    WP6's, alongside the cost and EV tests.
+19. **The meta-model has never seen a real bar.** Every number in §7.5 comes from
+    synthetic corpora whose structure the desk's geometry happens to suit. The
+    owner's M1/M5 export is still the gate between this work and any live use of
+    the probabilities, and the `emitted`/feature set must be re-measured on it —
+    in particular the `hourOfDay`/`session` features, which a broker's server
+    clock (GMT+3) shifts relative to the UTC hours the generator uses.
 
-## 10. Tests and commands
+## 11. Tests and commands
 
 ```bash
 # the standing regression — every api-server test, including the desk suites
@@ -979,6 +1207,16 @@ cd artifacts/api-server && pnpm run test
 # every desk test on its own (multiasset + research)
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx --test \
   --test-timeout=180000 --test-force-exit src/lib/multiasset/*.test.ts src/lib/multiasset/research/*.test.ts
+
+# the WP5 meta-model study (writes research-reports/2026-10-11-wp5-meta-<mode>-meta-study.json)
+# stride 1 is the default for this study: the desk evaluates every closed bar, and the
+# corpus must carry at least 200 INDEPENDENT observations before a calibrator is fitted
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --meta --mode intraday|swing --label meta-study
+
+# the same run with a different calibration form (both are measured by the gates)
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --meta --mode intraday --meta-calibrator isotonic|platt|platt-shrunk
 
 # typecheck (all packages)
 pnpm run typecheck
@@ -1019,16 +1257,19 @@ Stored reports (`artifacts/api-server/research-reports/`):
 | `2026-10-11-wp3-regime-null.json` | null gates for desk-v3 vs v4-regime | FAIL (desk-v3 null gates; v4-regime fails one gate on a single trade — §5.5) |
 | `2026-10-11-wp4-alpha-intraday-agent-study.json` | five agents × nine fixtures, M15, 12 series each | **PASS** — allowlist `liquidity-sweep, seasonality` |
 | `2026-10-11-wp4-alpha-swing-agent-study.json` | the same, H1 | **FAIL** — allowlist empty (§6.6) |
+| `2026-10-11-wp5-meta-intraday-meta-study.json` | WP5 meta-model, five fixtures, 3 series each, stride 1 | **PASS** — home slope 0.816, Brier skill +0.218, coverage 1/10, CPCV 45/45 |
+| `2026-10-11-wp5-meta-swing-meta-study.json` | the same, H1 | **PASS** — home slope 0.926, Brier skill +0.354, coverage 0/10, CPCV 45/45 |
 
-Current state: **434/434** desk tests (multiasset + research + alpha; was 416
-before WP4), **1,082/1,082** api-server tests overall (131 suites, 176 s; both
-readings wander by a handful between runs because a few pre-existing suites build
-their cases from data — 438 and 1,093 were the same suites on an earlier run),
-**37/37** trading-platform tests (including the 6/6 EA-download parity check that
-keeps `public/downloads/NeurotradeBridge.mq5` byte-identical to the source),
-typecheck clean across all packages. WP4 added 17 contract tests
-(`alpha/alpha.test.ts`) and 4 fixture-property tests
-(`research/generators.test.ts`).
+Current state: **1,128/1,128** api-server tests (139 suites) and
+**477/477** desk tests (multiasset + research + alpha + meta; was 416 before WP4; the
+counts wander by a handful between runs because a few pre-existing suites build
+their cases from data), **37/37** trading-platform tests (including the 6/6
+EA-download parity check that keeps `public/downloads/NeurotradeBridge.mq5`
+byte-identical to the source), typecheck clean across all packages. WP5 added 31
+unit tests (`meta/meta.test.ts` — labels, uniqueness, folds, the logistic fit, the
+isotonic pooling rules, `p_LCB`) and 8 gate tests (`research/meta-eval.test.ts` —
+a well-calibrated model passes, an overconfident one fails, a broken `p_LCB`
+promise is caught by decile, and refusing to trade on a null is a pass).
 
 The alpha tests deliberately do **not** assert the study's outcome. A unit test
 small enough to run in the standing regression cannot support an edge claim, and

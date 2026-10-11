@@ -131,6 +131,37 @@ export const DEFAULT_AGENT_MODES: Record<keyof DeskV4Config["agents"], TradeMode
   seasonality: ["intraday"],
 };
 
+/**
+ * The shipped agent ids (WP4's `AlphaId`) mapped onto their configuration keys.
+ *
+ * The two namespaces have to disagree somewhere: the registry calls the family
+ * "liquidity-sweep" because that is what it detects, and the config calls the flag
+ * `AGENT_SWEEP` because that is what an operator types. One table, in one place,
+ * so a study that asks "which agents may propose in swing?" cannot answer with a
+ * different list than the desk that is executing.
+ */
+export const ALPHA_ID_TO_AGENT_KEY = {
+  trend: "trend",
+  "mean-reversion": "meanReversion",
+  "liquidity-sweep": "sweep",
+  "vol-regime": "volRegime",
+  seasonality: "seasonality",
+} as const satisfies Record<string, keyof DeskV4Config["agents"]>;
+
+/**
+ * The agent ids the DEFAULT (measured) allowlist permits in a mode.
+ *
+ * Empty for a mode where the WP4 study allowed nothing — swing, as measured.
+ * This is the reference policy the WP5 study compares the fitted meta policy
+ * against, and in WP6 it is what the desk falls back to when the meta model is
+ * off.
+ */
+export function defaultAllowlistForMode(mode: TradeMode): string[] {
+  return (Object.keys(ALPHA_ID_TO_AGENT_KEY) as (keyof typeof ALPHA_ID_TO_AGENT_KEY)[]).filter((id) =>
+    (DEFAULT_AGENT_MODES[ALPHA_ID_TO_AGENT_KEY[id]] ?? []).includes(mode),
+  );
+}
+
 type Env = Record<string, string | undefined>;
 
 /** Truthy values, and ONLY these. Everything else ⇒ false. */

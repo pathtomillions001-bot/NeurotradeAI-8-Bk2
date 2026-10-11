@@ -154,7 +154,7 @@
 //| attach" to a chart.                                                |
 //+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "4.00"
+#property version   "3.04"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -177,20 +177,10 @@ input int    ServerSilenceSec          = 120;   // Server silent this long -> lo
 input bool   UseEconomicCalendar       = true;
 input int    NewsBlackoutBeforeMinutes = 30;
 input int    NewsBlackoutAfterMinutes  = 15;
-// Minutes before a symbol's session end at which `flatBeforeSessionClose` plans
-// are flattened. The check reads the broker's own session table; when the table
-// cannot be read the rule stays silent rather than guessing a close time.
-input int    SessionFlatMinutesBeforeClose = 15;
 input bool   VerboseLog                = true;
 
 #define MAX_PLANS      32
 #define MAX_SEEN_CMDS  512
-// Open positions the management state machine tracks. Sized well above the
-// desk's own `maxOpenPositions` (12) so a hand-opened position can never push a
-// managed one out of the table.
-#define MAX_MGMT_POSITIONS 24
-#define MAX_PARTIALS        4
-#define MAX_ATR_HANDLES    48
 #define NEWS_REFRESH_SECONDS 60
 // The Desk lists red-folder releases from the last 12 hours and the next 24.
 // The EA must fetch the SAME span: fetching only the next two hours meant the
@@ -223,139 +213,16 @@ struct ArmedPlan
    long   expiresAt;
    int    confirmTicks;
    int    confirmCount;
-   bool   active;
-
-   // ── Management rules, captured at fill (v4.00) ────────────────────────────
-   // These used to be read for break-even and the trail only, and only while
-   // this plan object happened to still be `active` — which, after a fill, it
-   // never was. They are now the source of the PositionState that survives the
-   // plan, so the whole block is carried.
-   string entryTimeframe;
-   string mode;
-   double costPoints;
    double beTriggerR;
    double beOffsetR;
-   bool   beStructure;
-   int    partialCount;
-   double partialAtR[MAX_PARTIALS];
-   double partialPct[MAX_PARTIALS];
    double trailMult;
-   double trailPeriod;
    double trailActivateR;
-   double trailStepPoints;
    bool   trailEnabled;
-   double timeStopBars;
-   int    timeStopPeriod;
-   bool   flatBeforeClose;
+   bool   active;
 };
 
 CTrade trade;
 ArmedPlan g_plans[MAX_PLANS];
-
-//+------------------------------------------------------------------+
-//| Position management state (v4.00, WP0)                            |
-//|                                                                  |
-//| THE DEFECT THIS REPLACES                                           |
-//|                                                                    |
-//| `ExecutePlan()` cleared `g_plans[i].active` the moment an order     |
-//| filled, and `ManageOpenPositions()` looked its rules up through     |
-//| `FindPlanForSymbol()`, which requires `active`. So the server's     |
-//| management block died at the fill: break-even fell back to a        |
-//| hard-coded +1.0R/+0.2R, the trail never ran, and the partial ladder,|
-//| time stop, pyramid and flat-before-close rules were produced by the |
-//| server and executed by nobody.                                      |
-//|                                                                    |
-//| The fix is not to keep the plan alive. A plan is an INTENT that     |
-//| expires; a position is a COMMITMENT that outlives it. At fill, the  |
-//| plan's rules are CAPTURED into a PositionState keyed by ticket,     |
-//| persisted to terminal global variables so a restart cannot lose     |
-//| them, and cleared when the position closes. Nothing here is looked  |
-//| up through `active`.                                                |
-//|                                                                    |
-//| This mirrors `position-manager.ts` function for function; the       |
-//| mapping and the golden vectors live in that module's test file.     |
-//+------------------------------------------------------------------+
-
-// Phase identifiers — must match PositionPhase in position-manager.ts.
-#define PHASE_OPEN_RISK       0
-#define PHASE_BE_ARMED        1
-#define PHASE_PARTIAL         2
-#define PHASE_RUNNER          3
-#define PHASE_TIME_STOP       4
-#define PHASE_REGIME_EXIT     5
-#define PHASE_SESSION_NEWS_FLAT 6
-#define PHASE_PYRAMID         7
-
-// Mode identifiers — must match the `mode` string on the wire.
-#define MODE_SCALP    0
-#define MODE_INTRADAY 1
-#define MODE_SWING    2
-
-// Tolerances. Identical in intent to R_EPSILON / LEVEL_EPSILON_POINTS in the
-// TypeScript machine: a level measured at 1.4999999999999445R IS 1.5R.
-#define R_EPSILON            1e-9
-#define LEVEL_EPSILON_POINTS 1e-6
-
-struct PositionState
-{
-   bool     active;
-   ulong    ticket;
-   string   symbol;
-   bool     isBuy;
-   int      mode;
-   int      entryPeriod;         // ENUM_TIMEFRAMES value of the entry frame
-   double   entry;
-   double   initialSl;
-   double   riskPoints;          // |entry - initialSl| / point, frozen at fill
-   double   point;
-   int      digits;
-   double   initialVolume;
-   double   openVolume;
-   long     openedAtMs;
-   double   costPoints;
-
-   // Rules captured at fill.
-   double   beTriggerR;
-   double   beOffsetR;
-   bool     beStructure;
-   int      partialCount;
-   double   partialAtR[MAX_PARTIALS];
-   double   partialPct[MAX_PARTIALS];
-   bool     partialDone[MAX_PARTIALS];
-   double   trailMult;
-   double   trailPeriod;
-   double   trailActivateR;
-   double   trailStepPoints;
-   double   timeStopBars;
-   bool     flatBeforeClose;
-   double   maxSpreadPoints;
-   bool     regimeExit;
-
-   // Running state.
-   int      phase;
-   double   currentSl;
-   bool     beApplied;
-   int      pyramidAdds;
-   double   bestR;
-   double   worstR;
-};
-
-PositionState g_positions[MAX_MGMT_POSITIONS];
-
-// Management events produced since the last heartbeat, drained into the sync
-// payload so every stop move, partial and flatten reaches the desk's journal.
-string    g_mgmtEvents = "";
-int       g_mgmtEventCount = 0;
-
-// Indicator handles are created ONCE per symbol/timeframe/period and reused.
-// The old `AtrValue()` created an iATR handle and released it on every call —
-// on every managed position, every tick. That is a handle churn the terminal
-// pays for with repeated history recalculation on exactly the path that has to
-// be fast.
-string    g_atrKeys[MAX_ATR_HANDLES];
-int       g_atrHandles[MAX_ATR_HANDLES];
-int       g_atrCount = 0;
-
 string    g_seenCmds[MAX_SEEN_CMDS];
 int       g_seenCount = 0;
 
@@ -464,24 +331,7 @@ int OnInit()
    // ever needed again.
    LoadSavedLink();
 
-   // Rebuild the management table from terminal globals BEFORE the first tick:
-   // positions that survived a restart must be managed to their own rules, not
-   // adopted later by whatever loop happens to notice them first.
-   for(int s = 0; s < MAX_MGMT_POSITIONS; s++) g_positions[s].active = false;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
-      string symbol = PositionGetSymbol(i);
-      PositionState restored;
-      if(!LoadPositionState(ticket, symbol, restored)) continue;
-      for(int s = 0; s < MAX_MGMT_POSITIONS; s++)
-         if(!g_positions[s].active) { g_positions[s] = restored; break; }
-      Print("NeurotradeBridge: restored management for position #", (long)ticket, " ", symbol,
-            " (phase ", restored.phase, ").");
-   }
-
-   Print("NeurotradeBridge v4.00 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   Print("NeurotradeBridge v3.04 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -499,11 +349,6 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
-   // Persist every live position's running state so a chart reload does not
-   // reset its progress counters, then release the cached indicator handles.
-   for(int s = 0; s < MAX_MGMT_POSITIONS; s++)
-      if(g_positions[s].active) SavePositionState(g_positions[s]);
-   ReleaseAtrHandles();
    Print("NeurotradeBridge: stopped (reason ", reason, ").");
 }
 
@@ -655,7 +500,7 @@ void TryPair()
    body += "\"login\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
    body += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
    body += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
-   body += "\"version\":\"4.00\",";
+   body += "\"version\":\"3.04\",";
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
    body += "\"currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\"},";
    // All broker symbols are discovered once at pairing. This is a catalogue,
@@ -866,7 +711,7 @@ void Sync()
    // Desk say "your EA is out of date" instead of leaving a stale terminal
    // silently disagreeing with it about the calendar.
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
-   body += "\"version\":\"4.00\",";
+   body += "\"version\":\"3.04\",";
    // Tell the server how this terminal's clock relates to UTC. Combined with
    // the UTC-normalised timestamps below it lets the Desk detect a skewed
    // clock instead of trusting (or silently mis-trusting) every tick. From
@@ -895,11 +740,7 @@ void Sync()
    body += "\"barsAvailable\":" + BarsAvailableJson() + ",";
    body += "\"news\":" + NewsJson() + ",";
    body += "\"positions\":" + PositionsJson() + ",";
-   body += "\"results\":[" + g_results + "],";
-   // What the position machine DID since the last beat. Without this the desk
-   // could only see that a stop had moved, never why — and a partial exit was
-   // indistinguishable from a manual close in the journal.
-   body += "\"management\":[" + g_mgmtEvents + "]";
+   body += "\"results\":[" + g_results + "]";
    body += "}";
 
    string response = "";
@@ -945,8 +786,6 @@ void Sync()
 
    g_lastOk = NowServer();
    g_results = "";
-   g_mgmtEvents = "";
-   g_mgmtEventCount = 0;
    // Learn the true UTC offset from the platform server's own clock BEFORE the
    // next beat builds its timestamps (v3.04, note 13).
    LearnBrokerClock(response);
@@ -1623,48 +1462,6 @@ void ExecutePlan(const int index, const double referencePrice)
       double slip = point > 0 ? MathAbs(fill - referencePrice) / point : 0;
       AddResult(g_plans[index].id, "filled", (long)trade.ResultOrder(), fill, slip, "");
       Log("FILLED " + symbol + " " + (g_plans[index].isBuy ? "BUY" : "SELL") + " " + DoubleToString(lots, 2));
-
-      // THE POSITION NOW OWNS THE RULES.
-      //
-      // The plan is cleared on the next line, exactly as before — but the
-      // management block is captured here first, keyed by the ticket the fill
-      // produced and persisted to terminal globals. That is the whole of the
-      // v4.00 fix: management is looked up by POSITION, never through a plan.
-      // `ResultOrder()` is the opening order's ticket, which is also the
-      // position's ticket for the trade this EA just placed. It is checked
-      // against a real position before use: attaching rules to a ticket that does
-      // not exist would look like management while protecting nothing.
-      ulong positionTicket = (ulong)trade.ResultOrder();
-      if(!PositionSelectByTicket(positionTicket) || PositionGetString(POSITION_SYMBOL) != symbol)
-         positionTicket = FindPositionTicketBySymbol(symbol);
-      if(positionTicket > 0)
-      {
-         int slot = -1;
-         for(int s = 0; s < MAX_MGMT_POSITIONS; s++)
-            if(!g_positions[s].active) { slot = s; break; }
-         if(slot >= 0)
-         {
-            CapturePositionStateFromPlan(slot, g_plans[index], positionTicket, symbol, fill, lots);
-            AddMgmtEvent(positionTicket, symbol, "captured", 0,
-                         "Management rules captured at fill: BE " +
-                         DoubleToString(g_plans[index].beTriggerR, 2) + "R, " +
-                         IntegerToString(g_plans[index].partialCount) + " partial(s), trail " +
-                         DoubleToString(g_plans[index].trailMult, 1) + "x" +
-                         (g_plans[index].trailEnabled ? "" : " (off)") + ".");
-            Log("position #" + IntegerToString((long)positionTicket) + " is now managed (BE " +
-                DoubleToString(g_plans[index].beTriggerR, 2) + "R, " +
-                IntegerToString(g_plans[index].partialCount) + " partials).");
-         }
-         else
-         {
-            Log("WARNING: no free management slot for position #" +
-                IntegerToString((long)positionTicket) + " — it has its SL/TP but no ladder.");
-         }
-      }
-      else
-      {
-         Log("WARNING: filled order could not be matched to a position — the ladder was not attached.");
-      }
    }
    else
    {
@@ -1675,357 +1472,6 @@ void ExecutePlan(const int index, const double referencePrice)
    // Exactly one terminal attempt per plan. Retrying a failed buy here risks a
    // duplicate position after a broker timeout.
    g_plans[index].active = false;
-}
-
-//+------------------------------------------------------------------+
-//| Management event queue                                            |
-//|                                                                   |
-//| Every action the machine takes is reported on the next heartbeat  |
-//| so the desk's journal shows what happened to a position, not just |
-//| that it appeared and later vanished.                              |
-//+------------------------------------------------------------------+
-void AddMgmtEvent(const ulong ticket, const string symbol, const string action,
-                  const double value, const string detail)
-{
-   if(g_mgmtEvents != "") g_mgmtEvents += ",";
-   g_mgmtEvents += "{\"ticket\":" + IntegerToString((long)ticket)
-                 + ",\"symbol\":\"" + JsonEscape(symbol)
-                 + "\",\"action\":\"" + JsonEscape(action)
-                 + "\",\"value\":" + DoubleToString(value, 10)
-                 + ",\"detail\":\"" + JsonEscape(detail)
-                 + "\",\"ts\":" + IntegerToString(NowUtcMs()) + "}";
-   g_mgmtEventCount++;
-}
-
-// Modifications are rate-limited per ticket. A trailing stop in a fast market
-// can qualify on every tick; the broker does not need every one of them, and a
-// rejected burst leaves the position on the OLD stop while the requests queue.
-#define MODIFY_MIN_INTERVAL_MS 2000
-ulong  g_lastModifyTicket[MAX_MGMT_POSITIONS];
-long   g_lastModifyAtMs[MAX_MGMT_POSITIONS];
-
-bool ModifyAllowedNow(const int slot, const ulong ticket)
-{
-   for(int i = 0; i < MAX_MGMT_POSITIONS; i++)
-   {
-      if(g_lastModifyTicket[i] != ticket) continue;
-      return (GetTickCount64() - g_lastModifyAtMs[i]) >= MODIFY_MIN_INTERVAL_MS;
-   }
-   return true;
-}
-
-void NoteModify(const int slot, const ulong ticket)
-{
-   for(int i = 0; i < MAX_MGMT_POSITIONS; i++)
-   {
-      if(g_lastModifyTicket[i] == ticket)
-      {
-         g_lastModifyAtMs[i] = (long)GetTickCount64();
-         return;
-      }
-   }
-   // Claim a free slot, or overwrite the oldest.
-   int target = -1;
-   long oldest = 0;
-   for(int i = 0; i < MAX_MGMT_POSITIONS; i++)
-   {
-      if(g_lastModifyTicket[i] == 0) { target = i; break; }
-      if(target < 0 || g_lastModifyAtMs[i] < oldest) { oldest = g_lastModifyAtMs[i]; target = i; }
-   }
-   if(target >= 0)
-   {
-      g_lastModifyTicket[target] = ticket;
-      g_lastModifyAtMs[target] = (long)GetTickCount64();
-   }
-}
-
-// Apply a modify with back-off, honouring the stop level and the freeze level.
-bool ApplyStopModify(const int slot, PositionState &st, const double newSl)
-{
-   if(!ModifyAllowedNow(slot, st.ticket)) return false;
-
-   MqlTick tick;
-   if(!SymbolInfoTick(st.symbol, tick)) return false;
-   double price = st.isBuy ? tick.bid : tick.ask;
-   if(!StopIsLegal(st.symbol, st.isBuy, price, newSl, st.point)) return false;
-
-   double tp = 0;
-   if(PositionSelectByTicket(st.ticket)) tp = PositionGetDouble(POSITION_TP);
-   double digits = (double)st.digits;
-   if(!ModifyPositionByTicket(st.ticket, st.symbol, NormalizeDouble(newSl, (int)digits), tp))
-      return false;
-
-   NoteModify(slot, st.ticket);
-   return true;
-}
-
-// ── Step 1: terminal exits ───────────────────────────────────────────────────
-// Session flat, news flat, regime exit, time stop — in that order, and any of
-// them ends the position, so the caller returns immediately.
-bool PositionTerminalExit(const int slot, PositionState &st, const MqlTick &tick)
-{
-   if(st.flatBeforeClose && SymbolSessionClosingSoon(st.symbol, SessionFlatMinutesBeforeClose))
-   {
-      st.phase = PHASE_SESSION_NEWS_FLAT;
-      AddMgmtEvent(st.ticket, st.symbol, "close_all", 0,
-                   "Session close — flat before the session ends.");
-      ClosePosition(st.ticket, 0, "");
-      return true;
-   }
-   if(IsNewsBlackout(st.symbol))
-   {
-      st.phase = PHASE_SESSION_NEWS_FLAT;
-      AddMgmtEvent(st.ticket, st.symbol, "close_all", 0,
-                   "High-impact release — flattening rather than holding through it.");
-      ClosePosition(st.ticket, 0, "");
-      return true;
-   }
-   if(st.regimeExit)
-   {
-      st.phase = PHASE_REGIME_EXIT;
-      AddMgmtEvent(st.ticket, st.symbol, "close_all", 0,
-                   "The regime that justified this trade no longer holds.");
-      ClosePosition(st.ticket, 0, "");
-      return true;
-   }
-   if(st.timeStopBars > 0)
-   {
-      int bars = BarsOnEntryFrame(st);
-      if(bars >= (int)st.timeStopBars && st.bestR < 0.5)
-      {
-         st.phase = PHASE_TIME_STOP;
-         AddMgmtEvent(st.ticket, st.symbol, "close_all", 0,
-                      StringFormat("%d bars with no progress (best %.2fR < 0.50R) — freeing the margin.",
-                                   bars, st.bestR));
-         ClosePosition(st.ticket, 0, "");
-         return true;
-      }
-   }
-   return false;
-}
-
-// ── Step 2: partials ─────────────────────────────────────────────────────────
-void PositionApplyPartials(const int slot, PositionState &st, const double progress)
-{
-   for(int i = 0; i < st.partialCount && i < MAX_PARTIALS; i++)
-   {
-      if(st.partialDone[i]) continue;
-      if(!Reached(progress, st.partialAtR[i])) continue;
-
-      double volumeMin = SymbolInfoDouble(st.symbol, SYMBOL_VOLUME_MIN);
-      double slice = QuantiseVolume(st.symbol, st.initialVolume * (st.partialPct[i] / 100.0));
-      double remainder = NormalizeDouble(st.openVolume - slice, 8);
-
-      // Infeasible now means infeasible forever — volume only shrinks — so the
-      // slice is retired rather than re-tested on every tick.
-      if(slice < volumeMin || remainder < volumeMin || slice > st.openVolume)
-      {
-         st.partialDone[i] = true;
-         SavePositionState(st);
-         continue;
-      }
-
-      if(ClosePosition(st.ticket, slice, ""))
-      {
-         st.partialDone[i] = true;
-         st.openVolume = remainder;
-         if(st.phase == PHASE_OPEN_RISK || st.phase == PHASE_BE_ARMED) st.phase = PHASE_PARTIAL;
-         AddMgmtEvent(st.ticket, st.symbol, "close_partial", slice,
-                      StringFormat("%.0f%% banked at %.1fR (%.2fR reached).",
-                                   st.partialPct[i], st.partialAtR[i], progress));
-         SavePositionState(st);
-      }
-   }
-}
-
-// ── Step 3: break-even ───────────────────────────────────────────────────────
-// The pending stop is the single modification this tick will send; break-even
-// and the trail both propose into it and only ever replace it with something
-// tighter (see PositionApplyTrail).
-void PositionApplyBreakeven(const int slot, PositionState &st, const double progress,
-                            double &pendingSl, bool &hasPending, string &pendingDetail)
-{
-   if(st.beTriggerR <= 0) return;
-   if(!Reached(progress, st.beTriggerR)) return;
-   if(!StructureConfirmedForBE(st)) return;
-
-   double offset = (st.costPoints + 0.05 * st.riskPoints) * st.point;
-   double candidate = st.isBuy ? st.entry + offset : st.entry - offset;
-   candidate = NormalizeDouble(candidate, st.digits);
-   double reference = hasPending ? pendingSl : st.currentSl;
-
-   if(Tightens(st.isBuy, candidate, reference, st.point * 0.01))
-   {
-      pendingSl = candidate;
-      hasPending = true;
-      pendingDetail = StringFormat("%.2fR reached — stop to entry + %.1fpt cost + %.1fpt buffer.",
-                                   progress, st.costPoints, 0.05 * st.riskPoints);
-   }
-   // Set regardless of who wins the comparison: either way the stop is at or
-   // beyond entry, so the base is risk-free and the pyramid rule may rely on it.
-   st.beApplied = true;
-   if(st.phase == PHASE_OPEN_RISK) st.phase = PHASE_BE_ARMED;
-}
-
-// ── Step 4: trail ────────────────────────────────────────────────────────────
-// Chandelier on the ENTRY timeframe's ATR — never a fixed M15 — and only by at
-// least max(plan step, 0.1 × ATR), so a trending market is not modified on noise.
-void PositionApplyTrail(const int slot, PositionState &st, const MqlTick &tick,
-                        const double progress, double &pendingSl, bool &hasPending,
-                        string &pendingDetail)
-{
-   if(st.trailMult <= 0) return;
-   if(!Reached(progress, st.trailActivateR)) return;
-
-   double atrPrice = AtrValue(st.symbol, (ENUM_TIMEFRAMES)st.entryPeriod, (int)MathMax(2, st.trailPeriod));
-   if(atrPrice <= 0) return;
-
-   double current = st.isBuy ? tick.bid : tick.ask;
-   double chandelier = st.isBuy ? current - atrPrice * st.trailMult
-                                : current + atrPrice * st.trailMult;
-   chandelier = NormalizeDouble(chandelier, st.digits);
-
-   double reference = hasPending ? pendingSl : st.currentSl;
-   double atrPoints = atrPrice / st.point;
-   double minStepPoints = MathMax(st.trailStepPoints, atrPoints * 0.1);
-   double improvementPoints = MathAbs(chandelier - reference) / st.point;
-
-   if(Tightens(st.isBuy, chandelier, reference, 0) && improvementPoints >= minStepPoints)
-   {
-      pendingSl = chandelier;
-      hasPending = true;
-      pendingDetail = StringFormat("Chandelier %.1f× ATR(%d) on %s — stop trailed (+%.1fpt step).",
-                                   st.trailMult, (int)st.trailPeriod,
-                                   EnumToString((ENUM_TIMEFRAMES)st.entryPeriod),
-                                   improvementPoints);
-      if(st.beApplied) st.phase = PHASE_RUNNER;
-   }
-}
-
-// ── Step 5: pyramid ──────────────────────────────────────────────────────────
-void PositionApplyPyramid(const int slot, PositionState &st, const double progress,
-                          const double spreadPoints, const double portfolioRiskR)
-{
-   // The add rules ride on the base state; they are written into the state at
-   // fill from the plan's pyramid block, which is non-null only in a trend.
-   if(st.trailMult <= 0) return;                 // no trend context captured
-   if(st.pyramidAdds >= 1 && st.mode != MODE_SWING) return;
-   if(st.pyramidAdds >= 2) return;
-   if(!st.beApplied) return;
-   if(!Reached(progress, 1.5)) return;
-   if(st.maxSpreadPoints > 0 && spreadPoints > st.maxSpreadPoints) return;
-   if(portfolioRiskR + 1 > 1.5) return;
-
-   double volumeMin = SymbolInfoDouble(st.symbol, SYMBOL_VOLUME_MIN);
-   double volumeMax = SymbolInfoDouble(st.symbol, SYMBOL_VOLUME_MAX);
-   double lots = QuantiseVolume(st.symbol, st.initialVolume * 0.5);
-   if(lots < volumeMin || lots > volumeMax) return;
-   if(st.openVolume + lots > volumeMax) return;
-
-   trade.SetDeviationInPoints(10);
-   bool ok = st.isBuy
-      ? trade.Buy(lots, st.symbol, 0.0, st.currentSl, 0, "nt:pyramid:" + st.symbol)
-      : trade.Sell(lots, st.symbol, 0.0, st.currentSl, 0, "nt:pyramid:" + st.symbol);
-   if(!ok) return;
-
-   st.pyramidAdds++;
-   st.phase = PHASE_PYRAMID;
-   AddMgmtEvent(st.ticket, st.symbol, "pyramid_add", lots,
-                StringFormat("Base at break-even and %.2fR clear — added %.2f lots (add %d).",
-                             progress, lots, st.pyramidAdds));
-   SavePositionState(st);
-}
-
-// ── Dispatch ─────────────────────────────────────────────────────────────────
-// Fixed order 1→5 with the early return on a terminal exit, exactly as in
-// managePosition(). Read the two side by side; they are meant to be compared.
-void ManagePositionState(const int slot, PositionState &st, const MqlTick &tick)
-{
-   if(st.phase == PHASE_TIME_STOP || st.phase == PHASE_REGIME_EXIT ||
-      st.phase == PHASE_SESSION_NEWS_FLAT)
-      return;
-
-   double current = st.isBuy ? tick.bid : tick.ask;
-   double progress = ProgressR(st, current);
-   st.bestR  = MathMax(st.bestR, progress);
-   st.worstR = MathMin(st.worstR, progress);
-
-   // 1 — terminal exits
-   if(PositionTerminalExit(slot, st, tick)) return;
-
-   // 2 — partials
-   PositionApplyPartials(slot, st, progress);
-
-   // 3 + 4 — one stop modification per tick, the tighter of break-even and trail
-   double pendingSl = 0;
-   bool hasPending = false;
-   string pendingDetail = "";
-   PositionApplyBreakeven(slot, st, progress, pendingSl, hasPending, pendingDetail);
-   PositionApplyTrail(slot, st, tick, progress, pendingSl, hasPending, pendingDetail);
-
-   if(hasPending && ApplyStopModify(slot, st, pendingSl))
-   {
-      st.currentSl = pendingSl;
-      AddMgmtEvent(st.ticket, st.symbol, "modify_sl", pendingSl, pendingDetail);
-   }
-
-   // 5 — pyramid
-   double spreadPoints = st.point > 0 ? (tick.ask - tick.bid) / st.point : 0;
-   PositionApplyPyramid(slot, st, progress, spreadPoints, 0);
-
-   SavePositionState(st);
-}
-
-// Capture the plan's rules into a fresh position state AT FILL. This is the
-// moment the plan stops being an intent and becomes a commitment.
-void CapturePositionStateFromPlan(const int slot, const ArmedPlan &plan, const ulong ticket,
-                                  const string symbol, const double fillPrice, const double lots)
-{
-   PositionState st;
-   st.active = true;
-   st.ticket = ticket;
-   st.symbol = symbol;
-   st.isBuy = plan.isBuy;
-   st.mode = ModeFromString(plan.mode);
-   st.entryPeriod = (int)TimeframeFromName(plan.entryTimeframe);
-   st.entry = fillPrice;
-   st.initialSl = plan.sl;
-   st.point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-   st.digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-   st.riskPoints = st.point > 0 ? MathAbs(fillPrice - plan.sl) / st.point : 0;
-   st.initialVolume = lots;
-   st.openVolume = lots;
-   st.openedAtMs = NowUtcMs();
-   st.costPoints = plan.costPoints;
-
-   st.beTriggerR = plan.beTriggerR;
-   st.beOffsetR = plan.beOffsetR;
-   st.beStructure = plan.beStructure;
-   st.partialCount = (int)MathMin(MAX_PARTIALS, plan.partialCount);
-   for(int i = 0; i < MAX_PARTIALS; i++)
-   {
-      st.partialAtR[i] = i < st.partialCount ? plan.partialAtR[i] : 0;
-      st.partialPct[i] = i < st.partialCount ? plan.partialPct[i] : 0;
-      st.partialDone[i] = false;
-   }
-   st.trailMult = plan.trailMult;
-   st.trailPeriod = plan.trailPeriod;
-   st.trailActivateR = plan.trailActivateR;
-   st.trailStepPoints = plan.trailStepPoints;
-   st.timeStopBars = plan.timeStopBars;
-   st.flatBeforeClose = plan.flatBeforeClose;
-   st.maxSpreadPoints = plan.maxSpreadPoints;
-   st.regimeExit = false;
-
-   st.phase = PHASE_OPEN_RISK;
-   st.currentSl = plan.sl;
-   st.beApplied = false;
-   st.pyramidAdds = 0;
-   st.bestR = 0;
-   st.worstR = 0;
-
-   g_positions[slot] = st;
-   SavePositionState(st);
 }
 
 void ManageOpenPositions()
@@ -2042,91 +1488,45 @@ void ManageOpenPositions()
       if(symbol == "") continue;
       if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
       ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+      bool isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
       double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-      if(point <= 0) continue;
+      if(point <= 0 || sl == 0) continue;
 
       MqlTick tick;
       if(!SymbolInfoTick(symbol, tick)) continue;
+      double current = isBuy ? tick.bid : tick.ask;
+      double riskPoints = MathAbs(entry - sl) / point;
+      if(riskPoints <= 0) continue;
+      double movePoints = (isBuy ? current - entry : entry - current) / point;
+      double progressR = movePoints / riskPoints;
 
-      // Find (or rebuild) this position's state. A position with no captured
-      // rules — one opened before the upgrade, or by hand — is left completely
-      // alone: this EA never invents management for a trade it did not plan.
-      int slot = -1;
-      for(int s = 0; s < MAX_MGMT_POSITIONS; s++)
-         if(g_positions[s].active && g_positions[s].ticket == ticket) { slot = s; break; }
-
-      if(slot < 0)
+      ArmedPlan plan;
+      bool hasPlan = FindPlanForSymbol(symbol, plan);
+      double beTrigger = hasPlan && plan.beTriggerR > 0 ? plan.beTriggerR : 1.0;
+      double beOffset = hasPlan ? plan.beOffsetR : 0.2;
+      double newSl = sl;
+      if(progressR >= beTrigger)
       {
-         for(int s = 0; s < MAX_MGMT_POSITIONS; s++)
-            if(!g_positions[s].active) { slot = s; break; }
-         if(slot < 0) continue;
-         PositionState restored;
-         if(!LoadPositionState(ticket, symbol, restored))
-         {
-            // No state on disk either. Adopt it with a conservative identity so
-            // it is still protected, but with no partials, no pyramid and no
-            // BE offset it never had. The stop it already carries is kept.
-            restored.active = true;
-            restored.ticket = ticket;
-            restored.symbol = symbol;
-            restored.isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
-            restored.mode = MODE_INTRADAY;
-            restored.entryPeriod = (int)PERIOD_M15;
-            restored.entry = PositionGetDouble(POSITION_PRICE_OPEN);
-            restored.initialSl = PositionGetDouble(POSITION_SL);
-            restored.point = point;
-            restored.digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-            restored.riskPoints = restored.initialSl > 0
-               ? MathAbs(restored.entry - restored.initialSl) / point : 0;
-            restored.initialVolume = PositionGetDouble(POSITION_VOLUME);
-            restored.openVolume = restored.initialVolume;
-            restored.openedAtMs = (long)PositionGetInteger(POSITION_TIME) * 1000;
-            restored.costPoints = 0;
-            restored.beTriggerR = 0;
-            restored.beOffsetR = 0;
-            restored.beStructure = false;
-            restored.partialCount = 0;
-            restored.trailMult = 0;
-            restored.trailPeriod = 14;
-            restored.trailActivateR = 0;
-            restored.trailStepPoints = 0;
-            restored.timeStopBars = 0;
-            restored.flatBeforeClose = false;
-            restored.maxSpreadPoints = 0;
-            restored.regimeExit = false;
-            restored.phase = PHASE_OPEN_RISK;
-            restored.currentSl = restored.initialSl;
-            restored.beApplied = false;
-            restored.pyramidAdds = 0;
-            restored.bestR = 0;
-            restored.worstR = 0;
-            Log("adopted position #" + IntegerToString((long)ticket) + " " + symbol +
-                " with no captured plan — protecting it, but applying no ladder.");
-         }
-         g_positions[slot] = restored;
+         double candidate = isBuy ? entry + beOffset * riskPoints * point : entry - beOffset * riskPoints * point;
+         if((isBuy && candidate > newSl) || (!isBuy && candidate < newSl)) newSl = candidate;
       }
-
-      if(g_positions[slot].riskPoints <= 0) continue;
-
-      // Keep the tracked volume honest: a manual partial, a broker-side action
-      // or a pyramid add changes it without the machine's involvement.
-      if(PositionSelectByTicket(ticket))
-         g_positions[slot].openVolume = PositionGetDouble(POSITION_VOLUME);
-
-      ManagePositionState(slot, g_positions[slot], tick);
-   }
-
-   // Retire state for positions that no longer exist, so a closed ticket cannot
-   // leave a stale rule set behind for the next position to inherit.
-   for(int s = 0; s < MAX_MGMT_POSITIONS; s++)
-   {
-      if(!g_positions[s].active) continue;
-      if(PositionSelectByTicket(g_positions[s].ticket)) continue;
-      ClearPositionState(g_positions[s].ticket);
-      AddMgmtEvent(g_positions[s].ticket, g_positions[s].symbol, "closed", 0,
-                   StringFormat("Position closed — final phase %d, best %.2fR, worst %.2fR.",
-                                g_positions[s].phase, g_positions[s].bestR, g_positions[s].worstR));
-      g_positions[s].active = false;
+      if(hasPlan && plan.trailEnabled && progressR >= plan.trailActivateR)
+      {
+         double atr = AtrValue(symbol, PERIOD_M15, 14);
+         if(atr > 0)
+         {
+            double candidate = isBuy ? current - atr * plan.trailMult : current + atr * plan.trailMult;
+            if((isBuy && candidate > newSl) || (!isBuy && candidate < newSl)) newSl = candidate;
+         }
+      }
+      if(newSl != sl && RespectsStopLevel(symbol, isBuy, current, newSl))
+      {
+         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+         ModifyPositionByTicket(ticket, symbol, NormalizeDouble(newSl, digits), tp);
+      }
    }
 }
 
@@ -2164,7 +1564,6 @@ void HandleCommand(const string obj)
    else if(type == "close") ClosePosition((ulong)JsonNumber(obj, "ticket"), 0, id);
    else if(type == "close_partial") ClosePosition((ulong)JsonNumber(obj, "ticket"), JsonNumber(obj, "lots"), id);
    else if(type == "modify") ModifyPositionCommand(obj, id);
-   else if(type == "set_management") SetManagementCommand(obj, id);
    else if(type == "flatten_all") { FlattenAll(JsonString(obj, "reason")); AddResult(id, "done", 0, 0, 0, ""); }
    else AddResult(id, "skipped", 0, 0, 0, "unknown command type");
 }
@@ -2213,65 +1612,18 @@ void ArmPlanFromJson(const string obj, const string commandId)
    g_plans[slot].expiresAt = (long)JsonNumber(plan, "expiresAt");
    g_plans[slot].confirmTicks = (int)MathMax(1, JsonNumber(plan, "confirmTicks"));
    g_plans[slot].confirmCount = 0;
-   ParseManagementIntoPlan(plan, g_plans[slot]);
-   g_plans[slot].active = true;
-   AddResult(commandId, "done", 0, 0, 0, "");
-}
-
-// Read the plan's whole management block into the EA's plan record.
-//
-// Extracted from ArmPlanFromJson because `set_management` updates the rules of
-// an OPEN position through the same reader — one parser, one meaning.
-void ParseManagementIntoPlan(const string plan, ArmedPlan &target)
-{
-   target.entryTimeframe = JsonString(plan, "entryTimeframe");
-   target.mode = JsonString(plan, "mode");
-   target.costPoints = JsonNumber(plan, "costPoints");
-
    string management = JsonObject(plan, "management");
-   if(management == "") management = plan;   // set_management sends it at the top level
    string breakeven = JsonObject(management, "breakeven");
    string trail = JsonObject(management, "trail");
-   string timeStop = JsonObject(management, "timeStop");
-   string guards = JsonObject(management, "guards");
-
-   target.beTriggerR = JsonNumber(breakeven, "triggerR");
-   target.beOffsetR = JsonNumber(breakeven, "offsetR");
-   int structure = JsonBool(breakeven, "structureBuffer");
-   target.beStructure = structure == 1;
-
-   target.trailMult = JsonNumber(trail, "mult");
-   target.trailPeriod = JsonNumber(trail, "period");
-   target.trailActivateR = JsonNumber(trail, "activateAtR");
-   target.trailStepPoints = JsonNumber(trail, "stepPoints");
-   target.trailEnabled = trail != "";
-   if(target.trailPeriod <= 0) target.trailPeriod = 14;
-
-   target.timeStopBars = JsonNumber(timeStop, "noProgressBars");
-   target.timeStopPeriod = (int)TimeframeFromName(JsonString(timeStop, "timeframe"));
-
-   int flat = JsonBool(guards, "flatBeforeSessionClose");
-   target.flatBeforeClose = flat == 1;
-   target.maxSpreadPoints = JsonNumber(guards, "maxSpreadPoints");
-
-   // The partial ladder: an array of objects, so each element is extracted by
-   // brace matching before its fields are read. Reading `atR` straight out of the
-   // array text would match the FIRST element for every slot.
-   target.partialCount = 0;
-   string partials = JsonArray(management, "partials");
-   int cursor = 0;
-   while(target.partialCount < MAX_PARTIALS)
-   {
-      string element = NextObjectInArray(partials, cursor);
-      if(element == "") break;
-      target.partialAtR[target.partialCount] = JsonNumber(element, "atR");
-      target.partialPct[target.partialCount] = JsonNumber(element, "closePct");
-      target.partialCount++;
-   }
-   for(int i = 0; i < MAX_PARTIALS; i++)
-   {
-      if(i >= target.partialCount) { target.partialAtR[i] = 0; target.partialPct[i] = 0; }
-   }
+   g_plans[slot].beTriggerR = JsonNumber(breakeven, "triggerR");
+   g_plans[slot].beOffsetR = JsonNumber(breakeven, "offsetR");
+   g_plans[slot].trailMult = JsonNumber(trail, "mult");
+   g_plans[slot].trailActivateR = JsonNumber(trail, "activateAtR");
+   g_plans[slot].trailEnabled = trail != "";
+   if(g_plans[slot].beTriggerR <= 0) g_plans[slot].beTriggerR = 1.0;
+   if(g_plans[slot].trailMult <= 0) g_plans[slot].trailMult = 2.5;
+   g_plans[slot].active = true;
+   AddResult(commandId, "done", 0, 0, 0, "");
 }
 
 void CancelPlan(const string planId, const string commandId)
@@ -2281,87 +1633,20 @@ void CancelPlan(const string planId, const string commandId)
    AddResult(commandId, "done", 0, 0, 0, "");
 }
 
-bool ClosePosition(const ulong ticket, const double lots, const string commandId)
+void ClosePosition(const ulong ticket, const double lots, const string commandId)
 {
-   if(!PositionSelectByTicket(ticket))
-   {
-      if(commandId != "") AddResult(commandId, "skipped", 0, 0, 0, "position not found");
-      return false;
-   }
-   double currentVolume = PositionGetDouble(POSITION_VOLUME);
-   string symbol = PositionGetString(POSITION_SYMBOL);
-   double requested = lots > 0 ? NormaliseVolume(symbol, lots) : 0;
-   // A partial that normalises below the broker minimum is not a partial — it is
-   // a rejected order. Closing the whole position instead would be a silent exit
-   // the plan never asked for, so the request is refused instead.
-   if(lots > 0 && requested <= 0)
-   {
-      if(commandId != "") AddResult(commandId, "rejected", (long)ticket, 0, 0, "partial below broker minimum");
-      return false;
-   }
-   bool ok = (requested > 0 && requested < currentVolume)
-      ? trade.PositionClosePartial(ticket, requested)
-      : trade.PositionClose(ticket);
-   // Management-driven calls pass an empty command id: they are journaled through
-   // the management event queue, not the command result queue.
-   if(commandId != "")
-      AddResult(commandId, ok ? "done" : "rejected", (long)ticket, trade.ResultPrice(), 0,
-                ok ? "" : trade.ResultRetcodeDescription());
-   return ok;
-}
-
-// `set_management` gives the desk a way to retune an OPEN position's rules —
-// widen a time stop in a slow session, withdraw the pyramid after a regime
-// change — without touching the position itself. The command type was declared
-// in types.ts and implemented nowhere; this is the other half.
-void SetManagementCommand(const string obj, const string commandId)
-{
-   ulong ticket = (ulong)JsonNumber(obj, "ticket");
    if(!PositionSelectByTicket(ticket))
    {
       AddResult(commandId, "skipped", 0, 0, 0, "position not found");
       return;
    }
+   double currentVolume = PositionGetDouble(POSITION_VOLUME);
    string symbol = PositionGetString(POSITION_SYMBOL);
-   int slot = -1;
-   for(int s = 0; s < MAX_MGMT_POSITIONS; s++)
-      if(g_positions[s].active && g_positions[s].ticket == ticket) { slot = s; break; }
-   if(slot < 0)
-   {
-      AddResult(commandId, "skipped", 0, 0, 0, "position has no captured management state");
-      return;
-   }
-
-   ArmedPlan updated;
-   ParseManagementIntoPlan(obj, updated);
-
-   PositionState st = g_positions[slot];
-   // Only the RULES move. Entry, risk unit, volumes and progress are facts about
-   // the position and are never rewritten by a command.
-   if(updated.beTriggerR > 0) st.beTriggerR = updated.beTriggerR;
-   if(updated.beOffsetR > 0) st.beOffsetR = updated.beOffsetR;
-   st.beStructure = updated.beStructure;
-   st.partialCount = updated.partialCount;
-   for(int i = 0; i < MAX_PARTIALS; i++)
-   {
-      st.partialAtR[i] = updated.partialAtR[i];
-      st.partialPct[i] = updated.partialPct[i];
-      if(i >= updated.partialCount) st.partialDone[i] = false;
-   }
-   st.trailMult = updated.trailMult;
-   st.trailPeriod = updated.trailPeriod;
-   st.trailActivateR = updated.trailActivateR;
-   st.trailStepPoints = updated.trailStepPoints;
-   st.timeStopBars = updated.timeStopBars;
-   st.flatBeforeClose = updated.flatBeforeClose;
-   if(updated.maxSpreadPoints > 0) st.maxSpreadPoints = updated.maxSpreadPoints;
-
-   if(JsonBool(obj, "regimeExit") == 1) st.regimeExit = true;
-
-   g_positions[slot] = st;
-   SavePositionState(st);
-   AddMgmtEvent(ticket, symbol, "management_updated", 0, "Management rules updated by the desk.");
-   AddResult(commandId, "done", (long)ticket, 0, 0, "");
+   bool ok = (lots > 0 && lots < currentVolume)
+      ? trade.PositionClosePartial(ticket, NormaliseVolume(symbol, lots))
+      : trade.PositionClose(ticket);
+   AddResult(commandId, ok ? "done" : "rejected", (long)ticket, trade.ResultPrice(), 0,
+             ok ? "" : trade.ResultRetcodeDescription());
 }
 
 void ModifyPositionCommand(const string obj, const string commandId)
@@ -2450,48 +1735,14 @@ double NormaliseVolume(const string symbol, const double lots)
    return NormalizeDouble(normalised, volumeDigits);
 }
 
-//+------------------------------------------------------------------+
-//| Cached indicator handles                                          |
-//|                                                                   |
-//| One handle per symbol|timeframe|period, created on first use and   |
-//| released in OnDeinit. The previous implementation created and      |
-//| released an ATR handle on EVERY call — per managed position, per   |
-//| tick — which makes the terminal recalculate history on the hottest |
-//| path the EA has. BarsCalculated is checked before CopyBuffer so a  |
-//| handle that has not warmed up reports "no ATR yet" instead of a    |
-//| zero that would be read as a flat market.                          |
-//+------------------------------------------------------------------+
-int AtrHandle(const string symbol, const ENUM_TIMEFRAMES timeframe, const int period)
-{
-   string key = symbol + "|" + IntegerToString((int)timeframe) + "|" + IntegerToString(period);
-   for(int i = 0; i < g_atrCount; i++)
-      if(g_atrKeys[i] == key) return g_atrHandles[i];
-
-   int handle = iATR(symbol, timeframe, period);
-   if(handle == INVALID_HANDLE) return INVALID_HANDLE;
-   if(g_atrCount >= MAX_ATR_HANDLES) return handle; // rare; never released, still correct
-
-   g_atrKeys[g_atrCount] = key;
-   g_atrHandles[g_atrCount] = handle;
-   g_atrCount++;
-   return handle;
-}
-
 double AtrValue(const string symbol, const ENUM_TIMEFRAMES timeframe, const int period)
 {
-   int handle = AtrHandle(symbol, timeframe, period);
+   int handle = iATR(symbol, timeframe, period);
    if(handle == INVALID_HANDLE) return 0;
-   if(BarsCalculated(handle) < period + 1) return 0;
    double buffer[];
    int copied = CopyBuffer(handle, 0, 0, 1, buffer);
+   IndicatorRelease(handle);
    return copied > 0 ? buffer[0] : 0;
-}
-
-void ReleaseAtrHandles()
-{
-   for(int i = 0; i < g_atrCount; i++)
-      if(g_atrHandles[i] != INVALID_HANDLE) IndicatorRelease(g_atrHandles[i]);
-   g_atrCount = 0;
 }
 
 bool FindPlanForSymbol(const string symbol, ArmedPlan &out)
@@ -2499,310 +1750,6 @@ bool FindPlanForSymbol(const string symbol, ArmedPlan &out)
    for(int i = 0; i < MAX_PLANS; i++)
       if(g_plans[i].active && g_plans[i].symbol == symbol) { out = g_plans[i]; return true; }
    return false;
-}
-
-// The newest position for `symbol` carrying this EA's magic. Used to attach
-// management rules to a fill whose order ticket did not resolve to a position
-// (netting accounts, or a broker that renumbers on the deal).
-ulong FindPositionTicketBySymbol(const string symbol)
-{
-   ulong newest = 0;
-   long newestTime = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      if(PositionGetSymbol(i) != symbol) continue;
-      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      long opened = (long)PositionGetInteger(POSITION_TIME);
-      if(opened >= newestTime)
-      {
-         newestTime = opened;
-         newest = (ulong)PositionGetInteger(POSITION_TICKET);
-      }
-   }
-   return newest;
-}
-
-//+------------------------------------------------------------------+
-//| Position management — mirror of position-manager.ts (WP0)         |
-//|                                                                   |
-//| Function-by-function mapping (TS → MQL5):                          |
-//|   progressR()               → ProgressR()                          |
-//|   quantiseVolume()          → QuantiseVolume()                     |
-//|   tightens()                → Tightens()                           |
-//|   stopIsLegal()             → StopIsLegal()                        |
-//|   managePosition() step 1   → PositionTerminalExit()               |
-//|   managePosition() step 2   → PositionApplyPartials()              |
-//|   managePosition() step 3   → PositionApplyBreakeven()             |
-//|   managePosition() step 4   → PositionApplyTrail()                 |
-//|   managePosition() step 5   → PositionApplyPyramid()               |
-//|   managePosition() dispatch → ManagePositionState()                |
-//|   positionStateFromFill()   → CapturePositionStateFromPlan()       |
-//|   state persistence         → SavePositionState()/LoadPositionState|
-//|                                                                   |
-//| The FIVE-STEP ORDER and the early return on a terminal exit are    |
-//| part of the contract, not an implementation detail: the golden     |
-//| vectors in position-manager.test.ts pin the order, and this file   |
-//| runs the steps in the same sequence with the same early returns.   |
-//+------------------------------------------------------------------+
-
-int ModeFromString(const string value)
-{
-   if(value == "scalp") return MODE_SCALP;
-   if(value == "swing") return MODE_SWING;
-   return MODE_INTRADAY;
-}
-
-ENUM_TIMEFRAMES TimeframeFromName(const string name)
-{
-   for(int i = 0; i < TF_COUNT; i++)
-      if(TF_NAMES[i] == name) return TF_LIST[i];
-   return PERIOD_M15;
-}
-
-double ProgressR(const PositionState &st, const double price)
-{
-   if(st.riskPoints <= 0 || st.point <= 0) return 0;
-   double distance = st.isBuy ? price - st.entry : st.entry - price;
-   return distance / (st.riskPoints * st.point);
-}
-
-// `progress` has reached `level`, tolerant of representation error — the exact
-// rule R_EPSILON documents on the TypeScript side.
-bool Reached(const double progress, const double level)
-{
-   return progress >= level - R_EPSILON;
-}
-
-double QuantiseVolume(const string symbol, const double lots)
-{
-   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
-   if(step <= 0) step = 0.01;
-   double quantised = MathFloor(lots / step + 1e-9) * step;
-   int volumeDigits = step < 0.01 ? 3 : 2;
-   return NormalizeDouble(quantised, volumeDigits);
-}
-
-// Is `candidate` a genuine tightening of `current` for this side?
-bool Tightens(const bool isBuy, const double candidate, const double current, const double epsilon)
-{
-   return isBuy ? candidate > current + epsilon : candidate < current - epsilon;
-}
-
-bool StopIsLegal(const string symbol, const bool isBuy, const double price,
-                 const double sl, const double point, const double *unused = NULL)
-{
-   if(point <= 0) return false;
-   double distancePoints = MathAbs(price - sl) / point;
-   long stops = SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL);
-   long freeze = SymbolInfoInteger(symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-   if(stops > 0 && distancePoints < (double)stops - LEVEL_EPSILON_POINTS) return false;
-   if(freeze > 0 && distancePoints < (double)freeze - LEVEL_EPSILON_POINTS) return false;
-   return isBuy ? sl < price : sl > price;
-}
-
-// The last CLOSED bar on the entry frame cleared the break-even trigger. Read
-// from bar index 1 on purpose: a forming bar is not structure, and reading it
-// would be the one place in this file where a decision saw the future.
-bool StructureConfirmedForBE(const PositionState &st)
-{
-   if(!st.beStructure) return true;
-   if(st.beTriggerR <= 0) return true;
-   double level = st.isBuy
-      ? st.entry + st.beTriggerR * st.riskPoints * st.point
-      : st.entry - st.beTriggerR * st.riskPoints * st.point;
-   MqlRates rates[];
-   if(CopyRates(st.symbol, (ENUM_TIMEFRAMES)st.entryPeriod, 1, 1, rates) < 1) return false;
-   return st.isBuy ? rates[0].close >= level : rates[0].close <= level;
-}
-
-// Closed bars on the entry frame since the position opened.
-int BarsOnEntryFrame(const PositionState &st)
-{
-   datetime openServer = (datetime)(st.openedAtMs / 1000 + g_brokerUtcOffsetSec);
-   datetime now = NowServer();
-   if(openServer <= 0 || now <= openServer) return 0;
-   int elapsed = Bars(st.symbol, (ENUM_TIMEFRAMES)st.entryPeriod, openServer, now);
-   return elapsed > 1 ? elapsed - 1 : 0;
-}
-
-// The broker's own session table says this symbol's session ends within
-// `minutesBefore`. When the table cannot be read the answer is FALSE: an
-// unreadable session is not a closing session, and flattening on a guess is
-// exactly the kind of invented data this desk refuses everywhere else.
-bool SymbolSessionClosingSoon(const string symbol, const int minutesBefore)
-{
-   MqlDateTime now;
-   TimeToStruct(NowServer(), now);
-   long nowSeconds = (long)now.hour * 3600 + (long)now.min * 60 + now.sec;
-
-   datetime from = 0, to = 0;
-   int sessions = SymbolInfoSessionTrade(symbol, (ENUM_DAY_OF_WEEK)now.day_of_week, 0, from, to);
-   if(sessions <= 0) return false;
-   for(int i = 0; i < sessions; i++)
-   {
-      if(!SymbolInfoSessionTrade(symbol, (ENUM_DAY_OF_WEEK)now.day_of_week, i, from, to)) continue;
-      long startSeconds = (long)from;
-      long endSeconds = (long)to;
-      // The MT5 session table reports the day's last session with `to` of 00:00
-      // meaning midnight, i.e. the end of the day rather than the start.
-      if(endSeconds <= startSeconds) endSeconds += 24 * 3600;
-      if(nowSeconds < startSeconds) continue;
-      long remaining = endSeconds - nowSeconds;
-      if(remaining > 0 && remaining <= (long)minutesBefore * 60) return true;
-   }
-   return false;
-}
-
-// ── Persistence ──────────────────────────────────────────────────────────────
-// Terminal global variables survive a restart, a chart reload and a VPS reboot,
-// so a position opened before a restart is still managed to the same rules after
-// it. Everything numeric is a global; the strings (plan id, symbol) come from the
-// position itself — the comment carries `nt:<planId>` and MT5 carries the symbol.
-string StateKey(const ulong ticket, const string field)
-{
-   return StringFormat("NTP4_%I64d_%s_%s", AccountInfoInteger(ACCOUNT_LOGIN),
-                       IntegerToString((long)ticket), field);
-}
-
-void SavePositionState(const PositionState &st)
-{
-   if(st.ticket == 0) return;
-   GlobalVariableSet(StateKey(st.ticket, "magic"),  7781);
-   GlobalVariableSet(StateKey(st.ticket, "entry"),  st.entry);
-   GlobalVariableSet(StateKey(st.ticket, "isl"),    st.initialSl);
-   GlobalVariableSet(StateKey(st.ticket, "risk"),   st.riskPoints);
-   GlobalVariableSet(StateKey(st.ticket, "point"),  st.point);
-   GlobalVariableSet(StateKey(st.ticket, "digits"), st.digits);
-   GlobalVariableSet(StateKey(st.ticket, "ivol"),   st.initialVolume);
-   GlobalVariableSet(StateKey(st.ticket, "ovol"),   st.openVolume);
-   GlobalVariableSet(StateKey(st.ticket, "omts"),   (double)st.openedAtMs);
-   GlobalVariableSet(StateKey(st.ticket, "cost"),   st.costPoints);
-   GlobalVariableSet(StateKey(st.ticket, "btr"),    st.beTriggerR);
-   GlobalVariableSet(StateKey(st.ticket, "boff"),   st.beOffsetR);
-   GlobalVariableSet(StateKey(st.ticket, "bstr"),   st.beStructure ? 1 : 0);
-   GlobalVariableSet(StateKey(st.ticket, "npart"),  st.partialCount);
-   for(int i = 0; i < st.partialCount && i < MAX_PARTIALS; i++)
-   {
-      GlobalVariableSet(StateKey(st.ticket, "pat" + IntegerToString(i)), st.partialAtR[i]);
-      GlobalVariableSet(StateKey(st.ticket, "ppc" + IntegerToString(i)), st.partialPct[i]);
-      GlobalVariableSet(StateKey(st.ticket, "pdn" + IntegerToString(i)), st.partialDone[i] ? 1 : 0);
-   }
-   GlobalVariableSet(StateKey(st.ticket, "tmult"),  st.trailMult);
-   GlobalVariableSet(StateKey(st.ticket, "tper"),   st.trailPeriod);
-   GlobalVariableSet(StateKey(st.ticket, "tact"),   st.trailActivateR);
-   GlobalVariableSet(StateKey(st.ticket, "tstep"),  st.trailStepPoints);
-   GlobalVariableSet(StateKey(st.ticket, "tstop"),  st.timeStopBars);
-   GlobalVariableSet(StateKey(st.ticket, "fflat"),  st.flatBeforeClose ? 1 : 0);
-   GlobalVariableSet(StateKey(st.ticket, "mspread"),st.maxSpreadPoints);
-   GlobalVariableSet(StateKey(st.ticket, "rexit"),  st.regimeExit ? 1 : 0);
-   GlobalVariableSet(StateKey(st.ticket, "phase"),  st.phase);
-   GlobalVariableSet(StateKey(st.ticket, "csl"),    st.currentSl);
-   GlobalVariableSet(StateKey(st.ticket, "beapp"),  st.beApplied ? 1 : 0);
-   GlobalVariableSet(StateKey(st.ticket, "padds"),  st.pyramidAdds);
-   GlobalVariableSet(StateKey(st.ticket, "best"),   st.bestR);
-   GlobalVariableSet(StateKey(st.ticket, "worst"),  st.worstR);
-   GlobalVariableSet(StateKey(st.ticket, "mode"),   st.mode);
-   GlobalVariableSet(StateKey(st.ticket, "eprd"),   st.entryPeriod);
-   GlobalVariableSet(StateKey(st.ticket, "buy"),    st.isBuy ? 1 : 0);
-}
-
-bool HasSavedPositionState(const ulong ticket)
-{
-   return GlobalVariableCheck(StateKey(ticket, "magic"));
-}
-
-double ReadState(const ulong ticket, const string field, const double fallback)
-{
-   string key = StateKey(ticket, field);
-   if(!GlobalVariableCheck(key)) return fallback;
-   return GlobalVariableGet(key);
-}
-
-bool LoadPositionState(const ulong ticket, const string symbol, PositionState &st)
-{
-   if(!HasSavedPositionState(ticket)) return false;
-   st.active        = true;
-   st.ticket        = ticket;
-   st.symbol        = symbol;
-   st.isBuy         = ReadState(ticket, "buy", 1) != 0;
-   st.mode          = (int)ReadState(ticket, "mode", MODE_INTRADAY);
-   st.entryPeriod   = (int)ReadState(ticket, "eprd", (double)PERIOD_M15);
-   st.entry         = ReadState(ticket, "entry", 0);
-   st.initialSl     = ReadState(ticket, "isl", 0);
-   st.riskPoints    = ReadState(ticket, "risk", 0);
-   st.point         = ReadState(ticket, "point", 0);
-   st.digits        = (int)ReadState(ticket, "digits", 5);
-   st.initialVolume = ReadState(ticket, "ivol", 0);
-   st.openVolume    = ReadState(ticket, "ovol", 0);
-   st.openedAtMs    = (long)ReadState(ticket, "omts", 0);
-   st.costPoints    = ReadState(ticket, "cost", 0);
-   st.beTriggerR    = ReadState(ticket, "btr", 0);
-   st.beOffsetR     = ReadState(ticket, "boff", 0);
-   st.beStructure   = ReadState(ticket, "bstr", 0) != 0;
-   st.partialCount  = (int)ReadState(ticket, "npart", 0);
-   for(int i = 0; i < MAX_PARTIALS; i++)
-   {
-      st.partialAtR[i] = ReadState(ticket, "pat" + IntegerToString(i), 0);
-      st.partialPct[i] = ReadState(ticket, "ppc" + IntegerToString(i), 0);
-      st.partialDone[i]= ReadState(ticket, "pdn" + IntegerToString(i), 0) != 0;
-   }
-   st.trailMult       = ReadState(ticket, "tmult", 0);
-   st.trailPeriod     = ReadState(ticket, "tper", 14);
-   st.trailActivateR  = ReadState(ticket, "tact", 0);
-   st.trailStepPoints = ReadState(ticket, "tstep", 0);
-   st.timeStopBars    = ReadState(ticket, "tstop", 0);
-   st.flatBeforeClose = ReadState(ticket, "fflat", 0) != 0;
-   st.maxSpreadPoints = ReadState(ticket, "mspread", 0);
-   st.regimeExit      = ReadState(ticket, "rexit", 0) != 0;
-   st.phase           = (int)ReadState(ticket, "phase", PHASE_OPEN_RISK);
-   st.currentSl       = ReadState(ticket, "csl", st.initialSl);
-   st.beApplied       = ReadState(ticket, "beapp", 0) != 0;
-   st.pyramidAdds     = (int)ReadState(ticket, "padds", 0);
-   st.bestR           = ReadState(ticket, "best", 0);
-   st.worstR          = ReadState(ticket, "worst", 0);
-   return true;
-}
-
-void ClearPositionState(const ulong ticket)
-{
-   if(ticket == 0) return;
-   GlobalVariableDel(StateKey(ticket, "magic"));
-   GlobalVariableDel(StateKey(ticket, "entry"));
-   GlobalVariableDel(StateKey(ticket, "isl"));
-   GlobalVariableDel(StateKey(ticket, "risk"));
-   GlobalVariableDel(StateKey(ticket, "point"));
-   GlobalVariableDel(StateKey(ticket, "digits"));
-   GlobalVariableDel(StateKey(ticket, "ivol"));
-   GlobalVariableDel(StateKey(ticket, "ovol"));
-   GlobalVariableDel(StateKey(ticket, "omts"));
-   GlobalVariableDel(StateKey(ticket, "cost"));
-   GlobalVariableDel(StateKey(ticket, "btr"));
-   GlobalVariableDel(StateKey(ticket, "boff"));
-   GlobalVariableDel(StateKey(ticket, "bstr"));
-   GlobalVariableDel(StateKey(ticket, "npart"));
-   for(int i = 0; i < MAX_PARTIALS; i++)
-   {
-      GlobalVariableDel(StateKey(ticket, "pat" + IntegerToString(i)));
-      GlobalVariableDel(StateKey(ticket, "ppc" + IntegerToString(i)));
-      GlobalVariableDel(StateKey(ticket, "pdn" + IntegerToString(i)));
-   }
-   GlobalVariableDel(StateKey(ticket, "tmult"));
-   GlobalVariableDel(StateKey(ticket, "tper"));
-   GlobalVariableDel(StateKey(ticket, "tact"));
-   GlobalVariableDel(StateKey(ticket, "tstep"));
-   GlobalVariableDel(StateKey(ticket, "tstop"));
-   GlobalVariableDel(StateKey(ticket, "fflat"));
-   GlobalVariableDel(StateKey(ticket, "mspread"));
-   GlobalVariableDel(StateKey(ticket, "rexit"));
-   GlobalVariableDel(StateKey(ticket, "phase"));
-   GlobalVariableDel(StateKey(ticket, "csl"));
-   GlobalVariableDel(StateKey(ticket, "beapp"));
-   GlobalVariableDel(StateKey(ticket, "padds"));
-   GlobalVariableDel(StateKey(ticket, "best"));
-   GlobalVariableDel(StateKey(ticket, "worst"));
-   GlobalVariableDel(StateKey(ticket, "mode"));
-   GlobalVariableDel(StateKey(ticket, "eprd"));
-   GlobalVariableDel(StateKey(ticket, "buy"));
 }
 
 //+------------------------------------------------------------------+
@@ -2913,54 +1860,6 @@ string JsonObject(const string json, const string key)
       {
          depth--;
          if(depth == 0) return StringSubstr(json, start, i - start + 1);
-      }
-   }
-   return "";
-}
-
-// The raw text between the brackets of `"key":[` … `]`. Empty when the key is
-// absent, so a caller can distinguish "no array" from "empty array".
-string JsonArray(const string json, const string key)
-{
-   string needle = "\"" + key + "\":[";
-   int start = StringFind(json, needle);
-   if(start < 0) return "";
-   start += StringLen(needle);
-   int depth = 0;
-   for(int i = start; i < StringLen(json); i++)
-   {
-      ushort ch = StringGetCharacter(json, i);
-      if(ch == '{' || ch == '[') depth++;
-      else if(ch == '}' || ch == ']')
-      {
-         if(ch == ']' && depth == 0) return StringSubstr(json, start, i - start);
-         depth--;
-      }
-   }
-   return "";
-}
-
-// The next `{…}` element of an array body, advancing `cursor` past it. Brace
-// matching means a nested object cannot truncate its parent.
-string NextObjectInArray(const string body, int &cursor)
-{
-   int start = -1;
-   for(int i = cursor; i < StringLen(body); i++)
-      if(StringGetCharacter(body, i) == '{') { start = i; break; }
-   if(start < 0) return "";
-   int depth = 0;
-   for(int i = start; i < StringLen(body); i++)
-   {
-      ushort ch = StringGetCharacter(body, i);
-      if(ch == '{') depth++;
-      else if(ch == '}')
-      {
-         depth--;
-         if(depth == 0)
-         {
-            cursor = i + 1;
-            return StringSubstr(body, start, i - start + 1);
-         }
       }
    }
    return "";

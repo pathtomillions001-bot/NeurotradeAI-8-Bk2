@@ -114,17 +114,8 @@ const router: IRouter = Router();
  * loop that stalled the heartbeat), targeted `history` re-seed keys, a shorter
  * WebRequest timeout, beat-duration logging, and timestamps self-corrected
  * against this server's clock (`serverTime`) instead of the machine clock.
- *
- * v4.00 adds POSITION MANAGEMENT (WP0): the plan's management block is captured
- * into a per-ticket `PositionState` at fill and persisted to terminal globals,
- * so break-even, the partial ladder, the entry-timeframe chandelier trail, the
- * time stop, session/news flattening and the pyramid add survive the plan that
- * created them. v4 also reports what it DID — a `management` array of events on
- * each heartbeat — and implements the `set_management` command end to end.
- * A v3 terminal pairs and streams but silently drops the whole ladder, which is
- * why the version gate below matters more for v4 than it did before.
  */
-export const EXPECTED_EA_VERSION = "4.00";
+export const EXPECTED_EA_VERSION = "3.04";
 
 interface PendingPairing {
   code: string;
@@ -653,34 +644,6 @@ function parseResult(raw: unknown): CommandResult | null {
   };
 }
 
-/**
- * A management event from the terminal's position machine (EA v4.00+).
- *
- * The machine is the authority on what happened to a position — it is the part
- * of the system holding the stop, the ladder and the trail — so these events are
- * taken at face value and journaled rather than re-derived here. A malformed
- * entry is dropped, never guessed at: an invented stop move in the journal is
- * worse than a missing one.
- */
-function parseManagementEvent(
-  raw: unknown,
-  now: number,
-): { ticket: number; symbol: string; action: string; value: number; detail: string; ts: number } | null {
-  if (!raw || typeof raw !== "object") return null;
-  const event = raw as Record<string, unknown>;
-  const action = String(event.action ?? "");
-  const ticket = Math.round(num(event.ticket));
-  if (!action || !ticket) return null;
-  return {
-    ticket,
-    symbol: String(event.symbol ?? ""),
-    action,
-    value: num(event.value),
-    detail: String(event.detail ?? ""),
-    ts: num(event.ts, now),
-  };
-}
-
 function parseNewsEvent(raw: unknown): HighImpactNewsEvent | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
@@ -998,29 +961,6 @@ router.post("/sync", async (req, res) => {
       if (desk.riskState.haltedUntilNextSession) {
         journal(desk, "risk", null, desk.riskState.haltReason ?? "Desk halted.");
       }
-    }
-  }
-
-  // What the position machine DID, reported by the EA (v4.00+).
-  //
-  // Before v4 the journal could only say "Position #12 opened" and later
-  // "closed" — with no record of the stop being moved, a partial banked, or the
-  // time stop firing, which are the decisions that actually determine the
-  // outcome. The event carries its own sentence, so the journal shows the
-  // machine's reasoning next to the trade it belongs to.
-  if (Array.isArray(body.management)) {
-    for (const raw of body.management) {
-      const event = parseManagementEvent(raw, now);
-      if (!event) continue;
-      journal(
-        desk,
-        event.action === "closed" ? "execution" : "management",
-        event.symbol || null,
-        `#${event.ticket} ${event.action.replace(/_/g, " ")}${
-          event.value > 0 && event.action !== "closed" ? ` (${event.value})` : ""
-        } — ${event.detail}`,
-        { ticket: event.ticket, action: event.action },
-      );
     }
   }
 

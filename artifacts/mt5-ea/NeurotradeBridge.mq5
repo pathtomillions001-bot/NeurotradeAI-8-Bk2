@@ -171,6 +171,18 @@
 //|     off by default because it is bytes on every beat) the chart    |
 //|     symbol's tick tape rides the heartbeat so a flow agent can     |
 //|     measure something other than one quote per 500 ms.             |
+//| 23. THE v3.05 SECTION COMPILES.                                  |
+//|     MQL5 resolves names in TEXT ORDER, and v3.05 was spliced in  |
+//|     at the position its FUNCTIONS belong — after the plan and    |
+//|     command handlers that already used PositionState and the     |
+//|     PM_* constants. The published file therefore compiled        |
+//|     nowhere: "declaration without type", "undeclared             |
+//|     identifier 'PM_TRAIL_MULT_*'", "cannot convert parameter     |
+//|     'PositionState' to 'int'". Everything the position machine   |
+//|     SHARES (macros, structs, arrays) is now declared with the    |
+//|     plan and link state near the top of this file, and the two   |
+//|     GetTickCount64() readings are `ulong`, as the API returns    |
+//|     them, instead of `long`.                                     |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -188,6 +200,16 @@
 #property copyright "NeuroTrade AI"
 #property version   "3.05"
 #property strict
+
+// The version this EA reports on the wire.
+//
+// `#property version` must be a literal, so the value necessarily appears
+// twice; the integrity test asserts the two agree. v3.05 shipped with the
+// PAIRING body reporting 3.05 and the HEARTBEAT body still reporting 3.04 — and
+// the heartbeat is the one the Desk stores (`desk.terminal.eaVersion`), so the
+// Desk's "this terminal is running an older EA" check could never tell a v3.05
+// terminal from a v3.04 one.
+#define EA_VERSION "3.05"
 
 #include <Trade/Trade.mqh>
 
@@ -371,6 +393,144 @@ long      g_computerClockSkewMs  = 0;
 bool      g_clockWarningPrinted  = false;
 
 //+------------------------------------------------------------------+
+//| v3.05 position-manager SHARED STATE                              |
+//| Declared HERE, not beside the machine that uses it.              |
+//+------------------------------------------------------------------+
+// WHY: MQL5's preprocessor is single-pass and the compiler resolves names in
+// TEXT ORDER. A `#define`, a `struct` or a global referenced ABOVE its
+// declaration is an error — "undeclared identifier", "declaration without
+// type", "cannot convert parameter" — never a forward reference. (C++ accepts
+// some of these; MQL5 does not.)
+//
+// v3.05 was appended to this file at the position its FUNCTIONS belong in —
+// after `ArmPlanFromJson()` and the command handlers, which already used
+// `PositionState` and the `PM_*` constants — so the published EA did not
+// compile for anybody:
+//
+//   int ParsePartials(const string json, PositionState &ps)
+//      -> declaration without type / comma expected
+//   ParsePartials(management, policyCarrier)  [ArmPlanFromJson]
+//      -> cannot convert parameter 'PositionState' to 'int'
+//   PM_TRAIL_MULT_SCALP / _INTRADAY / _SWING
+//      -> undeclared identifier
+//
+// So every macro, type and array the position manager SHARES with the rest of
+// the EA lives here; only its functions stay in the v3.05 section below (see
+// "POSITION MANAGEMENT STATE MACHINE"). src/lib/ea-source-integrity.test.ts
+// pins this ordering, so a re-splice cannot reintroduce it.
+
+#define MAX_POS_STATES   128
+#define MAX_ATR_HANDLES  48
+#define MAX_TICK_BUF     4000
+#define MAX_MGMT_EVENTS  64
+// MQL5 global variables hold a DOUBLE only. A 29-field position record cannot
+// fit in one, so the durable record lives in the terminal's COMMON files
+// folder (shared by every chart, exactly like the link file) and a global
+// variable is kept as the TICKET INDEX + freshness mirror. That is what makes
+// `PsRestoreAll()` able to find every position this EA manages after a
+// restart without scanning the filesystem.
+#define PS_PREFIX        "NTPS_"
+#define PS_DIR           "Neurotrade\\pos\\"
+
+// Chandelier multiples on the ENTRY timeframe's ATR (v3.05).
+#define PM_TRAIL_MULT_SCALP    2.0
+#define PM_TRAIL_MULT_INTRADAY 2.5
+#define PM_TRAIL_MULT_SWING    3.0
+#define PM_TRAIL_MIN_STEP_ATR  0.1
+#define PM_BREAKEVEN_PROFIT_R  0.05
+#define PM_MODIFY_COOLDOWN_MS  1500
+#define PM_MODIFY_COOLDOWN_R   0.5
+#define PM_TIME_STOP_PROGRESS_R 0.5
+#define PM_TIME_STOP_MFE_R      1.0
+#define PM_FLAT_BEFORE_CLOSE_MIN 15
+#define PM_SWING_LOOKBACK       2
+// A modify that fails is retried on a later evaluation with this back-off,
+// never in a tight loop: OrderSend() is synchronous and a rejected modify
+// retried immediately is a rejected modify.
+#define PM_RETRY_BACKOFF_MS     2000
+#define PM_MAX_RETRY            4
+
+/** One managed position. Mirrors position-manager.ts `PositionState` 1:1. */
+struct PositionState
+{
+   ulong           ticket;
+   string          planId;
+   string          symbol;
+   bool            isBuy;
+   int             mode;            // 0 scalp, 1 intraday, 2 swing
+   int             entryTfIndex;    // index into TF_LIST
+   double          entry;
+   double          initialSl;
+   double          sl;
+   double          tp;
+   double          riskPrice;
+   double          volume;
+   double          initialVolume;
+   long            openedAt;        // UTC epoch ms
+   int             barsSinceEntry;
+   double          progressR;
+   double          mfeR;
+   double          bestPrice;
+   string          stage;
+   int             partialsDone;
+   bool            beDone;
+   bool            trailArmed;
+   int             pyramidAdds;
+   double          closedVolume;
+   double          costPrice;
+   double          atrEntry;
+   long            lastModifyAt;
+   double          lastModifyR;
+   long            retryAfter;
+   int             retryCount;
+   // ── Policy: the position's own copy. Never looked up in g_plans. ──────────
+   double          beTriggerR;
+   double          beOffsetR;
+   bool            beStructure;
+   int             partialCount;
+   double          partialAtR[4];
+   double          partialPct[4];
+   bool            trailEnabled;
+   double          trailMult;
+   double          trailActivateR;
+   double          trailStepPoints;
+   int             trailPeriod;
+   bool            timeStopEnabled;
+   int             timeStopBars;
+   bool            pyramidEnabled;
+   int             pyramidMaxAdds;
+   double          pyramidAddAtR;
+   double          pyramidSizeRatio;
+   bool            pyramidRequireBe;
+   bool            flatBeforeClose;
+};
+
+struct AtrHandleRec
+{
+   string          symbol;
+   ENUM_TIMEFRAMES tf;
+   int             period;
+   int             handle;
+};
+
+struct TickRec
+{
+   string          symbol;
+   long            ts;
+   double          bid;
+   double          ask;
+};
+
+PositionState g_ps[MAX_POS_STATES];
+int           g_psCount = 0;
+AtrHandleRec  g_atrHandles[MAX_ATR_HANDLES];
+int           g_atrHandleCount = 0;
+TickRec       g_ticks[MAX_TICK_BUF];
+int           g_tickCount = 0;
+string        g_mgmtEvents[MAX_MGMT_EVENTS];
+int           g_mgmtEventCount = 0;
+
+//+------------------------------------------------------------------+
 //| Lifecycle                                                         |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -463,13 +623,18 @@ void OnTimer()
    // v3.04: the beat is timed. A heartbeat slower than 1.5 s is logged with its
    // duration, so a slow beat (payload build, server response) is visible in
    // the Experts journal instead of guessed from a stale board.
-   long beatStart = GetTickCount64();
+   //
+   // GetTickCount64() returns `ulong`. Holding it in a `long` (as v3.05 did) is
+   // a narrowing conversion MetaEditor reports as "possible loss of data due to
+   // type conversion from 'ulong' to 'long'", and a tick counter that wrapped
+   // would read as a huge negative duration. The elapsed time is unsigned.
+   ulong beatStart = GetTickCount64();
    if(g_token == "")
       TryPair();
    else
       Sync();
-   long beatMs = GetTickCount64() - beatStart;
-   if(beatMs > 1500)
+   ulong beatMs = GetTickCount64() - beatStart;
+   if(beatMs > (ulong)1500)
       Log(StringFormat("heartbeat took %d ms — payload build or server response was slow; quotes may age past the freshness gate", (int)beatMs));
 
    RollDayBaselineIfNeeded();
@@ -587,7 +752,7 @@ void TryPair()
    body += "\"login\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
    body += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
    body += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
-   body += "\"version\":\"3.05\",";
+   body += "\"version\":\"" + EA_VERSION + "\",";
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
    body += "\"currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\"},";
    // All broker symbols are discovered once at pairing. This is a catalogue,
@@ -798,7 +963,7 @@ void Sync()
    // Desk say "your EA is out of date" instead of leaving a stale terminal
    // silently disagreeing with it about the calendar.
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
-   body += "\"version\":\"3.04\",";
+   body += "\"version\":\"" + EA_VERSION + "\",";
    // Tell the server how this terminal's clock relates to UTC. Combined with
    // the UTC-normalised timestamps below it lets the Desk detect a skewed
    // clock instead of trusting (or silently mis-trusting) every tick. From
@@ -2161,116 +2326,11 @@ double NormaliseVolume(const string symbol, const double lots)
 //| docs/mt5-live-desk-v4.md, "MQL5 ↔ TypeScript mapping").           |
 //+------------------------------------------------------------------+
 
-#define MAX_POS_STATES   128
-#define MAX_ATR_HANDLES  48
-#define MAX_TICK_BUF     4000
-#define MAX_MGMT_EVENTS  64
-// MQL5 global variables hold a DOUBLE only. A 29-field position record cannot
-// fit in one, so the durable record lives in the terminal's COMMON files
-// folder (shared by every chart, exactly like the link file) and a global
-// variable is kept as the TICKET INDEX + freshness mirror. That is what makes
-// `PsRestoreAll()` able to find every position this EA manages after a
-// restart without scanning the filesystem.
-#define PS_PREFIX        "NTPS_"
-#define PS_DIR           "Neurotrade\\pos\\"
-
-// Chandelier multiples on the ENTRY timeframe's ATR (v3.05).
-#define PM_TRAIL_MULT_SCALP    2.0
-#define PM_TRAIL_MULT_INTRADAY 2.5
-#define PM_TRAIL_MULT_SWING    3.0
-#define PM_TRAIL_MIN_STEP_ATR  0.1
-#define PM_BREAKEVEN_PROFIT_R  0.05
-#define PM_MODIFY_COOLDOWN_MS  1500
-#define PM_MODIFY_COOLDOWN_R   0.5
-#define PM_TIME_STOP_PROGRESS_R 0.5
-#define PM_TIME_STOP_MFE_R      1.0
-#define PM_FLAT_BEFORE_CLOSE_MIN 15
-#define PM_SWING_LOOKBACK       2
-// A modify that fails is retried on a later evaluation with this back-off,
-// never in a tight loop: OrderSend() is synchronous and a rejected modify
-// retried immediately is a rejected modify.
-#define PM_RETRY_BACKOFF_MS     2000
-#define PM_MAX_RETRY            4
-
-/** One managed position. Mirrors position-manager.ts `PositionState` 1:1. */
-struct PositionState
-{
-   ulong           ticket;
-   string          planId;
-   string          symbol;
-   bool            isBuy;
-   int             mode;            // 0 scalp, 1 intraday, 2 swing
-   int             entryTfIndex;    // index into TF_LIST
-   double          entry;
-   double          initialSl;
-   double          sl;
-   double          tp;
-   double          riskPrice;
-   double          volume;
-   double          initialVolume;
-   long            openedAt;        // UTC epoch ms
-   int             barsSinceEntry;
-   double          progressR;
-   double          mfeR;
-   double          bestPrice;
-   string          stage;
-   int             partialsDone;
-   bool            beDone;
-   bool            trailArmed;
-   int             pyramidAdds;
-   double          closedVolume;
-   double          costPrice;
-   double          atrEntry;
-   long            lastModifyAt;
-   double          lastModifyR;
-   long            retryAfter;
-   int             retryCount;
-   // ── Policy: the position's own copy. Never looked up in g_plans. ──────────
-   double          beTriggerR;
-   double          beOffsetR;
-   bool            beStructure;
-   int             partialCount;
-   double          partialAtR[4];
-   double          partialPct[4];
-   bool            trailEnabled;
-   double          trailMult;
-   double          trailActivateR;
-   double          trailStepPoints;
-   int             trailPeriod;
-   bool            timeStopEnabled;
-   int             timeStopBars;
-   bool            pyramidEnabled;
-   int             pyramidMaxAdds;
-   double          pyramidAddAtR;
-   double          pyramidSizeRatio;
-   bool            pyramidRequireBe;
-   bool            flatBeforeClose;
-};
-
-struct AtrHandleRec
-{
-   string          symbol;
-   ENUM_TIMEFRAMES tf;
-   int             period;
-   int             handle;
-};
-
-struct TickRec
-{
-   string          symbol;
-   long            ts;
-   double          bid;
-   double          ask;
-};
-
-PositionState g_ps[MAX_POS_STATES];
-int           g_psCount = 0;
-AtrHandleRec  g_atrHandles[MAX_ATR_HANDLES];
-int           g_atrHandleCount = 0;
-TickRec       g_ticks[MAX_TICK_BUF];
-int           g_tickCount = 0;
-string        g_mgmtEvents[MAX_MGMT_EVENTS];
-int           g_mgmtEventCount = 0;
+// The state this section operates on — the `PositionState` record, its arrays
+// and the `PM_*` policy constants — is declared in the SHARED STATE section
+// near the top of this file, together with the plan and link state it belongs
+// with. MQL5 resolves names in TEXT ORDER, and the plan/command handlers ABOVE
+// this section already reference them, so the declarations cannot live here.
 
 //+------------------------------------------------------------------+
 //| State array plumbing                                             |

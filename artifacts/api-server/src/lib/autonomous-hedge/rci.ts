@@ -53,6 +53,8 @@ export function recoverySpecP0(spec: AutonomousContractSpec): number {
 
 export interface RciCandidateInput {
   spec: AutonomousContractSpec;
+  /** Market symbol — keys the WP6 honesty tilt (e-processes are per market). */
+  symbol?: string;
   /** Payout multiplier used for sizing — the live quote when fresh, else the table. */
   payout: number;
   /** Where `payout` came from (telemetry + tiebreak). */
@@ -100,6 +102,12 @@ export function scoreRecoveryCandidates(input: {
   /** Remaining drawdown headroom a single stake may consume (WP4). */
   headroomCap: number;
   weights?: RciWeights;
+  /**
+   * WP6 honesty tilt: per-candidate multiplier applied to the margin weight w1.
+   * Must return a factor in [TILT_FLOOR, 1] — it can only REDUCE margin
+   * aversion, never amplify it, and never touches stakes. Omitted ⇒ 1.
+   */
+  marginWeightFactor?: (spec: AutonomousContractSpec, symbol?: string) => number;
 }): RciDecision {
   const debt = Math.max(0, Number.isFinite(input.debt) ? input.debt : 0);
   const targetRaw = input.targetProfit ?? 0;
@@ -117,7 +125,10 @@ export function scoreRecoveryCandidates(input: {
       const feasible = firstStake <= cap;
       const ruinPreview = Number.isFinite(c.ruinPreview) ? c.ruinPreview! : 0;
       const clearTimePreview = Number.isFinite(c.clearTimePreview) ? c.clearTimePreview! : 0;
-      const rci = w.w1 * margin + w.w2 * ruinPreview + w.w3 * clearTimePreview;
+      const rawFactor = input.marginWeightFactor ? input.marginWeightFactor(c.spec) : 1;
+      // Clamp defensively: the tilt is a REDUCTION bounded below by 0.5.
+      const factor = Number.isFinite(rawFactor) ? Math.min(1, Math.max(0.5, rawFactor)) : 1;
+      const rci = w.w1 * factor * margin + w.w2 * ruinPreview + w.w3 * clearTimePreview;
       return { ...c, p0, margin, geometry, firstStake, feasible, rci };
     });
 

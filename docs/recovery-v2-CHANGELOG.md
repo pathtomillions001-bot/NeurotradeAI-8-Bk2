@@ -175,3 +175,38 @@ episodes per λ, seed 1, debt $1 / base $1 / payout 1.95 / p0 0.5 / budget 25×
   always < 0.2 %. Recorded honestly rather than tuned away.
 - Cached preview answers in ~0.01 ms (median); cold solve ≈ 100 ms once per
   debt bucket. Scan-payload budget (< 5 ms) is met on the hot path.
+
+## WP6 — Statistical honesty battery + bounded RCI margin tilt
+
+The engine's premise is that Deriv digits are i.i.d. CSPRNG and recovery
+contracts carry a 1.6–10.7% margin, so they are negative-expectation. No
+selection rule can manufacture edge. WP6 makes that premise TESTABLE per
+market, continuously, and gates the ONLY data-driven adjustment behind evidence
+strong enough to survive multiple testing.
+
+1. `statistical-honesty.ts` (pure, dependency-free): χ² digit-uniformity,
+   serial correlation lags 1–5, a 10×10 transition-independence χ² (df 81),
+   Wald–Wolfowitz runs, Rise/Fall sign-runs, Benjamini–Hochberg (q = 0.10), and
+   an anytime-valid e-process (uniform-mixture likelihood-ratio martingale) on
+   each contract's hit rate vs its fair p0. χ² tails use an in-repo regularised
+   incomplete gamma; the normal tail an Abramowitz–Stegun erf.
+2. `honesty-monitor.ts` (stateful): accumulates each watched market's digit
+   tape (deduped by tick sequence), re-runs the battery every 500 new ticks,
+   keeps one e-process per recovery contract, and applies the tilt gate WITH
+   hysteresis — ON only when e ≥ 20 AND the battery is BH-significant, OFF
+   below e < 1/20 or once the battery is clean again.
+3. RCI wiring: the tilt is a per-candidate multiplier on the margin weight w1,
+   clamped to [0.5, 1] — a bounded REDUCTION that only reorders selection. It
+   can never raise a stake. Normal mode is untouched.
+4. Kill switch: `recoveryTiltEnabled` (WP8 wires the setting) AND recovery v2
+   mode must both be on; both default OFF, so factor is 1 for every contract
+   until an operator opts in.
+
+Acceptance evidence (research-reports/recovery/*wp6-honesty-validation*, 400
+i.i.d. runs × 5000 ticks, seed-offset per run):
+- Tilt activated on i.i.d. data in 0.25 % of runs — gate ≤ 5 % PASS.
+- BH-significant battery alone: 10.8 %; e ≥ 20 alone: 3.8 % — requiring BOTH is
+  what keeps the joint rate at 0.25 % (a ~40× false-positive reduction).
+- Planted edge p(Even) = 0.55 vs p0 = 0.5: detected in 94 % of runs, median
+  734 trades to activation.
+- Battery cost ≈ 1.2 ms per market (runs every 500 new ticks, not per scan).

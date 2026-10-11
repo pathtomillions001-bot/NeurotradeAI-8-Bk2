@@ -112,6 +112,14 @@ itself when the e-process of realised outcomes vs the claimed edge falls below
 1/20. The expected, published result on Deriv data is: **no exploitable
 pattern detected.**
 
+Implementation: `statistical-honesty.ts` holds the pure battery, BH, and the
+uniform-mixture e-process; `honesty-monitor.ts` accumulates each market's tape
+(deduped by tick sequence), re-runs the battery every 500 new ticks, and owns
+the per-contract e-processes with hysteresis. The RCI scorer takes a
+per-candidate `marginWeightFactor` clamped to [0.5, 1], so the tilt can only
+reorder selection — never a stake increase. Kill switch: `recoveryTiltEnabled`
+plus recovery-v2 mode, both defaulting OFF.
+
 ## 7. Quote freshness (WP2)
 
 Live-quote TTL ≤ 3 s keyed by symbol/contract/barrier/duration/currency. At
@@ -174,6 +182,14 @@ grid; default λ = 0.5 within 1 % on P(clear)/P(rebase)/E[trades]. Cached
 preview ≈ 0.01 ms (gate < 5 ms); cold solve ≈ 100 ms per debt bucket (one-off).
 The optimizer ("auto") minimises |CVaR99|/capital + w·E[trades] s.t.
 P(rebase) ≤ 0.10 over λ ∈ {0.25, 0.33, 0.5, 0.67, 1.0}.
+
+WP6 honesty validation (`*wp6-honesty-validation*`, 400 i.i.d. runs × 5000
+ticks): tilt activated on i.i.d. data in 0.25 % of runs (gate ≤ 5 %). Requiring
+BOTH e ≥ 20 AND a BH-significant battery drops the joint false-positive rate to
+~1/40th of either alone. Planted edge p = 0.55 vs p0 = 0.5 detected in 94 % of
+runs (median 734 trades). The tilt factor is clamped to [0.5, 1] — selection
+order only, stakes never grow — and the kill switch (recoveryTiltEnabled +
+v2 mode, both default OFF) forces factor 1 everywhere.
 
 WP4 adaptive acceptance (`wp4-accept-*`, 200k episodes, Even/Odd, base $1,
 capital $200, seed 1): adaptive λ=0.5, budget 25×, φ=5% — CVaR99 −20.00 vs

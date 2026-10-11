@@ -59,6 +59,7 @@ import { recoveryDpPreview, chooseOptimalLambda, type DpPreview } from "./markov
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
+import { HonestyMonitor, fairP0ForContractKey } from "./honesty-monitor";
 import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
 import {
@@ -164,6 +165,8 @@ interface HedgeSession {
   lastEmitAt: number;
   execFailures: number;
   ctx: { at: number; value: HedgeContext } | null;
+  /** WP6 honesty battery: per-market tape tests + per-contract e-processes. */
+  honesty: HonestyMonitor;
 }
 
 const CONTEXT_TTL_MS = 2_000;
@@ -210,6 +213,9 @@ function newSession(): HedgeSession {
     lastEmitAt: 0,
     execFailures: 0,
     ctx: null,
+    // WP6: kill-switch defaults OFF — the tilt can only ever reduce the RCI
+    // margin weight, and only when explicitly enabled (WP8 wires the setting).
+    honesty: new HonestyMonitor(false),
   };
 }
 
@@ -358,12 +364,14 @@ function decideRecoveryV2(
   ctx: HedgeContext,
   lossRun: number,
   escalation: number,
+  honesty: HonestyMonitor,
 ): HedgeDecision | null {
   if (rows.length === 0) return null;
   const ledger = recoveryEngine.getState();
   const tapeAgeBySymbol = new Map(tapes.map((t) => [t.symbol, t.ageMs]));
   const candidates: RciCandidateInput[] = rows.map((row) => ({
     spec: { type: row.contract, digit: row.barrier },
+    symbol: row.symbol,
     payout: row.payout,
     quoteSource: "fallback", // live re-verification happens at buy time (WP2)
     quoteAgeMs: 0,
@@ -385,12 +393,21 @@ function decideRecoveryV2(
         headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
       }).headroomCap
     : ctx.settings.maxTradeStake;
+  // WP4 wired the margin preference (default 1 ≡ the old default weights);
+  // WP6's honesty tilt can only ever multiply it DOWN per contract, and only
+  // when the kill switch is on — the factor is clamped to [0.5, 1] inside.
+  const marginPrefRaw = (ctx.settings as { recoveryMarginPreference?: unknown }).recoveryMarginPreference;
+  const marginPreference = Number.isFinite(Number(marginPrefRaw))
+    ? Math.min(10, Math.max(0, Number(marginPrefRaw)))
+    : DEFAULT_RCI_WEIGHTS.w1;
   const decision = scoreRecoveryCandidates({
     candidates,
     debt,
     targetProfit,
     headroomCap,
-    weights: DEFAULT_RCI_WEIGHTS,
+    weights: { w1: marginPreference, w2: 0, w3: 0 },
+    marginWeightFactor: (spec, symbol) =>
+      symbol ? honesty.marginWeightFactor(symbol, `${spec.type}:${spec.digit}`) : 1,
   });
   if (!decision.chosen) return null;
 
@@ -693,6 +710,12 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
 
   const ctx = await getContext(host, s, false);
+  // WP6 kill switch, re-read every cycle: the honesty tilt only exists when
+  // recovery v2 is enabled at all AND the operator opts in (defaults OFF).
+  s.honesty.setEnabled(
+    Boolean((ctx.settings as { recoveryTiltEnabled?: unknown }).recoveryTiltEnabled) &&
+      (ctx.settings.recoveryV2Mode ?? "off") !== "off",
+  );
   const mode: HedgeMode = recoveryEngine.isInRecovery() ? "RECOVERY" : "NORMAL";
   const ledger = recoveryEngine.getState();
   const lossRun = ledger.streakLossCount;
@@ -743,6 +766,10 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     if (specs.length === 0) { feed.noSpecs += 1; continue; }
     if (tape.digits.length < HEDGE_MIN_TICKS) { feed.thin += 1; continue; }
     tapes.push(tape);
+    // WP6 honesty: accumulate this market's ticks for the statistical battery.
+    // The monitor dedupes the rolling window by tick sequence, so re-feeding
+    // the same tape each cycle costs an O(overlap) compare, not a re-append.
+    s.honesty.ingestTape(tape.symbol, tape.digits, tape.prices, tape.tickSequence);
     rows.push(...buildMarketCandidates({
       symbol: market.symbol,
       group: hedgeGroupIndex(market.symbol),
@@ -763,7 +790,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   //     or is logged beside it (shadow). Normal mode is never touched.
   const v2Mode = ctx.settings.recoveryV2Mode ?? "off";
   if (mode === "RECOVERY" && v2Mode !== "off" && rows.length > 0) {
-    const v2Decision = decideRecoveryV2(rows, tapes, ctx, lossRun, escalation);
+    const v2Decision = decideRecoveryV2(rows, tapes, ctx, lossRun, escalation, s.honesty);
     if (v2Mode === "shadow") {
       logger.info(
         {
@@ -1277,6 +1304,8 @@ async function executeDecision(
       closedAt: new Date(),
     }).returning();
     recordLedger(sessionId, { won, profit, cost: stake, contract: b.contract, payout, maxRecoverySteps: ctx.settings.maxRecoverySteps });
+    // WP6: this outcome feeds the contract's anytime-valid e-process.
+    s.honesty.recordOutcome(b.symbol, b.contract, fairP0ForContractKey(b.contract), won);
     applySettlement(s.memory, {
       won,
       key: b.key,
@@ -1432,6 +1461,9 @@ async function executeDecision(
   if (settlement === "already") {
     logger.info({ rowId: openRow.id }, "Autonomous 1-tick: settlement already recorded by the reconciler — ledger not updated twice");
   }
+  // WP6: feed the settled outcome into the contract's e-process. Counted once
+  // per settlement regardless of which path wrote the ledger row.
+  s.honesty.recordOutcome(b.symbol, b.contract, fairP0ForContractKey(b.contract), result.won);
   clearExposure(s);
   applySettlement(s.memory, {
     won: result.won,

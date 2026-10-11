@@ -1282,7 +1282,7 @@ risk is never above the 0.35% cap — holds at exactly 1.0000×.
 
 ## 11. WP9 — learning and governance, and the difference between a counter and an e-value
 
-### 15.1 The question the layer answers
+### 11.1 The question the layer answers
 
 Every earlier layer answers a question about the *market*. WP9 answers one about
 the desk: **is what we are doing still working?** That question has a property the
@@ -1294,7 +1294,7 @@ often halves a working agent, and one that never fires is a decoration.
 WP9 therefore ships exactly one acting statistic per agent (an e-process), one
 reporting statistic (a change detector), and a durable record of both.
 
-### 15.2 The e-process — and the direction bug it exists to avoid
+### 11.2 The e-process — and the direction bug it exists to avoid
 
 An e-value is a nonnegative random variable whose expectation is at most 1 under
 the null. A running product of such factors can be watched **continuously**: Ville's
@@ -1341,7 +1341,7 @@ auditable a month later.
 > with the derivation written into the constants. It is recorded here because the
 > mistake is invisible in a report that only prints e-values.
 
-### 15.3 The thresholds are arithmetic, not taste
+### 11.3 The thresholds are arithmetic, not taste
 
 Every outcome's contribution on the ±1R scale:
 
@@ -1359,7 +1359,7 @@ A mixed stream takes as long as its mean drift deserves, which is the point of a
 sequential test — the study's power table (§11.8) is the honest version of "how
 long does it take".
 
-### 15.4 The change detector, and a degenerate statistic caught by measurement
+### 11.4 The change detector, and a degenerate statistic caught by measurement
 
 `pageHinkleyStep` is a **lower CUSUM** against break-even: the statistic accumulates
 `−r − δ` and resets at zero, so it measures the *recent* stream on its own terms.
@@ -1383,7 +1383,7 @@ At δ = 0.25R, h = 12R, 1 of the 18 measured cells satisfies both, and the study
 asserts that (G9.5b). The neighbouring cell (h = 10R) is 1.9 trades faster and was
 rejected for a measured null rate of 6.20% — the rejection is in the report.
 
-### 15.5 The overlay, and why it can only ever reduce
+### 11.5 The overlay, and why it can only ever reduce
 
 `desk.ts` reads the registry and hands `evaluate()` two lists: `disabledAgents` and
 `halvedAgents`. In `agent.ts`:
@@ -1407,7 +1407,7 @@ proposer set (2⁵ − 1) crossed with every status assignment (3⁵) — **7,53
 combinations**, maximum composed multiplier **1.0000**, 781 blocked by an emptied
 view, 4,651 halved, 2,101 unchanged (G9.6, W9.11).
 
-### 15.6 The durable layer
+### 11.6 The durable layer
 
 Five tables, added to `lib/db/src/schema/desk.ts` and to the in-process `INIT_DDL`
 that is the only guaranteed schema path on a runtime without drizzle-kit:
@@ -1436,7 +1436,7 @@ Two details that are easy to get wrong and are pinned by tests:
   report counts those trades as *unmeasured* rather than dropping them or charging
   them a fabricated R, and the study's rehearsal asserts the count.
 
-### 15.7 Wiring — where the layer meets the desk
+### 11.7 Wiring — where the layer meets the desk
 
 | point | file | what happens |
 | --- | --- | --- |
@@ -1453,7 +1453,7 @@ model the call would have fitted. A moved window re-fits. The reuse exists to st
 the desk paying for the same EM run on every restart, and W9.10 asserts that a stale
 version is **not** served.
 
-### 15.8 The study — `2026-10-11-wp9-governance-{intraday,swing}-study.json`
+### 11.8 The study — `2026-10-11-wp9-governance-{intraday,swing}-study.json`
 
 ```bash
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
@@ -1482,7 +1482,7 @@ rather than about the layer. Sup-e over the whole corpus reaches 42,904 on the
 mean-reverting trap — the layer is not asleep — while the streams the desk's own
 simulator measured with positive expectancy are left untouched.
 
-### 15.9 What WP9 does NOT measure
+### 11.9 What WP9 does NOT measure
 
 * **Whether the live agents will degrade.** The layer's operating characteristics are
   measured; the market's are not.
@@ -1494,7 +1494,7 @@ simulator measured with positive expectancy are left untouched.
 
 ## 12. WP10 — the learning surface: what the desk shows about itself
 
-### 16.1 What WP10 is, and what it deliberately is not
+### 12.1 What WP10 is, and what it deliberately is not
 
 WP10 adds no trading behaviour. It adds the three things that make everything
 before it *checkable by a human*:
@@ -1510,7 +1510,7 @@ The page is a reader. The only write it performs is `POST /desk/governance/resum
 which is exactly the operator handshake §11.2 describes — with a note, with the
 evidence kept, and with a journal line and an alert.
 
-### 16.2 The desk-timeframe state (`GET /desk/regime`)
+### 12.2 The desk-timeframe state (`GET /desk/regime`)
 
 `GET /desk/analysis` is the wrong call to poll twice a second: it fits a regime
 model, prices a plan and samples a Monte Carlo. The dashboard needs the *read* —
@@ -1537,7 +1537,7 @@ W10.2 pins the staleness rules: inside the TTL the second read is served from th
 memo and reports its `ageMs`; past it the read recomputes; and a **new bar**
 invalidates the memo immediately even inside the TTL.
 
-### 16.3 The learning page (`/learning`, nav "Learning")
+### 12.3 The learning page (`/learning`, nav "Learning")
 
 Four panels, each of which says so plainly when its subsystem is off rather than
 rendering zeros that would look like measurements:
@@ -1563,7 +1563,7 @@ bar must be logarithmic (a linear bar would show a *halved* agent at e = 5.3 as 
 quarter of the way to trouble when it is already past the half mark), and the Brier
 score is never printed without its coin-flip reference.
 
-### 16.4 The alert channel
+### 12.4 The alert channel
 
 `alerts.ts` is small on purpose, and every constraint on it exists to keep it from
 becoming a trading dependency:
@@ -1583,7 +1583,7 @@ reason), the desk **halting**, and an operator **resuming** an agent. W10.4 and
 W10.5 measure the flag-off path, the unconfigured path, de-duplication, the rate
 bucket, a 429, and a transport that throws.
 
-### 16.5 Wiring and absence
+### 12.5 Wiring and absence
 
 | endpoint | flag it hangs on | with the flag off |
 | --- | --- | --- |
@@ -1599,7 +1599,38 @@ API, and a desk that has never switched a layer on must have exactly the API it 
 before. It then switches the layers on and reads the state, the registry, the
 weekly report and the journal back out.
 
-### 16.6 What WP10 does not do
+### 12.6 Not delivered from the WP10 brief — stated, not buried
+
+One item of the WP10 brief has **no counterpart in this branch**, and the owner
+should know it rather than infer it from a green page:
+
+* **`ensembleDecide` applying a 0.5-vote weight to an agent whose regime differs
+  from the current one.** The desk's voting lives in the meta view
+  (`meta/view.ts`): an agent's probability is its own, the view's probability is the
+  mean over the agents that AGREE with the view's direction, and the WP4 allowlist
+  decides who may propose at all. There is no regime-mismatch weight anywhere in it.
+
+  That is deliberate for now, and the reason is the programme's own rule. Halving a
+  disagreeing agent's vote changes the **blended probability**, which changes
+  `p_LCB`, which changes which plans clear the gatekeeper's EV floor — a live
+  behavioural change at the composition point. It cannot be added on the strength of
+  an argument: it needs its own measurement round (the WP5 calibration gates re-run
+  on the new blend, then the WP6 gatekeeper study re-run to show the nulls still
+  claim nothing and the positive controls still arm), and that round is not in this
+  branch. Adding it without one would be exactly the "eye-tuned threshold" the brief
+  forbids.
+
+* The brief's other WP10 items do exist, under the repository's own names: the
+  **edge verdict with a degraded mode** is `regimePermit` (`REGIME_UNAVAILABLE` is
+  the degraded answer, and it is fail-closed); the **ensemble** is `evidence.ts`
+  plus the view above; the **Brier-tracked calibrator** is WP5's (`meta/model.ts`
+  records the skill and the study gates on it); the **backtest** with purge + embargo
+  is `meta/folds.ts` and the WP2/WP5 harness; the **data-freshness veto** is the
+  desk's readiness gate (`integrity.ts` feed status, refused before any analysis);
+  and the **dashboard with the equity curve** is the terminal's realised-performance
+  panel plus §12.3.
+
+### 12.7 What WP10 does not do
 
 * **It adds no independent verification of the desk's performance.** The equity
   curve on the terminal is still the one the API serves from the terminal's own
@@ -2195,6 +2226,12 @@ the reasoning recorded.
    arrives only from real trades.** With the flags off (the shipped state) the page
    has nothing to show, and with them on the numbers are as sparse as the shadow
    phase is young — an empty panel is not a clean bill of health.
+
+53. **`ensembleDecide`'s regime-mismatch vote weighting is NOT implemented**
+   (§12.6). The desk's blend is the mean over agreeing agents, with no regime
+   penalty. Adding one changes `p_LCB` and therefore the set of plans that clear
+   the EV floor, so it needs its own measurement round (WP5 calibration, then a WP6
+   gatekeeper re-run) before it can ship — and that round is not in this branch.
 
 ## 16. Tests and commands
 

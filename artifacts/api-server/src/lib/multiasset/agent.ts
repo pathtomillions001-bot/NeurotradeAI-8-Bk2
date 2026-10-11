@@ -177,6 +177,47 @@ const STOP_ATR_MULT: Record<TradeMode, number> = {
 export const MIN_COST_COVERAGE = 4;
 
 /**
+ * Minimum reward:risk the plan must still show at the EXPECTED FILL price.
+ *
+ * The owner's floor, and it is not the same number the plan reports. `rewardRisk`
+ * is measured from the quote, but the EA does not fill at the quote: it fires at
+ * `trigger`, which is 0.08–0.12 ATR BEYOND the market, and then pays the spread
+ * and the slippage allowance on top. Both effects move the fill further from the
+ * target and closer to the stop, so the realised ratio is always worse than the
+ * planned one — and a "2R" trade whose fill is 6 points against it on a 63-point
+ * risk unit is really 1.74R.
+ *
+ * Every gate downstream (expectancy, Kelly, the sizing cap) is denominated in R.
+ * If the R the trade actually gets is smaller than the R the gate approved, the
+ * gate approved a different trade.
+ */
+export const MIN_RR_AT_FILL = 2.0;
+
+/**
+ * Reward:risk measured at the expected fill.
+ *
+ * `fill = trigger ± (spread + slippage)`: a buy pays the ask at the trigger and
+ * slips up, a sell receives the bid and slips down. Both move against us, which
+ * is the point — this is the number the trade will actually get, not the one it
+ * was drawn with.
+ */
+export function rewardRiskAtFill(input: {
+  side: "buy" | "sell";
+  trigger: number;
+  sl: number;
+  tp: number;
+  point: number;
+  slippagePoints: number;
+  spreadPoints: number;
+}): number {
+  const adverse = (input.slippagePoints + input.spreadPoints / 2) * input.point;
+  const fill = input.side === "buy" ? input.trigger + adverse : input.trigger - adverse;
+  const risk = Math.abs(fill - input.sl);
+  if (risk <= 0) return 0;
+  return Math.abs(input.tp - fill) / risk;
+}
+
+/**
  * ...and the stop may never be smaller than this many ATRs of the entry frame,
  * because a stop inside one average bar's range is taken out by noise rather
  * than by the market disagreeing with the idea.
@@ -858,6 +899,29 @@ export function evaluate(input: AgentInput): AgentDecision {
 
   if (!sizing.ok) rejections.push(sizing.explanation);
 
+  // ── The 1:2 floor, measured at the fill ───────────────────────────────────
+  // The stop that will actually be sent is `sizing.sl` (sizing may have widened
+  // it to the broker's stop level), so this is the last place the true ratio can
+  // be computed before the plan is built.
+  const stopForFill = sizing.ok ? sizing.sl : sl;
+  const rewardRiskAtFillValue = rewardRiskAtFill({
+    side,
+    trigger,
+    sl: stopForFill,
+    tp: search.tp,
+    point: input.spec.point,
+    slippagePoints,
+    spreadPoints: liveSpreadPoints,
+  });
+  if (rewardRiskAtFillValue < MIN_RR_AT_FILL) {
+    rejections.push(
+      `Reward:risk at the expected fill is ${rewardRiskAtFillValue.toFixed(2)} (target ${search.rewardRisk.toFixed(1)}R ` +
+        `from the quote), below the ${MIN_RR_AT_FILL.toFixed(1)} floor the owner requires. The fill sits ` +
+        `${(slippagePoints + liveSpreadPoints / 2).toFixed(1)} pts beyond the trigger, which both shortens the ` +
+        `run to target and lengthens the run to stop.`,
+    );
+  }
+
   // When the broker's indivisible minimum lot forces more risk than the edge
   // asked for, say so out loud. The trade is inside the desk budget, but the
   // user should never have to infer that from the lot size alone.
@@ -941,7 +1005,16 @@ export function evaluate(input: AgentInput): AgentDecision {
     expiresAt: now + PLAN_TTL_MS[input.mode],
     createdAt: now,
     management,
+    // The frame the risk was measured on, and the round-trip cost in points.
+    // The terminal's position machine uses the first for its chandelier ATR and
+    // the second to place break-even at entry + cost rather than at entry.
+    entryTimeframe: entrySeries.timeframe,
+    costPoints: Number((liveSpreadPoints + commissionPoints + slippagePoints).toFixed(2)),
     rationale: {
+      // The ratio the trade will actually get, next to the one it was drawn with.
+      // A reader who sees 2.5R planned and 2.1R at fill can see the slippage
+      // cost without re-deriving it.
+      rewardRiskAtFill: Number(rewardRiskAtFillValue.toFixed(2)),
       confluenceScore: Number(qualityScore.toFixed(1)),
       grade: confluence.grade,
       regime: `${entrySeries.timeframe} ${regime.kind}`,

@@ -11,7 +11,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildManagementPlan, evaluate, horizonMinutes, structuralStop } from "./agent";
+import {
+  buildManagementPlan,
+  evaluate,
+  horizonMinutes,
+  rewardRiskAtFill,
+  structuralStop,
+} from "./agent";
+import { bestTarget } from "./montecarlo";
 import { createRiskState, recordOutcome, type RiskState } from "./risk";
 import { makeRng } from "./math";
 import { TIMEFRAMES, type AccountSnapshot, type Bar, type Quote, type SymbolSpec, type Timeframe } from "./types";
@@ -306,9 +313,12 @@ test("an account too small for the minimum lot is refused, not over-risked", () 
 });
 
 test("a halted desk is refused before any analysis cost is paid", () => {
+  // The halt point is now the 10-loss backstop (WP1). Five losses — the old
+  // halt — is inside the normal range for a 1:2 system and must NOT end the
+  // session, so this test reaches the halt deliberately.
   let state = createRiskState();
-  for (let i = 0; i < 5; i++) {
-    state = recordOutcome(state, { symbol: "EURUSD", profit: -10, closedAt: 1 });
+  for (let i = 0; i < 10; i++) {
+    state = recordOutcome(state, { symbol: "EURUSD", profit: -10, closedAt: i + 1 });
   }
   const decision = run({ riskState: state });
   assert.equal(decision.armed, false);
@@ -750,4 +760,147 @@ test("paths that end at the time stop are priced, not written off as losses", ()
   }
   // …and the split is reported, so a refusal can be read rather than guessed at.
   assert.ok(mc.lossProbability + mc.winProbability + mc.timeoutProbability > 0.999);
+});
+
+// ── WP1: the 1:2 floor, measured at the fill ────────────────────────────────
+
+/**
+ * The owner's hard requirement: no plan may be armed with a reward:risk below
+ * 1:2 AT THE EXPECTED FILL. Not at the quote — the EA fires at a trigger that
+ * sits 0.08–0.12 ATR beyond the market and pays spread and slippage on top, so
+ * the planned ratio is always better than the realised one.
+ *
+ * The generators here are the two that matter for this property: a driftless
+ * random walk (where any "edge" the agent finds is noise, so the floor has to
+ * hold when the model is wrong) and a clean trend (where it should still arm).
+ */
+function randomWalk(count = 220, start = 1.08, seed = 1): Bar[] {
+  const rng = makeRng(seed);
+  const bars: Bar[] = [];
+  let price = start;
+  for (let i = 0; i < count; i++) {
+    const open = price;
+    // No drift term at all: E[r] = 0 by construction.
+    price = open * Math.exp((rng() - 0.5) * 0.0004);
+    const high = Math.max(open, price) * (1 + rng() * 0.0001);
+    const low = Math.min(open, price) * (1 - rng() * 0.0001);
+    bars.push([i * 60_000, open, high, low, price, 100]);
+  }
+  return bars;
+}
+
+test("no armed plan drops below 1:2 at the expected fill — on noise", () => {
+  const modes = ["scalp", "intraday", "swing"] as const;
+  let armed = 0;
+  for (let seed = 1; seed <= 6; seed++) {
+    const series = allTimeframes((s) => randomWalk(220, 1.08, s * 10 + seed));
+    for (const mode of modes) {
+      const decision = run({ series, mode });
+      if (!decision.armed || !decision.plan) continue;
+      armed += 1;
+      const rrFill = decision.plan.rationale.rewardRiskAtFill;
+      assert.ok(rrFill !== undefined, "an armed plan must report its fill ratio");
+      assert.ok(
+        rrFill >= 2.0 - 1e-9,
+        `${mode} armed at ${rrFill}R at fill on noise (planned ${decision.plan.rationale.rewardRisk}R)`,
+      );
+    }
+  }
+  // The property is vacuous if nothing ever arms, so make the test say so
+  // rather than pass silently on a generator that never produces a plan.
+  assert.ok(armed > 0, "the noise generator must be able to produce plans to test");
+});
+
+test("no armed plan drops below 1:2 at the expected fill — on a trend", () => {
+  const modes = ["scalp", "intraday", "swing"] as const;
+  let armed = 0;
+  for (let seed = 1; seed <= 6; seed++) {
+    const series = allTimeframes((s) => trendUp(220, 1.08, 0.0006, 0.0002, s + seed));
+    for (const mode of modes) {
+      const decision = run({ series, mode });
+      if (!decision.armed || !decision.plan) continue;
+      armed += 1;
+      const rrFill = decision.plan.rationale.rewardRiskAtFill;
+      assert.ok(
+        (rrFill ?? 0) >= 2.0 - 1e-9,
+        `${mode} armed at ${rrFill}R at fill on a trend`,
+      );
+    }
+  }
+  assert.ok(armed > 0, "a clean trend should produce at least one armable plan");
+});
+
+test("the target search never proposes a multiple below the 2R floor", () => {
+  // Even if a caller passes the old set, the search filters it.
+  const result = bestTarget({
+    entry: 1.1,
+    sl: 1.098,
+    side: "buy",
+    drift: 0,
+    volatility: 0.0005,
+    horizon: 12,
+    returns: [],
+    costPrice: 0.0001,
+    paths: 400,
+    seed: 3,
+  });
+  assert.ok(result !== null);
+  assert.ok(result.rewardRisk >= 2, `bestTarget picked ${result.rewardRisk}R`);
+});
+
+test("the one-SE rule prefers the nearer target when they are indistinguishable", () => {
+  // With zero drift every multiple is statistically the same trade, so the
+  // rule must land on the SMALLEST candidate rather than on whichever one the
+  // seed inflated. The old argmax picked >= 3R in 87% of intraday plans here.
+  let atFloor = 0;
+  let total = 0;
+  for (let seed = 1; seed <= 20; seed++) {
+    const result = bestTarget({
+      entry: 1.1,
+      sl: 1.098,
+      side: "buy",
+      drift: 0,
+      volatility: 0.0004,
+      horizon: 12,
+      returns: [],
+      costPrice: 0,
+      paths: 800,
+      seed,
+    });
+    if (!result) continue;
+    total += 1;
+    if (result.rewardRisk === 2) atFloor += 1;
+  }
+  assert.ok(total > 0, "the search must return a candidate");
+  assert.ok(
+    atFloor / total >= 0.6,
+    `the one-SE rule should land on 2R most of the time on noise; got ${atFloor}/${total}`,
+  );
+});
+
+test("rewardRiskAtFill charges the fill, not the quote", () => {
+  // A 2R plan drawn from the trigger, filled 6 points worse on a 63-point risk
+  // unit, is not a 2R trade. The helper must say so.
+  const fromQuote = rewardRiskAtFill({
+    side: "buy",
+    trigger: 1.1,
+    sl: 1.098,
+    tp: 1.104,
+    point: 0.00001,
+    slippagePoints: 0,
+    spreadPoints: 0,
+  });
+  assert.equal(Number(fromQuote.toFixed(4)), 2);
+
+  const atFill = rewardRiskAtFill({
+    side: "buy",
+    trigger: 1.1,
+    sl: 1.098,
+    tp: 1.104,
+    point: 0.00001,
+    slippagePoints: 6,
+    spreadPoints: 8,
+  });
+  assert.ok(atFill < 2, `the fill ratio must be worse than the quote's: got ${atFill}`);
+  assert.ok(atFill > 1.8, `and only modestly so on a wide risk unit: got ${atFill}`);
 });

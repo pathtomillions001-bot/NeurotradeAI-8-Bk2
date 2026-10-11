@@ -60,6 +60,18 @@ export interface MonteCarloResult {
   /** Mean bars to resolution. */
   meanBarsToResolve: number;
   paths: number;
+  /**
+   * Standard error of `expectancyR` across the simulated paths.
+   *
+   * WHY IT IS ON THE RESULT: `bestTarget` used to pick the target with the
+   * highest expectancy across six multiples — an argmax over a noisy statistic,
+   * which is the winner's curse in miniature. On a driftless random walk the
+   * winning multiple is whichever one the seed happened to favour, and the plan
+   * is built on that noise. Reporting the error lets the target search use a
+   * one-standard-error rule instead: take the SMALLEST multiple that is
+   * statistically indistinguishable from the best.
+   */
+  expectancyStdError: number;
 }
 
 const MIN_BOOTSTRAP_SAMPLES = 60;
@@ -107,6 +119,7 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
       rewardRisk,
       meanBarsToResolve: 0,
       paths: 0,
+      expectancyStdError: 0,
     };
   }
 
@@ -130,6 +143,7 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
       rewardRisk,
       meanBarsToResolve: horizon,
       paths: 0,
+      expectancyStdError: 0,
     };
   }
 
@@ -140,6 +154,9 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
   let timeouts = 0;
   let timeoutRSum = 0;
   let barsSum = 0;
+  // Per-path R, for the standard error of the expectancy.
+  let sumR = 0;
+  let sumR2 = 0;
 
   for (let p = 0; p < paths; p++) {
     let price = entry;
@@ -164,12 +181,16 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
       if (hitSl) {
         // Conservative tie-break: ambiguous bars are losses.
         losses++;
+        sumR += -1;
+        sumR2 += 1;
         barsSum += s + 1;
         resolved = true;
         break;
       }
       if (hitTp) {
         wins++;
+        sumR += rewardRisk;
+        sumR2 += rewardRisk * rewardRisk;
         barsSum += s + 1;
         resolved = true;
         break;
@@ -180,7 +201,10 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
       timeouts++;
       barsSum += steps;
       const pnlPrice = long ? price - entry : entry - price;
-      timeoutRSum += pnlPrice / riskPrice;
+      const pathR = pnlPrice / riskPrice;
+      timeoutRSum += pathR;
+      sumR += pathR;
+      sumR2 += pathR * pathR;
     }
   }
 
@@ -204,32 +228,78 @@ export function simulateTrade(input: MonteCarloInput): MonteCarloResult {
     rewardRisk,
     meanBarsToResolve: barsSum / total,
     paths: total,
+    expectancyStdError: standardErrorOfR(sumR, sumR2, total),
   };
 }
 
+/** Standard error of a mean R given its first two moments. */
+function standardErrorOfR(sumR: number, sumR2: number, n: number): number {
+  if (n <= 1) return 0;
+  const mean = sumR / n;
+  const variance = Math.max(0, sumR2 / n - mean * mean);
+  return Math.sqrt(variance / n);
+}
+
 /**
- * Search a set of reward:risk multiples and return the best by expectancy.
+ * The smallest reward:risk multiple the desk will consider.
  *
- * A fixed 1:2 target is arbitrary — the right target depends on volatility,
- * drift and cost. Letting the simulator choose is how the agent decides
- * between "bank it at 1R" and "let it run to 3R".
+ * The owner's floor, and it is measured AT THE EXPECTED FILL — a 2R target
+ * against a trigger that fills 6 points worse is not a 2R trade. See
+ * `MIN_RR_AT_FILL` in agent.ts, which enforces that after slippage.
+ */
+export const MIN_TARGET_MULTIPLE = 2;
+
+/**
+ * Candidate multiples, smallest first.
+ *
+ * `1` and `1.5` are deliberately absent. They were the old set's most-picked
+ * values, and they are structurally unable to satisfy a 1:2 floor once the
+ * spread and the fill slippage are charged — keeping them in the search only
+ * gave the winner's curse more ways to select a target that could not be
+ * traded.
+ */
+export const TARGET_MULTIPLES: readonly number[] = [2, 2.5, 3];
+
+/**
+ * Search reward:risk multiples for a target, by the ONE-STANDARD-ERROR RULE.
+ *
+ * The previous implementation took the argmax of simulated expectancy over
+ * `[1, 1.5, 2, 2.5, 3, 4]`. On pure noise that is a lottery: whichever multiple
+ * the seed favoured wins, and because every candidate is scored on the SAME
+ * paths the comparison is correlated but the winner is still inflated — the
+ * winner's curse. Measured on the desk, the argmax chose >= 3R in 87% of
+ * intraday plans built on a driftless random walk.
+ *
+ * The rule now: find the best multiple, then take the SMALLEST multiple whose
+ * expectancy is within one standard error of it. Statistically that says "these
+ * are indistinguishable, so prefer the one that asks less of the market" — the
+ * nearer target is reached sooner, is less exposed to a drift that is not really
+ * there, and leaves the tail of the distribution to the trailing stop instead of
+ * to a fixed level.
  */
 export function bestTarget(
   base: Omit<MonteCarloInput, "tp">,
-  multiples: number[] = [1, 1.5, 2, 2.5, 3, 4],
+  multiples: number[] = [...TARGET_MULTIPLES],
 ): { rewardRisk: number; tp: number; result: MonteCarloResult } | null {
   const risk = Math.abs(base.entry - base.sl);
   if (risk <= 0) return null;
 
-  let best: { rewardRisk: number; tp: number; result: MonteCarloResult } | null = null;
-  for (const m of multiples) {
-    const tp = base.side === "buy" ? base.entry + risk * m : base.entry - risk * m;
-    const result = simulateTrade({ ...base, tp });
-    if (!best || result.expectancyR > best.result.expectancyR) {
-      best = { rewardRisk: m, tp, result };
-    }
-  }
-  return best;
+  const candidates = multiples
+    .filter((m) => m >= MIN_TARGET_MULTIPLE)
+    .sort((a, b) => a - b)
+    .map((m) => ({
+      rewardRisk: m,
+      tp: base.side === "buy" ? base.entry + risk * m : base.entry - risk * m,
+      result: simulateTrade({ ...base, tp: base.side === "buy" ? base.entry + risk * m : base.entry - risk * m }),
+    }));
+
+  if (candidates.length === 0) return null;
+
+  const best = candidates.reduce((a, b) =>
+    b.result.expectancyR > a.result.expectancyR ? b : a,
+  );
+  const threshold = best.result.expectancyR - best.result.expectancyStdError;
+  return candidates.find((candidate) => candidate.result.expectancyR >= threshold) ?? best;
 }
 
 /**

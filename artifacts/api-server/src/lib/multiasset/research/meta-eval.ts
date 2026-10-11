@@ -309,6 +309,16 @@ export interface MetaSeriesInput {
   agents?: Record<AlphaId, AlphaAgent>;
   /** Which calibrator to fit on the out-of-fold sample (default: isotonic). */
   calibrator?: MetaCalibratorKind;
+  /**
+   * WP10's regime-mismatch vote weight (default 1 = the shipped majority vote).
+   *
+   * A number below 1 makes a proposal that contradicts the desk's own directional
+   * regime reading count for less in the blend. Both arms are measured: the blend
+   * is the model's `meanAgentProbability` feature and the weighted sums set
+   * `netDirection`, so the weight moves `p_LCB` and the EV the gatekeeper prices
+   * (§12.6). The shipped weight is 1; the 0.5 arm fails the intraday slope gate.
+   */
+  regimeMismatchVoteWeight?: number;
 }
 
 /**
@@ -356,6 +366,7 @@ export function buildMetaViewStream(input: MetaSeriesInput): MetaViewStream {
       targetMultipleR: input.targetMultipleR,
       horizonBars,
       previous,
+      regimeMismatchVoteWeight: input.regimeMismatchVoteWeight,
     });
     // An abstention is not a row: the corpus is the decisions where at least one
     // agent had a view. It is still a DECISION for the streak feature, so the

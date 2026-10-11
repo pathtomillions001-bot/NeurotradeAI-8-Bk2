@@ -53,6 +53,26 @@ export interface MetaViewInput {
    * is 1, which is what the study records for the first view of every series.
    */
   previous?: { index: number; kind: RegimeKind | null; streak: number } | null;
+  /**
+   * WP10's regime-mismatch vote: the weight an agent's vote carries when it
+   * proposes AGAINST the desk's own directional regime reading.
+   *
+   * `1` (the default, and what every caller except the live path with its flag on
+   * passes) is the shipped behaviour, byte for byte. A value below 1 down-weights
+   * a contrarian vote: a buy proposed while the desk reads `trend_down`, or a sell
+   * while it reads `trend_up`. In `range` and `volatile` the desk has no
+   * directional reading to contradict, so nothing is down-weighted — the rule
+   * fires only where the desk has actually formed an opinion, which is the
+   * conservative reading of the brief's sentence and the only one that does not
+   * silently shrink every vote in a quiet market.
+   *
+   * This is a CHANGE TO THE COMPOSITION POINT, not a display tweak: the blend is
+   * the `meanAgentProbability` feature the meta-model was fitted on, the weighted
+   * sums decide the `netDirection` feature, and in the harness the view's
+   * probability is priced directly — so it is measured (§12.6) before it is ever
+   * switched on, and it ships with the weight at 1.
+   */
+  regimeMismatchVoteWeight?: number;
 }
 
 export interface MetaViewAt {
@@ -63,6 +83,13 @@ export interface MetaViewAt {
 }
 
 const MIN_REGIME_WINDOW_BARS = 20;
+
+/**
+ * The weight a contrarian vote carries when WP10's rule is armed.
+ *
+ * The brief's own number, not a chosen one: half a vote.
+ */
+export const REGIME_MISMATCH_VOTE_WEIGHT = 0.5;
 
 /**
  * Build the view at one bar, or null when no agent had anything to say.
@@ -114,17 +141,46 @@ export function metaViewAt(input: MetaViewInput): MetaViewAt | null {
   const streak =
     previous !== null && previous.kind !== null && previous.kind === kind ? previous.streak + 1 : 1;
 
-  const buys = firing.filter((reading) => reading.view?.direction === "buy").length;
-  const sells = firing.length - buys;
+  // The vote is WEIGHTED (WP10): a reading that proposes against the desk's own
+  // directional regime reading counts `regimeMismatchVoteWeight` instead of 1. The
+  // default weight is 1, which reproduces the shipped majority vote exactly —
+  // weights of 1 in both piles leave the comparison below unchanged.
+  const mismatchWeight = input.regimeMismatchVoteWeight ?? 1;
+  const agentWeights: Record<string, number> = {};
+  let buyWeight = 0;
+  let sellWeight = 0;
+  for (const reading of firing) {
+    const weight = regimeVoteWeight({
+      kind,
+      direction: reading.view?.direction ?? null,
+      mismatchWeight,
+    });
+    agentWeights[reading.id] = weight;
+    if (reading.view?.direction === "buy") buyWeight += weight;
+    else sellWeight += weight;
+  }
   const direction: 1 | -1 =
-    buys === sells ? (bestProbability(firing) >= 0.5 ? 1 : -1) : buys > sells ? 1 : -1;
+    buyWeight === sellWeight ? (bestProbability(firing) >= 0.5 ? 1 : -1) : buyWeight > sellWeight ? 1 : -1;
   const agreeing = firing.filter(
     (reading) => (direction === 1 ? reading.view?.direction === "buy" : reading.view?.direction === "sell"),
   );
   const agentProbabilities: Record<string, number> = {};
   for (const reading of firing) agentProbabilities[reading.id] = reading.view?.probability ?? 0.5;
+  // The blend is the WEIGHTED mean over the agents that agree with the view's own
+  // direction, so a down-weighted agent's opinion counts for less than a full vote
+  // — and an agent carrying no weight at all contributes nothing.
+  const agreeWeight = agreeing.reduce((sum, reading) => sum + (agentWeights[reading.id] ?? 1), 0);
   const meanProbability =
-    agreeing.reduce((sum, reading) => sum + (reading.view?.probability ?? 0.5), 0) / Math.max(1, agreeing.length);
+    agreeWeight > 0
+      ? agreeing.reduce(
+          (sum, reading) => sum + (reading.view?.probability ?? 0.5) * (agentWeights[reading.id] ?? 1),
+          0,
+        ) / agreeWeight
+      : agreeing.reduce((sum, reading) => sum + (reading.view?.probability ?? 0.5), 0) /
+        Math.max(1, agreeing.length);
+  const downWeightedAgents = firing
+    .filter((reading) => (agentWeights[reading.id] ?? 1) < 1)
+    .map((reading) => reading.id);
   const allowlist = input.allowlist ?? defaultAllowlistForMode(mode);
 
   return {
@@ -134,6 +190,8 @@ export function metaViewAt(input: MetaViewInput): MetaViewAt | null {
       probability: meanProbability,
       agents: agreeing.map((reading) => reading.id),
       agentProbabilities,
+      agentWeights,
+      downWeightedAgents,
       emitted: agreeing.some((reading) => allowlist.includes(reading.id)),
       mode,
       regimeKind: kind,
@@ -145,6 +203,24 @@ export function metaViewAt(input: MetaViewInput): MetaViewAt | null {
     kind,
     streak,
   };
+}
+
+/**
+ * WP10's vote weight for one reading, as a pure function of the regime and the
+ * proposal — exported so the rule can be tested without a market.
+ */
+export function regimeVoteWeight(input: {
+  kind: RegimeKind | null;
+  direction: "buy" | "sell" | null;
+  /** The weight a contrarian vote carries; 1 disables the rule entirely. */
+  mismatchWeight: number;
+}): number {
+  const { kind, direction, mismatchWeight } = input;
+  if (!(mismatchWeight < 1) || mismatchWeight <= 0) return 1;
+  if (direction === null || kind === null) return 1;
+  const against =
+    (direction === "buy" && kind === "trend_down") || (direction === "sell" && kind === "trend_up");
+  return against ? mismatchWeight : 1;
 }
 
 /**
@@ -160,8 +236,3 @@ export function metaViewAt(input: MetaViewInput): MetaViewAt | null {
 function bestProbability(firing: { view: { probability: number } | null }[]): number {
   return firing.reduce((best, reading) => Math.max(best, reading.view?.probability ?? 0), 0);
 }
-
-/** Re-exported so a caller can pre-build the agent registry once per series. */
-export { buildAlphaAgents };
-export type { AlphaAgent, AlphaId };
-export { HIGH, LOW };

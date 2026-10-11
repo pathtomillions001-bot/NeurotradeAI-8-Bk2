@@ -15,12 +15,16 @@ Everything described as OFF is off by default: the v4 subsystems live behind the
 `DESK_V4_*` flags in `lib/multiasset/desk-v4-config.ts`, and the pre-v4 desk runs
 unchanged when they are unset.
 
-**Status after WP4:** the desk's LIVE behaviour is still the pre-v4 desk. WP0–WP3
-built the position manager, the RR floor, the research harness and the regime
-agent; WP4 built and measured five alpha agents (§6) and allowlisted two of them
-for intraday and none for swing. Nothing in WP0–WP4 is consulted by the live
-decision path — every flag defaults off, and the composition point is the WP6
-gatekeeper.
+**Status after WP10:** the desk's LIVE behaviour is still the pre-v4 desk, plus the
+WP0/WP1 invariants (they are the v3.05 semantics written down). Every v4 layer is
+built, wired and measured — the regime permit (§5), the alpha agents (§6), the
+meta-model (§7), the gatekeeper (§8), execution (§9), the portfolio layer (§10),
+learning and governance (§11) and the learning surface (§12) — and every one of
+them sits behind a `DESK_V4_*` flag that defaults **off**, so the live path is
+unchanged until the shadow and demo phases say otherwise. Two things were
+*measured and deliberately left disabled*: the swing allowlist (§6.6) and WP10's
+regime-mismatch vote (§12.6). Nothing is claimed as shipped that was not measured;
+the reports are in `artifacts/api-server/research-reports/`.
 
 ---
 
@@ -881,7 +885,9 @@ that has found nothing.
 3. **The intraday home margin is 0.016 of slope** (0.816 against a 0.80 floor).
    That is inside the band, but it is thin, and a different seed could flip it.
    This is recorded rather than smoothed: the artifact carries the number and the
-   gate re-runs on every study.
+   gate re-runs on every study. WP10's vote arm flipped it for real (§12.6): at
+   weight 0.5 the slope fell to 0.7908 and the gates failed, which is why the vote
+   ships disarmed.
 4. **The live path still fits nothing.** `DESK_V4_META_MODEL` defaults OFF; the
    desk keeps using the measured allowlist until WP6 wires the gatekeeper and
    WP9 persists the calibration online.
@@ -987,7 +993,9 @@ in `EV_LCB`.
 ### 8.5 The result (stored in `research-reports/2026-10-11-wp6-gatekeeper-*-study.json`)
 
 Both modes **PASS**. (Numbers below are from the stored reports; `floor` is the
-mode's EV floor, `gated` is floor **and** BH.)
+mode's EV floor, `gated` is floor **and** BH.) The study was re-run with WP10's
+regime-mismatch vote armed (§12.6): still PASS in both modes, both nulls still
+refusing — the gatekeeper's safety does not depend on the blend's weighting.
 
 | fixture (intraday) | rows | EV>0 armed / meanR | floor armed / meanR | gated armed / meanR | corpusR | BH rej% |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -1599,36 +1607,79 @@ API, and a desk that has never switched a layer on must have exactly the API it 
 before. It then switches the layers on and reads the state, the registry, the
 weekly report and the journal back out.
 
-### 12.6 Not delivered from the WP10 brief — stated, not buried
+### 12.6 The regime-mismatch vote — built, measured, and left disarmed
 
-One item of the WP10 brief has **no counterpart in this branch**, and the owner
-should know it rather than infer it from a green page:
+Until this round this section was an *absence*: the WP10 brief's "0.5-vote weight to
+an agent whose regime differs from the current one" had no counterpart in the code.
+It has one now. The measurement is why it is still **not armed**.
 
-* **`ensembleDecide` applying a 0.5-vote weight to an agent whose regime differs
-  from the current one.** The desk's voting lives in the meta view
-  (`meta/view.ts`): an agent's probability is its own, the view's probability is the
-  mean over the agents that AGREE with the view's direction, and the WP4 allowlist
-  decides who may propose at all. There is no regime-mismatch weight anywhere in it.
+**The rule.** `meta/view.ts` exports `regimeVoteWeight({ kind, direction, mismatchWeight })`
+— pure, so the rule can be tested without a market — together with
+`REGIME_MISMATCH_VOTE_WEIGHT = 0.5`, the brief's own number. A proposal that
+contradicts the desk's **directional** regime reading (a buy while the desk reads
+`trend_down`, a sell while it reads `trend_up`) carries 0.5 instead of 1 in the
+ensemble: the vote sums are weighted, the blend is the weighted mean over the agents
+that agree, and the view records `agentWeights` and `downWeightedAgents` so the
+effect is visible in a corpus, a journal and a study rather than only in the code.
 
-  That is deliberate for now, and the reason is the programme's own rule. Halving a
-  disagreeing agent's vote changes the **blended probability**, which changes
-  `p_LCB`, which changes which plans clear the gatekeeper's EV floor — a live
-  behavioural change at the composition point. It cannot be added on the strength of
-  an argument: it needs its own measurement round (the WP5 calibration gates re-run
-  on the new blend, then the WP6 gatekeeper study re-run to show the nulls still
-  claim nothing and the positive controls still arm), and that round is not in this
-  branch. Adding it without one would be exactly the "eye-tuned threshold" the brief
-  forbids.
+Two conservative choices are inside that paragraph, recorded as assumptions 44–45:
 
-* The brief's other WP10 items do exist, under the repository's own names: the
-  **edge verdict with a degraded mode** is `regimePermit` (`REGIME_UNAVAILABLE` is
-  the degraded answer, and it is fail-closed); the **ensemble** is `evidence.ts`
-  plus the view above; the **Brier-tracked calibrator** is WP5's (`meta/model.ts`
-  records the skill and the study gates on it); the **backtest** with purge + embargo
-  is `meta/folds.ts` and the WP2/WP5 harness; the **data-freshness veto** is the
-  desk's readiness gate (`integrity.ts` feed status, refused before any analysis);
-  and the **dashboard with the equity curve** is the terminal's realised-performance
-  panel plus §12.3.
+* **`range` and `volatile` never down-weight anything.** In a quiet market the desk
+  has formed no direction to contradict; halving every vote there would be a silent,
+  market-wide shrink of every probability — a strategy change dressed as a vote.
+* **Weight 1 is the default and cannot be passed by accident.** `MetaViewInput`'s
+  option is optional and `regimeVoteWeight` returns 1 for anything that is not
+  strictly below 1, so a caller that forgets it gets the shipped behaviour. The live
+  path passes 0.5 **only** when `DESK_V4_ENSEMBLE_REGIME_WEIGHT` is on (default
+  OFF); the studies at weight 1 and the wiring tests pass nothing.
+
+**The measurement.** `--regime-weight <0..1>` threads the weight into both studies,
+and both arms were run in both modes. The weight-1 reports were re-run against this
+code and are **identical, fixture for fixture**, to the WP5 reports they supersede:
+the disarmed path is unchanged, not merely claimed to be.
+
+| arm | WP5 intraday | WP5 swing | WP6 intraday | WP6 swing |
+| --- | --- | --- | --- | --- |
+| weight 1 (shipped) | **PASS** — home slope 0.8164, skill +0.2183 | **PASS** — 0.9256, +0.3539 | PASS | PASS |
+| weight 0.5 (the brief's vote) | **FAIL** — home slope 0.7908 (gate ≥ 0.80), skill +0.2012 | PASS — 0.9180, +0.3433 | PASS | PASS |
+
+Per-fixture numbers are in `…-wp10-meta-{intraday,swing}-control.json` (weight 1) and
+`…-wp10-meta-{intraday,swing}-regime-weight.json` (weight 0.5), plus the two
+`…-wp10-gatekeeper-…-regime-weight.json` runs. What they say:
+
+* **Intraday fails the calibration gate.** The home fixture's reliability slope falls
+  from 0.8164 to 0.7908 — outside the [0.8, 1.2] band the gate has held since WP5 —
+  and Brier skill falls from +0.2183 to +0.2012. Swing survives (0.9256 → 0.9180);
+  one mode failing is a failing.
+* **The effect is real.** Even the base rate moves (35.50% → 36.33% intraday,
+  45.45% → 46.36% swing): the rule flips direction on real decision bars. That is
+  precisely the behavioural change the flag exists to gate.
+* **The composition point stays safe.** Both nulls still refuse to claim an edge
+  (intraday 29 and 56 armed rows with lower bounds −0.895 and −0.275; swing 36 and
+  40 armed, −0.293 and −0.356) and the positive controls still arm: the loss is in
+  the calibration of the blend, not in the gatekeeper.
+
+§7.6 recorded that the intraday home margin was 0.016 of slope and that "a different
+seed could flip it". It flipped — not from a seed, but from this vote. The honest
+reading of a thin gate is not to widen the gate.
+
+**The decision: it stays OFF, and the measurement is the reason.**
+`DESK_V4_ENSEMBLE_REGIME_WEIGHT` ships **default OFF**, the rule disabled at the
+composition point, with its mechanism, its two arms and its reports stored. Arming
+it in intraday mode could only be bought by relaxing the WP5 slope floor — a gate
+the brief forbids weakening and which no eye-tuned number could justify anyway. A
+future campaign that wants the vote must produce a blend that passes the gates as
+they stand; until then the desk behaves exactly as the weight-1 studies measured it.
+
+**Nothing else in the WP10 brief is now absent.** The remaining names map to code
+that already exists, under the repository's own names: the **edge verdict with a
+degraded mode** is `regimePermit` (`REGIME_UNAVAILABLE` is the degraded answer, and
+it is fail-closed); the **ensemble** is `evidence.ts` plus the view above; the
+**Brier-tracked calibrator** is WP5's (`meta/model.ts` records the skill and the
+study gates on it); the **backtest** with purge + embargo is `meta/folds.ts` and the
+WP2/WP5 harness; the **data-freshness veto** is the desk's readiness gate
+(`integrity.ts` feed status, refused before any analysis); and the **dashboard with
+the equity curve** is the terminal's realised-performance panel plus §12.3.
 
 ### 12.7 What WP10 does not do
 
@@ -1641,6 +1692,9 @@ should know it rather than infer it from a green page:
   (as the disable), and the rest are shown so the operator can act.
 * **It does not re-measure the calibrator.** The weekly report's gap and Brier are
   the *live* checks; the WP5/WP6 studies remain the evidence for the model itself.
+* **It does not arm the regime-mismatch vote.** The rule is built and measured
+  (§12.6) and the measurement fails the WP5 intraday calibration gate, so the flag
+  is off; the page displays the desk as it is, not as the brief hoped.
 
 ## 13. Documented assumptions and conservative choices
 
@@ -1859,6 +1913,17 @@ the reasoning recorded.
    bracket before bisecting; and no size of a new trade can fix a book that is
    already too big, so the honest answer there is zero risk and a named refusal.
 
+44. **The regime-mismatch rule fires only against a DIRECTIONAL regime reading**
+   (`trend_up` / `trend_down`), never in `range`, `volatile` or an unknown state.
+   Halving votes where the desk has formed no opinion would shrink every
+   probability in a quiet market — a strategy change wearing the clothes of a vote
+   (§12.6).
+45. **The regime-mismatch vote ships DISARMED, because its own measurement failed
+   a gate.** The armed arm's intraday home-fixture reliability slope is 0.7908
+   against the WP5 floor of 0.80 (§12.6); the conservative consequence of a failed
+   measurement is to leave the feature off and say so in the docs, the changelog
+   and the risk register, never to widen the gate so that it fits.
+
 ## 14. Changelog — every behavioural change, and the gate ledger
 
 ### Behavioural changes
@@ -1944,6 +2009,7 @@ the reasoning recorded.
 | 60 | The journal's structured `detail` is withheld unless `DESK_V4_UI` is on | **scope** — `ui` governs explanatory payloads, never the numbers |
 | 61 | Alerts are de-duplicated per key for 10 minutes and rate-limited to 12 per minute, with no credentials meaning no channel | **operator discipline** — a channel that storms or half-exists gets muted or trusted wrongly; a failed send releases its de-dupe key so the next real event is delivered |
 | 62 | The rollout's kill rules are DISPLAYED, not enforced (except `e ≥ 20`, which is the wired disable) | **the brief makes them human decisions**; a page that silently halted the desk on a number the operator cannot see would be worse than one that shows the number |
+| 63 | WP10's regime-mismatch vote: `regimeVoteWeight()` + `REGIME_MISMATCH_VOTE_WEIGHT = 0.5` in `meta/view.ts`, the weighted blend, and `agentWeights` / `downWeightedAgents` on the view; exposed as `DESK_V4_ENSEMBLE_REGIME_WEIGHT` and threaded into the studies by `--regime-weight` | **added, and OFF by default because it was measured**: weight 1 reproduces the shipped blend byte-for-byte (both stored WP5 reports re-run, identical) while weight 0.5 drops the intraday home-fixture reliability slope to 0.7908 against the 0.80 floor → the WP5 gates FAIL, so the flag stays off (§12.6) |
 
 ### Gate ledger
 
@@ -1972,6 +2038,11 @@ the reasoning recorded.
   20`; the 200-independent-observation floor on fitting a calibrator at all; and
   the rule that an unidentifiable calibration slope is a failure rather than a
   number to report.
+* **Added (WP10)**: the regime-mismatch vote weight (0.5) and the weighted blend
+  behind `DESK_V4_ENSEMBLE_REGIME_WEIGHT` — measured, and left OFF because the
+  armed arm fails the WP5 intraday calibration gate (§12.6). The vote is the only
+  change in the round that could have moved a decision; it does not, in the
+  shipped configuration.
 * **Added (WP6)**: the gatekeeper's eight layers (§8.2) — the mode-specific EV
   floors (0.25R scalp / 0.20R intraday+swing), the cost/σ_h ceiling (15%, scalp),
   Benjamini–Hochberg at q = 0.10, the executed-policy geometry bars (target
@@ -2227,11 +2298,16 @@ the reasoning recorded.
    has nothing to show, and with them on the numbers are as sparse as the shadow
    phase is young — an empty panel is not a clean bill of health.
 
-53. **`ensembleDecide`'s regime-mismatch vote weighting is NOT implemented**
-   (§12.6). The desk's blend is the mean over agreeing agents, with no regime
-   penalty. Adding one changes `p_LCB` and therefore the set of plans that clear
-   the EV floor, so it needs its own measurement round (WP5 calibration, then a WP6
-   gatekeeper re-run) before it can ship — and that round is not in this branch.
+53. **The regime-mismatch vote is built and measured, and it FAILS the WP5
+   intraday calibration gate — so it is not armed** (§12.6). With
+   `DESK_V4_ENSEMBLE_REGIME_WEIGHT` off (the shipped state) the blend is the
+   weight-1 mean every stored study was run on, re-verified identical. With it on,
+   the intraday home fixture's reliability slope falls to 0.7908 against a 0.80
+   floor while the gatekeeper's nulls still refuse: the risk is an operator arming
+   the flag on the strength of the brief's sentence alone. The flag's doc comment,
+   §12.6, assumption 45 and this entry exist to make that impossible to do by
+   accident — and if a future campaign does want the vote, the evidence it must
+   produce is a blend that passes the gates as they stand, not a wider gate.
 
 ## 16. Tests and commands
 
@@ -2239,15 +2315,25 @@ the reasoning recorded.
 # the standing regression — every api-server test, including the desk suites
 cd artifacts/api-server && pnpm run test
 
-# every desk test on its own (multiasset + research)
+# every desk test on its own (multiasset + alpha + meta + research + the route tests)
+# the nested glob is not optional: meta/ and alpha/ hold suites the top-level glob misses
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx --test \
-  --test-timeout=180000 --test-force-exit src/lib/multiasset/*.test.ts src/lib/multiasset/research/*.test.ts
+  --test-timeout=180000 --test-force-exit src/lib/multiasset/*.test.ts src/lib/multiasset/*/*.test.ts \
+  src/routes/desk*.test.ts
 
 # the WP5 meta-model study (writes research-reports/2026-10-11-wp5-meta-<mode>-meta-study.json)
 # stride 1 is the default for this study: the desk evaluates every closed bar, and the
 # corpus must carry at least 200 INDEPENDENT observations before a calibrator is fitted
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
   --meta --mode intraday|swing --label meta-study
+
+# the WP10 vote arm: weight 0.5 in the ensemble, threaded into both studies
+# (weight 1, or omitting the flag, is the shipped blend; the arm reports the
+# number the WP5 gates are decided on and is why the flag ships OFF — §12.6)
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --meta --mode intraday|swing --label regime-weight --regime-weight 0.5
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --gatekeeper --mode intraday|swing --regime-weight 0.5
 
 # the same run with a different calibration form (both are measured by the gates)
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
@@ -2335,11 +2421,18 @@ Stored reports (`artifacts/api-server/research-reports/`):
 | `2026-10-11-wp8-portfolio-swing-study.json` | the same, H1 | **PASS** — ρ̂ 0.818, composed CVaR on its 1.5% ceiling, mirrored DD 10.07% vs 193% flat |
 | `2026-10-11-wp9-governance-intraday-study.json` | WP9: the e-process's null bound and power, the change detector's 18-cell grid, the overlay's 7,533-combination sweep, the layer over the desk's own corpus | **PASS** — 0.700% false alarm vs a 5% bound, 100% catch of −0.35R in a median 59 trades, 1 of 18 grid cells qualifying |
 | `2026-10-11-wp9-governance-swing-study.json` | the same, H1 | **PASS** — same thresholds; 3 of 3 degraded streams disabled and 0 of 3 positive ones touched |
-| (no new report) | WP10 adds no measurement: it is a reader, and its evidence is the route tests (absence, then presence) and the page's pure-function tests | — |
+| `2026-10-11-wp10-meta-intraday-control.json` | WP10: the WP5 study re-run at weight 1 against the new code | **PASS**, and fixture-for-fixture **identical** to the report it supersedes |
+| `2026-10-11-wp10-meta-swing-control.json` | the same, H1 | **PASS**, identical |
+| `2026-10-11-wp10-meta-intraday-regime-weight.json` | WP10: the WP5 study with the regime-mismatch vote armed (0.5) | **FAIL** — home slope 0.7908 vs the 0.80 floor (§12.6); the flag stays OFF |
+| `2026-10-11-wp10-meta-swing-regime-weight.json` | the same, H1 | **PASS** — slope 0.9180; one mode failing is a failing |
+| `2026-10-11-wp10-gatekeeper-intraday-regime-weight.json` | WP10: the WP6 study with the vote armed | **PASS** — nulls still refuse (lower bounds −0.702) |
+| `2026-10-11-wp10-gatekeeper-swing-regime-weight.json` | the same, H1 | **PASS** — nulls still refuse (−0.511) |
 
-Current state: **1,220/1,220** api-server tests (**149** suites) and **568/568** desk
-tests (multiasset + research + alpha + meta; the counts wander by a handful between
-runs because a few pre-existing suites build their cases from data), **44/44**
+Current state (measured on the WP10 vote round, two full runs of the same code):
+**1,215–1,220** api-server tests (**146–151** suites), **0 failures** in both, and
+**563/563** desk tests (multiasset + alpha + meta + research + the route tests;
+the counts wander by a handful between runs because a few pre-existing suites build
+their cases from data), **44/44**
 trading-platform tests (including the 6/6 EA-download parity check that keeps
 `public/downloads/NeurotradeBridge.mq5` byte-identical to the source), typecheck
 clean across all packages. WP5 added 31 unit tests (`meta/meta.test.ts` — labels,
@@ -2355,12 +2448,16 @@ thresholds at the 16th and 29th consecutive loss, the one-way rule and the resum
 that keeps the evidence, the change detector's statefulness and its measured
 operating point, the weekly recount, the refusal histogram's once-per-decision rule,
 the overlay's reduce-only vocabulary, plan/ticket attribution, and the durable
-round-trip of all five tables). WP10 added 9 on the API side
+round-trip of all five tables). WP10 added 12 on the API side
 (`wp10-learning-surface.test.ts` — the regime read agreeing with the live permit,
 the 2 s memo, the new-bar invalidation, the short-window refusal, and the alert
 channel's flag-off / unconfigured / duplicate / rate-limited / failing /
 throwing paths; `routes/desk-learning.test.ts` — every new endpoint absent while
-its flag is off, then present with the desk's own numbers) and 7 on the platform
+its flag is off, then present with the desk's own numbers; and
+`meta/wp10-ensemble-vote.test.ts` — the vote rule as a pure function, the disarmed
+path reproducing the shipped view on a real series, and the armed path's weights,
+contrarian-only penalty and weighted mean, re-read from the view rather than
+recomputed from the rule) and 7 on the platform
 side (`learning.test.ts` — the logarithmic e-value bar, the calibration and Brier
 bars, the refusal histogram, the kill rules' not-measurable state, and the
 formatting of a signed R). WP7 added 13 (`wp7-execution.test.ts` — the spread

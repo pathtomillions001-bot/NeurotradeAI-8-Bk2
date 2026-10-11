@@ -79,6 +79,7 @@ import {
   type MetaFixtureVerdict,
   type MetaStudyReport,
 } from "./meta-eval";
+import { REGIME_MISMATCH_VOTE_WEIGHT } from "../meta/view";
 import {
   GK_MC_PATHS,
   GK_MC_STRIDE,
@@ -208,6 +209,11 @@ interface CliArgs {
   portfolio: boolean;
   /** Run the WP9 governance study instead of a strategy study. */
   governance: boolean;
+  /**
+   * WP10's regime-mismatch vote weight for the meta and gatekeeper studies.
+   * `null` means "not set" — the shipped majority vote, weight 1.
+   */
+  regimeMismatchVoteWeight: number | null;
   /** True when the caller set --stride explicitly. */
   strideExplicit: boolean;
 }
@@ -252,6 +258,11 @@ const USAGE = `research:run — the MT5 Desk v4 research harness
                                     the layer's ceilings on the book's heat and
                                     CVaR, and the drawdown scalar on an equity
                                     path driven by the execution study's trades
+  --regime-weight <0..1>            arm WP10's regime-mismatch vote in the meta
+                                    and gatekeeper studies: an agent proposing
+                                    against the desk's own directional regime
+                                    reading counts this much (the shipped weight is
+                                    0.5, and the default is 1 = the majority vote)
   --governance                      run the WP9 governance study instead of a
                                     strategy study: the per-agent e-process's
                                     false-alarm and power tables, the change
@@ -347,6 +358,9 @@ export function parseArgs(argv: string[]): CliArgs {
     execution: flags.has("execution"),
     portfolio: flags.has("portfolio"),
     governance: flags.has("governance"),
+    regimeMismatchVoteWeight: flags.has("regime-weight")
+      ? Math.max(0.01, Math.min(1, num("regime-weight", REGIME_MISMATCH_VOTE_WEIGHT)))
+      : null,
     regimeFitBars: Math.max(200, Math.floor(num("regime-fit-bars", DEFAULT_REGIME_HMM_CONFIG.fitBars))),
     mode,
     data: flags.get("data") ?? "synthetic:all",
@@ -1387,6 +1401,7 @@ export function runMetaStudy(args: CliArgs): MetaStudyReport {
           targetMultipleR: META_TARGET_MULTIPLE_R,
           horizonBars,
           calibrator: args.metaCalibrator,
+          regimeMismatchVoteWeight: args.regimeMismatchVoteWeight ?? undefined,
         }),
       );
     }
@@ -2177,6 +2192,7 @@ export function runGatekeeperStudy(args: CliArgs): GatekeeperStudyReport {
         targetMultipleR: META_TARGET_MULTIPLE_R,
         horizonBars,
         calibrator: args.metaCalibrator,
+        regimeMismatchVoteWeight: args.regimeMismatchVoteWeight ?? undefined,
       });
       const assessment = assessGatekeeperSeries({
         measurement,

@@ -93,6 +93,13 @@ export interface MetaView {
   agents: string[];
   /** Per-agent stated probabilities, keyed by shipped agent key. */
   agentProbabilities: Record<string, number>;
+  /**
+   * WP10's vote weight per agent, keyed the same way. Always populated by
+   * `metaViewAt`; every entry is 1 unless the regime-mismatch rule was armed.
+   */
+  agentWeights?: Record<string, number>;
+  /** The agents whose vote was down-weighted, for the journal and the studies. */
+  downWeightedAgents?: string[];
   /** True when the reference policy would have acted. */
   emitted: boolean;
   mode: TradeMode;

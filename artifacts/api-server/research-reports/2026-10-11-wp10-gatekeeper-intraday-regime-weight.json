@@ -1,0 +1,2912 @@
+{
+  "tool": "MT5 Desk v4 — WP6 gatekeeper study",
+  "mode": "intraday",
+  "generatedAt": "2026-10-11T19:42:25.461Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --gatekeeper --mode intraday --regime-weight 0.5 --out research-reports/2026-10-11-wp10-gatekeeper-intraday-regime-weight.json",
+  "mc": {
+    "stride": 60,
+    "paths": 100,
+    "tradesPerPath": 8
+  },
+  "thresholds": {
+    "evLcbFloorR": {
+      "scalp": 0.25,
+      "intraday": 0.2,
+      "swing": 0.2
+    },
+    "bhQ": 0.1,
+    "costSigmaMax": 0.15
+  },
+  "contractSpec": {
+    "symbol": "EURUSD",
+    "assetClass": "forex",
+    "point": 0.00001,
+    "digits": 5,
+    "tickSize": 0.00001,
+    "tickValue": 1,
+    "contractSize": 100000,
+    "volumeMin": 0.01,
+    "volumeMax": 100,
+    "volumeStep": 0.01,
+    "stopsLevel": 0,
+    "freezeLevel": 0,
+    "marginInitial": 0,
+    "swapLong": 0,
+    "swapShort": 0,
+    "commissionPerLot": 0,
+    "spreadPoints": 12
+  },
+  "fixtures": [
+    {
+      "name": "positive-control",
+      "kind": "positive-control",
+      "mode": "intraday",
+      "home": true,
+      "null": false,
+      "note": "regime-switching drift + AR(1) residual: the desk's own positive control, where the trend structure is real",
+      "series": [
+        {
+          "series": "positive-control#1",
+          "kind": "positive-control",
+          "mode": "intraday",
+          "rows": 1204,
+          "evidenceMean": 136.155229636908,
+          "breakEvenMean": 0.4236813551847877,
+          "evZero": {
+            "armed": 819,
+            "armedRate": 0,
+            "hitRate": 0.63003663003663,
+            "meanR": 1.1769607936631734,
+            "meanRLower": 1.1076447434601278
+          },
+          "evFloor": {
+            "armed": 715,
+            "armedRate": 0,
+            "hitRate": 0.6601398601398601,
+            "meanR": 1.260943027013711,
+            "meanRLower": 1.1897096939298497
+          },
+          "gated": {
+            "armed": 512,
+            "armedRate": 0,
+            "hitRate": 0.673828125,
+            "meanR": 1.2991981307548786,
+            "meanRLower": 1.217297788259337
+          },
+          "bh": {
+            "tested": 1204,
+            "rejected": 646,
+            "thresholdMedian": 0.04898785425101215
+          },
+          "edgeP": {
+            "median": 0.10519319748470096,
+            "overQ": 605
+          },
+          "costSigma": {
+            "measured": 1204,
+            "median": 0.027280402387368036,
+            "above": 0
+          },
+          "mc": {
+            "samples": 21,
+            "positiveTail": 0,
+            "admitted": 21,
+            "medianMeanR": 0.026251629292545563,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 150,
+                "meanR": -0.02544492436102018,
+                "p05MeanR": -0.5728935793997284,
+                "targetShare": 0.0575,
+                "timeoutShare": 0.575
+              },
+              {
+                "row": 389,
+                "meanR": -0.029256014022277885,
+                "p05MeanR": -0.7513696569752286,
+                "targetShare": 0.1775,
+                "timeoutShare": 0.32375
+              },
+              {
+                "row": 578,
+                "meanR": -0.09620872001688148,
+                "p05MeanR": -0.6444749739524056,
+                "targetShare": 0.1425,
+                "timeoutShare": 0.3425
+              },
+              {
+                "row": 735,
+                "meanR": 0.052783154185689185,
+                "p05MeanR": -0.596497188267602,
+                "targetShare": 0.19,
+                "timeoutShare": 0.355
+              },
+              {
+                "row": 885,
+                "meanR": 0.07149721411212237,
+                "p05MeanR": -0.6767926053877675,
+                "targetShare": 0.2575,
+                "timeoutShare": 0.23125
+              },
+              {
+                "row": 1016,
+                "meanR": 0.10123617594368041,
+                "p05MeanR": -0.6907709797440629,
+                "targetShare": 0.24875,
+                "timeoutShare": 0.265
+              },
+              {
+                "row": 1175,
+                "meanR": 0.03879333432207825,
+                "p05MeanR": -0.6353123558934513,
+                "targetShare": 0.20125,
+                "timeoutShare": 0.32375
+              },
+              {
+                "row": 1277,
+                "meanR": 0.1521479244356931,
+                "p05MeanR": -0.6278471899563973,
+                "targetShare": 0.25875,
+                "timeoutShare": 0.27125
+              },
+              {
+                "row": 1379,
+                "meanR": 0.1024966451132519,
+                "p05MeanR": -0.527840926221901,
+                "targetShare": 0.20375,
+                "timeoutShare": 0.345
+              },
+              {
+                "row": 1502,
+                "meanR": 0.017797946679785254,
+                "p05MeanR": -0.6189705660700313,
+                "targetShare": 0.17,
+                "timeoutShare": 0.37375
+              },
+              {
+                "row": 1582,
+                "meanR": 0.1161016374486635,
+                "p05MeanR": -0.5495823553310742,
+                "targetShare": 0.2275,
+                "timeoutShare": 0.3125
+              },
+              {
+                "row": 1723,
+                "meanR": -0.00845924500548492,
+                "p05MeanR": -0.5728234205980461,
+                "targetShare": 0.1625,
+                "timeoutShare": 0.36625
+              },
+              {
+                "row": 1797,
+                "meanR": -0.011118068533476237,
+                "p05MeanR": -0.782307568177598,
+                "targetShare": 0.23125,
+                "timeoutShare": 0.2375
+              },
+              {
+                "row": 1872,
+                "meanR": -0.0976979278172786,
+                "p05MeanR": -0.7557246503007198,
+                "targetShare": 0.2175,
+                "timeoutShare": 0.2075
+              },
+              {
+                "row": 1978,
+                "meanR": -0.1483794121372226,
+                "p05MeanR": -0.8452498258689526,
+                "targetShare": 0.205,
+                "timeoutShare": 0.19625
+              },
+              {
+                "row": 2061,
+                "meanR": 0.036054408508164514,
+                "p05MeanR": -0.5761284505964712,
+                "targetShare": 0.16875,
+                "timeoutShare": 0.3775
+              },
+              {
+                "row": 2135,
+                "meanR": -0.0034947852852865325,
+                "p05MeanR": -0.5613873402706424,
+                "targetShare": 0.22375,
+                "timeoutShare": 0.25625
+              },
+              {
+                "row": 2228,
+                "meanR": 0.05213282933087271,
+                "p05MeanR": -0.758696495229079,
+                "targetShare": 0.16375,
+                "timeoutShare": 0.39875
+              },
+              {
+                "row": 2327,
+                "meanR": -0.004463957402992578,
+                "p05MeanR": -0.6537766861462129,
+                "targetShare": 0.1875,
+                "timeoutShare": 0.32125
+              },
+              {
+                "row": 2399,
+                "meanR": 0.026251629292545563,
+                "p05MeanR": -0.6898758496497909,
+                "targetShare": 0.19125,
+                "timeoutShare": 0.31375
+              },
+              {
+                "row": 2471,
+                "meanR": 0.05526197720383576,
+                "p05MeanR": -0.7477056446859935,
+                "targetShare": 0.2025,
+                "timeoutShare": 0.325
+              }
+            ],
+            "meanR": {
+              "p05": -0.0976979278172786,
+              "median": 0.026251629292545563,
+              "min": -0.1483794121372226,
+              "max": 0.1521479244356931
+            },
+            "p05": {
+              "p05": -0.782307568177598,
+              "median": -0.6444749739524056,
+              "min": -0.8452498258689526,
+              "max": -0.527840926221901
+            },
+            "targetShare": {
+              "p05": 0.1425,
+              "median": 0.20125,
+              "min": 0.0575,
+              "max": 0.25875
+            },
+            "timeoutShare": {
+              "p05": 0.2075,
+              "median": 0.32375,
+              "min": 0.19625,
+              "max": 0.575
+            }
+          },
+          "corpus": {
+            "hitRate": 0.4867109634551495,
+            "meanR": 0.707664529920346
+          }
+        },
+        {
+          "series": "positive-control#2",
+          "kind": "positive-control",
+          "mode": "intraday",
+          "rows": 1117,
+          "evidenceMean": 124.2701017072134,
+          "breakEvenMean": 0.36601594705527085,
+          "evZero": {
+            "armed": 561,
+            "armedRate": 0,
+            "hitRate": 0.41889483065953653,
+            "meanR": 0.659845817600129,
+            "meanRLower": 0.5694687921822796
+          },
+          "evFloor": {
+            "armed": 339,
+            "armedRate": 0,
+            "hitRate": 0.30678466076696165,
+            "meanR": 0.42515125275877197,
+            "meanRLower": 0.3125256196373646
+          },
+          "gated": {
+            "armed": 197,
+            "armedRate": 0,
+            "hitRate": 0.30456852791878175,
+            "meanR": 0.4561097213881463,
+            "meanRLower": 0.30952382745140405
+          },
+          "bh": {
+            "tested": 1117,
+            "rejected": 839,
+            "thresholdMedian": 0.007450980392156864
+          },
+          "edgeP": {
+            "median": 0.45852087699719846,
+            "overQ": 748
+          },
+          "costSigma": {
+            "measured": 1117,
+            "median": 0.029330249078189277,
+            "above": 0
+          },
+          "mc": {
+            "samples": 19,
+            "positiveTail": 0,
+            "admitted": 19,
+            "medianMeanR": -0.040518724689970094,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 151,
+                "meanR": 0.011366548754598168,
+                "p05MeanR": -0.7135917849731798,
+                "targetShare": 0.2175,
+                "timeoutShare": 0.27875
+              },
+              {
+                "row": 387,
+                "meanR": -0.19323240364183253,
+                "p05MeanR": -0.9719645955967657,
+                "targetShare": 0.2175,
+                "timeoutShare": 0.1625
+              },
+              {
+                "row": 539,
+                "meanR": -0.08414774120392814,
+                "p05MeanR": -0.8193585464720727,
+                "targetShare": 0.145,
+                "timeoutShare": 0.3525
+              },
+              {
+                "row": 679,
+                "meanR": -0.002538451535894755,
+                "p05MeanR": -0.5921620001949515,
+                "targetShare": 0.195,
+                "timeoutShare": 0.3125
+              },
+              {
+                "row": 857,
+                "meanR": 0.016766610108527733,
+                "p05MeanR": -0.6854023298761086,
+                "targetShare": 0.22,
+                "timeoutShare": 0.275
+              },
+              {
+                "row": 975,
+                "meanR": -0.08822134713017396,
+                "p05MeanR": -0.9781042105295223,
+                "targetShare": 0.24375,
+                "timeoutShare": 0.16625
+              },
+              {
+                "row": 1142,
+                "meanR": 0.0439828099665516,
+                "p05MeanR": -0.763198494554171,
+                "targetShare": 0.25375,
+                "timeoutShare": 0.2175
+              },
+              {
+                "row": 1225,
+                "meanR": -0.03405905347333077,
+                "p05MeanR": -0.732618861173517,
+                "targetShare": 0.2375,
+                "timeoutShare": 0.2075
+              },
+              {
+                "row": 1369,
+                "meanR": -0.0696784698570274,
+                "p05MeanR": -0.7220918999523437,
+                "targetShare": 0.2025,
+                "timeoutShare": 0.23
+              },
+              {
+                "row": 1471,
+                "meanR": -0.09921876038745303,
+                "p05MeanR": -0.8538320060866965,
+                "targetShare": 0.21875,
+                "timeoutShare": 0.215
+              },
+              {
+                "row": 1588,
+                "meanR": -0.03683497528009889,
+                "p05MeanR": -0.6301807422217505,
+                "targetShare": 0.16875,
+                "timeoutShare": 0.3525
+              },
+              {
+                "row": 1688,
+                "meanR": -0.09997255630827677,
+                "p05MeanR": -0.7034034901011033,
+                "targetShare": 0.2075,
+                "timeoutShare": 0.2525
+              },
+              {
+                "row": 1830,
+                "meanR": -0.08384129797099528,
+                "p05MeanR": -0.7427481171423544,
+                "targetShare": 0.1575,
+                "timeoutShare": 0.30625
+              },
+              {
+                "row": 1939,
+                "meanR": -0.0016460565192191723,
+                "p05MeanR": -0.7190271025845322,
+                "targetShare": 0.21125,
+                "timeoutShare": 0.29375
+              },
+              {
+                "row": 2043,
+                "meanR": -0.040518724689970094,
+                "p05MeanR": -0.7802242134225053,
+                "targetShare": 0.19875,
+                "timeoutShare": 0.27125
+              },
+              {
+                "row": 2130,
+                "meanR": 0.01919132405231996,
+                "p05MeanR": -0.8389500791602419,
+                "targetShare": 0.15125,
+                "timeoutShare": 0.435
+              },
+              {
+                "row": 2247,
+                "meanR": -0.11325056283533577,
+                "p05MeanR": -0.8357579291595744,
+                "targetShare": 0.22875,
+                "timeoutShare": 0.1825
+              },
+              {
+                "row": 2340,
+                "meanR": 0.026157018247889234,
+                "p05MeanR": -0.7673424536185298,
+                "targetShare": 0.1925,
+                "timeoutShare": 0.3125
+              },
+              {
+                "row": 2418,
+                "meanR": -0.06947625362876376,
+                "p05MeanR": -0.7298900056817581,
+                "targetShare": 0.25125,
+                "timeoutShare": 0.15625
+              }
+            ],
+            "meanR": {
+              "p05": -0.19323240364183253,
+              "median": -0.040518724689970094,
+              "min": -0.19323240364183253,
+              "max": 0.0439828099665516
+            },
+            "p05": {
+              "p05": -0.9781042105295223,
+              "median": -0.7427481171423544,
+              "min": -0.9781042105295223,
+              "max": -0.5921620001949515
+            },
+            "targetShare": {
+              "p05": 0.145,
+              "median": 0.21125,
+              "min": 0.145,
+              "max": 0.25375
+            },
+            "timeoutShare": {
+              "p05": 0.15625,
+              "median": 0.27125,
+              "min": 0.15625,
+              "max": 0.435
+            }
+          },
+          "corpus": {
+            "hitRate": 0.37958818263205013,
+            "meanR": 0.45792859383263657
+          }
+        },
+        {
+          "series": "positive-control#3",
+          "kind": "positive-control",
+          "mode": "intraday",
+          "rows": 1204,
+          "evidenceMean": 134.88857104385488,
+          "breakEvenMean": 0.4660497043566012,
+          "evZero": {
+            "armed": 903,
+            "armedRate": 0,
+            "hitRate": 0.5791805094130675,
+            "meanR": 0.9968081253137018,
+            "meanRLower": 0.9255421934658496
+          },
+          "evFloor": {
+            "armed": 768,
+            "armedRate": 0,
+            "hitRate": 0.59375,
+            "meanR": 1.0403589085790326,
+            "meanRLower": 0.9640799469502692
+          },
+          "gated": {
+            "armed": 303,
+            "armedRate": 0,
+            "hitRate": 0.6402640264026402,
+            "meanR": 1.1580972337768765,
+            "meanRLower": 1.0429981571988796
+          },
+          "bh": {
+            "tested": 1204,
+            "rejected": 846,
+            "thresholdMedian": 0.03959390862944163
+          },
+          "edgeP": {
+            "median": 0.3210211314851818,
+            "overQ": 719
+          },
+          "costSigma": {
+            "measured": 1204,
+            "median": 0.02666399776040878,
+            "above": 0
+          },
+          "mc": {
+            "samples": 21,
+            "positiveTail": 0,
+            "admitted": 21,
+            "medianMeanR": -0.06383989823585492,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 157,
+                "meanR": -0.15770208871476837,
+                "p05MeanR": -0.7888414436600066,
+                "targetShare": 0.08375,
+                "timeoutShare": 0.41375
+              },
+              {
+                "row": 398,
+                "meanR": 0.009594295256858705,
+                "p05MeanR": -0.8109955500634423,
+                "targetShare": 0.20125,
+                "timeoutShare": 0.30875
+              },
+              {
+                "row": 583,
+                "meanR": -0.11958567223227805,
+                "p05MeanR": -0.908639354609725,
+                "targetShare": 0.19,
+                "timeoutShare": 0.2375
+              },
+              {
+                "row": 774,
+                "meanR": -0.07594481444508512,
+                "p05MeanR": -0.8206084267292924,
+                "targetShare": 0.1725,
+                "timeoutShare": 0.29875
+              },
+              {
+                "row": 890,
+                "meanR": -0.01007772486364043,
+                "p05MeanR": -0.8820974608050793,
+                "targetShare": 0.22625,
+                "timeoutShare": 0.24375
+              },
+              {
+                "row": 1019,
+                "meanR": -0.1428643842966685,
+                "p05MeanR": -0.824466094346757,
+                "targetShare": 0.1525,
+                "timeoutShare": 0.29875
+              },
+              {
+                "row": 1114,
+                "meanR": -0.02545332622382256,
+                "p05MeanR": -0.6696474377306736,
+                "targetShare": 0.21125,
+                "timeoutShare": 0.25375
+              },
+              {
+                "row": 1210,
+                "meanR": -0.06383989823585492,
+                "p05MeanR": -0.7070587238924907,
+                "targetShare": 0.16625,
+                "timeoutShare": 0.3175
+              },
+              {
+                "row": 1316,
+                "meanR": -0.12904776431894693,
+                "p05MeanR": -0.8477005876027216,
+                "targetShare": 0.20875,
+                "timeoutShare": 0.20875
+              },
+              {
+                "row": 1404,
+                "meanR": -0.06982467570246344,
+                "p05MeanR": -0.763840092435083,
+                "targetShare": 0.17375,
+                "timeoutShare": 0.29625
+              },
+              {
+                "row": 1491,
+                "meanR": -0.07042682092165344,
+                "p05MeanR": -0.9134975013095936,
+                "targetShare": 0.185,
+                "timeoutShare": 0.2725
+              },
+              {
+                "row": 1585,
+                "meanR": -0.11838959844587606,
+                "p05MeanR": -0.8267136329909246,
+                "targetShare": 0.18625,
+                "timeoutShare": 0.25875
+              },
+              {
+                "row": 1698,
+                "meanR": -0.053731752385937186,
+                "p05MeanR": -0.6976907642593215,
+                "targetShare": 0.20375,
+                "timeoutShare": 0.25
+              },
+              {
+                "row": 1784,
+                "meanR": -0.05130487994957259,
+                "p05MeanR": -0.7567345845505324,
+                "targetShare": 0.1575,
+                "timeoutShare": 0.34375
+              },
+              {
+                "row": 1921,
+                "meanR": -0.08307275450816076,
+                "p05MeanR": -0.8277784446067321,
+                "targetShare": 0.20125,
+                "timeoutShare": 0.2375
+              },
+              {
+                "row": 2000,
+                "meanR": 0.06260030282129211,
+                "p05MeanR": -0.5078089124970273,
+                "targetShare": 0.13,
+                "timeoutShare": 0.4675
+              },
+              {
+                "row": 2078,
+                "meanR": -0.039785374621452894,
+                "p05MeanR": -0.8020902239013754,
+                "targetShare": 0.17875,
+                "timeoutShare": 0.31
+              },
+              {
+                "row": 2209,
+                "meanR": -0.037085988854561006,
+                "p05MeanR": -0.7109989352775953,
+                "targetShare": 0.20875,
+                "timeoutShare": 0.25125
+              },
+              {
+                "row": 2277,
+                "meanR": -0.020518058547912714,
+                "p05MeanR": -0.6968769520443209,
+                "targetShare": 0.16125,
+                "timeoutShare": 0.3425
+              },
+              {
+                "row": 2353,
+                "meanR": -0.0666381833897501,
+                "p05MeanR": -0.7114611163008612,
+                "targetShare": 0.19875,
+                "timeoutShare": 0.25
+              },
+              {
+                "row": 2469,
+                "meanR": -0.03615181748302391,
+                "p05MeanR": -0.8071713159036406,
+                "targetShare": 0.20625,
+                "timeoutShare": 0.2625
+              }
+            ],
+            "meanR": {
+              "p05": -0.1428643842966685,
+              "median": -0.06383989823585492,
+              "min": -0.15770208871476837,
+              "max": 0.06260030282129211
+            },
+            "p05": {
+              "p05": -0.908639354609725,
+              "median": -0.8020902239013754,
+              "min": -0.9134975013095936,
+              "max": -0.5078089124970273
+            },
+            "targetShare": {
+              "p05": 0.13,
+              "median": 0.18625,
+              "min": 0.08375,
+              "max": 0.22625
+            },
+            "timeoutShare": {
+              "p05": 0.2375,
+              "median": 0.2725,
+              "min": 0.20875,
+              "max": 0.4675
+            }
+          },
+          "corpus": {
+            "hitRate": 0.47259136212624586,
+            "meanR": 0.6504786978421039
+          }
+        }
+      ],
+      "pooled": {
+        "rows": 3525,
+        "evZero": {
+          "armed": 2283,
+          "armedRate": 0.6476595744680851,
+          "hitRate": 0.5580376697328077,
+          "meanR": 0.9786343104871151,
+          "meanRLower": 0.9033717205465465
+        },
+        "evFloor": {
+          "armed": 1822,
+          "armedRate": 0.5168794326241135,
+          "hitRate": 0.566410537870472,
+          "meanR": 1.0124567402792117,
+          "meanRLower": 0.9313951786359582
+        },
+        "gated": {
+          "armed": 1012,
+          "armedRate": 0.28709219858156027,
+          "hitRate": 0.591897233201581,
+          "meanR": 1.0928325295398778,
+          "meanRLower": 0.9884002996323791
+        },
+        "corpus": {
+          "hitRate": 0.4479432624113475,
+          "meanR": 0.6089959391594454
+        },
+        "mcAdmitted": 61,
+        "mcSamples": 61
+      }
+    },
+    {
+      "name": "seasonal",
+      "kind": "seasonal",
+      "mode": "intraday",
+      "home": false,
+      "null": false,
+      "note": "hour-of-day drift: the fixture where the hour feature carries information (report-only; see the calibration caveat in the report notes)",
+      "series": [
+        {
+          "series": "seasonal#1",
+          "kind": "seasonal",
+          "mode": "intraday",
+          "rows": 794,
+          "evidenceMean": 121.44755520650261,
+          "breakEvenMean": 0.2296997542914875,
+          "evZero": {
+            "armed": 248,
+            "armedRate": 0,
+            "hitRate": 0.6330645161290323,
+            "meanR": 1.108776659667266,
+            "meanRLower": 0.975939595823275
+          },
+          "evFloor": {
+            "armed": 188,
+            "armedRate": 0,
+            "hitRate": 0.6382978723404256,
+            "meanR": 1.1293797506236012,
+            "meanRLower": 0.9780205206209829
+          },
+          "gated": {
+            "armed": 188,
+            "armedRate": 0,
+            "hitRate": 0.6382978723404256,
+            "meanR": 1.1293797506236012,
+            "meanRLower": 0.9780205206209829
+          },
+          "bh": {
+            "tested": 794,
+            "rejected": 412,
+            "thresholdMedian": 0.050955414012738856
+          },
+          "edgeP": {
+            "median": 0.0782622690708603,
+            "overQ": 392
+          },
+          "costSigma": {
+            "measured": 794,
+            "median": 0.02846804146443934,
+            "above": 0
+          },
+          "mc": {
+            "samples": 14,
+            "positiveTail": 0,
+            "admitted": 14,
+            "medianMeanR": -0.08930239555389222,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 152,
+                "meanR": -0.08947461629438822,
+                "p05MeanR": -0.6632575051565966,
+                "targetShare": 0.195,
+                "timeoutShare": 0.23
+              },
+              {
+                "row": 454,
+                "meanR": 0.12438541664879206,
+                "p05MeanR": -0.6859536872825454,
+                "targetShare": 0.23875,
+                "timeoutShare": 0.27625
+              },
+              {
+                "row": 679,
+                "meanR": -0.09413759239224304,
+                "p05MeanR": -0.7607715814182027,
+                "targetShare": 0.23125,
+                "timeoutShare": 0.18625
+              },
+              {
+                "row": 879,
+                "meanR": -0.20285242295723918,
+                "p05MeanR": -1.0390442741262984,
+                "targetShare": 0.21375,
+                "timeoutShare": 0.14625
+              },
+              {
+                "row": 1044,
+                "meanR": -0.08440908024755267,
+                "p05MeanR": -0.9462221337048862,
+                "targetShare": 0.23875,
+                "timeoutShare": 0.18125
+              },
+              {
+                "row": 1257,
+                "meanR": -0.09808207893867887,
+                "p05MeanR": -0.810978789818317,
+                "targetShare": 0.19625,
+                "timeoutShare": 0.2425
+              },
+              {
+                "row": 1367,
+                "meanR": -0.00031397282110135925,
+                "p05MeanR": -0.7749417814220001,
+                "targetShare": 0.21,
+                "timeoutShare": 0.25875
+              },
+              {
+                "row": 1548,
+                "meanR": -0.0891301748133962,
+                "p05MeanR": -0.9413771907891693,
+                "targetShare": 0.25,
+                "timeoutShare": 0.14875
+              },
+              {
+                "row": 1669,
+                "meanR": -0.10180829809227017,
+                "p05MeanR": -0.8460365243272613,
+                "targetShare": 0.215,
+                "timeoutShare": 0.2025
+              },
+              {
+                "row": 1845,
+                "meanR": -0.10155398811589146,
+                "p05MeanR": -0.8227737995804761,
+                "targetShare": 0.20375,
+                "timeoutShare": 0.22
+              },
+              {
+                "row": 1975,
+                "meanR": -0.06795982933368912,
+                "p05MeanR": -0.7709858340868859,
+                "targetShare": 0.24625,
+                "timeoutShare": 0.17
+              },
+              {
+                "row": 2136,
+                "meanR": -0.07050093561314673,
+                "p05MeanR": -0.8219169115397875,
+                "targetShare": 0.26625,
+                "timeoutShare": 0.135
+              },
+              {
+                "row": 2307,
+                "meanR": -0.14602666395537675,
+                "p05MeanR": -0.9131996994243283,
+                "targetShare": 0.23375,
+                "timeoutShare": 0.14625
+              },
+              {
+                "row": 2434,
+                "meanR": -0.04857314752980628,
+                "p05MeanR": -0.8326454333411595,
+                "targetShare": 0.16,
+                "timeoutShare": 0.33125
+              }
+            ],
+            "meanR": {
+              "p05": -0.20285242295723918,
+              "median": -0.0891301748133962,
+              "min": -0.20285242295723918,
+              "max": 0.12438541664879206
+            },
+            "p05": {
+              "p05": -1.0390442741262984,
+              "median": -0.8219169115397875,
+              "min": -1.0390442741262984,
+              "max": -0.6632575051565966
+            },
+            "targetShare": {
+              "p05": 0.16,
+              "median": 0.23125,
+              "min": 0.16,
+              "max": 0.26625
+            },
+            "timeoutShare": {
+              "p05": 0.135,
+              "median": 0.2025,
+              "min": 0.135,
+              "max": 0.33125
+            }
+          },
+          "corpus": {
+            "hitRate": 0.3425692695214106,
+            "meanR": 0.3290831365750204
+          }
+        },
+        {
+          "series": "seasonal#2",
+          "kind": "seasonal",
+          "mode": "intraday",
+          "rows": 986,
+          "evidenceMean": 127.17995747809464,
+          "breakEvenMean": 0.2430604777246442,
+          "evZero": {
+            "armed": 468,
+            "armedRate": 0,
+            "hitRate": 0.688034188034188,
+            "meanR": 1.3722157345660102,
+            "meanRLower": 1.29449623741738
+          },
+          "evFloor": {
+            "armed": 451,
+            "armedRate": 0,
+            "hitRate": 0.6829268292682927,
+            "meanR": 1.3591929735736201,
+            "meanRLower": 1.2791194171341953
+          },
+          "gated": {
+            "armed": 451,
+            "armedRate": 0,
+            "hitRate": 0.6829268292682927,
+            "meanR": 1.3591929735736201,
+            "meanRLower": 1.2791194171341953
+          },
+          "bh": {
+            "tested": 986,
+            "rejected": 489,
+            "thresholdMedian": 0.05119617224880383
+          },
+          "edgeP": {
+            "median": 0.000771236221028132,
+            "overQ": 476
+          },
+          "costSigma": {
+            "measured": 986,
+            "median": 0.029020312958656324,
+            "above": 0
+          },
+          "mc": {
+            "samples": 17,
+            "positiveTail": 0,
+            "admitted": 17,
+            "medianMeanR": -0.03940174871138562,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 155,
+                "meanR": 0.013086204966437465,
+                "p05MeanR": -0.6860641283439413,
+                "targetShare": 0.32625,
+                "timeoutShare": 0.06375
+              },
+              {
+                "row": 415,
+                "meanR": -0.15245948661980147,
+                "p05MeanR": -0.846864257165429,
+                "targetShare": 0.2375,
+                "timeoutShare": 0.145
+              },
+              {
+                "row": 575,
+                "meanR": 0.08158182586848525,
+                "p05MeanR": -0.7052711864573612,
+                "targetShare": 0.30125,
+                "timeoutShare": 0.16125
+              },
+              {
+                "row": 725,
+                "meanR": -0.11308113285614162,
+                "p05MeanR": -0.9046096897693172,
+                "targetShare": 0.2525,
+                "timeoutShare": 0.14875
+              },
+              {
+                "row": 930,
+                "meanR": 0.06908111594768612,
+                "p05MeanR": -0.6626662618791364,
+                "targetShare": 0.22375,
+                "timeoutShare": 0.285
+              },
+              {
+                "row": 993,
+                "meanR": -0.025151880293123364,
+                "p05MeanR": -0.6784442192845495,
+                "targetShare": 0.2275,
+                "timeoutShare": 0.22625
+              },
+              {
+                "row": 1179,
+                "meanR": -0.13776498090859954,
+                "p05MeanR": -0.7082946870251251,
+                "targetShare": 0.20625,
+                "timeoutShare": 0.20375
+              },
+              {
+                "row": 1272,
+                "meanR": -0.03940174871138562,
+                "p05MeanR": -0.7051359228920453,
+                "targetShare": 0.23625,
+                "timeoutShare": 0.22125
+              },
+              {
+                "row": 1417,
+                "meanR": 0.24113333480891366,
+                "p05MeanR": -0.38511612438720744,
+                "targetShare": 0.20875,
+                "timeoutShare": 0.39625
+              },
+              {
+                "row": 1544,
+                "meanR": 0.00528309100486421,
+                "p05MeanR": -0.7065202245329683,
+                "targetShare": 0.24375,
+                "timeoutShare": 0.21375
+              },
+              {
+                "row": 1643,
+                "meanR": -0.04378618547313122,
+                "p05MeanR": -0.7093653807922553,
+                "targetShare": 0.25625,
+                "timeoutShare": 0.16875
+              },
+              {
+                "row": 1808,
+                "meanR": -0.07874269517063862,
+                "p05MeanR": -0.7257826597726921,
+                "targetShare": 0.21875,
+                "timeoutShare": 0.2175
+              },
+              {
+                "row": 1879,
+                "meanR": -0.04946740493505401,
+                "p05MeanR": -0.8074371359225577,
+                "targetShare": 0.24875,
+                "timeoutShare": 0.1725
+              },
+              {
+                "row": 2094,
+                "meanR": -0.047572279362368616,
+                "p05MeanR": -0.6975211277121658,
+                "targetShare": 0.18125,
+                "timeoutShare": 0.3125
+              },
+              {
+                "row": 2185,
+                "meanR": 0.09620483147656034,
+                "p05MeanR": -0.6898214018306411,
+                "targetShare": 0.25875,
+                "timeoutShare": 0.2375
+              },
+              {
+                "row": 2354,
+                "meanR": -0.09573844602750958,
+                "p05MeanR": -0.881227035469732,
+                "targetShare": 0.2225,
+                "timeoutShare": 0.1875
+              },
+              {
+                "row": 2430,
+                "meanR": -0.019265540949589655,
+                "p05MeanR": -0.781231322515655,
+                "targetShare": 0.23125,
+                "timeoutShare": 0.225
+              }
+            ],
+            "meanR": {
+              "p05": -0.15245948661980147,
+              "median": -0.03940174871138562,
+              "min": -0.15245948661980147,
+              "max": 0.24113333480891366
+            },
+            "p05": {
+              "p05": -0.9046096897693172,
+              "median": -0.7065202245329683,
+              "min": -0.9046096897693172,
+              "max": -0.38511612438720744
+            },
+            "targetShare": {
+              "p05": 0.18125,
+              "median": 0.23625,
+              "min": 0.18125,
+              "max": 0.32625
+            },
+            "timeoutShare": {
+              "p05": 0.06375,
+              "median": 0.21375,
+              "min": 0.06375,
+              "max": 0.39625
+            }
+          },
+          "corpus": {
+            "hitRate": 0.40466531440162273,
+            "meanR": 0.5502295132038583
+          }
+        },
+        {
+          "series": "seasonal#3",
+          "kind": "seasonal",
+          "mode": "intraday",
+          "rows": 886,
+          "evidenceMean": 123.13288775721217,
+          "breakEvenMean": 0.2418157930711796,
+          "evZero": {
+            "armed": 375,
+            "armedRate": 0,
+            "hitRate": 0.7626666666666667,
+            "meanR": 1.4812063271936005,
+            "meanRLower": 1.395559462824595
+          },
+          "evFloor": {
+            "armed": 334,
+            "armedRate": 0,
+            "hitRate": 0.7784431137724551,
+            "meanR": 1.5233505998973227,
+            "meanRLower": 1.4358684908915371
+          },
+          "gated": {
+            "armed": 333,
+            "armedRate": 0,
+            "hitRate": 0.7807807807807807,
+            "meanR": 1.5310544415318306,
+            "meanRLower": 1.4442347738338566
+          },
+          "bh": {
+            "tested": 886,
+            "rejected": 407,
+            "thresholdMedian": 0.052941176470588235
+          },
+          "edgeP": {
+            "median": 0.01102166186619166,
+            "overQ": 386
+          },
+          "costSigma": {
+            "measured": 886,
+            "median": 0.03010716316997356,
+            "above": 0
+          },
+          "mc": {
+            "samples": 15,
+            "positiveTail": 0,
+            "admitted": 15,
+            "medianMeanR": -0.04405107920251711,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 151,
+                "meanR": -0.27164935137338814,
+                "p05MeanR": -0.8807885495209186,
+                "targetShare": 0.15625,
+                "timeoutShare": 0.22625
+              },
+              {
+                "row": 385,
+                "meanR": -0.05567511934461103,
+                "p05MeanR": -0.8240686082373144,
+                "targetShare": 0.2,
+                "timeoutShare": 0.255
+              },
+              {
+                "row": 629,
+                "meanR": -0.09767012066532126,
+                "p05MeanR": -0.9364141312970026,
+                "targetShare": 0.20875,
+                "timeoutShare": 0.2175
+              },
+              {
+                "row": 755,
+                "meanR": -0.027085651736919854,
+                "p05MeanR": -0.7183879264671824,
+                "targetShare": 0.26375,
+                "timeoutShare": 0.16375
+              },
+              {
+                "row": 987,
+                "meanR": -0.021220840555913938,
+                "p05MeanR": -0.6669316004375081,
+                "targetShare": 0.1875,
+                "timeoutShare": 0.315
+              },
+              {
+                "row": 1180,
+                "meanR": -0.01417594279728736,
+                "p05MeanR": -0.705782833285432,
+                "targetShare": 0.2375,
+                "timeoutShare": 0.2025
+              },
+              {
+                "row": 1316,
+                "meanR": -0.008681545304408123,
+                "p05MeanR": -0.8070485523083624,
+                "targetShare": 0.265,
+                "timeoutShare": 0.165
+              },
+              {
+                "row": 1531,
+                "meanR": -0.11402670253255882,
+                "p05MeanR": -0.9182346008442503,
+                "targetShare": 0.20875,
+                "timeoutShare": 0.20625
+              },
+              {
+                "row": 1609,
+                "meanR": -0.04405107920251711,
+                "p05MeanR": -0.7305504785486738,
+                "targetShare": 0.25375,
+                "timeoutShare": 0.15125
+              },
+              {
+                "row": 1794,
+                "meanR": -0.024216203634964097,
+                "p05MeanR": -0.7796823099844716,
+                "targetShare": 0.225,
+                "timeoutShare": 0.22125
+              },
+              {
+                "row": 1884,
+                "meanR": 0.0010164347849369532,
+                "p05MeanR": -0.7285779535877682,
+                "targetShare": 0.215,
+                "timeoutShare": 0.2675
+              },
+              {
+                "row": 2033,
+                "meanR": -0.06932749304794314,
+                "p05MeanR": -0.7471139228667437,
+                "targetShare": 0.22875,
+                "timeoutShare": 0.19875
+              },
+              {
+                "row": 2144,
+                "meanR": -0.08686677105635246,
+                "p05MeanR": -0.7374894949315915,
+                "targetShare": 0.22125,
+                "timeoutShare": 0.19625
+              },
+              {
+                "row": 2255,
+                "meanR": 0.07163179881503909,
+                "p05MeanR": -0.6491500021470993,
+                "targetShare": 0.2275,
+                "timeoutShare": 0.27875
+              },
+              {
+                "row": 2416,
+                "meanR": -0.054609268508033874,
+                "p05MeanR": -0.671914955108882,
+                "targetShare": 0.20375,
+                "timeoutShare": 0.25125
+              }
+            ],
+            "meanR": {
+              "p05": -0.27164935137338814,
+              "median": -0.04405107920251711,
+              "min": -0.27164935137338814,
+              "max": 0.07163179881503909
+            },
+            "p05": {
+              "p05": -0.9364141312970026,
+              "median": -0.7374894949315915,
+              "min": -0.9364141312970026,
+              "max": -0.6491500021470993
+            },
+            "targetShare": {
+              "p05": 0.15625,
+              "median": 0.22125,
+              "min": 0.15625,
+              "max": 0.265
+            },
+            "timeoutShare": {
+              "p05": 0.15125,
+              "median": 0.2175,
+              "min": 0.15125,
+              "max": 0.315
+            }
+          },
+          "corpus": {
+            "hitRate": 0.4706546275395034,
+            "meanR": 0.6706454989043871
+          }
+        }
+      ],
+      "pooled": {
+        "rows": 2666,
+        "evZero": {
+          "armed": 1091,
+          "armedRate": 0.40922730682670666,
+          "hitRate": 0.7011915673693859,
+          "meanR": 1.3497946361796287,
+          "meanRLower": 1.2568213175387069
+        },
+        "evFloor": {
+          "armed": 973,
+          "armedRate": 0.3649662415603901,
+          "hitRate": 0.7070914696813977,
+          "meanR": 1.3711392852668505,
+          "meanRLower": 1.2747490143494762
+        },
+        "gated": {
+          "armed": 972,
+          "armedRate": 0.36459114778694673,
+          "hitRate": 0.7078189300411523,
+          "meanR": 1.3736219683426332,
+          "meanRLower": 1.2774494801347132
+        },
+        "corpus": {
+          "hitRate": 0.4081020255063766,
+          "meanR": 0.5243849296657379
+        },
+        "mcAdmitted": 46,
+        "mcSamples": 46
+      }
+    },
+    {
+      "name": "mean-reverting",
+      "kind": "mean-reverting",
+      "mode": "intraday",
+      "home": false,
+      "null": false,
+      "note": "OU around a level: the structure a meta-model should be able to rank",
+      "series": [
+        {
+          "series": "mean-reverting#1",
+          "kind": "mean-reverting",
+          "mode": "intraday",
+          "rows": 534,
+          "evidenceMean": 113.39987166248659,
+          "breakEvenMean": 0.09872924083872574,
+          "evZero": {
+            "armed": 3,
+            "armedRate": 0,
+            "hitRate": 0.3333333333333333,
+            "meanR": 0.7085894060400436,
+            "meanRLower": -0.7752902924678814
+          },
+          "evFloor": {
+            "armed": 0,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": 0,
+            "meanRLower": 0
+          },
+          "gated": {
+            "armed": 0,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": 0,
+            "meanRLower": 0
+          },
+          "bh": {
+            "tested": 534,
+            "rejected": 378,
+            "thresholdMedian": 0.03363636363636364
+          },
+          "edgeP": {
+            "median": 0.3826285502615958,
+            "overQ": 339
+          },
+          "costSigma": {
+            "measured": 534,
+            "median": 0.029958899308571815,
+            "above": 0
+          },
+          "mc": {
+            "samples": 9,
+            "positiveTail": 0,
+            "admitted": 9,
+            "medianMeanR": -0.21552484404343517,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 152,
+                "meanR": -0.0935777541744416,
+                "p05MeanR": -0.738523528646606,
+                "targetShare": 0.115,
+                "timeoutShare": 0.42625
+              },
+              {
+                "row": 428,
+                "meanR": -0.30147244369355614,
+                "p05MeanR": -0.8850689152326439,
+                "targetShare": 0.0975,
+                "timeoutShare": 0.3225
+              },
+              {
+                "row": 723,
+                "meanR": -0.21552484404343517,
+                "p05MeanR": -0.9068259972404114,
+                "targetShare": 0.1625,
+                "timeoutShare": 0.24875
+              },
+              {
+                "row": 995,
+                "meanR": -0.19106970374814494,
+                "p05MeanR": -0.7281688593141287,
+                "targetShare": 0.1225,
+                "timeoutShare": 0.34375
+              },
+              {
+                "row": 1250,
+                "meanR": -0.23902900846652486,
+                "p05MeanR": -0.7601003127338395,
+                "targetShare": 0.11625,
+                "timeoutShare": 0.3275
+              },
+              {
+                "row": 1491,
+                "meanR": -0.22093857559763092,
+                "p05MeanR": -0.8092569815342282,
+                "targetShare": 0.15875,
+                "timeoutShare": 0.2425
+              },
+              {
+                "row": 1736,
+                "meanR": -0.12004374802302431,
+                "p05MeanR": -0.7955183248152474,
+                "targetShare": 0.1475,
+                "timeoutShare": 0.32625
+              },
+              {
+                "row": 2019,
+                "meanR": -0.21601704078951023,
+                "p05MeanR": -0.8997454582985049,
+                "targetShare": 0.16,
+                "timeoutShare": 0.24375
+              },
+              {
+                "row": 2225,
+                "meanR": -0.20586936922127777,
+                "p05MeanR": -0.7840491950521825,
+                "targetShare": 0.12,
+                "timeoutShare": 0.34
+              }
+            ],
+            "meanR": {
+              "p05": -0.30147244369355614,
+              "median": -0.21552484404343517,
+              "min": -0.30147244369355614,
+              "max": -0.0935777541744416
+            },
+            "p05": {
+              "p05": -0.9068259972404114,
+              "median": -0.7955183248152474,
+              "min": -0.9068259972404114,
+              "max": -0.7281688593141287
+            },
+            "targetShare": {
+              "p05": 0.0975,
+              "median": 0.1225,
+              "min": 0.0975,
+              "max": 0.1625
+            },
+            "timeoutShare": {
+              "p05": 0.2425,
+              "median": 0.32625,
+              "min": 0.2425,
+              "max": 0.42625
+            }
+          },
+          "corpus": {
+            "hitRate": 0.11423220973782772,
+            "meanR": -0.16502223643042685
+          }
+        },
+        {
+          "series": "mean-reverting#2",
+          "kind": "mean-reverting",
+          "mode": "intraday",
+          "rows": 558,
+          "evidenceMean": 113.48296458518946,
+          "breakEvenMean": 0.11011262951411492,
+          "evZero": {
+            "armed": 8,
+            "armedRate": 0,
+            "hitRate": 0.25,
+            "meanR": 0.380809270604083,
+            "meanRLower": -0.38807576390671206
+          },
+          "evFloor": {
+            "armed": 4,
+            "armedRate": 0,
+            "hitRate": 0.5,
+            "meanR": 1.489051729768278,
+            "meanRLower": 0.9670738961278237
+          },
+          "gated": {
+            "armed": 4,
+            "armedRate": 0,
+            "hitRate": 0.5,
+            "meanR": 1.489051729768278,
+            "meanRLower": 0.9670738961278237
+          },
+          "bh": {
+            "tested": 558,
+            "rejected": 380,
+            "thresholdMedian": 0.030000000000000002
+          },
+          "edgeP": {
+            "median": 0.28348266162073166,
+            "overQ": 336
+          },
+          "costSigma": {
+            "measured": 558,
+            "median": 0.03046339356068475,
+            "above": 0
+          },
+          "mc": {
+            "samples": 10,
+            "positiveTail": 0,
+            "admitted": 10,
+            "medianMeanR": -0.16868855896877522,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 155,
+                "meanR": -0.18558164707737823,
+                "p05MeanR": -0.728864258140475,
+                "targetShare": 0.09625,
+                "timeoutShare": 0.39125
+              },
+              {
+                "row": 433,
+                "meanR": -0.10432441310667154,
+                "p05MeanR": -0.7566121303176316,
+                "targetShare": 0.145,
+                "timeoutShare": 0.35625
+              },
+              {
+                "row": 668,
+                "meanR": -0.17068784652572633,
+                "p05MeanR": -0.8381339507742908,
+                "targetShare": 0.15125,
+                "timeoutShare": 0.2975
+              },
+              {
+                "row": 897,
+                "meanR": -0.18598245568370098,
+                "p05MeanR": -0.7803162366459706,
+                "targetShare": 0.13625,
+                "timeoutShare": 0.315
+              },
+              {
+                "row": 1213,
+                "meanR": -0.21594379212408565,
+                "p05MeanR": -0.8749230044183588,
+                "targetShare": 0.17125,
+                "timeoutShare": 0.24875
+              },
+              {
+                "row": 1445,
+                "meanR": -0.16637138255622375,
+                "p05MeanR": -0.6694378508284949,
+                "targetShare": 0.11375,
+                "timeoutShare": 0.37375
+              },
+              {
+                "row": 1666,
+                "meanR": -0.15059606647981832,
+                "p05MeanR": -0.8815955822576016,
+                "targetShare": 0.17125,
+                "timeoutShare": 0.27
+              },
+              {
+                "row": 1891,
+                "meanR": -0.15249561220065422,
+                "p05MeanR": -0.7594618862008056,
+                "targetShare": 0.14,
+                "timeoutShare": 0.335
+              },
+              {
+                "row": 2166,
+                "meanR": -0.1666892714118241,
+                "p05MeanR": -0.7609911675885217,
+                "targetShare": 0.1275,
+                "timeoutShare": 0.34125
+              },
+              {
+                "row": 2405,
+                "meanR": -0.25211491893681914,
+                "p05MeanR": -0.968651978559004,
+                "targetShare": 0.15875,
+                "timeoutShare": 0.2375
+              }
+            ],
+            "meanR": {
+              "p05": -0.25211491893681914,
+              "median": -0.1666892714118241,
+              "min": -0.25211491893681914,
+              "max": -0.10432441310667154
+            },
+            "p05": {
+              "p05": -0.968651978559004,
+              "median": -0.7609911675885217,
+              "min": -0.968651978559004,
+              "max": -0.6694378508284949
+            },
+            "targetShare": {
+              "p05": 0.09625,
+              "median": 0.145,
+              "min": 0.09625,
+              "max": 0.17125
+            },
+            "timeoutShare": {
+              "p05": 0.2375,
+              "median": 0.335,
+              "min": 0.2375,
+              "max": 0.39125
+            }
+          },
+          "corpus": {
+            "hitRate": 0.13261648745519714,
+            "meanR": -0.1805143352636664
+          }
+        },
+        {
+          "series": "mean-reverting#3",
+          "kind": "mean-reverting",
+          "mode": "intraday",
+          "rows": 560,
+          "evidenceMean": 111.18467152145938,
+          "breakEvenMean": 0.13121220170715897,
+          "evZero": {
+            "armed": 12,
+            "armedRate": 0,
+            "hitRate": 0.5,
+            "meanR": 0.5322390081728922,
+            "meanRLower": -0.18362576797387653
+          },
+          "evFloor": {
+            "armed": 5,
+            "armedRate": 0,
+            "hitRate": 0.8,
+            "meanR": 1.351750146054108,
+            "meanRLower": 0.3646267325419308
+          },
+          "gated": {
+            "armed": 5,
+            "armedRate": 0,
+            "hitRate": 0.8,
+            "meanR": 1.351750146054108,
+            "meanRLower": 0.3646267325419308
+          },
+          "bh": {
+            "tested": 560,
+            "rejected": 490,
+            "thresholdMedian": 0.007627118644067797
+          },
+          "edgeP": {
+            "median": 0.8423199139537607,
+            "overQ": 452
+          },
+          "costSigma": {
+            "measured": 560,
+            "median": 0.031877393296705664,
+            "above": 0
+          },
+          "mc": {
+            "samples": 10,
+            "positiveTail": 0,
+            "admitted": 10,
+            "medianMeanR": -0.14663277659807775,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 151,
+                "meanR": -0.12628508020183804,
+                "p05MeanR": -0.7224754950085098,
+                "targetShare": 0.11,
+                "timeoutShare": 0.35625
+              },
+              {
+                "row": 393,
+                "meanR": -0.13144812469551068,
+                "p05MeanR": -0.8268859357873355,
+                "targetShare": 0.125,
+                "timeoutShare": 0.36125
+              },
+              {
+                "row": 638,
+                "meanR": -0.062450936088297056,
+                "p05MeanR": -0.7497201247116282,
+                "targetShare": 0.1675,
+                "timeoutShare": 0.31375
+              },
+              {
+                "row": 878,
+                "meanR": -0.130879034381571,
+                "p05MeanR": -0.7348732389178994,
+                "targetShare": 0.17625,
+                "timeoutShare": 0.275
+              },
+              {
+                "row": 1134,
+                "meanR": -0.17162904745249766,
+                "p05MeanR": -0.7735234737600843,
+                "targetShare": 0.15125,
+                "timeoutShare": 0.31125
+              },
+              {
+                "row": 1355,
+                "meanR": -0.11443681160190085,
+                "p05MeanR": -0.8215427565654595,
+                "targetShare": 0.1625,
+                "timeoutShare": 0.3
+              },
+              {
+                "row": 1605,
+                "meanR": -0.221299449197152,
+                "p05MeanR": -1.0506642460443476,
+                "targetShare": 0.17625,
+                "timeoutShare": 0.22125
+              },
+              {
+                "row": 1843,
+                "meanR": -0.18385104877542702,
+                "p05MeanR": -0.7109880372478505,
+                "targetShare": 0.0725,
+                "timeoutShare": 0.4725
+              },
+              {
+                "row": 2154,
+                "meanR": -0.16181742850064482,
+                "p05MeanR": -0.7740910054020502,
+                "targetShare": 0.1,
+                "timeoutShare": 0.385
+              },
+              {
+                "row": 2379,
+                "meanR": -0.19906695855354178,
+                "p05MeanR": -0.8094739104493184,
+                "targetShare": 0.1125,
+                "timeoutShare": 0.36375
+              }
+            ],
+            "meanR": {
+              "p05": -0.221299449197152,
+              "median": -0.13144812469551068,
+              "min": -0.221299449197152,
+              "max": -0.062450936088297056
+            },
+            "p05": {
+              "p05": -1.0506642460443476,
+              "median": -0.7735234737600843,
+              "min": -1.0506642460443476,
+              "max": -0.7109880372478505
+            },
+            "targetShare": {
+              "p05": 0.0725,
+              "median": 0.15125,
+              "min": 0.0725,
+              "max": 0.17625
+            },
+            "timeoutShare": {
+              "p05": 0.22125,
+              "median": 0.35625,
+              "min": 0.22125,
+              "max": 0.4725
+            }
+          },
+          "corpus": {
+            "hitRate": 0.11428571428571428,
+            "meanR": -0.14232334838794447
+          }
+        }
+      ],
+      "pooled": {
+        "rows": 1652,
+        "evZero": {
+          "armed": 23,
+          "armedRate": 0.013922518159806295,
+          "hitRate": 0.391304347826087,
+          "meanR": 0.5025700209142391,
+          "meanRLower": -0.3319124436671243
+        },
+        "evFloor": {
+          "armed": 9,
+          "armedRate": 0.005447941888619854,
+          "hitRate": 0.6666666666666666,
+          "meanR": 1.4127730721492948,
+          "meanRLower": 0.6323810274689943
+        },
+        "gated": {
+          "armed": 9,
+          "armedRate": 0.005447941888619854,
+          "hitRate": 0.6666666666666666,
+          "meanR": 1.4127730721492948,
+          "meanRLower": 0.6323810274689943
+        },
+        "corpus": {
+          "hitRate": 0.12046004842615012,
+          "meanR": -0.16256050146986847
+        },
+        "mcAdmitted": 29,
+        "mcSamples": 29
+      }
+    },
+    {
+      "name": "null-driftless",
+      "kind": "driftless",
+      "mode": "intraday",
+      "home": false,
+      "null": true,
+      "note": "driftless random walk: nothing to learn, so the fitted policy must not claim an edge",
+      "series": [
+        {
+          "series": "null-driftless#1",
+          "kind": "driftless",
+          "mode": "intraday",
+          "rows": 539,
+          "evidenceMean": 115.12986482044276,
+          "breakEvenMean": 0.12340339136525834,
+          "evZero": {
+            "armed": 4,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": -0.6050728935094569,
+            "meanRLower": -1.5448204380612474
+          },
+          "evFloor": {
+            "armed": 0,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": 0,
+            "meanRLower": 0
+          },
+          "gated": {
+            "armed": 0,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": 0,
+            "meanRLower": 0
+          },
+          "bh": {
+            "tested": 539,
+            "rejected": 373,
+            "thresholdMedian": 0.03145161290322581
+          },
+          "edgeP": {
+            "median": 0.23650552462137808,
+            "overQ": 316
+          },
+          "costSigma": {
+            "measured": 539,
+            "median": 0.030363180732232653,
+            "above": 0
+          },
+          "mc": {
+            "samples": 9,
+            "positiveTail": 0,
+            "admitted": 9,
+            "medianMeanR": -0.14186127460120854,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 152,
+                "meanR": -0.08468423877731159,
+                "p05MeanR": -0.7298332480540637,
+                "targetShare": 0.1425,
+                "timeoutShare": 0.36625
+              },
+              {
+                "row": 482,
+                "meanR": -0.11824916241940267,
+                "p05MeanR": -0.654269930155206,
+                "targetShare": 0.11375,
+                "timeoutShare": 0.38875
+              },
+              {
+                "row": 708,
+                "meanR": -0.14186127460120854,
+                "p05MeanR": -0.8034689186583621,
+                "targetShare": 0.13375,
+                "timeoutShare": 0.36625
+              },
+              {
+                "row": 1019,
+                "meanR": -0.15933078562783837,
+                "p05MeanR": -0.8242149781027861,
+                "targetShare": 0.1475,
+                "timeoutShare": 0.3175
+              },
+              {
+                "row": 1256,
+                "meanR": -0.18881822444474536,
+                "p05MeanR": -0.7272607667109287,
+                "targetShare": 0.095,
+                "timeoutShare": 0.40625
+              },
+              {
+                "row": 1487,
+                "meanR": -0.1411858675897539,
+                "p05MeanR": -0.9344909413072312,
+                "targetShare": 0.19125,
+                "timeoutShare": 0.24125
+              },
+              {
+                "row": 1707,
+                "meanR": -0.2368315671910914,
+                "p05MeanR": -0.9410591804559402,
+                "targetShare": 0.14875,
+                "timeoutShare": 0.25625
+              },
+              {
+                "row": 1974,
+                "meanR": -0.21219312850810695,
+                "p05MeanR": -0.8647569466313458,
+                "targetShare": 0.1775,
+                "timeoutShare": 0.20625
+              },
+              {
+                "row": 2219,
+                "meanR": -0.12827123775092103,
+                "p05MeanR": -0.780683025858129,
+                "targetShare": 0.1425,
+                "timeoutShare": 0.3475
+              }
+            ],
+            "meanR": {
+              "p05": -0.2368315671910914,
+              "median": -0.14186127460120854,
+              "min": -0.2368315671910914,
+              "max": -0.08468423877731159
+            },
+            "p05": {
+              "p05": -0.9410591804559402,
+              "median": -0.8034689186583621,
+              "min": -0.9410591804559402,
+              "max": -0.654269930155206
+            },
+            "targetShare": {
+              "p05": 0.095,
+              "median": 0.1425,
+              "min": 0.095,
+              "max": 0.19125
+            },
+            "timeoutShare": {
+              "p05": 0.20625,
+              "median": 0.3475,
+              "min": 0.20625,
+              "max": 0.40625
+            }
+          },
+          "corpus": {
+            "hitRate": 0.15213358070500926,
+            "meanR": -0.091098891243787
+          }
+        },
+        {
+          "series": "null-driftless#2",
+          "kind": "driftless",
+          "mode": "intraday",
+          "rows": 627,
+          "evidenceMean": 122.4218918070455,
+          "breakEvenMean": 0.13898858211294696,
+          "evZero": {
+            "armed": 8,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": -1.0140489546699893,
+            "meanRLower": -1.3038578838844357
+          },
+          "evFloor": {
+            "armed": 3,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": -1.1457653188816206,
+            "meanRLower": -1.2318988319806334
+          },
+          "gated": {
+            "armed": 3,
+            "armedRate": 0,
+            "hitRate": 0,
+            "meanR": -1.1457653188816206,
+            "meanRLower": -1.2318988319806334
+          },
+          "bh": {
+            "tested": 627,
+            "rejected": 532,
+            "thresholdMedian": 0.01794871794871795
+          },
+          "edgeP": {
+            "median": 0.65654407679914,
+            "overQ": 476
+          },
+          "costSigma": {
+            "measured": 627,
+            "median": 0.031258479681122706,
+            "above": 0
+          },
+          "mc": {
+            "samples": 11,
+            "positiveTail": 0,
+            "admitted": 11,
+            "medianMeanR": -0.09041357031691552,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 155,
+                "meanR": -0.09041357031691552,
+                "p05MeanR": -0.7101472079745365,
+                "targetShare": 0.1625,
+                "timeoutShare": 0.30125
+              },
+              {
+                "row": 417,
+                "meanR": -0.21811397667249366,
+                "p05MeanR": -0.7198675592776671,
+                "targetShare": 0.15875,
+                "timeoutShare": 0.24625
+              },
+              {
+                "row": 699,
+                "meanR": -0.20913956195788203,
+                "p05MeanR": -0.9250506490279834,
+                "targetShare": 0.16875,
+                "timeoutShare": 0.23125
+              },
+              {
+                "row": 967,
+                "meanR": -0.14043363553176272,
+                "p05MeanR": -0.8062445429818433,
+                "targetShare": 0.125,
+                "timeoutShare": 0.3475
+              },
+              {
+                "row": 1180,
+                "meanR": -0.07718660523909864,
+                "p05MeanR": -0.6334559899276153,
+                "targetShare": 0.11875,
+                "timeoutShare": 0.41125
+              },
+              {
+                "row": 1383,
+                "meanR": -0.07702154672255433,
+                "p05MeanR": -0.8791008763288093,
+                "targetShare": 0.1675,
+                "timeoutShare": 0.32875
+              },
+              {
+                "row": 1549,
+                "meanR": -0.1533259332485448,
+                "p05MeanR": -0.8643077011966191,
+                "targetShare": 0.15,
+                "timeoutShare": 0.28625
+              },
+              {
+                "row": 1754,
+                "meanR": -0.1272046363388728,
+                "p05MeanR": -0.8277691604087718,
+                "targetShare": 0.19875,
+                "timeoutShare": 0.23125
+              },
+              {
+                "row": 1947,
+                "meanR": -0.07694737602541343,
+                "p05MeanR": -0.7165016650664418,
+                "targetShare": 0.22625,
+                "timeoutShare": 0.2
+              },
+              {
+                "row": 2191,
+                "meanR": -0.07252515277041784,
+                "p05MeanR": -0.8075324076680421,
+                "targetShare": 0.19625,
+                "timeoutShare": 0.27
+              },
+              {
+                "row": 2400,
+                "meanR": 0.0018096749819955554,
+                "p05MeanR": -0.7039418097481994,
+                "targetShare": 0.215,
+                "timeoutShare": 0.285
+              }
+            ],
+            "meanR": {
+              "p05": -0.21811397667249366,
+              "median": -0.09041357031691552,
+              "min": -0.21811397667249366,
+              "max": 0.0018096749819955554
+            },
+            "p05": {
+              "p05": -0.9250506490279834,
+              "median": -0.8062445429818433,
+              "min": -0.9250506490279834,
+              "max": -0.6334559899276153
+            },
+            "targetShare": {
+              "p05": 0.11875,
+              "median": 0.1675,
+              "min": 0.11875,
+              "max": 0.22625
+            },
+            "timeoutShare": {
+              "p05": 0.2,
+              "median": 0.285,
+              "min": 0.2,
+              "max": 0.41125
+            }
+          },
+          "corpus": {
+            "hitRate": 0.12121212121212122,
+            "meanR": -0.21355983844587229
+          }
+        },
+        {
+          "series": "null-driftless#3",
+          "kind": "driftless",
+          "mode": "intraday",
+          "rows": 581,
+          "evidenceMean": 116.16309477675581,
+          "breakEvenMean": 0.17379300423804336,
+          "evZero": {
+            "armed": 17,
+            "armedRate": 0,
+            "hitRate": 0.17647058823529413,
+            "meanR": -0.3449791038650523,
+            "meanRLower": -0.8385086252476062
+          },
+          "evFloor": {
+            "armed": 8,
+            "armedRate": 0,
+            "hitRate": 0.25,
+            "meanR": -0.2989961161404263,
+            "meanRLower": -1.1068668080687614
+          },
+          "gated": {
+            "armed": 8,
+            "armedRate": 0,
+            "hitRate": 0.25,
+            "meanR": -0.2989961161404263,
+            "meanRLower": -1.1068668080687614
+          },
+          "bh": {
+            "tested": 581,
+            "rejected": 490,
+            "thresholdMedian": 0.014782608695652176
+          },
+          "edgeP": {
+            "median": 0.7422127076956754,
+            "overQ": 438
+          },
+          "costSigma": {
+            "measured": 581,
+            "median": 0.03212428119065888,
+            "above": 0
+          },
+          "mc": {
+            "samples": 10,
+            "positiveTail": 0,
+            "admitted": 10,
+            "medianMeanR": -0.07806607635792974,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 151,
+                "meanR": -0.03445602286073906,
+                "p05MeanR": -0.7118759621967263,
+                "targetShare": 0.19,
+                "timeoutShare": 0.27375
+              },
+              {
+                "row": 377,
+                "meanR": -0.09267521121165044,
+                "p05MeanR": -0.7374597293058428,
+                "targetShare": 0.1225,
+                "timeoutShare": 0.39125
+              },
+              {
+                "row": 582,
+                "meanR": -0.1800737728141313,
+                "p05MeanR": -0.8835234250848283,
+                "targetShare": 0.1625,
+                "timeoutShare": 0.28
+              },
+              {
+                "row": 865,
+                "meanR": -0.06292621350166082,
+                "p05MeanR": -0.6940047133212617,
+                "targetShare": 0.1925,
+                "timeoutShare": 0.26
+              },
+              {
+                "row": 1099,
+                "meanR": -0.08730329589331509,
+                "p05MeanR": -0.7362094730840267,
+                "targetShare": 0.2025,
+                "timeoutShare": 0.24375
+              },
+              {
+                "row": 1341,
+                "meanR": -0.166268025544355,
+                "p05MeanR": -0.9495939309662672,
+                "targetShare": 0.19875,
+                "timeoutShare": 0.21375
+              },
+              {
+                "row": 1567,
+                "meanR": -0.16080504152127606,
+                "p05MeanR": -0.8641414414188918,
+                "targetShare": 0.21875,
+                "timeoutShare": 0.15375
+              },
+              {
+                "row": 1764,
+                "meanR": -0.06882885682254439,
+                "p05MeanR": -0.6405678525664662,
+                "targetShare": 0.1325,
+                "timeoutShare": 0.3825
+              },
+              {
+                "row": 2059,
+                "meanR": -0.040316831252507124,
+                "p05MeanR": -0.7389025087491828,
+                "targetShare": 0.19125,
+                "timeoutShare": 0.28125
+              },
+              {
+                "row": 2285,
+                "meanR": -0.06359624954688525,
+                "p05MeanR": -0.7841794543503846,
+                "targetShare": 0.16125,
+                "timeoutShare": 0.3275
+              }
+            ],
+            "meanR": {
+              "p05": -0.1800737728141313,
+              "median": -0.06882885682254439,
+              "min": -0.1800737728141313,
+              "max": -0.03445602286073906
+            },
+            "p05": {
+              "p05": -0.9495939309662672,
+              "median": -0.7374597293058428,
+              "min": -0.9495939309662672,
+              "max": -0.6405678525664662
+            },
+            "targetShare": {
+              "p05": 0.1225,
+              "median": 0.19125,
+              "min": 0.1225,
+              "max": 0.21875
+            },
+            "timeoutShare": {
+              "p05": 0.15375,
+              "median": 0.28,
+              "min": 0.15375,
+              "max": 0.39125
+            }
+          },
+          "corpus": {
+            "hitRate": 0.16695352839931152,
+            "meanR": -0.07959206241348943
+          }
+        }
+      ],
+      "pooled": {
+        "rows": 1747,
+        "evZero": {
+          "armed": 29,
+          "armedRate": 0.01659988551803091,
+          "hitRate": 0.10344827586206896,
+          "meanR": -0.5654251026587459,
+          "meanRLower": -1.0643031535355096
+        },
+        "evFloor": {
+          "armed": 11,
+          "armedRate": 0.006296508299942759,
+          "hitRate": 0.18181818181818182,
+          "meanR": -0.5299331714334793,
+          "meanRLower": -1.1409664509538173
+        },
+        "gated": {
+          "armed": 11,
+          "armedRate": 0.006296508299942759,
+          "hitRate": 0.18181818181818182,
+          "meanR": -0.5299331714334793,
+          "meanRLower": -1.1409664509538173
+        },
+        "corpus": {
+          "hitRate": 0.14596451058958215,
+          "meanR": -0.13122341691368086
+        },
+        "mcAdmitted": 30,
+        "mcSamples": 30
+      }
+    },
+    {
+      "name": "null-shuffled",
+      "kind": "block-shuffled",
+      "mode": "intraday",
+      "home": false,
+      "null": true,
+      "note": "block-shuffled returns: marginals kept, temporal structure destroyed",
+      "series": [
+        {
+          "series": "null-shuffled#1",
+          "kind": "block-shuffled",
+          "mode": "intraday",
+          "rows": 625,
+          "evidenceMean": 118.76625407231025,
+          "breakEvenMean": 0.15029272465267057,
+          "evZero": {
+            "armed": 13,
+            "armedRate": 0,
+            "hitRate": 0.23076923076923078,
+            "meanR": 0.11954690977833907,
+            "meanRLower": -0.5049017696765884
+          },
+          "evFloor": {
+            "armed": 10,
+            "armedRate": 0,
+            "hitRate": 0.3,
+            "meanR": 0.31533667547641364,
+            "meanRLower": -0.4462768760066571
+          },
+          "gated": {
+            "armed": 10,
+            "armedRate": 0,
+            "hitRate": 0.3,
+            "meanR": 0.31533667547641364,
+            "meanRLower": -0.4462768760066571
+          },
+          "bh": {
+            "tested": 625,
+            "rejected": 443,
+            "thresholdMedian": 0.03515625
+          },
+          "edgeP": {
+            "median": 0.4681058225231339,
+            "overQ": 390
+          },
+          "costSigma": {
+            "measured": 625,
+            "median": 0.02954667423516594,
+            "above": 0
+          },
+          "mc": {
+            "samples": 11,
+            "positiveTail": 0,
+            "admitted": 11,
+            "medianMeanR": -0.11918325882090583,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 158,
+                "meanR": -0.40633986685881746,
+                "p05MeanR": -1.0527593377821154,
+                "targetShare": 0.15,
+                "timeoutShare": 0.1475
+              },
+              {
+                "row": 391,
+                "meanR": -0.11918325882090583,
+                "p05MeanR": -0.8225991510107433,
+                "targetShare": 0.20625,
+                "timeoutShare": 0.2225
+              },
+              {
+                "row": 648,
+                "meanR": -0.2754732792931344,
+                "p05MeanR": -0.9314652054603245,
+                "targetShare": 0.1525,
+                "timeoutShare": 0.22875
+              },
+              {
+                "row": 855,
+                "meanR": -0.11196898505063077,
+                "p05MeanR": -0.6737821351853961,
+                "targetShare": 0.17125,
+                "timeoutShare": 0.28375
+              },
+              {
+                "row": 1060,
+                "meanR": -0.13039305898932238,
+                "p05MeanR": -0.8147107976793095,
+                "targetShare": 0.15875,
+                "timeoutShare": 0.31
+              },
+              {
+                "row": 1257,
+                "meanR": -0.08573369719807246,
+                "p05MeanR": -0.7557935308369159,
+                "targetShare": 0.17125,
+                "timeoutShare": 0.30375
+              },
+              {
+                "row": 1452,
+                "meanR": -0.09515919958677581,
+                "p05MeanR": -0.88892720613283,
+                "targetShare": 0.20375,
+                "timeoutShare": 0.23
+              },
+              {
+                "row": 1654,
+                "meanR": -0.18941855707021724,
+                "p05MeanR": -0.9188540805834072,
+                "targetShare": 0.195,
+                "timeoutShare": 0.21125
+              },
+              {
+                "row": 1939,
+                "meanR": -0.20094467426656898,
+                "p05MeanR": -0.746340190436943,
+                "targetShare": 0.1475,
+                "timeoutShare": 0.28875
+              },
+              {
+                "row": 2173,
+                "meanR": -0.1089353054103924,
+                "p05MeanR": -0.8190670296353918,
+                "targetShare": 0.245,
+                "timeoutShare": 0.14
+              },
+              {
+                "row": 2384,
+                "meanR": -0.07783706184888076,
+                "p05MeanR": -0.7191733617584388,
+                "targetShare": 0.15125,
+                "timeoutShare": 0.34375
+              }
+            ],
+            "meanR": {
+              "p05": -0.40633986685881746,
+              "median": -0.11918325882090583,
+              "min": -0.40633986685881746,
+              "max": -0.07783706184888076
+            },
+            "p05": {
+              "p05": -1.0527593377821154,
+              "median": -0.8190670296353918,
+              "min": -1.0527593377821154,
+              "max": -0.6737821351853961
+            },
+            "targetShare": {
+              "p05": 0.1475,
+              "median": 0.17125,
+              "min": 0.1475,
+              "max": 0.245
+            },
+            "timeoutShare": {
+              "p05": 0.14,
+              "median": 0.23,
+              "min": 0.14,
+              "max": 0.34375
+            }
+          },
+          "corpus": {
+            "hitRate": 0.1632,
+            "meanR": -0.12076667947987385
+          }
+        },
+        {
+          "series": "null-shuffled#2",
+          "kind": "block-shuffled",
+          "mode": "intraday",
+          "rows": 582,
+          "evidenceMean": 116.85124258353038,
+          "breakEvenMean": 0.13203302650942725,
+          "evZero": {
+            "armed": 25,
+            "armedRate": 0,
+            "hitRate": 0.28,
+            "meanR": 0.01281192631404477,
+            "meanRLower": -0.41596701796555013
+          },
+          "evFloor": {
+            "armed": 11,
+            "armedRate": 0,
+            "hitRate": 0.36363636363636365,
+            "meanR": 0.24580928243376043,
+            "meanRLower": -0.44639037052640873
+          },
+          "gated": {
+            "armed": 11,
+            "armedRate": 0,
+            "hitRate": 0.36363636363636365,
+            "meanR": 0.24580928243376043,
+            "meanRLower": -0.44639037052640873
+          },
+          "bh": {
+            "tested": 582,
+            "rejected": 428,
+            "thresholdMedian": 0.03937007874015748
+          },
+          "edgeP": {
+            "median": 0.6130494436889617,
+            "overQ": 398
+          },
+          "costSigma": {
+            "measured": 582,
+            "median": 0.031198172904520902,
+            "above": 0
+          },
+          "mc": {
+            "samples": 10,
+            "positiveTail": 0,
+            "admitted": 10,
+            "medianMeanR": -0.12445632098699994,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 150,
+                "meanR": -0.2846956916831398,
+                "p05MeanR": -0.9112643728493597,
+                "targetShare": 0.08,
+                "timeoutShare": 0.345
+              },
+              {
+                "row": 445,
+                "meanR": -0.12482990460983492,
+                "p05MeanR": -0.8246833458025709,
+                "targetShare": 0.18125,
+                "timeoutShare": 0.2725
+              },
+              {
+                "row": 651,
+                "meanR": -0.12408273736416495,
+                "p05MeanR": -0.7423099283554331,
+                "targetShare": 0.15375,
+                "timeoutShare": 0.335
+              },
+              {
+                "row": 884,
+                "meanR": -0.060568978213591994,
+                "p05MeanR": -0.7285215727032575,
+                "targetShare": 0.16875,
+                "timeoutShare": 0.35
+              },
+              {
+                "row": 1167,
+                "meanR": -0.10984129875031103,
+                "p05MeanR": -0.6951347945758528,
+                "targetShare": 0.09375,
+                "timeoutShare": 0.4325
+              },
+              {
+                "row": 1405,
+                "meanR": -0.24388496488171899,
+                "p05MeanR": -0.918897369733201,
+                "targetShare": 0.19625,
+                "timeoutShare": 0.175
+              },
+              {
+                "row": 1646,
+                "meanR": -0.1671920425011859,
+                "p05MeanR": -0.8102396610360488,
+                "targetShare": 0.09125,
+                "timeoutShare": 0.425
+              },
+              {
+                "row": 1895,
+                "meanR": -0.06686078462577276,
+                "p05MeanR": -0.7101795190333654,
+                "targetShare": 0.09875,
+                "timeoutShare": 0.4625
+              },
+              {
+                "row": 2112,
+                "meanR": -0.06975959079900425,
+                "p05MeanR": -0.7539688257277067,
+                "targetShare": 0.1375,
+                "timeoutShare": 0.36375
+              },
+              {
+                "row": 2316,
+                "meanR": -0.17176762293031092,
+                "p05MeanR": -0.8605877216413056,
+                "targetShare": 0.1575,
+                "timeoutShare": 0.27875
+              }
+            ],
+            "meanR": {
+              "p05": -0.2846956916831398,
+              "median": -0.12408273736416495,
+              "min": -0.2846956916831398,
+              "max": -0.060568978213591994
+            },
+            "p05": {
+              "p05": -0.918897369733201,
+              "median": -0.7539688257277067,
+              "min": -0.918897369733201,
+              "max": -0.6951347945758528
+            },
+            "targetShare": {
+              "p05": 0.08,
+              "median": 0.15375,
+              "min": 0.08,
+              "max": 0.19625
+            },
+            "timeoutShare": {
+              "p05": 0.175,
+              "median": 0.35,
+              "min": 0.175,
+              "max": 0.4625
+            }
+          },
+          "corpus": {
+            "hitRate": 0.1718213058419244,
+            "meanR": -0.04192112259058429
+          }
+        },
+        {
+          "series": "null-shuffled#3",
+          "kind": "block-shuffled",
+          "mode": "intraday",
+          "rows": 556,
+          "evidenceMean": 119.76186582637618,
+          "breakEvenMean": 0.1690860329247074,
+          "evZero": {
+            "armed": 18,
+            "armedRate": 0,
+            "hitRate": 0.1111111111111111,
+            "meanR": -0.1151099519764066,
+            "meanRLower": -0.5385051805517507
+          },
+          "evFloor": {
+            "armed": 6,
+            "armedRate": 0,
+            "hitRate": 0.16666666666666666,
+            "meanR": 0.024208039251803492,
+            "meanRLower": -0.7950701736196916
+          },
+          "gated": {
+            "armed": 6,
+            "armedRate": 0,
+            "hitRate": 0.16666666666666666,
+            "meanR": 0.024208039251803492,
+            "meanRLower": -0.7950701736196916
+          },
+          "bh": {
+            "tested": 556,
+            "rejected": 429,
+            "thresholdMedian": 0.03017241379310345
+          },
+          "edgeP": {
+            "median": 0.8619747913037852,
+            "overQ": 409
+          },
+          "costSigma": {
+            "measured": 556,
+            "median": 0.03161062205049822,
+            "above": 0
+          },
+          "mc": {
+            "samples": 10,
+            "positiveTail": 0,
+            "admitted": 10,
+            "medianMeanR": -0.14455618443284152,
+            "failedFit": 0,
+            "paths": 100,
+            "tradesPerPath": 8,
+            "stride": 60,
+            "readings": [
+              {
+                "row": 150,
+                "meanR": -0.229331656433805,
+                "p05MeanR": -0.6931326246107136,
+                "targetShare": 0.04375,
+                "timeoutShare": 0.5025
+              },
+              {
+                "row": 372,
+                "meanR": -0.18457612371982052,
+                "p05MeanR": -0.7574217217297514,
+                "targetShare": 0.17375,
+                "timeoutShare": 0.23
+              },
+              {
+                "row": 583,
+                "meanR": -0.14866469372824237,
+                "p05MeanR": -0.8647080359029554,
+                "targetShare": 0.20625,
+                "timeoutShare": 0.2
+              },
+              {
+                "row": 833,
+                "meanR": -0.1404476751374407,
+                "p05MeanR": -0.8632175536775814,
+                "targetShare": 0.1075,
+                "timeoutShare": 0.38375
+              },
+              {
+                "row": 1141,
+                "meanR": -0.1663398249396033,
+                "p05MeanR": -0.8474314940661059,
+                "targetShare": 0.1675,
+                "timeoutShare": 0.27375
+              },
+              {
+                "row": 1366,
+                "meanR": -0.10870816788500644,
+                "p05MeanR": -0.6814804778121946,
+                "targetShare": 0.2125,
+                "timeoutShare": 0.21375
+              },
+              {
+                "row": 1618,
+                "meanR": -0.10822207778982376,
+                "p05MeanR": -0.8271978110847831,
+                "targetShare": 0.18875,
+                "timeoutShare": 0.24875
+              },
+              {
+                "row": 1930,
+                "meanR": -0.10144540377355123,
+                "p05MeanR": -0.7531607313064752,
+                "targetShare": 0.1525,
+                "timeoutShare": 0.3275
+              },
+              {
+                "row": 2179,
+                "meanR": -0.19490518076113703,
+                "p05MeanR": -0.8547062290609948,
+                "targetShare": 0.23375,
+                "timeoutShare": 0.135
+              },
+              {
+                "row": 2412,
+                "meanR": -0.09612582032031992,
+                "p05MeanR": -0.8521937006224194,
+                "targetShare": 0.1525,
+                "timeoutShare": 0.3475
+              }
+            ],
+            "meanR": {
+              "p05": -0.229331656433805,
+              "median": -0.1404476751374407,
+              "min": -0.229331656433805,
+              "max": -0.09612582032031992
+            },
+            "p05": {
+              "p05": -0.8647080359029554,
+              "median": -0.8271978110847831,
+              "min": -0.8647080359029554,
+              "max": -0.6814804778121946
+            },
+            "targetShare": {
+              "p05": 0.04375,
+              "median": 0.17375,
+              "min": 0.04375,
+              "max": 0.23375
+            },
+            "timeoutShare": {
+              "p05": 0.135,
+              "median": 0.27375,
+              "min": 0.135,
+              "max": 0.5025
+            }
+          },
+          "corpus": {
+            "hitRate": 0.17446043165467626,
+            "meanR": -0.11027233145804743
+          }
+        }
+      ],
+      "pooled": {
+        "rows": 1763,
+        "evZero": {
+          "armed": 56,
+          "armedRate": 0.03176403857061826,
+          "hitRate": 0.21428571428571427,
+          "meanR": -0.0035280562608177063,
+          "meanRLower": -0.4759998518726056
+        },
+        "evFloor": {
+          "armed": 27,
+          "armedRate": 0.015314804310833806,
+          "hitRate": 0.2962962962962963,
+          "meanR": 0.2223154480387527,
+          "meanRLower": -0.5238327362064895
+        },
+        "gated": {
+          "armed": 27,
+          "armedRate": 0.015314804310833806,
+          "hitRate": 0.2962962962962963,
+          "meanR": 0.2223154480387527,
+          "meanRLower": -0.5238327362064895
+        },
+        "corpus": {
+          "hitRate": 0.16959727736812252,
+          "meanR": -0.0914286354584887
+        },
+        "mcAdmitted": 31,
+        "mcSamples": 31
+      }
+    }
+  ],
+  "homeGates": {
+    "gates": [
+      {
+        "name": "gate admits a usable number of trades",
+        "pass": true,
+        "detail": "1012 of 3525 rows armed on the floor AND BH (need ≥ 20)"
+      },
+      {
+        "name": "gated selection beats the corpus",
+        "pass": true,
+        "detail": "gated mean R 1.093 vs corpus 0.609"
+      },
+      {
+        "name": "the floor does not cost edge",
+        "pass": true,
+        "detail": "floor mean R 1.012 vs WP5's EV_LCB>0 0.979 (need ≥ −0.02R)"
+      },
+      {
+        "name": "the geometry layer does not bite on healthy corpora",
+        "pass": true,
+        "detail": "61 of 61 sampled decision bars pass the geometry layer (need ≥ 50%; the bars sit below the measured range, so this gate exists to catch a broken simulation, not to filter alpha)"
+      }
+    ],
+    "pass": true
+  },
+  "nullGates": {
+    "gates": [
+      {
+        "name": "null: no positive edge",
+        "pass": true,
+        "detail": "38 armed of 3510 rows, mean R 0.005 with 95% lower bound -0.702 (need ≤ 0)"
+      },
+      {
+        "name": "null: every null fixture is reported",
+        "pass": true,
+        "detail": "null-driftless (11 armed), null-shuffled (27 armed)"
+      }
+    ],
+    "pass": true
+  },
+  "verdict": "PASS",
+  "notes": [
+    "the WP3 regime permit and the executed-policy Monte Carlo are NOT the same measurement here: the permit is measured by the WP3 study (research-reports/2026-10-11-wp3-regime-study-*.json) and its composition by wp6-gatekeeper-wiring.test.ts; the MC is SAMPLED at the stride below, and the per-decision path is covered by the wiring tests",
+    "sampled MC: 197 decision bars (every 60th row), 0 refused for want of a GARCH fit",
+    "cost/sigma_h measured on 11353 rows with a usable trailing sigma; enforced only on scalp (scalp)",
+    "scalp is not measured here: the meta corpus has no scalp frames, so the 0.25R scalp floor and the 0.15 cost ceiling are asserted by the unit and wiring tests only"
+  ]
+}

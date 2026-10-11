@@ -51,7 +51,7 @@ import { deskV4, v4Live, v4On } from "./desk-v4-config";
 import { DEFAULT_REGIME_HMM_CONFIG, regimePermit, type RegimePermit } from "./regime-hmm";
 import { loadRegimeModel, persistRegimeModel, regimeModelVersion } from "./governance-runtime";
 import { executedPolicyMonteCarlo } from "./montecarlo-v2";
-import { metaViewAt } from "./meta/view";
+import { REGIME_MISMATCH_VOTE_WEIGHT, metaViewAt } from "./meta/view";
 import type { AlphaId } from "./alpha/types";
 import type { MetaView } from "./meta/dataset";
 import { metaPredictContext, predictMetaModel, type MetaModelSnapshot, type MetaModelPrediction } from "./meta/model";
@@ -568,6 +568,9 @@ function gatekeeperPrediction(input: {
     targetMultipleR: input.targetMultipleR,
     horizonBars: input.horizonBars,
     previous: gatekeeperViewStates.get(stateKey) ?? null,
+    // WP10's regime-mismatch vote, armed only behind its own flag: with the flag
+    // off this passes 1, and the view is the one the model was fitted on.
+    regimeMismatchVoteWeight: v4On(deskV4().ensembleRegimeWeight) ? REGIME_MISMATCH_VOTE_WEIGHT : 1,
   });
   if (!built) {
     // A decision bar with no view still advances the regime state: the streak is

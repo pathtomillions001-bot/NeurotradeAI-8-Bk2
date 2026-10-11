@@ -96,6 +96,18 @@ export interface DeskV4Config {
   ui: DeskV4Feature;
   /** Outbound alerts (WP10). Off by default, and inert without credentials. */
   alerts: DeskV4Feature;
+  /**
+   * WP10's regime-mismatch vote in the ensemble: an agent proposing against the
+   * desk's own directional regime reading counts half in the blend.
+   *
+   * Off by default, and it must stay off until the meta study and the gatekeeper
+   * study have both been re-run with it on (§12.6): the blend is the model's
+   * `meanAgentProbability` feature and the weighted sums set `netDirection`, so
+   * arming this moves `p_LCB` and which plans clear the EV floor. Both studies
+   * have now been run at 0.5: the gatekeeper passes, and WP5's intraday
+   * calibration gate FAILS (home slope 0.7908 vs 0.80) — so the flag stays off.
+   */
+  ensembleRegimeWeight: DeskV4Feature;
   /** Research harness only — never consulted by the live path. */
   research: { paths: number; seed: number };
 }
@@ -238,6 +250,7 @@ export function resolveDeskV4Config(env: Env = process.env): DeskV4Config {
     // even when on (see alerts.ts): watching a desk is never allowed to be a
     // condition of trading it.
     alerts: gate(feature(env, `${V4_ENV_PREFIX}ALERTS`, false)),
+    ensembleRegimeWeight: gate(feature(env, `${V4_ENV_PREFIX}ENSEMBLE_REGIME_WEIGHT`, false)),
     ui: gate(feature(env, `${V4_ENV_PREFIX}UI`, false)),
     research: {
       paths: clampInt(env[`${V4_ENV_PREFIX}RESEARCH_PATHS`], 200, 1_000_000, 4000),

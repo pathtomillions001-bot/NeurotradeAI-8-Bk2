@@ -22,7 +22,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { mulberry32, splitSeed } from "./rng";
 import { runLadderSweep, splitLogDebtDrift, MIN_DERIV_STAKE } from "./ladder";
-import { runEpisodeSweep, specTrueP0 } from "./episode";
+import { runEpisodeSweep, specTrueP0, meanMarginPaid, type EpisodeRunResult } from "./episode";
 import { summarizeEpisodes, proportionCiHalfWidth, type RecoveryMetricsSummary } from "./metrics";
 import { auditJournal, type AuditTradeRow } from "./audit";
 import { parseContractSpecs, contractSpecLabel } from "../contract-sets";
@@ -39,7 +39,7 @@ interface CliOptions {
   seed: number;
   maxTrades: number;
   mode: "ladder" | "episode" | "null" | "audit";
-  selector: "engine" | "random";
+  selector: "engine" | "random" | "rci";
   cooldownTicks: number;
   lossLimit: number;
   maxTicks: number;
@@ -95,7 +95,7 @@ function parseArgs(argv: string[]): CliOptions {
       }
       case "--selector": {
         const s = next();
-        if (s !== "engine" && s !== "random") throw new Error("--selector must be engine|random");
+        if (s !== "engine" && s !== "random" && s !== "rci") throw new Error("--selector must be engine|random|rci");
         opts.selector = s;
         break;
       }
@@ -244,41 +244,57 @@ function runEpisodeMode(opts: CliOptions, outDir: string): void {
   console.log(`\nReports: ${jsonPath}\n         ${mdPath}`);
 }
 
+function hitRateOf(records: EpisodeRunResult[]): { hr: number; n: number } {
+  const n = records.reduce((s, r) => s + r.recoveryTrades, 0);
+  const hr = n > 0 ? records.reduce((s, r) => s + Math.round(r.hitRate * r.recoveryTrades), 0) / n : 0;
+  return { hr, n };
+}
+
 function runNullMode(opts: CliOptions, outDir: string): void {
   const cfg = episodeConfigFrom(opts);
-  const engineRng = mulberry32(splitSeed(opts.seed, 1));
-  const randomRng = mulberry32(splitSeed(opts.seed, 2));
-  const engine = runEpisodeSweep({ episodes: opts.episodes, rng: engineRng, cfg, selector: "engine" });
-  const random = runEpisodeSweep({ episodes: opts.episodes, rng: randomRng, cfg, selector: "random" });
+  const engine = runEpisodeSweep({ episodes: opts.episodes, rng: mulberry32(splitSeed(opts.seed, 1)), cfg, selector: "engine" });
+  const random = runEpisodeSweep({ episodes: opts.episodes, rng: mulberry32(splitSeed(opts.seed, 2)), cfg, selector: "random" });
+  const rci = runEpisodeSweep({ episodes: opts.episodes, rng: mulberry32(splitSeed(opts.seed, 3)), cfg, selector: "rci" });
   const mEngine = summarizeEpisodes(engine);
   const mRandom = summarizeEpisodes(random);
-  const nEngine = engine.reduce((s, r) => s + r.recoveryTrades, 0);
-  const nRandom = random.reduce((s, r) => s + r.recoveryTrades, 0);
-  const hrEngine = nEngine > 0 ? engine.reduce((s, r) => s + Math.round(r.hitRate * r.recoveryTrades), 0) / nEngine : 0;
-  const hrRandom = nRandom > 0 ? random.reduce((s, r) => s + Math.round(r.hitRate * r.recoveryTrades), 0) / nRandom : 0;
-  const power = proportionCiHalfWidth(Math.min(nEngine, nRandom));
-  const indistinguishable = Math.abs(hrEngine - hrRandom) <= power;
+  const mRci = summarizeEpisodes(rci);
+  const e = hitRateOf(engine);
+  const r = hitRateOf(random);
+  const c = hitRateOf(rci);
+  const power = proportionCiHalfWidth(Math.min(e.n, r.n, c.n));
+  const indistinguishable = Math.abs(e.hr - r.hr) <= power;
+  const marginEngine = meanMarginPaid(engine);
+  const marginRandom = meanMarginPaid(random);
+  const marginRci = meanMarginPaid(rci);
+  const rciBeatsBoth = marginRci <= marginEngine + 1e-12 && marginRci <= marginRandom + 1e-12;
   const md = [
     `# Recovery selection null test — ${opts.method}`,
     "",
     `- Command: \`research:recovery --mode null --method ${opts.method} --set "${opts.set}" --episodes ${opts.episodes} --seed ${opts.seed}\``,
-    `- Engine arm runs the shipped ranker + gates; random arm draws a uniform contract from the SAME set with the SAME stake formula and cooldown rules. Both arms trade i.i.d. tapes.`,
-    `- Hit rate: engine ${(hrEngine * 100).toFixed(2)}% (${nEngine} trades) vs random ${(hrRandom * 100).toFixed(2)}% (${nRandom} trades).`,
+    `- Engine arm runs the shipped ranker + gates; random arm draws a uniform contract; RCI arm uses the WP3 Recovery Cost Index. All arms trade i.i.d. tapes with the SAME stake formula and cooldown rules.`,
+    `- Hit rate: engine ${(e.hr * 100).toFixed(2)}% (${e.n}) vs random ${(r.hr * 100).toFixed(2)}% (${r.n}) vs RCI ${(c.hr * 100).toFixed(2)}% (${c.n}).`,
+    `- Mean margin paid per $ staked: engine ${(marginEngine * 100).toFixed(3)}% · random ${(marginRandom * 100).toFixed(3)}% · RCI ${(marginRci * 100).toFixed(3)}%.`,
+    `- Decision latency (ticks): engine ${mEngine.meanDecisionLatencyTicks.toFixed(1)} · random ${mRandom.meanDecisionLatencyTicks.toFixed(1)} · RCI ${mRci.meanDecisionLatencyTicks.toFixed(1)}.`,
     `- Detectable edge at this N ≈ ±${(power * 100).toFixed(2)}pt (2·√(0.25/N)).`,
-    `- VERDICT: ${indistinguishable ? "engine selection is statistically INDISTINGUISHABLE from random choice on i.i.d. data (as expected)" : "arms differ beyond Monte-Carlo power — investigate before trusting either"}.`,
+    `- VERDICT (selection skill): ${indistinguishable ? "engine selection is statistically INDISTINGUISHABLE from random choice on i.i.d. data (as expected)" : "arms differ beyond Monte-Carlo power — investigate before trusting either"}.`,
+    `- VERDICT (WP3 cost gate): RCI margin ≤ engine AND ≤ random → ${rciBeatsBoth ? "PASS" : "FAIL"}; RCI latency ≤ 1 tick of the watched market → ${mRci.meanDecisionLatencyTicks <= 1.0 ? "PASS" : "FAIL"}.`,
     "",
     metricsTable([
       { label: `${opts.method}/engine`, m: mEngine },
       { label: `${opts.method}/random`, m: mRandom },
+      { label: `${opts.method}/rci`, m: mRci },
     ]),
   ].join("\n");
   const { jsonPath, mdPath } = writeReports(outDir, opts.name ?? `null-${opts.method}`, {
     kind: "null",
     options: opts,
-    engine: { hitRate: hrEngine, trades: nEngine, metrics: mEngine },
-    random: { hitRate: hrRandom, trades: nRandom, metrics: mRandom },
+    engine: { hitRate: e.hr, trades: e.n, metrics: mEngine, meanMarginPaid: marginEngine },
+    random: { hitRate: r.hr, trades: r.n, metrics: mRandom, meanMarginPaid: marginRandom },
+    rci: { hitRate: c.hr, trades: c.n, metrics: mRci, meanMarginPaid: marginRci },
     powerAtN: power,
     indistinguishable,
+    rciMarginGatePass: rciBeatsBoth,
+    rciLatencyGatePass: mRci.meanDecisionLatencyTicks <= 1.0,
   }, md);
   console.log(md);
   console.log(`\nReports: ${jsonPath}\n         ${mdPath}`);

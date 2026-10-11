@@ -39,6 +39,7 @@ import {
   type AutonomousContractSpec,
 } from "../contract-sets";
 import { HEDGE_MIN_TICKS, HEDGE_WINDOW } from "../constants";
+import { scoreRecoveryCandidates } from "../rci";
 import type { Rng } from "./rng";
 import { createTapeGenerator, type TapeGeneratorOptions } from "./tape";
 import { MIN_DERIV_STAKE } from "./ladder";
@@ -72,6 +73,10 @@ export interface EpisodeRunResult extends EpisodeRecord {
   hitRate: number;
   firedByEngine: number;
   ticks: number;
+  /** Total $ staked on recovery trades (denominator of the margin metric). */
+  stakedInRecovery: number;
+  /** Total margin (house edge) paid: Σ stake_c × margin_c. WP3 acceptance. */
+  marginPaid: number;
 }
 
 /** True per-tick win probability of a spec on i.i.d. data (no lookahead). */
@@ -87,10 +92,12 @@ export function specTrueP0(spec: AutonomousContractSpec): number {
 
 const contractTypeOf = (t: HedgeContractType): string => t;
 
+export type EpisodeSelector = "engine" | "random" | "rci";
+
 export function runEpisode(
   rng: Rng,
   cfg: EpisodeSimConfig,
-  selector: "engine" | "random",
+  selector: EpisodeSelector,
 ): EpisodeRunResult {
   const maxTicks = cfg.maxTicks ?? 4000;
   const lossLimit = cfg.consecutiveLossLimit ?? 4;
@@ -136,6 +143,8 @@ export function runEpisode(
   let latencyCount = 0;
   let cappedSeen = false;
   let capTrap = false;
+  let stakedInRecovery = 0;
+  let marginPaid = 0;
   let tick = 0;
 
   for (;; tick++) {
@@ -151,8 +160,11 @@ export function runEpisode(
         // not, and the TRUE run keeps counting (which the dashboard never saw).
         recState = { ...recState, streakLossCount: 0 };
         memory.confirmation = undefined;
+        // A cooldown is a RISK-MANAGER pause, not selector latency. The latency
+        // clock restarts when the pause ends so we measure how fast the selector
+        // fires once it is allowed to look, not how long the pause lasted.
+        ticksSinceLastSettlement = 0;
       }
-      ticksSinceLastSettlement += 1;
       continue;
     }
 
@@ -171,6 +183,39 @@ export function runEpisode(
         p0: specTrueP0({ type: spec.type, digit: spec.barrier }),
         payout,
         key: `${spec.type}:${spec.barrier}`,
+      };
+    } else if (mode === "RECOVERY" && selector === "rci") {
+      // WP3 RCI selection: no confirmation gate, no rematch penalty — fires on
+      // the first tick a feasible contract exists. Stake stays the legacy
+      // formula (WP4 swaps in adaptive sizing); only the CHOICE differs here.
+      const candidates = recoveryFamilySpecs.map((spec) => ({
+        spec: { type: spec.type, digit: spec.barrier },
+        payout: hedgePayout(spec.type, spec.barrier),
+        quoteSource: "fallback" as const,
+        quoteAgeMs: 0,
+        tapeAgeMs: 0,
+        recentRejections: 0,
+      }));
+      const decision = scoreRecoveryCandidates({
+        candidates,
+        debt: recState.unrecoveredAmount,
+        targetProfit: recState.remainingTargetProfit,
+        headroomCap: cfg.maxTradeStake,
+      });
+      if (!decision.chosen) {
+        // Nothing affordable this tick is a BUDGET fact (WP4's headroom makes it
+        // a partial recovery instead), not selector latency — restart the clock.
+        ticksSinceLastSettlement = 0;
+        continue;
+      }
+      firedByEngine += 1;
+      const chosenSpec = decision.chosen.spec;
+      chosen = {
+        type: chosenSpec.type,
+        barrier: chosenSpec.digit,
+        p0: decision.chosen.p0,
+        payout: decision.chosen.payout,
+        key: `${chosenSpec.type}:${chosenSpec.digit}`,
       };
     } else {
       const specs = mode === "RECOVERY" ? recoveryFamilySpecs : (normalFamilySpecs ?? []);
@@ -225,7 +270,8 @@ export function runEpisode(
     }
     if (!Number.isFinite(stake) || stake < MIN_DERIV_STAKE || stake > balance) {
       if (balance < MIN_DERIV_STAKE) return finish("ruined");
-      ticksSinceLastSettlement += 1;
+      // An unaffordable stake is a budget fact, not selector latency.
+      ticksSinceLastSettlement = 0;
       continue;
     }
     if (stake >= cfg.maxTradeStake - 1e-9 || stake >= balance - 1e-9) cappedSeen = true;
@@ -240,6 +286,9 @@ export function runEpisode(
       if (won) winsInRecovery += 1;
       latencySum += ticksSinceLastSettlement + 1;
       latencyCount += 1;
+      // WP3 margin metric: house edge paid per $ staked on this recovery trade.
+      stakedInRecovery += stake;
+      marginPaid += stake * (1 - chosen.p0 * chosen.payout);
     }
     ticksSinceLastSettlement = 0;
 
@@ -288,6 +337,8 @@ export function runEpisode(
       hitRate: recoveryTrades > 0 ? winsInRecovery / recoveryTrades : 0,
       firedByEngine,
       ticks: tick,
+      stakedInRecovery,
+      marginPaid,
     };
   }
 }
@@ -296,7 +347,14 @@ export interface EpisodeSweepOptions {
   episodes: number;
   rng: Rng;
   cfg: EpisodeSimConfig;
-  selector: "engine" | "random";
+  selector: EpisodeSelector;
+}
+
+/** Mean margin (house edge) paid per $1 staked on recovery trades. */
+export function meanMarginPaid(records: EpisodeRunResult[]): number {
+  const staked = records.reduce((s, r) => s + r.stakedInRecovery, 0);
+  const margin = records.reduce((s, r) => s + r.marginPaid, 0);
+  return staked > 0 ? margin / staked : 0;
 }
 
 export function runEpisodeSweep(options: EpisodeSweepOptions): EpisodeRunResult[] {

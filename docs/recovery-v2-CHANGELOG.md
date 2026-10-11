@@ -65,3 +65,29 @@ Safety analysis:
   user's multiplier ladder is used exactly as entered.
 - Split keeps its one-base-stake cap even after a live re-size.
 - Existing tests pin the pure stake math; those numbers are unchanged.
+
+## WP3 — Recovery Cost Index selector (recovery ranking, v2 path only)
+
+Behavioural changes:
+1. New `rci.ts`: `scoreRecoveryCandidates()` prices each allowed recovery
+   contract by margin (1 − p0·payout), geometry, exact one-win stake and
+   feasibility against the headroom cap; RCI = w1·margin + w2·ruinPreview +
+   w3·clearTimePreview (w2/w3 = 0 until WP5). Picks the minimum RCI among
+   feasible candidates; ties by feed health (freshest tape, then quote), then
+   fewest recent rejections. No confirmations, no rematch penalty, no
+   Markov/clustering terms. If nothing clears in one win inside the cap, the
+   highest-p0 fundable contract runs PARTIAL recovery — never idle.
+2. `cycle.ts` gains `decideRecoveryV2()`: in RECOVERY mode with
+   `recoveryV2Mode = live` the RCI decision replaces the legacy contest
+   decision (fires on the first feasible tick); in `shadow` it is logged
+   beside the legacy decision without trading. NORMAL mode is never touched.
+3. Harness: the episode simulator gains the `rci` selector arm and a
+   mean-margin-paid metric; the null report compares engine/random/RCI.
+
+Acceptance evidence (research-reports/recovery/*wp3-null-rci*, seed 1):
+- Mean margin paid per $ staked: RCI 2.200 % ≤ random 2.329 % ≤ engine
+  2.357 % (PASS on the default Over/Under + Even/Odd set).
+- Decision latency: RCI 1.0 tick vs engine 25.4 (confirmations + lucky-window
+  gate) — recovery fires on the first feasible tick (PASS).
+- Selection skill vs random remains statistically indistinguishable (as
+  expected — RCI claims lower COST, never prediction).

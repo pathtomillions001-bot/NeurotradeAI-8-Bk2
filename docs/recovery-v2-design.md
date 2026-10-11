@@ -159,7 +159,14 @@ seed 1, capital $200, base $1, max stake $500):
 
 Null-test verdict (WP0 acceptance): the shipped recovery ranker is
 statistically indistinguishable from uniform random selection on i.i.d. data;
-its confirmations/gates add ~39 ticks of decision latency per recovery trade.
+its confirmations/gates add ~25–40 ticks of decision latency per recovery trade.
+
+WP3 RCI gate (`wp3-null-rci*`): mean margin paid per $ staked — RCI 2.200 % ≤
+random 2.329 % ≤ engine 2.357 % (default set) and RCI 1.924 % ≤ engine 1.961 %
+≤ random 2.259 % (wide set); RCI decision latency 1.0 tick. Note: on the wide
+set the raw hit rates differ between arms because RCI deterministically shifts
+the mix toward low-margin high-p0 contracts (Differs) — that is the cost
+optimisation itself, not selection skill; margin-paid is the honest comparison.
 
 ## 11. Open risks / unverified
 

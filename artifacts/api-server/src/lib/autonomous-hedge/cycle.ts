@@ -46,6 +46,7 @@ import {
 import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
 import { computeStake } from "../agents/ev-calculator";
 import { recoveryEscalation } from "./recovery-risk";
+import { scoreRecoveryCandidates, DEFAULT_RCI_WEIGHTS, type RciCandidateInput } from "./rci";
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
@@ -326,6 +327,83 @@ function riskWithSizeDown(ctx: HedgeContext, symbol: string): { risk: RiskDecisi
       hardStopReason: undefined,
     },
     factor,
+  };
+}
+
+/**
+ * WP3 — v2 recovery decision via the Recovery Cost Index.
+ *
+ * Returns a HedgeDecision that fires on the FIRST tick a feasible contract
+ * exists: no confirmations, no rematch penalty, no Markov terms (D8). Used only
+ * when settings.recoveryV2Mode is shadow/live AND the engine is in recovery;
+ * normal mode keeps the legacy gate. Returns null when no market produced rows
+ * or nothing is affordable (a budget fact, reported as a HOLD, not a wait).
+ *
+ * TODO(WP4): headroomCap currently proxies the drawdown headroom with the
+ * per-trade max stake; WP4 replaces it with φ·min(balance−reserve, headroom).
+ * TODO(WP5): ruin/clear-time previews are 0 until the Markov-DP preview lands.
+ */
+function decideRecoveryV2(
+  rows: HedgeCandidate[],
+  tapes: HedgeTape[],
+  ctx: HedgeContext,
+  lossRun: number,
+  escalation: number,
+): HedgeDecision | null {
+  if (rows.length === 0) return null;
+  const ledger = recoveryEngine.getState();
+  const tapeAgeBySymbol = new Map(tapes.map((t) => [t.symbol, t.ageMs]));
+  const candidates: RciCandidateInput[] = rows.map((row) => ({
+    spec: { type: row.contract, digit: row.barrier },
+    payout: row.payout,
+    quoteSource: "fallback", // live re-verification happens at buy time (WP2)
+    quoteAgeMs: 0,
+    tapeAgeMs: tapeAgeBySymbol.get(row.symbol) ?? Number.MAX_SAFE_INTEGER,
+    recentRejections: 0,
+  }));
+  const debt = ledger.unrecoveredAmount;
+  const targetProfit = ledger.remainingTargetProfit;
+  const headroomCap = ctx.settings.maxTradeStake; // TODO(WP4)
+  const decision = scoreRecoveryCandidates({
+    candidates,
+    debt,
+    targetProfit,
+    headroomCap,
+    weights: DEFAULT_RCI_WEIGHTS,
+  });
+  if (!decision.chosen) return null;
+
+  // Map the RCI winner back onto the ranked row that produced it.
+  const chosenSpec = decision.chosen.spec;
+  const best = rows.find(
+    (r) => r.contract === chosenSpec.type && r.barrier === chosenSpec.digit,
+  );
+  if (!best) return null;
+
+  const barrierText = best.barrier >= 0 ? ` ${best.barrier}` : "";
+  const reason = `READY ${best.contract}${barrierText} on ${best.symbol} · RCI ${(decision.chosen.rci * 100).toFixed(2)} margin ${(decision.chosen.margin * 100).toFixed(2)}%${decision.partial ? " · partial (headroom-bound)" : ""}`;
+
+  // Group winners for the dashboard, mirroring the legacy contest's layout.
+  const rankedByScore = [...rows].sort((a, b) => b.score - a.score);
+  const groupWinners = HEDGE_GROUP_NAMES.map((_, g) => {
+    const inGroup = rankedByScore.filter((r) => r.group === g);
+    return inGroup.length > 0
+      ? { group: g, groupName: HEDGE_GROUP_NAMES[g], winner: inGroup[0], rowsInGroup: inGroup.length }
+      : null;
+  }).filter((x): x is NonNullable<typeof x> => x !== null);
+
+  return {
+    mode: "RECOVERY",
+    best,
+    eligible: true,
+    confirmations: 0,
+    requiredConfirmations: 0,
+    rescanInProgress: false,
+    escalation,
+    blockers: [],
+    reason,
+    groupWinners,
+    rowsRanked: rows.length,
   };
 }
 
@@ -657,7 +735,28 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
 
   // 2. Contest and gate.
-  const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
+  let decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
+
+  // 2b. Recovery v2 (WP3): when the gate is enabled and the engine is in
+  //     recovery, the RCI selector either REPLACES the legacy decision (live)
+  //     or is logged beside it (shadow). Normal mode is never touched.
+  const v2Mode = ctx.settings.recoveryV2Mode ?? "off";
+  if (mode === "RECOVERY" && v2Mode !== "off" && rows.length > 0) {
+    const v2Decision = decideRecoveryV2(rows, tapes, ctx, lossRun, escalation);
+    if (v2Mode === "shadow") {
+      logger.info(
+        {
+          sessionId: host.sessionId,
+          legacy: decision ? { eligible: decision.eligible, reason: decision.reason } : null,
+          v2: v2Decision ? { reason: v2Decision.reason } : null,
+        },
+        "Recovery v2 shadow decision (RCI beside legacy)",
+      );
+    } else if (v2Decision) {
+      decision = v2Decision;
+    }
+  }
+
   if (!decision) {
     host.publish({ currentMarket: null, nextScanIn: null });
     // Ranked nothing this tick — HOLD with the feed cause, never silence.

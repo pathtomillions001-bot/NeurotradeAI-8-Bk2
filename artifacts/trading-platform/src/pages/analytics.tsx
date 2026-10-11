@@ -262,38 +262,34 @@ function OutcomeExtremes({ trades }: { trades: any[] }) {
   const money = (v: number | null, signed = false) =>
     v == null ? "—" : `${signed && v > 0 ? "+" : ""}${v.toFixed(2)}`;
 
-  // REDESIGNED as a 3×2 stat grid whose NATURAL height is deliberately kept
-  // below the Trade Timeline's shortest possible card (one trade ≈ 112 px), so
-  // the extremes block can NEVER be the taller side of the bottom row. The
-  // card still fills its column (`h-full`) when the timeline is taller — the
-  // tiles stretch and centre their content — so the two bottom edges line up
-  // without either card being forced past its own natural look. The
-  // descriptive third line ("lowest amount risked", …) survives as a hover
-  // title, so nothing is actually lost.
+  // COMPACT rows: label + value only. The descriptive third line ("lowest
+  // amount risked", …) was dropped so the card is shorter and reaches the
+  // Trade Timeline card's bottom edge instead of leaving a gap under it; the
+  // same wording survives as a hover title, so nothing is actually lost.
   const rows: Array<{ label: string; value: string; tone: string; sub: string }> = [
     { label: "Smallest Stake",  value: money(extremes.smallestStake),  tone: "text-foreground",    sub: "lowest amount risked" },
     { label: "Largest Stake",   value: money(extremes.largestStake),   tone: "text-foreground",    sub: "highest amount risked" },
-    { label: "Largest Profit",  value: money(extremes.largestProfit, true),   tone: "text-emerald-400", sub: "best trade" },
     { label: "Smallest Profit", value: money(extremes.smallestProfit, true),  tone: "text-emerald-400", sub: "thinnest win" },
+    { label: "Largest Profit",  value: money(extremes.largestProfit, true),   tone: "text-emerald-400", sub: "best trade" },
     { label: "Smallest Loss",   value: money(extremes.smallestLoss),   tone: "text-red-400",       sub: "closest loss to break-even" },
     { label: "Largest Loss",    value: money(extremes.largestLoss),    tone: "text-red-400",       sub: `${extremes.lossCount} losing trade${extremes.lossCount === 1 ? "" : "s"} today` },
   ];
 
   return (
-    <div className="h-full min-h-0 flex flex-col overflow-hidden rounded-xl border border-border/60 bg-card/70 p-2.5">
-      <div className="flex items-baseline justify-between gap-2 mb-1">
+    <div className="h-full flex flex-col rounded-xl border border-border/60 bg-card/70 p-4">
+      <div className="flex items-baseline justify-between gap-2 mb-2">
         <p className="text-xs font-semibold text-foreground truncate">Stake &amp; Outcome Extremes</p>
-        <p className="text-[9px] text-muted-foreground shrink-0">Today</p>
+        <p className="text-[10px] text-muted-foreground shrink-0">Today</p>
       </div>
-      <div className="grid grid-cols-3 grid-rows-2 gap-1.5 flex-1 min-h-0">
+      <div className="grid grid-cols-2 gap-1.5 flex-1 content-start">
         {rows.map(r => (
           <div
             key={r.label}
             title={r.sub}
-            className="flex flex-col items-center justify-center gap-0.5 rounded-lg border border-border/50 bg-secondary/20 px-1.5 py-1 min-h-0 min-w-0 text-center"
+            className="flex items-center justify-between gap-2 rounded-lg border border-border/50 bg-secondary/20 px-2 py-1.5 min-w-0"
           >
-            <span className="text-[8px] leading-none uppercase tracking-wider text-muted-foreground truncate w-full">{r.label}</span>
-            <span className={`text-[11px] leading-none font-mono font-bold ${r.tone}`}>{r.value}</span>
+            <span className="text-[9px] uppercase tracking-wider text-muted-foreground truncate">{r.label}</span>
+            <span className={`text-xs font-mono font-bold shrink-0 ${r.tone}`}>{r.value}</span>
           </div>
         ))}
       </div>
@@ -306,7 +302,7 @@ function TradeTimeline({ trades }: { trades: any[] }) {
   const reversed = [...trades].reverse().slice(0, 30);
 
   return (
-    <div className="rounded-xl border border-border/60 bg-card/70 p-4">
+    <div className="h-full flex flex-col rounded-xl border border-border/60 bg-card/70 p-4">
       <div className="flex items-center justify-between mb-3">
         <div>
           <p className="text-xs font-semibold text-foreground">Trade Timeline</p>
@@ -315,12 +311,12 @@ function TradeTimeline({ trades }: { trades: any[] }) {
         <span className="text-[10px] text-muted-foreground font-mono">{trades.length} total</span>
       </div>
       {reversed.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-8 gap-2">
+        <div className="flex flex-col items-center justify-center py-8 gap-2 flex-1">
           <Activity className="w-7 h-7 text-muted-foreground/20" />
           <p className="text-xs text-muted-foreground">No trades today yet</p>
         </div>
       ) : (
-        <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
+        <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1 flex-1">
           <AnimatePresence>
             {reversed.map((t, i) => {
               const profit = t.profit ?? 0;
@@ -503,19 +499,17 @@ export default function Analytics() {
           </div>
 
           {/* ── Bottom row: timeline + contract breakdown ─────────────
-              The Trade Timeline owns its own natural height again (its list is
-              capped at `max-h-72`, nothing stretches it). The Stake & Outcome
-              Extremes card is designed so its natural height never exceeds the
-              timeline's shortest possible height, and it only ever FILLS the
-              space the timeline (plus the contract list above it) leaves in its
-              column — so it can never become the taller block. */}
+              `items-stretch` + full-height children keep BOTH columns the same
+              height, so the bottom of the Stake & Outcome Extremes card always
+              lines up with the bottom of the Trade Timeline card — no gap
+              under either of them. */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-stretch">
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}
-              className="lg:col-span-2">
+              className="lg:col-span-2 flex">
               <TradeTimeline trades={trades} />
             </motion.div>
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.25 }}
-              className="flex flex-col gap-4 min-h-0">
+              className="flex flex-col gap-4">
               <ContractBreakdown trades={trades} />
               <motion.div
                 initial={{ opacity: 0 }}

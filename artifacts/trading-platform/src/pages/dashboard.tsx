@@ -35,20 +35,6 @@ interface PendingResult {
   createdAt: string;
 }
 
-// ── Dashboard status line ─────────────────────────────────────────────────────
-/**
- * The header status line names WHY a paused engine is paused (ownership
- * conflicts, broker rejections, risk hard-stops) — but the loss-limit stop
- * ("4 consecutive losses — limit 4 reached, cooling down 1m") is deliberately
- * NOT shown: the Quick Strike card's power button already counts that same
- * cooldown down live (Resume m:ss) and the card carries the loss counter, so
- * the message is pure duplication. Every other stop reason still shows.
- */
-function displayedStopReason(reason: string | null | undefined): string | null {
-  if (!reason) return null;
-  return /^\d+\s+consecutive losses\b/i.test(reason.trim()) ? null : reason;
-}
-
 // ── Recovery stat card (in the top KPI row) ───────────────────────────────────
 // Recovery is a SINGLE global state now, regardless of which contract type
 // caused the loss — the AI simply trades whatever the tournament ranks best,
@@ -377,11 +363,9 @@ export default function Dashboard() {
               {(engine as any)?.paperTradeMode && " · PAPER"}
               {(engine as any)?.tickHealth?.usingSimulated && " · SIM DATA"}
               {/* The removed status strip carried the stop reason; it lives here now
-                  so a paused engine still says WHY, without a second bar. The
-                  loss-limit stop is filtered out (displayedStopReason): its
-                  counter and cooldown countdown live on the Quick Strike card. */}
-              {!engine?.isRunning && displayedStopReason(engine?.stopReasons?.[0]) && (
-                <span className="text-muted-foreground/70"> · {displayedStopReason(engine?.stopReasons?.[0])}</span>
+                  so a paused engine still says WHY, without a second bar. */}
+              {!engine?.isRunning && engine?.stopReasons?.[0] && (
+                <span className="text-muted-foreground/70"> · {engine.stopReasons[0]}</span>
               )}
             </p>
           </div>

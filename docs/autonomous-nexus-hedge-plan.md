@@ -165,64 +165,6 @@ Fix (three parts, all bounded):
 ceiling, and a 31-minute-old exposure releases the gate, resumes the contest and
 leaves the row `open` in the database.
 
-### The recurring settle miss (fixed)
-
-Bounding the hold stopped the deadlock, but the hold itself kept coming back:
-"HOLD: settling previous 1-tick trade on JD25 (#44645, waiting 4m32s)" on a
-contract Deriv had already closed. The gate was working; the settle DETECTION
-was losing the race. Three defects in the reconciler's lookup, all in
-`trade-reconciler.ts`, and one in the shared settlement snapshot:
-
-1. **The paged walk was a rate-limit bomb.** `fetchAutonomousTransactions`
-   fired its pages back-to-back (four `profit_table` requests inside half a
-   second). Deriv throttles `profit_table` to roughly one request per 3–5 s
-   per ACCOUNT — the journal deliberately spaces its own pagination chain 5 s
-   apart for exactly this reason — so the second page tripped `RateLimit`.
-2. **One failed page threw away the pages before it.** The fetch was
-   all-or-nothing: the error propagated and the already-fetched pages were
-   discarded — including page 1, where a seconds-old settled 1-tick contract
-   sits. The row stayed `open`, the engine kept HOLDing, and the next sweep
-   (5 s later) repeated the same burst. Under load this never converged.
-3. **A stale row poisoned every sweep.** `date_from` starts at the OLDEST open
-   autonomous row's era. One row left open by an earlier miss (or by a
-   `[GATE RELEASED …]`) widened the window to hours or days, so page 1 filled
-   up and the walk ran the FULL four-page burst on every sweep — and rows with
-   a contract id deeper than the 4-page cap could never match at all. Each
-   missed settle added another such row, so the problem grew over time.
-4. **A failed snapshot read as authoritative empty.** `pollSettlementSnapshot`
-   overwrote its cache with an empty transaction list (marked fresh) whenever
-   the fetch failed, so `waitForContractResult` chewed through its 36-second
-   window on "fresh" empties during any rate-limit pause.
-
-Fix (settle plumbing only — the engine's analysis, timing and execution are
-untouched):
-
-- **The walk is paced** (`AUTONOMOUS_PAGE_DELAY_MS`, 5 s between pages) and
-  **stops early** once every row it is sweeping has found its exact
-  transaction — the common case (a fresh row on page 1) costs one request.
-- **A failed page settles from what it has.** The walk returns
-  `{ transactions, complete: false }` instead of throwing; every match in the
-  fetched pages is settled immediately. `complete` is the ONLY licence to read
-  a missing transaction as "no such trade", so the no-id release
-  (`AUTONOMOUS_UNRESOLVED_AFTER_MS`) is gated on it — an outage or a walk cut
-  short by the page cap releases nothing.
-- **One sweep at a time.** Concurrent triggers (the gate's 5 s re-requests and
-  the 60 s timer) share a single in-flight walk instead of stacking bursts.
-- **The journal's real-time feed settles rows directly.** Deriv pushes a
-  `transaction` (sell) event, the journal's quick refresh answers with the
-  settled `profit_table` rows within a second or two, and
-  `settleFromJournalBatch` completes any open autonomous row whose exact
-  contract id is in that batch — zero extra requests, zero rate-limit
-  pressure, through the same claim-unique writer. The sweep remains the
-  safety net for sessions with no journal attached.
-- **A failed snapshot keeps the previous one** (`pollSettlementSnapshot`): a
-  transient Deriv hiccup can no longer present "empty" as fresh data.
-
-`trade-reconciler.test.ts` pins every property: partial pages survive a page
-failure, the walk stops at one request when the rows matched, a capped walk is
-never "complete", the journal batch settles exactly the matching row exactly
-once, and only a complete lookup releases a ghost buy.
-
 ## Duration
 
 Deriv's public docs show 5-tick Rise/Fall examples and do not state a per-type

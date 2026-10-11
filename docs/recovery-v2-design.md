@@ -168,6 +168,13 @@ set the raw hit rates differ between arms because RCI deterministically shifts
 the mix toward low-margin high-p0 contracts (Differs) — that is the cost
 optimisation itself, not selection skill; margin-paid is the honest comparison.
 
+WP5 DP validation (`*wp5-dp-validation*`): collocation-grid value iteration vs
+1e6-episode Monte-Carlo — P(clear) within 0.12 % on every λ in the optimizer
+grid; default λ = 0.5 within 1 % on P(clear)/P(rebase)/E[trades]. Cached
+preview ≈ 0.01 ms (gate < 5 ms); cold solve ≈ 100 ms per debt bucket (one-off).
+The optimizer ("auto") minimises |CVaR99|/capital + w·E[trades] s.t.
+P(rebase) ≤ 0.10 over λ ∈ {0.25, 0.33, 0.5, 0.67, 1.0}.
+
 WP4 adaptive acceptance (`wp4-accept-*`, 200k episodes, Even/Odd, base $1,
 capital $200, seed 1): adaptive λ=0.5, budget 25×, φ=5% — CVaR99 −20.00 vs
 Instant −200.00 (10×, gate ≥3×); mean −1.27 vs −1.36 (Δ 0.09, gate ≤0.2);
@@ -189,8 +196,11 @@ tail) while adaptive realises the debt and restarts instead.
 - **Wide-set mean gap:** adaptive mean −1.42 vs Instant −1.80 is a 0.38 gap
   (> the 0.2 gate) because the wide set mixes in high-margin Rise/Fall; the
   gate is met on the Even/Odd acceptance set.
-- **λ = "auto"** currently falls back to 0.5; the WP5 Markov-DP optimizer will
-  choose it. Until then "auto" ≡ 0.5.
+- **λ = "auto"** resolves through the WP5 Markov-DP optimizer. Cold solve is
+  ≈ 100 ms per debt bucket (≈ 0.5 s when the optimizer evaluates all five
+  lambdas at once); it happens once per visited bucket and is cached
+  afterwards, so the 1-tick cycle absorbs it, but it is the most expensive
+  thing the v2 path does.
 - **Live Deriv quote behaviour** (WP2 buy-time re-verify, WP7 one-tick buy) is
   exercised only against injected fake fetchers in tests; the sandbox cannot
   reach Deriv WS, so live-path behaviour is untested here by design.

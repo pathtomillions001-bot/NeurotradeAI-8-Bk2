@@ -54,6 +54,7 @@ import {
   ADAPTIVE_DEFAULT_BUDGET_BASE,
   ADAPTIVE_DEFAULT_HEADROOM_PCT,
 } from "./adaptive-stake";
+import { recoveryDpPreview, chooseOptimalLambda, type DpPreview } from "./markov-dp";
 
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
@@ -885,6 +886,11 @@ function publishScan(
     lossRunRisk: Math.round(b.lossRunRisk * 1000) / 1000,
     riskWeight: Math.round(b.riskWeight * 100) / 100,
     escalation: decision.escalation,
+    // WP5 — adaptive Markov-DP preview (cached; < 5 ms on the hot path).
+    // Present only when the adaptive ladder is the recovery method and the v2
+    // gate is at least shadow, so the dashboard can show what the ladder
+    // expects before a single recovery stake is placed.
+    recoveryPreview: buildRecoveryPreview(decision, ctx),
   });
   for (const gw of decision.groupWinners) {
     const w = gw.winner;
@@ -918,12 +924,24 @@ function publishScan(
  * legacy number without trading it; "live" trades it; "off" (default) is
  * byte-for-byte legacy.
  */
-function resolveRecoveryLambda(ctx: HedgeContext): number {
+function resolveRecoveryLambda(ctx: HedgeContext, auto: {
+  debt: number; payout: number; p0: number; headroomCap: number; baseStake: number;
+}): number {
   const raw = ctx.settings.recoveryLambda;
   if (raw === undefined || raw === null || raw === "" || String(raw).toLowerCase() === "auto") {
-    // TODO(WP5): "auto" resolves through the Markov-DP optimizer. Until then
-    // it falls back to the validated default lambda.
-    return ADAPTIVE_DEFAULT_LAMBDA;
+    // WP5: the Markov-DP optimizer picks λ from the validated grid, minimising
+    // U = |CVaR99|/capital + w·E[trades] s.t. P(rebase) ≤ tol. Cached per debt
+    // bucket, so this is cheap on the hot path.
+    const result = chooseOptimalLambda({
+      debt: auto.debt,
+      baseStake: auto.baseStake,
+      payout: auto.payout,
+      p0: auto.p0,
+      budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
+      headroomCap: auto.headroomCap,
+      capital: ctx.balance,
+    });
+    return result.lambda;
   }
   const n = Number(raw);
   return Number.isFinite(n) ? Math.min(1, Math.max(0.05, n)) : ADAPTIVE_DEFAULT_LAMBDA;
@@ -960,11 +978,18 @@ async function resolveStake(
       headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
     });
     const baseStake = base > 0 ? base : ledgerState.baseStake;
+    const lambda = resolveRecoveryLambda(ctx, {
+      debt: ledgerState.unrecoveredAmount,
+      payout,
+      p0: b.probability,
+      headroomCap: headroom.headroomCap,
+      baseStake,
+    });
     const plan = computeAdaptiveStake({
       debt: ledgerState.unrecoveredAmount,
       baseStake,
       payout,
-      lambda: resolveRecoveryLambda(ctx),
+      lambda,
       headroomCap: headroom.headroomCap,
       budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
     });
@@ -1030,6 +1055,47 @@ async function resolveStake(
     return { stake: plannedStake, payout: plan.payoutMultiplier };
   }
   return { stake, payout }; // shadow: legacy trades, v2 only logged
+}
+
+/**
+ * WP5 — build the adaptive Markov-DP preview for the scan payload. Returns
+ * null unless the adaptive method is active and the v2 gate is ≥ shadow, so
+ * legacy sessions pay nothing. The preview is cached per debt bucket, keeping
+ * this well under the 5 ms scan-payload budget after warm-up.
+ */
+function buildRecoveryPreview(decision: HedgeDecision, ctx: HedgeContext): DpPreview | null {
+  if (ctx.settings.recoveryMethod !== "adaptive") return null;
+  if ((ctx.settings.recoveryV2Mode ?? "off") === "off") return null;
+  const ledgerState = recoveryEngine.getState();
+  const debt = ledgerState.unrecoveredAmount;
+  if (debt <= 0) return null;
+  const headroom = computeRecoveryHeadroom({
+    balance: ctx.balance,
+    dailyProfit: ctx.daily.profit,
+    maxDrawdownPct: ctx.settings.maxDrawdown,
+    headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
+  });
+  const baseStake = ledgerState.baseStake > 0 ? ledgerState.baseStake : 1;
+  try {
+    const lambda = resolveRecoveryLambda(ctx, {
+      debt,
+      payout: decision.best.payout,
+      p0: decision.best.probability,
+      headroomCap: headroom.headroomCap,
+      baseStake,
+    });
+    return recoveryDpPreview({
+      debt,
+      baseStake,
+      payout: decision.best.payout,
+      p0: decision.best.probability,
+      lambda,
+      budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
+      headroomCap: headroom.headroomCap,
+    });
+  } catch {
+    return null; // a preview failure must never block the scan
+  }
 }
 
 function barrierFor(row: HedgeCandidate): number | null {

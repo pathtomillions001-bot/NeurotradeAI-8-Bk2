@@ -141,3 +141,37 @@ Acceptance evidence (200k episodes, Even/Odd, base $1, capital $200, seed 1):
 Honest statement: the adaptive ladder reshapes RISK (tail, ruin, run length);
 it does not create positive expectation — mean cash stays negative on i.i.d.
 data.
+
+## WP5 — Markov-chain DP preview + λ optimizer ("auto")
+
+New behaviour:
+1. `markov-dp.ts`: value-iteration solver for the adaptive ladder's debt random
+   walk on a 1%-budget collocation grid (4× oversampled). Transitions stay
+   continuous; value functions interpolate between grid points with flat
+   edge extrapolation (the value functions are discontinuous at the two
+   absorbing boundaries, so interpolating across them leaks probability — the
+   flat edges keep every metric's Bellman operator linear, which is what makes
+   Σ rebase-bins ≡ 1 − P(clear) hold exactly). Outputs P(clear), P(rebase),
+   E[trades], E[cash], CVaR99 of final cash, P(max-run ≥ 6/8/10) and the
+   realised re-base-debt tail.
+2. `chooseOptimalLambda()`: picks λ from {0.25, 0.33, 0.5, 0.67, 1.0}
+   minimising U = |CVaR99|/capital + w·E[trades] subject to P(rebase) ≤ tol
+   (default 0.10). No feasible λ ⇒ the lowest-P(rebase) candidate (never an
+   unvalidated λ). This is what `recoveryLambda = "auto"` now resolves to.
+3. Cycle wiring: `resolveRecoveryLambda(...,"auto")` calls the optimizer with
+   the live debt/payout/probability/headroom; `buildRecoveryPreview()` attaches
+   a cached DP preview to the `scan_complete` payload when the method is
+   adaptive and the v2 gate is ≥ shadow. A preview failure can never block a
+   scan (returns null).
+
+Acceptance evidence (research-reports/recovery/*wp5-dp-validation*, 1e6 MC
+episodes per λ, seed 1, debt $1 / base $1 / payout 1.95 / p0 0.5 / budget 25×
+/ headroom $10):
+- P(clear) within 0.12 % of Monte-Carlo on every λ (gate ≤ 1 %).
+- At the default λ = 0.5: P(clear) 0.057 %, E[trades] 0.93 %, P(rebase)
+  0.96 % — all within the 1 % gate.
+- Tail quantities on off-default λ carry a small residual (P(rebase) up to
+  ~1.9 %, E[trades] up to ~2.7 % at λ = 1); P(clear), the dominant metric, is
+  always < 0.2 %. Recorded honestly rather than tuned away.
+- Cached preview answers in ~0.01 ms (median); cold solve ≈ 100 ms once per
+  debt bucket. Scan-payload budget (< 5 ms) is met on the hot path.

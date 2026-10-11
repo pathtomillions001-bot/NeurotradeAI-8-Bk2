@@ -14,7 +14,7 @@
  *  - decision latency in ticks (settlement → next fired recovery trade)
  */
 
-export type EpisodeOutcome = "cleared" | "ruined" | "unresolved";
+export type EpisodeOutcome = "cleared" | "ruined" | "unresolved" | "rebased";
 
 export interface EpisodeRecord {
   outcome: EpisodeOutcome;
@@ -42,6 +42,8 @@ export interface RecoveryMetricsSummary {
   clearRate: number;
   ruinRate: number;
   unresolvedRate: number;
+  /** WP4: episodes that hit the recovery budget and RE-BASED (adaptive only). */
+  rebaseRate: number;
   tradesToClear: Quantiles;
   peakDebt: Quantiles;
   meanFinalCash: number;
@@ -73,6 +75,7 @@ export function summarizeEpisodes(records: EpisodeRecord[]): RecoveryMetricsSumm
       clearRate: 0,
       ruinRate: 0,
       unresolvedRate: 0,
+      rebaseRate: 0,
       tradesToClear: { p50: 0, p90: 0, p95: 0, p99: 0 },
       peakDebt: { p50: 0, p90: 0, p95: 0, p99: 0 },
       meanFinalCash: 0,
@@ -86,6 +89,7 @@ export function summarizeEpisodes(records: EpisodeRecord[]): RecoveryMetricsSumm
   let cleared = 0;
   let ruined = 0;
   let unresolved = 0;
+  let rebased = 0;
   let capTraps = 0;
   let finalCashSum = 0;
   let runSum = 0;
@@ -102,6 +106,7 @@ export function summarizeEpisodes(records: EpisodeRecord[]): RecoveryMetricsSumm
   for (const r of records) {
     if (r.outcome === "cleared") cleared++;
     else if (r.outcome === "ruined") ruined++;
+    else if (r.outcome === "rebased") rebased++;
     else unresolved++;
     if (r.capTrap) capTraps++;
     if (r.outcome === "cleared") tradesToClear.push(r.trades);
@@ -131,6 +136,7 @@ export function summarizeEpisodes(records: EpisodeRecord[]): RecoveryMetricsSumm
     clearRate: cleared / episodes,
     ruinRate: ruined / episodes,
     unresolvedRate: unresolved / episodes,
+    rebaseRate: rebased / episodes,
     tradesToClear: {
       p50: quantile(tradesToClear, 0.5),
       p90: quantile(tradesToClear, 0.9),

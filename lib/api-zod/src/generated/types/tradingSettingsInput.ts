@@ -46,6 +46,14 @@ export interface TradingSettingsInput {
   recoveryAutoMode?: boolean;
   /** Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them). */
   recoveryV2Mode?: TradingSettingsInputRecoveryV2Mode;
+  /** Recovery budget in multiples of the base stake (adaptive method, default 25) */
+  recoveryBudgetBase?: number;
+  /** Adaptive ladder lambda. "auto" or a fixed number in (0,1] */
+  recoveryLambda?: string;
+  /** phi — percent of remaining drawdown headroom one recovery stake may consume (default 5) */
+  recoveryHeadroomPct?: number;
+  /** RCI margin weight w1 (default 1) */
+  recoveryMarginPreference?: number;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

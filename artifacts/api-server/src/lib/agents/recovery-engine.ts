@@ -548,6 +548,48 @@ export function createRecoveryState(): RecoveryState {
   return freshState();
 }
 
+/**
+ * WP4 — RE-BASE (pure form).
+ *
+ * The adaptive ladder's budget rule: when the outstanding debt reaches the
+ * recovery budget (or the headroom cap can no longer fund even a base stake),
+ * the debt is REALISED as a logged loss and recovery restarts at base stake.
+ * A re-base never waits and never hides the loss — the caller writes the
+ * ledger row for the realised amount; this function only moves the state.
+ *
+ * Alongside reduceRecoveryOutcome this is the ONLY other transition allowed to
+ * write recovery state, and it can only REDUCE obligations (debt → 0). It
+ * preserves baseStake (the ladder restarts at the normal stake) and the true
+ * loss run (a re-base is a loss, not a win — the run keeps counting).
+ */
+export function reduceRecoveryRebase(current: RecoveryState): RecoveryState {
+  const next = freshState();
+  next.resetDate = current.resetDate;
+  next.baseStake = current.baseStake;
+  next.trueLossRun = Number.isFinite(current.trueLossRun) ? current.trueLossRun : 0;
+  return next;
+}
+
+/**
+ * Session writer for a re-base. Returns the debt that was realised (0 when
+ * there was nothing to re-base). The caller makes the state durable
+ * (flushRecoveryState) BEFORE writing the ledger row — the same
+ * durable-before-claimed order as settleAutonomousRow — and rolls back via
+ * restoreStateSnapshot if the flush fails.
+ */
+export function applyRebaseToState(): number {
+  ensureFreshDay();
+  const debt = state.unrecoveredAmount;
+  if (!state.inRecovery && debt <= 0) return 0;
+  replaceState(reduceRecoveryRebase({ ...state }));
+  return debt;
+}
+
+/** WP4 — rollback support: restores a snapshot after a failed durable flush. */
+export function restoreStateSnapshot(snapshot: RecoveryState): void {
+  replaceState({ ...snapshot });
+}
+
 export function recordOutcome(
   won: boolean,
   profit: number,

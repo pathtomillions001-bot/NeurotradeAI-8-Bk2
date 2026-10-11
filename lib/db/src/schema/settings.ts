@@ -46,6 +46,11 @@ export const settingsTable = pgTable("settings", {
   // "shadow" = compute and log the v2 decision next to the legacy one without
   // trading it; "live" = the v2 path trades. Kill switch: back to "off".
   recoveryV2Mode: text("recovery_v2_mode").notNull().default("off"),
+  // WP4 adaptive ladder settings (recoveryMethod = "adaptive").
+  recoveryBudgetBase: numeric("recovery_budget_base", { precision: 20, scale: 2 }).notNull().default("25"),
+  recoveryLambda: text("recovery_lambda").notNull().default("auto"),
+  recoveryHeadroomPct: numeric("recovery_headroom_pct", { precision: 20, scale: 2 }).notNull().default("5"),
+  recoveryMarginPreference: numeric("recovery_margin_preference", { precision: 20, scale: 4 }).notNull().default("1"),
   recoveryStateJson: text("recovery_state_json"),
   riskAmountType: text("risk_amount_type").notNull().default("fixed"),
   riskAmountValue: numeric("risk_amount_value", { precision: 20, scale: 2 }).notNull().default("1.00"),

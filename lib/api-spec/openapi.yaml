@@ -743,6 +743,10 @@ components:
         duration:
           type: ["integer", "null"]
 
+    # NOTE (regen hazard): orval 8.9.1 does NOT emit zod .strict() for
+    # additionalProperties:false. After every regen, re-add .strict() to the
+    # TradeInput schema in lib/api-zod/src/generated/api.ts — the manual-trade
+    # route relies on it to reject unknown fields (count/quantity/orders).
     TradeInput:
       type: object
       additionalProperties: false
@@ -1162,8 +1166,8 @@ components:
           description: Digit barrier used for DIGITUNDER trades while in recovery mode
         recoveryMethod:
           type: string
-          enum: [split, instant]
-          description: Split caps recovery attempts; Instant targets one-win recovery
+          enum: [split, instant, adaptive]
+          description: Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)
         recoveryAutoMode:
           type: boolean
           description: Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit
@@ -1171,6 +1175,18 @@ components:
           type: string
           enum: [off, shadow, live]
           description: Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly.
+        recoveryBudgetBase:
+          type: number
+          description: Recovery budget in multiples of the base stake (adaptive method, default 25). When the debt reaches the budget the ladder re-bases (realises the debt) and restarts at base stake
+        recoveryLambda:
+          type: string
+          description: Adaptive ladder lambda. "auto" lets the Markov-DP optimizer choose (falls back to 0.5 until WP5), or a fixed number in (0,1]
+        recoveryHeadroomPct:
+          type: number
+          description: phi — the percent of remaining drawdown headroom one recovery stake may consume (default 5)
+        recoveryMarginPreference:
+          type: number
+          description: RCI margin weight w1 — preference for cheaper recovery contracts (default 1)
         allowedMarkets:
           type: array
           items:
@@ -1265,7 +1281,7 @@ components:
           type: integer
         recoveryMethod:
           type: string
-          enum: [split, instant]
+          enum: [split, instant, adaptive]
         recoveryAutoMode:
           type: boolean
           description: Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit
@@ -1273,6 +1289,18 @@ components:
           type: string
           enum: [off, shadow, live]
           description: Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them).
+        recoveryBudgetBase:
+          type: number
+          description: Recovery budget in multiples of the base stake (adaptive method, default 25)
+        recoveryLambda:
+          type: string
+          description: Adaptive ladder lambda. "auto" or a fixed number in (0,1]
+        recoveryHeadroomPct:
+          type: number
+          description: phi — percent of remaining drawdown headroom one recovery stake may consume (default 5)
+        recoveryMarginPreference:
+          type: number
+          description: RCI margin weight w1 (default 1)
         allowedMarkets:
           type: array
           items:

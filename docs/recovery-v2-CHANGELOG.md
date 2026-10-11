@@ -91,3 +91,53 @@ Acceptance evidence (research-reports/recovery/*wp3-null-rci*, seed 1):
   gate) — recovery fires on the first feasible tick (PASS).
 - Selection skill vs random remains statistically indistinguishable (as
   expected — RCI claims lower COST, never prediction).
+
+## WP4 — adaptive ladder, drawdown headroom, recovery budget (re-base)
+
+New behaviour (opt-in via `recoveryMethod = "adaptive"`):
+1. `adaptive-stake.ts`: stake = clamp(min(exact, max(base, λ·exact)),
+   minStake, headroomCap). Exact clearance is debt-only (T′ = 0, the D4 fix —
+   the sizing-target profit is no longer added to recovery stakes). λ (default
+   0.5, "auto" reserved for the WP5 optimizer) controls how fast a win eats
+   the debt; a soft-descent scale drives λ to 0 across the top half of the
+   budget so stakes stop growing before the budget binds.
+2. `recovery-headroom.ts`: headroomCap = min(φ·(balance − reserve),
+   drawdownHeadroom), φ = recoveryHeadroomPct (default 5). A single recovery
+   stake can never exceed the remaining drawdown budget — the D3 fix: the
+   budget the hard stops enforce between trades is now folded into the stake.
+   (The naive φ·min(balance, headroom) collapses to ≈ base stake and re-bases
+   on the first loss; the working form was validated against the WP4 gates.)
+3. Re-base: when debt ≥ recoveryBudgetBase·base (default 25×) OR the headroom
+   cap can no longer fund a base stake, the debt is realised as a logged
+   `REBASE` ledger row (counts in daily P&L) and the ladder restarts at base
+   stake — immediately, no pause. `reduceRecoveryRebase`/`applyRebaseToState`
+   are the only writers of recovery state besides `reduceRecoveryOutcome`;
+   they can only REDUCE obligations and are rolled back if the durable flush
+   fails (durable-before-claimed, same as settlement).
+4. Cycle wiring: `resolveStake` computes the adaptive plan in RECOVERY mode;
+   `checkRecoveryRebase` runs before contract selection so a headroom-bound
+   recovery re-bases/holds instead of dead-locking. RCI feasibility uses the
+   real headroom cap and debt-only target for adaptive.
+5. Harness: episode simulator grows the `adaptive` method arm (rebase is a
+   first-class outcome), CLI gains --method adaptive, --lambda, --budget-base,
+   --headroom-pct, --max-drawdown-pct.
+
+Settings (OpenAPI + api-zod + DB schema/migration + formatSettings/PUT):
+`recoveryMethod` gains `adaptive`; new `recoveryBudgetBase` (25),
+`recoveryLambda` ("auto"), `recoveryHeadroomPct` (5),
+`recoveryMarginPreference` (1).
+
+Acceptance evidence (200k episodes, Even/Odd, base $1, capital $200, seed 1):
+- vs Instant: CVaR99 −20.00 vs −200.00 (10× better, gate ≥3×) · mean −1.27 vs
+  −1.36 (Δ 0.09, gate ≤0.2) · trades p99 38 (gate ≤60) · P(run≥10) 0.00%
+  (gate ≤0.1%) · P(ruin) 0.00% (gate = 0).
+- vs Split baseline mean −8.80 (paper geometry): adaptive −1.27 ≈ 6.9× better
+  (gate ≥4×); vs the same-harness split arm (−2.92) it is 2.3× better.
+- Over 3 / Over 1 / Over 5 re-runs: CVaR 9.6×/7.6×/10× better, Δmean ≤0.19,
+  ruin 0. Over 5 shows run≥10 = 1.27% — intrinsic at p0 = 0.4 (q¹⁰ ≈ 0.6%),
+  not addressable by staking; recorded as an open risk.
+- Wide set (50k): CVaR 10× better, ruin 0, trades p99 41.
+
+Honest statement: the adaptive ladder reshapes RISK (tail, ruin, run length);
+it does not create positive expectation — mean cash stays negative on i.i.d.
+data.

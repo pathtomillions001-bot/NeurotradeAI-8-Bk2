@@ -47,6 +47,14 @@ import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMod
 import { computeStake } from "../agents/ev-calculator";
 import { recoveryEscalation } from "./recovery-risk";
 import { scoreRecoveryCandidates, DEFAULT_RCI_WEIGHTS, type RciCandidateInput } from "./rci";
+import { computeRecoveryHeadroom } from "./recovery-headroom";
+import {
+  computeAdaptiveStake,
+  ADAPTIVE_DEFAULT_LAMBDA,
+  ADAPTIVE_DEFAULT_BUDGET_BASE,
+  ADAPTIVE_DEFAULT_HEADROOM_PCT,
+} from "./adaptive-stake";
+
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
@@ -362,8 +370,20 @@ function decideRecoveryV2(
     recentRejections: 0,
   }));
   const debt = ledger.unrecoveredAmount;
-  const targetProfit = ledger.remainingTargetProfit;
-  const headroomCap = ctx.settings.maxTradeStake; // TODO(WP4)
+  const adaptive = ctx.settings.recoveryMethod === "adaptive";
+  // D4: the adaptive ladder clears DEBT only (T′ = 0); legacy keeps the sizing target.
+  const targetProfit = adaptive ? 0 : ledger.remainingTargetProfit;
+  // WP4: feasibility is bounded by the remaining drawdown headroom, not just
+  // the per-trade cap (D3). Legacy methods keep the max-trade cap so the
+  // shadow comparison stays honest against legacy stakes.
+  const headroomCap = adaptive
+    ? computeRecoveryHeadroom({
+        balance: ctx.balance,
+        dailyProfit: ctx.daily.profit,
+        maxDrawdownPct: ctx.settings.maxDrawdown,
+        headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
+      }).headroomCap
+    : ctx.settings.maxTradeStake;
   const decision = scoreRecoveryCandidates({
     candidates,
     debt,
@@ -754,6 +774,26 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
       );
     } else if (v2Decision) {
       decision = v2Decision;
+    } else if (ctx.settings.recoveryMethod === "adaptive") {
+      // Live adaptive with no fundable contract: either re-base (budget/headroom
+      // trigger) or hold — never fall back to legacy sizing and never wait on a
+      // contract that cannot fit the headroom.
+      const why = checkRecoveryRebase(ctx, risk.recommendedStake);
+      if (why) {
+        await executeRebase(host, decision?.best.symbol ?? rows[0].symbol, ctx, why);
+        return;
+      }
+      host.publish({ currentMarket: null, nextScanIn: null });
+      emitHoldScan(host, s, {
+        reason: "recovery headroom: no contract fits the remaining drawdown budget",
+        mode,
+        lossRun,
+        consecutiveLossLimit: ctx.consecutiveLossLimit,
+        marketsScanned: tapes.length,
+        feed,
+        started: { markets: tapes.length, mode },
+      });
+      return;
     }
   }
 
@@ -878,12 +918,23 @@ function publishScan(
  * legacy number without trading it; "live" trades it; "off" (default) is
  * byte-for-byte legacy.
  */
+function resolveRecoveryLambda(ctx: HedgeContext): number {
+  const raw = ctx.settings.recoveryLambda;
+  if (raw === undefined || raw === null || raw === "" || String(raw).toLowerCase() === "auto") {
+    // TODO(WP5): "auto" resolves through the Markov-DP optimizer. Until then
+    // it falls back to the validated default lambda.
+    return ADAPTIVE_DEFAULT_LAMBDA;
+  }
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.min(1, Math.max(0.05, n)) : ADAPTIVE_DEFAULT_LAMBDA;
+}
+
 async function resolveStake(
   decision: HedgeDecision,
   ctx: HedgeContext,
   mode: HedgeMode,
   risk: RiskDecision,
-): Promise<{ stake: number; payout: number }> {
+): Promise<{ stake: number; payout: number; rebase?: "budget" | "headroom" }> {
   const b = decision.best;
   const base = risk.recommendedStake;
   if (mode === "NORMAL") {
@@ -898,6 +949,36 @@ async function resolveStake(
     currency: ctx.currency,
   });
   const payout = quote.source === "live" || !Number.isFinite(b.payout) || b.payout <= 1 ? quote.payoutMultiplier : b.payout;
+
+  // ── WP4 adaptive ladder ──────────────────────────────────────────────────
+  if (ctx.settings.recoveryMethod === "adaptive") {
+    const ledgerState = recoveryEngine.getState();
+    const headroom = computeRecoveryHeadroom({
+      balance: ctx.balance,
+      dailyProfit: ctx.daily.profit,
+      maxDrawdownPct: ctx.settings.maxDrawdown,
+      headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
+    });
+    const baseStake = base > 0 ? base : ledgerState.baseStake;
+    const plan = computeAdaptiveStake({
+      debt: ledgerState.unrecoveredAmount,
+      baseStake,
+      payout,
+      lambda: resolveRecoveryLambda(ctx),
+      headroomCap: headroom.headroomCap,
+      budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
+    });
+    if (plan.rebaseBudget) return { stake: 0, payout, rebase: "budget" };
+    if (plan.rebaseHeadroom) return { stake: 0, payout, rebase: "headroom" };
+    logger.debug(
+      { debt: ledgerState.unrecoveredAmount, payout, lambdaEffective: plan.lambdaEffective, headroomCap: headroom.headroomCap, stake: plan.stake, partial: plan.partial },
+      "Adaptive recovery stake plan",
+    );
+    return { stake: plan.stake, payout };
+  }
+
+  // The adaptive method returned above; below this line the method is legacy
+  // (TS has narrowed the union accordingly).
   const stake = recoveryEngine.getDynamicRecoveryStake(
     base,
     ctx.settings.maxTradeStake,
@@ -972,6 +1053,96 @@ function recordLedger(
   });
 }
 
+/**
+ * WP4 — RE-BASE execution. The adaptive ladder's budget rule realised the debt:
+ * the recovery state is zeroed durably FIRST (durable-before-claimed, with an
+ * in-memory rollback if the flush fails), then the ledger row for the realised
+ * loss is written and counted in the daily P&L. Trading resumes immediately at
+ * base stake — no pause, no gate, nothing hidden: the loss stays visible in
+ * the true counters and the daily stats.
+ */
+async function executeRebase(
+  host: HedgeHost,
+  symbol: string,
+  ctx: HedgeContext,
+  why: "budget" | "headroom",
+): Promise<void> {
+  const sessionId = host.sessionId;
+  const snapshot = { ...recoveryEngine.getState() };
+  const realised = runWithSession(sessionId, () => {
+    recoveryEngine.setPersistenceSession(sessionId);
+    return recoveryEngine.applyRebaseToState();
+  });
+  if (realised <= 0) return;
+
+  const durable = await recoveryEngine.flushRecoveryState();
+  if (!durable) {
+    recoveryEngine.restoreStateSnapshot(snapshot);
+    logger.warn(
+      { sessionId, realised, why },
+      "Recovery re-base: durable flush failed — rolled back, retrying next tick",
+    );
+    return;
+  }
+
+  const displayName = AUTOMATED_DERIV_MARKETS.find((m) => m.symbol === symbol)?.displayName ?? symbol;
+  const [row] = await db.insert(tradesTable).values({
+    sessionId,
+    symbol,
+    displayName,
+    contractType: "REBASE",
+    stake: "0",
+    direction: "neutral",
+    status: "lost",
+    payout: "0",
+    profit: String(Math.round(-realised * 100) / 100),
+    entryPrice: "0",
+    exitPrice: "0",
+    aiConfidence: "0",
+    aiRiskScore: "0",
+    isAutonomous: true,
+    agentReasoning: `${AUTONOMOUS_HEDGE_PREFIX}REBASE(${why}): realised $${realised.toFixed(2)} recovery debt; ladder restarts at base stake`,
+    duration: HEDGE_DURATION_TICKS,
+    durationUnit: HEDGE_DURATION_UNIT,
+    closedAt: new Date(),
+  }).returning();
+
+  host.emit("recovery_rebase", {
+    symbol,
+    debt: realised,
+    reason: why,
+    rowId: row?.id ?? null,
+    budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
+  });
+  logger.warn(
+    { sessionId, realised, why, rowId: row?.id },
+    "Recovery re-base: debt realised as loss; engine continues at base stake",
+  );
+}
+
+/**
+ * WP4 — pre-selection re-base check. Both triggers are contract-independent:
+ * the debt has reached the budget, or the headroom cap can no longer fund even
+ * a base stake. Callers run this BEFORE the selector so a headroom-bound
+ * recovery never dead-locks waiting for an affordable contract.
+ */
+function checkRecoveryRebase(ctx: HedgeContext, baseStake: number): "budget" | "headroom" | null {
+  const ledgerState = recoveryEngine.getState();
+  const debt = ledgerState.unrecoveredAmount;
+  if (!ledgerState.inRecovery && debt <= 0) return null;
+  const base = baseStake > 0 ? baseStake : ledgerState.baseStake;
+  const budgetBase = ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE;
+  if (debt >= budgetBase * base) return "budget";
+  const headroom = computeRecoveryHeadroom({
+    balance: ctx.balance,
+    dailyProfit: ctx.daily.profit,
+    maxDrawdownPct: ctx.settings.maxDrawdown,
+    headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
+  });
+  if (base > headroom.headroomCap) return "headroom";
+  return null;
+}
+
 async function executeDecision(
   host: HedgeHost,
   s: HedgeSession,
@@ -985,7 +1156,11 @@ async function executeDecision(
   const b = decision.best;
   const sessionId = host.sessionId;
   const reasoningBase = `${AUTONOMOUS_HEDGE_PREFIX}${decision.reason}`;
-  const { stake: resolvedStake, payout } = await resolveStake(decision, ctx, mode, risk);
+  const { stake: resolvedStake, payout, rebase } = await resolveStake(decision, ctx, mode, risk);
+  if (rebase) {
+    await executeRebase(host, b.symbol, ctx, rebase);
+    return;
+  }
   // WP1 size-down: the NORMAL stake already carries the reduction through
   // risk.recommendedStake (riskWithSizeDown). The RECOVERY stake is debt-driven
   // and does not, so the factor is applied here — exposure shrinks while the

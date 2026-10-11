@@ -40,6 +40,8 @@ import {
 } from "../contract-sets";
 import { HEDGE_MIN_TICKS, HEDGE_WINDOW } from "../constants";
 import { scoreRecoveryCandidates } from "../rci";
+import { computeAdaptiveStake, ADAPTIVE_DEFAULT_BUDGET_BASE, ADAPTIVE_DEFAULT_LAMBDA } from "../adaptive-stake";
+import { computeRecoveryHeadroom } from "../recovery-headroom";
 import type { Rng } from "./rng";
 import { createTapeGenerator, type TapeGeneratorOptions } from "./tape";
 import { MIN_DERIV_STAKE } from "./ladder";
@@ -57,11 +59,17 @@ export interface EpisodeSimConfig {
   capital: number;
   baseStake: number;
   maxTradeStake: number;
-  method: "instant" | "split";
+  method: "instant" | "split" | "adaptive";
   recoveryAutoMode?: boolean;
   recoveryMultiplier?: number;
   maxRecoverySteps?: number;
   consecutiveLossLimit?: number;
+  /** WP4 adaptive ladder knobs (only used when method = "adaptive"). */
+  adaptiveLambda?: number;
+  adaptiveBudgetBase?: number;
+  adaptiveHeadroomPct?: number;
+  /** Max drawdown % used for the headroom cap (default 10). */
+  maxDrawdownPct?: number;
   /** Cooldown pause in ticks (1 tick ≈ 1s of a Volatility index). */
   cooldownTicks?: number;
   maxTicks?: number;
@@ -113,6 +121,8 @@ export function runEpisode(
   const normalFamilySpecs = cfg.normalSpecs ? familySpecsForSet(cfg.normalSpecs, true) : null;
 
   let balance = cfg.capital;
+  // WP4 headroom is priced off the running equity peak and the loss below it.
+  let peakBalance = cfg.capital;
   let recState: RecoveryState = createRecoveryState();
   let everInRecovery = false;
 
@@ -171,6 +181,22 @@ export function runEpisode(
     const mode: HedgeMode = recState.inRecovery ? "RECOVERY" : "NORMAL";
     if (mode === "RECOVERY") everInRecovery = true;
 
+    // WP4: both re-base triggers are contract-independent — check them before
+    // selection so a headroom-bound recovery never dead-locks waiting for an
+    // affordable contract (the cycle does the same via checkRecoveryRebase).
+    if (mode === "RECOVERY" && cfg.method === "adaptive") {
+      const debtNow = recState.unrecoveredAmount;
+      const baseNow = recState.baseStake > 0 ? recState.baseStake : cfg.baseStake;
+      const headroomNow = computeRecoveryHeadroom({
+        balance,
+        dailyProfit: balance - peakBalance,
+        maxDrawdownPct: cfg.maxDrawdownPct ?? 10,
+        headroomPct: cfg.adaptiveHeadroomPct ?? 5,
+      });
+      if (debtNow >= (cfg.adaptiveBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE) * baseNow) return finish("rebased");
+      if (baseNow > headroomNow.headroomCap) return finish("rebased");
+    }
+
     // ── Pick the contract ────────────────────────────────────────────────
     let chosen: { type: HedgeContractType; barrier: number; p0: number; payout: number; key: string } | null = null;
 
@@ -196,11 +222,21 @@ export function runEpisode(
         tapeAgeMs: 0,
         recentRejections: 0,
       }));
+      // WP4: adaptive feasibility is bounded by drawdown headroom (D3 fix) and
+      // clears DEBT only (T′ = 0); legacy keeps the max-stake cap and target.
+      const rciHeadroomCap = cfg.method === "adaptive"
+        ? computeRecoveryHeadroom({
+            balance,
+            dailyProfit: balance - peakBalance,
+            maxDrawdownPct: cfg.maxDrawdownPct ?? 10,
+            headroomPct: cfg.adaptiveHeadroomPct ?? 5,
+          }).headroomCap
+        : cfg.maxTradeStake;
       const decision = scoreRecoveryCandidates({
         candidates,
         debt: recState.unrecoveredAmount,
-        targetProfit: recState.remainingTargetProfit,
-        headroomCap: cfg.maxTradeStake,
+        targetProfit: cfg.method === "adaptive" ? 0 : recState.remainingTargetProfit,
+        headroomCap: rciHeadroomCap,
       });
       if (!decision.chosen) {
         // Nothing affordable this tick is a BUDGET fact (WP4's headroom makes it
@@ -252,14 +288,36 @@ export function runEpisode(
 
     // ── Stake (the shipped money path) ───────────────────────────────────
     let stake: number;
-    if (mode === "RECOVERY") {
+    const legacyMethod: "instant" | "split" = cfg.method === "adaptive" ? "instant" : cfg.method;
+    if (mode === "RECOVERY" && cfg.method === "adaptive") {
+      // WP4 adaptive ladder: stake is bounded by the debt (exact clearance),
+      // λ·exact (soft descent), the base-stake floor and the drawdown headroom
+      // cap — never by the debt alone. Hitting the budget RE-BASES the episode
+      // (debt realised) instead of compounding past it.
+      const headroom = computeRecoveryHeadroom({
+        balance,
+        dailyProfit: balance - peakBalance,
+        maxDrawdownPct: cfg.maxDrawdownPct ?? 10,
+        headroomPct: cfg.adaptiveHeadroomPct ?? 5,
+      });
+      const plan = computeAdaptiveStake({
+        debt: recState.unrecoveredAmount,
+        baseStake: recState.baseStake > 0 ? recState.baseStake : cfg.baseStake,
+        payout: chosen.payout,
+        lambda: cfg.adaptiveLambda ?? ADAPTIVE_DEFAULT_LAMBDA,
+        headroomCap: headroom.headroomCap,
+        budgetBase: cfg.adaptiveBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
+      });
+      if (plan.rebaseBudget || plan.rebaseHeadroom) return finish("rebased");
+      stake = plan.stake;
+    } else if (mode === "RECOVERY") {
       const requested = calculateRecoveryStakeRequest({
         unrecoveredAmount: recState.unrecoveredAmount,
         remainingTargetProfit: recState.remainingTargetProfit,
         payoutMultiplier: chosen.payout,
         baseStake: recState.baseStake > 0 ? recState.baseStake : cfg.baseStake,
         recoveryAutoMode: autoMode,
-        recoveryMethod: cfg.method,
+        recoveryMethod: legacyMethod,
         recoveryMultiplier: multiplier,
         recoveryStep: recState.recoveryStep,
         maxRecoverySteps: maxSteps,
@@ -280,6 +338,7 @@ export function runEpisode(
     const won = rng.next() < chosen.p0;
     const profit = won ? stake * (chosen.payout - 1) : -stake;
     balance += profit;
+    peakBalance = Math.max(peakBalance, balance);
     trades += 1;
     if (mode === "RECOVERY") {
       recoveryTrades += 1;

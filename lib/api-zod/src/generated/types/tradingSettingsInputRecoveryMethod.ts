@@ -12,4 +12,5 @@ export type TradingSettingsInputRecoveryMethod = typeof TradingSettingsInputReco
 export const TradingSettingsInputRecoveryMethod = {
   split: 'split',
   instant: 'instant',
+  adaptive: 'adaptive',
 } as const;

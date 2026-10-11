@@ -1,0 +1,55 @@
+{
+  "kind": "episode",
+  "options": {
+    "method": "instant",
+    "set": "DIGITOVER:1",
+    "capital": 200,
+    "base": 1,
+    "maxStake": 500,
+    "episodes": 100000,
+    "seed": 1,
+    "maxTrades": 3000,
+    "mode": "episode",
+    "selector": "engine",
+    "cooldownTicks": 60,
+    "lossLimit": 4,
+    "maxTicks": 3000,
+    "lambda": 0.5,
+    "budgetBase": 25,
+    "headroomPct": 5,
+    "maxDrawdownPct": 10,
+    "name": "wp4-accept-DIGITOVER_1-instant-engine"
+  },
+  "hitRate": 0.8004553064321812,
+  "totalRecoveryTrades": 127826,
+  "metrics": {
+    "episodes": 100000,
+    "clearRate": 0.99237,
+    "ruinRate": 0.00763,
+    "unresolvedRate": 0,
+    "rebaseRate": 0,
+    "tradesToClear": {
+      "p50": 1,
+      "p90": 2,
+      "p95": 2,
+      "p99": 3
+    },
+    "peakDebt": {
+      "p50": 1,
+      "p90": 6.35,
+      "p95": 6.35,
+      "p99": 34.96
+    },
+    "meanFinalCash": -1.2972786479986094,
+    "cvar99FinalCash": -152.54279549999615,
+    "trueLossRun": {
+      "mean": 1.24872,
+      "max": 5,
+      "pGe6": 0,
+      "pGe8": 0,
+      "pGe10": 0
+    },
+    "capTrapRate": 0.00655,
+    "meanDecisionLatencyTicks": 119.12672779371502
+  }
+}

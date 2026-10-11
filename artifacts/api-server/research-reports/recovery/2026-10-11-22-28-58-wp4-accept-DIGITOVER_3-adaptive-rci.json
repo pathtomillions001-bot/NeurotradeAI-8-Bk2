@@ -1,0 +1,55 @@
+{
+  "kind": "episode",
+  "options": {
+    "method": "adaptive",
+    "set": "DIGITOVER:3",
+    "capital": 200,
+    "base": 1,
+    "maxStake": 500,
+    "episodes": 100000,
+    "seed": 1,
+    "maxTrades": 3000,
+    "mode": "episode",
+    "selector": "rci",
+    "cooldownTicks": 60,
+    "lossLimit": 4,
+    "maxTicks": 3000,
+    "lambda": 0.5,
+    "budgetBase": 25,
+    "headroomPct": 5,
+    "maxDrawdownPct": 10,
+    "name": "wp4-accept-DIGITOVER_3-adaptive-rci"
+  },
+  "hitRate": 0.6007285640805226,
+  "totalRecoveryTrades": 709615,
+  "metrics": {
+    "episodes": 100000,
+    "clearRate": 0.93715,
+    "ruinRate": 0,
+    "unresolvedRate": 0,
+    "rebaseRate": 0.06285,
+    "tradesToClear": {
+      "p50": 4,
+      "p90": 15,
+      "p95": 20,
+      "p99": 32
+    },
+    "peakDebt": {
+      "p50": 1.96,
+      "p90": 10.04,
+      "p95": 19.99,
+      "p99": 20.01
+    },
+    "meanFinalCash": -1.2466889509013332,
+    "cvar99FinalCash": -20,
+    "trueLossRun": {
+      "mean": 1.99295,
+      "max": 7,
+      "pGe6": 0.01731,
+      "pGe8": 0,
+      "pGe10": 0
+    },
+    "capTrapRate": 0,
+    "meanDecisionLatencyTicks": 1
+  }
+}

@@ -29,7 +29,7 @@ import { parseContractSpecs, contractSpecLabel } from "../contract-sets";
 import { hedgePayout } from "../hedge-analysis";
 
 interface CliOptions {
-  method: "instant" | "split";
+  method: "instant" | "split" | "adaptive";
   set: string;
   normalSet?: string;
   capital: number;
@@ -44,6 +44,10 @@ interface CliOptions {
   lossLimit: number;
   maxTicks: number;
   originPayout?: number;
+  lambda: number;
+  budgetBase: number;
+  headroomPct: number;
+  maxDrawdownPct: number;
   input?: string;
   out?: string;
   name?: string;
@@ -64,6 +68,10 @@ function parseArgs(argv: string[]): CliOptions {
     cooldownTicks: 60,
     lossLimit: 4,
     maxTicks: 3000,
+    lambda: 0.5,
+    budgetBase: 25,
+    headroomPct: 5,
+    maxDrawdownPct: 10,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -75,7 +83,7 @@ function parseArgs(argv: string[]): CliOptions {
     switch (arg) {
       case "--method": {
         const m = next();
-        if (m !== "instant" && m !== "split") throw new Error("--method must be instant|split");
+        if (m !== "instant" && m !== "split" && m !== "adaptive") throw new Error("--method must be instant|split|adaptive");
         opts.method = m;
         break;
       }
@@ -103,6 +111,10 @@ function parseArgs(argv: string[]): CliOptions {
       case "--loss-limit": opts.lossLimit = Number(next()); break;
       case "--max-ticks": opts.maxTicks = Number(next()); break;
       case "--origin-payout": opts.originPayout = Number(next()); break;
+      case "--lambda": opts.lambda = Number(next()); break;
+      case "--budget-base": opts.budgetBase = Number(next()); break;
+      case "--headroom-pct": opts.headroomPct = Number(next()); break;
+      case "--max-drawdown-pct": opts.maxDrawdownPct = Number(next()); break;
       case "--input": opts.input = next(); break;
       case "--out": opts.out = next(); break;
       case "--name": opts.name = next(); break;
@@ -115,7 +127,7 @@ function parseArgs(argv: string[]): CliOptions {
 
 function metricsTable(rows: Array<{ label: string; m: RecoveryMetricsSummary }>): string {
   const header = [
-    "config", "episodes", "P(clear)", "P(ruin)", "P(unres)",
+    "config", "episodes", "P(clear)", "P(ruin)", "P(unres)", "P(rebase)",
     "trades p50/p90/p99", "peak debt p95/p99", "mean cash", "CVaR99",
     "run≥6", "run≥8", "run≥10", "cap-trap", "latency(t)",
   ];
@@ -125,7 +137,7 @@ function metricsTable(rows: Array<{ label: string; m: RecoveryMetricsSummary }>)
   ];
   for (const { label, m } of rows) {
     lines.push(
-      `| ${label} | ${m.episodes} | ${(m.clearRate * 100).toFixed(2)}% | ${(m.ruinRate * 100).toFixed(2)}% | ${(m.unresolvedRate * 100).toFixed(2)}% | ${m.tradesToClear.p50}/${m.tradesToClear.p90}/${m.tradesToClear.p99} | ${m.peakDebt.p95.toFixed(2)}/${m.peakDebt.p99.toFixed(2)} | ${m.meanFinalCash.toFixed(2)} | ${m.cvar99FinalCash.toFixed(2)} | ${(m.trueLossRun.pGe6 * 100).toFixed(2)}% | ${(m.trueLossRun.pGe8 * 100).toFixed(2)}% | ${(m.trueLossRun.pGe10 * 100).toFixed(2)}% | ${(m.capTrapRate * 100).toFixed(2)}% | ${m.meanDecisionLatencyTicks.toFixed(1)} |`,
+      `| ${label} | ${m.episodes} | ${(m.clearRate * 100).toFixed(2)}% | ${(m.ruinRate * 100).toFixed(2)}% | ${(m.unresolvedRate * 100).toFixed(2)}% | ${(m.rebaseRate * 100).toFixed(2)}% | ${m.tradesToClear.p50}/${m.tradesToClear.p90}/${m.tradesToClear.p99} | ${m.peakDebt.p95.toFixed(2)}/${m.peakDebt.p99.toFixed(2)} | ${m.meanFinalCash.toFixed(2)} | ${m.cvar99FinalCash.toFixed(2)} | ${(m.trueLossRun.pGe6 * 100).toFixed(2)}% | ${(m.trueLossRun.pGe8 * 100).toFixed(2)}% | ${(m.trueLossRun.pGe10 * 100).toFixed(2)}% | ${(m.capTrapRate * 100).toFixed(2)}% | ${m.meanDecisionLatencyTicks.toFixed(1)} |`,
     );
   }
   return lines.join("\n");
@@ -142,8 +154,13 @@ function writeReports(outDir: string, name: string, json: unknown, markdown: str
 }
 
 function runLadderMode(opts: CliOptions, outDir: string): void {
+  if (opts.method === "adaptive") {
+    throw new Error("--mode ladder supports instant|split only; use --mode episode --method adaptive for the WP4 ladder");
+  }
   const specs = parseContractSpecs(opts.set);
   if (specs.length === 0) throw new Error("Empty contract set");
+  // Narrowed by the adaptive guard above; captured so closures keep the type.
+  const method: "instant" | "split" = opts.method;
   const rows: Array<{ label: string; m: RecoveryMetricsSummary }> = [];
   const detail: Record<string, unknown> = {};
   specs.forEach((spec, idx) => {
@@ -158,7 +175,7 @@ function runLadderMode(opts: CliOptions, outDir: string): void {
       baseStake: opts.base,
       capital: opts.capital,
       maxTradeStake: opts.maxStake,
-      method: opts.method,
+      method,
       maxTrades: opts.maxTrades,
       originPayout: opts.originPayout,
     });
@@ -213,6 +230,10 @@ function episodeConfigFrom(opts: CliOptions) {
     consecutiveLossLimit: opts.lossLimit,
     cooldownTicks: opts.cooldownTicks,
     maxTicks: opts.maxTicks,
+    adaptiveLambda: opts.lambda,
+    adaptiveBudgetBase: opts.budgetBase,
+    adaptiveHeadroomPct: opts.headroomPct,
+    maxDrawdownPct: opts.maxDrawdownPct,
   };
 }
 

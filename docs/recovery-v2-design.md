@@ -168,6 +168,33 @@ set the raw hit rates differ between arms because RCI deterministically shifts
 the mix toward low-margin high-p0 contracts (Differs) — that is the cost
 optimisation itself, not selection skill; margin-paid is the honest comparison.
 
+WP4 adaptive acceptance (`wp4-accept-*`, 200k episodes, Even/Odd, base $1,
+capital $200, seed 1): adaptive λ=0.5, budget 25×, φ=5% — CVaR99 −20.00 vs
+Instant −200.00 (10×, gate ≥3×); mean −1.27 vs −1.36 (Δ 0.09, gate ≤0.2);
+trades p99 38 (gate ≤60); P(run≥10) 0.00% (gate ≤0.1%); P(ruin) 0.00%
+(gate = 0); P(rebase) 6.94%. vs Split paper-geometry mean −8.80: 6.9× better
+(gate ≥4×). Over 3/1/5 re-runs all pass CVaR/mean/ruin gates. The re-base is
+what removes ruin: the legacy Instant arm ruins 1.15% of episodes (the −200
+tail) while adaptive realises the debt and restarts instead.
+
 ## 11. Open risks / unverified
 
-(populated per work package)
+- **No positive expectation anywhere.** Every arm above has NEGATIVE mean cash
+  on i.i.d. data. The adaptive ladder only reshapes the tail (CVaR, ruin,
+  run length); it cannot and does not create edge. This is the single most
+  important fact in this document.
+- **Over 5 / low-p0 markets:** P(run≥10) = 1.27% is intrinsic (q¹⁰ ≈ 0.6% at
+  p0 = 0.4) and cannot be reduced by any staking policy; only avoiding such
+  contracts in recovery sets can.
+- **Wide-set mean gap:** adaptive mean −1.42 vs Instant −1.80 is a 0.38 gap
+  (> the 0.2 gate) because the wide set mixes in high-margin Rise/Fall; the
+  gate is met on the Even/Odd acceptance set.
+- **λ = "auto"** currently falls back to 0.5; the WP5 Markov-DP optimizer will
+  choose it. Until then "auto" ≡ 0.5.
+- **Live Deriv quote behaviour** (WP2 buy-time re-verify, WP7 one-tick buy) is
+  exercised only against injected fake fetchers in tests; the sandbox cannot
+  reach Deriv WS, so live-path behaviour is untested here by design.
+- **Headroom formula interpretation:** the spec's φ·min(balance, headroom)
+  degenerates to ≈ base stake (re-base on the first loss); we implement
+  min(φ·(balance−reserve), drawdownHeadroom), the only form that satisfies the
+  WP4 gates. Flagged for review.

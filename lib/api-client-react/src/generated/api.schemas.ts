@@ -475,7 +475,7 @@ export const TradingSettingsCooldownBehavior = {
 } as const;
 
 /**
- * Split caps recovery attempts; Instant targets one-win recovery
+ * Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)
  */
 export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod[keyof typeof TradingSettingsRecoveryMethod];
 
@@ -483,6 +483,7 @@ export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod
 export const TradingSettingsRecoveryMethod = {
   split: 'split',
   instant: 'instant',
+  adaptive: 'adaptive',
 } as const;
 
 /**
@@ -555,12 +556,20 @@ export interface TradingSettings {
   recoveryOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades while in recovery mode */
   recoveryUnderDigit?: number;
-  /** Split caps recovery attempts; Instant targets one-win recovery */
+  /** Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4) */
   recoveryMethod?: TradingSettingsRecoveryMethod;
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
   /** Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly. */
   recoveryV2Mode?: TradingSettingsRecoveryV2Mode;
+  /** Recovery budget in multiples of the base stake (adaptive method, default 25). When the debt reaches the budget the ladder re-bases (realises the debt) and restarts at base stake */
+  recoveryBudgetBase?: number;
+  /** Adaptive ladder lambda. "auto" lets the Markov-DP optimizer choose (falls back to 0.5 until WP5), or a fixed number in (0,1] */
+  recoveryLambda?: string;
+  /** phi — the percent of remaining drawdown headroom one recovery stake may consume (default 5) */
+  recoveryHeadroomPct?: number;
+  /** RCI margin weight w1 — preference for cheaper recovery contracts (default 1) */
+  recoveryMarginPreference?: number;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.
@@ -608,6 +617,7 @@ export type TradingSettingsInputRecoveryMethod = typeof TradingSettingsInputReco
 export const TradingSettingsInputRecoveryMethod = {
   split: 'split',
   instant: 'instant',
+  adaptive: 'adaptive',
 } as const;
 
 /**
@@ -665,6 +675,14 @@ export interface TradingSettingsInput {
   recoveryAutoMode?: boolean;
   /** Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them). */
   recoveryV2Mode?: TradingSettingsInputRecoveryV2Mode;
+  /** Recovery budget in multiples of the base stake (adaptive method, default 25) */
+  recoveryBudgetBase?: number;
+  /** Adaptive ladder lambda. "auto" or a fixed number in (0,1] */
+  recoveryLambda?: string;
+  /** phi — percent of remaining drawdown headroom one recovery stake may consume (default 5) */
+  recoveryHeadroomPct?: number;
+  /** RCI margin weight w1 (default 1) */
+  recoveryMarginPreference?: number;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

@@ -87,10 +87,21 @@ export interface TradingSettings {
   normalUnderDigit: number;
   recoveryOverDigit: number;
   recoveryUnderDigit: number;
-  recoveryMethod: "split" | "instant";
+  recoveryMethod: "split" | "instant" | "adaptive";
   recoveryMultiplier: number;
   recoveryAutoMode: boolean;
   maxRecoverySteps: number;
+  /**
+   * WP4 (recovery v2) adaptive ladder: recovery budget in multiples of the
+   * base stake (default 25). Optional so existing constructors keep compiling.
+   */
+  recoveryBudgetBase?: number;
+  /** WP4: adaptive lambda — "auto" or a fixed number in (0,1]. Optional. */
+  recoveryLambda?: string;
+  /** WP4: φ — % of remaining drawdown headroom one stake may use (default 5). Optional. */
+  recoveryHeadroomPct?: number;
+  /** WP4: RCI margin weight w1 (default 1). Optional. */
+  recoveryMarginPreference?: number;
   /**
    * WP2 (recovery v2) rollout gate: "off" = byte-for-byte legacy; "shadow" =
    * compute+log the v2 decision beside the legacy one without trading it;

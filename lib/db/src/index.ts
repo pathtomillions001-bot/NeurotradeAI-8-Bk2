@@ -128,6 +128,10 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS autonomous_recovery_contracts TEXT
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS cooldown_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS cooldown_behavior TEXT NOT NULL DEFAULT 'pause';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_v2_mode TEXT NOT NULL DEFAULT 'off';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_budget_base NUMERIC(20, 2) NOT NULL DEFAULT '25';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_lambda TEXT NOT NULL DEFAULT 'auto';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_headroom_pct NUMERIC(20, 2) NOT NULL DEFAULT '5';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_margin_preference NUMERIC(20, 4) NOT NULL DEFAULT '1';
 -- Legacy global rows remain inaccessible and get distinct owners so older
 -- deployments with multiple settings rows can migrate safely.
 UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy';

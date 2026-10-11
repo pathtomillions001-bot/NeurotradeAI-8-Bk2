@@ -476,7 +476,7 @@ export const ExecuteTradeBody = zod.object({
   "isAutonomous": zod.boolean().optional(),
   "duration": zod.number().optional(),
   "durationUnit": zod.enum(['t', 's', 'm', 'h', 'd']).optional()
-}).describe('One contract per request. Quantity and order arrays are not supported.')
+}).strict().describe('One contract per request. Quantity and order arrays are not supported.')
 
 
 /**
@@ -889,9 +889,13 @@ export const GetSettingsResponse = zod.object({
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
   "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
+  "recoveryMethod": zod.enum(['split', 'instant', 'adaptive']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)'),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "recoveryV2Mode": zod.enum(['off', 'shadow', 'live']).optional().describe('Recovery v2 rollout gate. \"off\" (default) keeps byte-for-byte legacy behaviour; \"shadow\" computes and logs the v2 decision next to the legacy one without trading it; \"live\" lets the v2 path trade. Turning it off restores legacy exactly.'),
+  "recoveryBudgetBase": zod.number().optional().describe('Recovery budget in multiples of the base stake (adaptive method, default 25). When the debt reaches the budget the ladder re-bases (realises the debt) and restarts at base stake'),
+  "recoveryLambda": zod.string().optional().describe('Adaptive ladder lambda. \"auto\" lets the Markov-DP optimizer choose (falls back to 0.5 until WP5), or a fixed number in (0,1]'),
+  "recoveryHeadroomPct": zod.number().optional().describe('phi — the percent of remaining drawdown headroom one recovery stake may consume (default 5)'),
+  "recoveryMarginPreference": zod.number().optional().describe('RCI margin weight w1 — preference for cheaper recovery contracts (default 1)'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "autonomousNormalContracts": zod.array(zod.string()).max(getSettingsResponseAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
   "autonomousRecoveryContracts": zod.array(zod.string()).max(getSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),
@@ -941,9 +945,13 @@ export const UpdateSettingsBody = zod.object({
   "normalUnderDigit": zod.number().optional(),
   "recoveryOverDigit": zod.number().optional(),
   "recoveryUnderDigit": zod.number().optional(),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional(),
+  "recoveryMethod": zod.enum(['split', 'instant', 'adaptive']).optional(),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "recoveryV2Mode": zod.enum(['off', 'shadow', 'live']).optional().describe('Recovery v2 rollout gate (\"off\" default = legacy; \"shadow\" logs v2 decisions without trading; \"live\" trades them).'),
+  "recoveryBudgetBase": zod.number().optional().describe('Recovery budget in multiples of the base stake (adaptive method, default 25)'),
+  "recoveryLambda": zod.string().optional().describe('Adaptive ladder lambda. \"auto\" or a fixed number in (0,1]'),
+  "recoveryHeadroomPct": zod.number().optional().describe('phi — percent of remaining drawdown headroom one recovery stake may consume (default 5)'),
+  "recoveryMarginPreference": zod.number().optional().describe('RCI margin weight w1 (default 1)'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "autonomousNormalContracts": zod.array(zod.string()).max(updateSettingsBodyAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
   "autonomousRecoveryContracts": zod.array(zod.string()).max(updateSettingsBodyAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),
@@ -990,9 +998,13 @@ export const UpdateSettingsResponse = zod.object({
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
   "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
+  "recoveryMethod": zod.enum(['split', 'instant', 'adaptive']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)'),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
   "recoveryV2Mode": zod.enum(['off', 'shadow', 'live']).optional().describe('Recovery v2 rollout gate. \"off\" (default) keeps byte-for-byte legacy behaviour; \"shadow\" computes and logs the v2 decision next to the legacy one without trading it; \"live\" lets the v2 path trade. Turning it off restores legacy exactly.'),
+  "recoveryBudgetBase": zod.number().optional().describe('Recovery budget in multiples of the base stake (adaptive method, default 25). When the debt reaches the budget the ladder re-bases (realises the debt) and restarts at base stake'),
+  "recoveryLambda": zod.string().optional().describe('Adaptive ladder lambda. \"auto\" lets the Markov-DP optimizer choose (falls back to 0.5 until WP5), or a fixed number in (0,1]'),
+  "recoveryHeadroomPct": zod.number().optional().describe('phi — the percent of remaining drawdown headroom one recovery stake may consume (default 5)'),
+  "recoveryMarginPreference": zod.number().optional().describe('RCI margin weight w1 — preference for cheaper recovery contracts (default 1)'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "autonomousNormalContracts": zod.array(zod.string()).max(updateSettingsResponseAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
   "autonomousRecoveryContracts": zod.array(zod.string()).max(updateSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),

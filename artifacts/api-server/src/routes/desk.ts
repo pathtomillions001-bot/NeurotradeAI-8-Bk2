@@ -11,7 +11,10 @@ import { Router, type IRouter, type Response } from "express";
 import { randomUUID } from "node:crypto";
 import { getBrowserSessionId } from "../lib/session";
 import { logger } from "../lib/logger";
-import { evaluate, horizonMinutes } from "../lib/multiasset/agent";
+import { evaluate, getSlippageLedger, getSpreadHistory, getTimingLedger, horizonMinutes } from "../lib/multiasset/agent";
+import { SPREAD_Z_WINDOW, recordSpread, spreadHistoryFor } from "../lib/multiasset/execution";
+import { correlationFromBars, MIN_COVARIANCE_SAMPLES } from "../lib/multiasset/portfolio-risk";
+import { deskV4, v4On } from "../lib/multiasset/desk-v4-config";
 import { performanceStats } from "../lib/multiasset/analytics";
 import {
   AUTO_SELECT_INTERVAL_MS,
@@ -57,6 +60,7 @@ import {
   type DeskState,
 } from "../lib/multiasset/store";
 import {
+  MODE_ANALYSIS_TIMEFRAMES,
   ALL_TIMEFRAMES,
   type Bar,
   type Quote,
@@ -109,6 +113,51 @@ function accountFor(desk: DeskState) {
   return desk.account;
 }
 
+/**
+ * The WP7/WP8 inputs the desk can honestly supply to a decision.
+ *
+ * Both are flag-gated and both default to "the desk has not measured this":
+ *
+ *   • the spread history is the desk's OWN record of this symbol's quotes —
+ *     there is nowhere else to get it, since MT5 bars carry no spread column.
+ *     With too few observations the z-score abstains rather than firing on a
+ *     window of three.
+ *   • the correlation matrix is built from the desk's own closing bars at the
+ *     mode's fastest analysis frame, and it is built ONLY when every position
+ *     in the book and the candidate have the bars to support it. A matrix with
+ *     a hole in it would make an unmeasured symbol look uncorrelated with
+ *     everything else, which is the one reading this layer must never take;
+ *     `null` makes it say so out loud (PF_NO_COVARIANCE) and keep the
+ *     per-trade ceiling.
+ */
+function v4InputsFor(
+  desk: DeskState,
+  symbol: string,
+  mode: TradeMode,
+): { spreadHistory?: number[]; portfolioCorrelation?: { labels: string[]; matrix: number[][] } | null } {
+  const v4 = deskV4();
+  if (!v4.enabled) return {};
+  const inputs: { spreadHistory?: number[]; portfolioCorrelation?: { labels: string[]; matrix: number[][] } | null } = {};
+  if (v4On(v4.execution)) {
+    const history = spreadHistoryFor(getSpreadHistory(), symbol);
+    // A window shorter than the z-score can use is not passed at all: an empty
+    // array and 30 observations both mean "no opinion", and saying so early
+    // keeps the decision record honest about it.
+    inputs.spreadHistory = history.length >= 60 ? history.slice(-SPREAD_Z_WINDOW) : [];
+  }
+  if (v4On(v4.portfolio)) {
+    const frame = MODE_ANALYSIS_TIMEFRAMES[mode][0];
+    const held = desk.positions.map((position) => position.symbol).filter((heldSymbol) => heldSymbol !== symbol);
+    const labels = [...new Set([...held, symbol])];
+    const built = correlationFromBars({
+      series: labels.map((label) => ({ label, bars: desk.candles.get(`${label}|${frame}`)?.bars ?? [] })),
+      count: MIN_COVARIANCE_SAMPLES * 3,
+    });
+    inputs.portfolioCorrelation = built ? { labels: built.labels, matrix: built.correlation } : null;
+  }
+  return inputs;
+}
+
 function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: number) {
   const readiness = symbolReadiness(desk, symbol, now);
   const resolved = resolveLiveSymbol(desk, symbol, now);
@@ -147,6 +196,7 @@ function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: numbe
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
     now,
+    ...v4InputsFor(desk, symbol, mode),
   });
   return {
     symbol,
@@ -378,6 +428,54 @@ router.get("/series", (req, res) => {
  * record, not a projection. It backs the performance block under the news
  * calendar, which previously left a hole on wide screens.
  */
+/**
+ * The WP7/WP8 state, read-only.
+ *
+ * A layer that can refuse entries must be auditable while it is switched on:
+ * "why is the desk not trading this symbol?" is answered here, with the numbers
+ * the layers are actually using (including how many observations stand behind
+ * each one). It changes nothing and is absent — a 404 — while both flags are
+ * off, so the shipped API surface is unchanged.
+ */
+router.get("/execution", (_req, res) => {
+  const v4 = deskV4();
+  if (!v4On(v4.execution) && !v4On(v4.portfolio)) {
+    return res.status(404).json({ error: "The v4 execution and portfolio layers are switched off." });
+  }
+  const desk = getDesk(getBrowserSessionId());
+  const spreadHistory = getSpreadHistory();
+  const timing = getTimingLedger();
+  const slippage = getSlippageLedger();
+  return res.json({
+    execution: v4On(v4.execution)
+      ? {
+          spreadSamples: Object.fromEntries(
+            [...spreadHistory.samples.entries()].map(([symbol, samples]) => [
+              symbol,
+              { samples: samples.length, last: samples[samples.length - 1] ?? null },
+            ]),
+          ),
+          timingBuckets: timing.buckets.size,
+          timingPooled: { ...timing.pooled },
+          slippage: { ewmaR: slippage.ewmaR, samples: slippage.samples, observations: slippage.observations.length },
+        }
+      : null,
+    portfolio: v4On(v4.portfolio)
+      ? {
+          correlation: [...new Set([...desk.positions.map((position) => position.symbol), ...desk.watchlist])]
+            .map((symbol) => {
+              const built = correlationFromBars({
+                series: [{ label: symbol, bars: desk.candles.get(`${symbol}|${MODE_ANALYSIS_TIMEFRAMES[desk.mode][0]}`)?.bars ?? [] }],
+                count: MIN_COVARIANCE_SAMPLES * 3,
+              });
+              return [symbol, built ? built.returnCount : 0];
+            })
+            .filter(([, count]) => (count as number) > 0),
+        }
+      : null,
+  });
+});
+
 router.get("/performance", (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
   const now = Date.now();
@@ -461,6 +559,7 @@ router.get("/analysis", (req, res) => {
     policy: desk.policy,
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
+    ...v4InputsFor(desk, symbol, mode),
   });
 
   return res.json({
@@ -571,6 +670,7 @@ router.post("/arm", (req, res) => {
     policy: desk.policy,
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
+    ...v4InputsFor(desk, symbol, mode),
   });
 
   if (!decision.armed || !decision.plan) {

@@ -47,16 +47,37 @@ import {
   MIN_RR_FILL,
   STOP_ATR_MULT,
 } from "./desk-constants";
-import { deskV4, v4On } from "./desk-v4-config";
+import { deskV4, v4Live, v4On } from "./desk-v4-config";
 import { regimePermit, type RegimePermit } from "./regime-hmm";
 import { executedPolicyMonteCarlo } from "./montecarlo-v2";
 import { metaViewAt } from "./meta/view";
+import type { MetaView } from "./meta/dataset";
 import { metaPredictContext, predictMetaModel, type MetaModelSnapshot, type MetaModelPrediction } from "./meta/model";
 import {
   gatekeeperDecision,
   gatekeeperRejections,
   type GatekeeperDecision,
 } from "./meta/gatekeeper";
+import {
+  SLIPPAGE_MEASUREMENT_CEILING_MULT,
+  createSlippageLedger,
+  createSpreadHistory,
+  createTimingLedger,
+  executionDecision,
+  executionRejections,
+  measuredSlippageR,
+  spreadHistoryFor,
+  type ExecutionDecision,
+  type SlippageLedger,
+  type SpreadHistory,
+  type TimingLedger,
+} from "./execution";
+import {
+  drawdownFromPeak,
+  portfolioDecision,
+  type Matrix,
+  type PortfolioDecision,
+} from "./portfolio-risk";
 import {
   MODE_ANALYSIS_TIMEFRAMES,
   ALL_TIMEFRAMES,
@@ -72,6 +93,60 @@ import {
   type Timeframe,
   type TradeMode,
 } from "./types";
+
+/**
+ * The WP7 ledgers, process-wide and bounded.
+ *
+ * They are the desk's memory of how its own fills and its own minutes have
+ * behaved, so they must outlive a single decision — and they must not grow
+ * without bound: minute-of-week has at most 10,080 keys and the slippage ledger
+ * keeps the last 500 observations. Exported so the desk (and WP9's shadow
+ * journal) can record a closed trade against the minute it was DECIDED in and a
+ * fill against its plan.
+ */
+const timingLedger: TimingLedger = createTimingLedger();
+const slippageLedger: SlippageLedger = createSlippageLedger();
+const spreadHistory: SpreadHistory = createSpreadHistory();
+
+export function getTimingLedger(): TimingLedger {
+  return timingLedger;
+}
+
+export function getSlippageLedger(): SlippageLedger {
+  return slippageLedger;
+}
+
+/**
+ * The desk's own trailing spreads, fed from every accepted quote.
+ *
+ * The WP7 z-score is a comparison against "the spread this symbol usually
+ * shows", and MT5 bars carry no spread column, so the only honest source is the
+ * quotes the desk has received. The desk records them on the sync path; the
+ * agent reads them here.
+ */
+export function getSpreadHistory(): SpreadHistory {
+  return spreadHistory;
+}
+
+/**
+ * Empty the three ledgers IN PLACE.
+ *
+ * The ledgers are deliberately process-wide (that is what makes a timing layer
+ * a record of the desk's own behaviour), which also means one test's fills
+ * would otherwise be the next test's history. This is the test seam — it is not
+ * called from any production path, and it clears rather than replaces so every
+ * existing handle (the routes' included) keeps pointing at the same object.
+ */
+export function resetExecutionLedgersForTests(): void {
+  timingLedger.buckets.clear();
+  timingLedger.pooled.wins = 0;
+  timingLedger.pooled.losses = 0;
+  timingLedger.pooled.rSum = 0;
+  slippageLedger.ewmaR = null;
+  slippageLedger.samples = 0;
+  slippageLedger.observations.length = 0;
+  spreadHistory.samples.clear();
+}
 
 export interface AgentInput {
   symbol: string;
@@ -114,6 +189,26 @@ export interface AgentInput {
    * gatekeeper turns into a refusal, never into a pass.
    */
   metaModel?: MetaModelSnapshot | null;
+  /**
+   * Recent spreads for THIS symbol and frame, oldest first — the window the
+   * WP7 spread z-score is computed over. Omitted means the desk has no spread
+   * history in front of it, which the execution layer reads as "no opinion"
+   * rather than as a zero-variance history it would then divide by.
+   */
+  spreadHistory?: number[];
+  /**
+   * What kind of setup the caller believes this is. WP7 rests a LIMIT for a
+   * pullback and stops in for a breakout; the default is the legacy breakout,
+   * so the entry style can only change when a caller says the setup changed.
+   */
+  entrySetup?: "pullback" | "breakout";
+  /**
+   * The book's return correlation matrix, when the caller has one (labels must
+   * line up with `positions`, the candidate appended last). Omitted ⇒ the WP8
+   * layer reports that it cannot see the book and applies only the per-trade
+   * ceiling — it does not invent a correlation of zero.
+   */
+  portfolioCorrelation?: { labels: string[]; matrix: Matrix } | null;
 }
 
 export interface AgentDecision {
@@ -157,6 +252,10 @@ export interface AgentDecision {
   stopWidened: boolean;
   /** Every gate that failed, in evaluation order. Shown verbatim in the UI. */
   rejections: string[];
+  /** The WP7 execution and timing verdict, when the subsystem is enabled. */
+  execution: ExecutionDecision | null;
+  /** The WP8 portfolio budget, when the subsystem is enabled. */
+  portfolio: PortfolioDecision | null;
   /**
    * The WP6 gatekeeper's verdict, when the subsystem is enabled.
    *
@@ -299,6 +398,15 @@ interface GatekeeperPredictionResult {
   breakEvenProbability: number | null;
   /** Why there is no prediction, in words, for the decision record. */
   note: string | undefined;
+  /**
+   * The WP4/WP5 view the prediction was built from, when one existed.
+   *
+   * Kept so the layers AFTER the gatekeeper can read the same evidence instead
+   * of recomputing it: WP7's entry style asks whether a liquidity sweep is what
+   * fired (a sweep rests a limit), and asking the view that already exists
+   * cannot disagree with the prediction that was priced.
+   */
+  view: MetaView | null;
 }
 
 /**
@@ -326,11 +434,11 @@ function gatekeeperPrediction(input: {
 }): GatekeeperPredictionResult {
   const snapshot = input.snapshot;
   if (!snapshot) {
-    return { prediction: null, breakEvenProbability: null, note: "no fitted meta-model is loaded for this desk" };
+    return { prediction: null, breakEvenProbability: null, note: "no fitted meta-model is loaded for this desk", view: null };
   }
   const breakeven = snapshot.cohort.breakEvenProbability;
   const index = input.bars.length - 1;
-  if (index < 0) return { prediction: null, breakEvenProbability: breakeven, note: "there are no closed bars to read" };
+  if (index < 0) return { prediction: null, breakEvenProbability: breakeven, note: "there are no closed bars to read", view: null };
   const stateKey = [input.symbol, input.mode, input.frame].join("|");
   const built = metaViewAt({
     symbol: input.symbol,
@@ -353,6 +461,7 @@ function gatekeeperPrediction(input: {
       prediction: null,
       breakEvenProbability: breakeven,
       note: "no alpha agent had a view on the decision bar",
+      view: null,
     };
   }
   gatekeeperViewStates.set(stateKey, { index, kind: built.kind, streak: built.streak });
@@ -362,11 +471,12 @@ function gatekeeperPrediction(input: {
       prediction: null,
       breakEvenProbability: breakeven,
       note: `the agents' view is ${built.view.direction === 1 ? "long" : "short"}, against this ${input.side} plan`,
+      view: built.view,
     };
   }
   const ctx = metaPredictContext({ bars: input.bars, index, spreadPrice: input.spreadPrice });
   if (!ctx) {
-    return { prediction: null, breakEvenProbability: breakeven, note: "the decision bar has no usable ATR yet" };
+    return { prediction: null, breakEvenProbability: breakeven, note: "the decision bar has no usable ATR yet", view: built.view };
   }
   const prediction = predictMetaModel(snapshot, built.view, ctx);
   if (!prediction) {
@@ -374,9 +484,10 @@ function gatekeeperPrediction(input: {
       prediction: null,
       breakEvenProbability: breakeven,
       note: "the loaded snapshot does not match this decision's mode, horizon or feature set",
+      view: built.view,
     };
   }
-  return { prediction, breakEvenProbability: prediction.breakEvenProbability, note: undefined };
+  return { prediction, breakEvenProbability: prediction.breakEvenProbability, note: undefined, view: built.view };
 }
 
 /** Below this, persistence is surfaced as a caution rather than a failure. */
@@ -569,6 +680,22 @@ export function evaluate(input: AgentInput): AgentDecision {
   const warnings: string[] = [];
   /** Filled by §5c when the WP6 gatekeeper is switched on. */
   let gatekeeper: GatekeeperDecision | null = null;
+  /** The WP4/WP5 view §5c priced, kept for WP7's entry style. */
+  let alphaView: MetaView | null = null;
+  /**
+   * The lower bound the WP8 sizing is allowed to use, filled by §5c.
+   *
+   * It is `null` whenever there is no fitted model — and the portfolio layer
+   * reads a null probability as "no Kelly opinion", which is why the cap — not
+   * the Kelly term — is what sizes the trade in that case. Sizing on a
+   * probability that does not exist would be the exact failure p_LCB exists to
+   * prevent.
+   */
+  let sizingProbabilityLowerBound: number | null = null;
+  /** Filled by §5d when the WP7 execution agent is switched on. */
+  let execution: ExecutionDecision | null = null;
+  /** Filled by §7 when the WP8 portfolio layer is switched on. */
+  let portfolio: PortfolioDecision | null = null;
   /** Set once the entry frame is resolved; reported on every decision. */
   let resolvedEntryFrame: Timeframe | null = null;
 
@@ -598,6 +725,8 @@ export function evaluate(input: AgentInput): AgentDecision {
       mode: input.mode,
       armed: false,
       gatekeeper,
+      execution,
+      portfolio,
       plan: null,
       confluence,
       evidence: usedEvidence,
@@ -743,12 +872,15 @@ export function evaluate(input: AgentInput): AgentDecision {
       : { ...input.spec, spreadPoints: liveSpreadPoints };
 
   const pointValue = pointValuePerLot(input.spec);
-  const slippagePoints = slippageAllowancePoints(input.spec, input.mode);
+  // The MODELLED allowance. D7 replaces it with the desk's measured one below,
+  // once the risk unit exists to express that measurement in points.
+  const modelledSlippagePoints = slippageAllowancePoints(input.spec, input.mode);
+  let slippagePoints = modelledSlippagePoints;
   const commissionPoints = pointValue > 0 ? input.spec.commissionPerLot / pointValue : 0;
   // Spread crossed once, commission converted via point value, plus an
   // allowance for slippage. Slippage is scaled by asset class — a crypto CFD
   // does not fill like a major FX pair.
-  const costPrice = (liveSpreadPoints + commissionPoints + slippagePoints) * input.spec.point;
+  let costPrice = (liveSpreadPoints + commissionPoints + slippagePoints) * input.spec.point;
 
   // ── 3d. Regime and stop ───────────────────────────────────────────────────
   const regime = assessRegime(entrySeries.bars);
@@ -796,6 +928,41 @@ export function evaluate(input: AgentInput): AgentDecision {
     );
   }
   const riskPrice = Math.abs(entry - sl);
+
+  // ── D7: the slippage allowance stops being an assumption ───────────────────
+  //
+  // The desk costed every trade with `slippageAllowancePoints` — a constant per
+  // asset class, i.e. a guess. Once WP7's ledger has watched enough of the
+  // desk's OWN fills, the guess is replaced by the measurement, and it is
+  // replaced in ONE direction: the allowance is
+  //
+  //     max(modelled, measured),  capped at 3× the modelled allowance
+  //
+  // so a desk that has been filling BETTER than its allowance does not start
+  // pricing its future fills as free, and a single catastrophic fill cannot
+  // rewrite the cost basis for a week — slippage that bad pauses new entries
+  // (see `slippagePause`), which is the proportionate response.
+  //
+  // Note the ordering: this runs AFTER the stop was widened to cover the
+  // modelled cost (see MIN_COST_COVERAGE above), so re-pricing the cost here can
+  // only make every later gate — expectancy, the gatekeeper's cost test, the
+  // R:R floor measured from the fill — STRICTER. The stop is never narrowed by a
+  // measurement.
+  let slippagePointsMeasured = false;
+  if (v4On(deskV4().execution)) {
+    const measured = measuredSlippageR(slippageLedger);
+    if (measured !== null && riskPrice > 0 && input.spec.point > 0) {
+      const measuredPoints = (measured * riskPrice) / input.spec.point;
+      const ceiling = modelledSlippagePoints * SLIPPAGE_MEASUREMENT_CEILING_MULT;
+      const effective = Math.min(ceiling, Math.max(modelledSlippagePoints, measuredPoints));
+      if (effective > slippagePoints) {
+        slippagePoints = effective;
+        slippagePointsMeasured = true;
+        costPrice = (liveSpreadPoints + commissionPoints + slippagePoints) * input.spec.point;
+      }
+    }
+  }
+
   const costR = riskPrice > 0 ? costPrice / riskPrice : 0;
 
   // ── 4. Markov persistence — one vote, not a veto ──────────────────────────
@@ -844,6 +1011,11 @@ export function evaluate(input: AgentInput): AgentDecision {
   const triggerOffset = stop.atrValue * (input.mode === "scalp" ? 0.08 : 0.12);
   const trigger = side === "buy" ? entry + triggerOffset : entry - triggerOffset;
   const slippagePrice = slippagePoints * input.spec.point;
+  if (slippagePointsMeasured) {
+    warnings.push(
+      `The slippage allowance is MEASURED, not assumed: ${modelledSlippagePoints.toFixed(1)} pt modelled vs ${slippagePoints.toFixed(1)} pt from the desk's own realised fills (${slippageLedger.samples} fills EWMA ${(measuredSlippageR(slippageLedger) ?? 0).toFixed(3)}R). The fill this plan is measured from is the worse one.`,
+    );
+  }
   const expectedFill = side === "buy" ? trigger + slippagePrice : trigger - slippagePrice;
 
   const search = bestTarget({
@@ -1034,7 +1206,45 @@ export function evaluate(input: AgentInput): AgentDecision {
       familySize: 1,
       modelNote: prediction.note,
     });
+    alphaView = prediction.view;
+    sizingProbabilityLowerBound = prediction.prediction?.probabilityLowerBound ?? null;
     if (!gatekeeper.armed) rejections.push(...gatekeeperRejections(gatekeeper));
+  }
+
+  // ── 5d. The WP7 execution and timing agent ────────────────────────────────
+  //
+  // It runs only when `DESK_V4_EXECUTION` is on, and it can only refuse or
+  // reshape the ENTRY — never the geometry: the stop, the target and the risk
+  // unit are the ones the gate above priced. The four layers are the spread's
+  // own z-score, the desk's realised outcomes by minute-of-week, the EWMA of
+  // its realised slippage, and the entry style (a pullback rests a limit; a
+  // breakout stops in with bar-close confirmation).
+  //
+  // The ledgers are deliberately process-wide: "the desk's own record" is the
+  // whole point of a timing layer, and the decision it makes is still a pure
+  // function of what that record contains at the moment of the call.
+  if (v4On(deskV4().execution)) {
+    const lastBar = entrySeries.bars[entrySeries.bars.length - 1] as Bar;
+    execution = executionDecision({
+      mode: input.mode,
+      side,
+      spec: input.spec,
+      decisionClose: entry,
+      atr: stop.atrValue,
+      // The desk's own entry offset, in ATR: the same distance the plan's
+      // trigger already sits at, so the resting level and the trigger cannot
+      // disagree about where the setup is.
+      retraceAtr: input.mode === "scalp" ? 0.08 : 0.12,
+      setup: input.entrySetup ?? (alphaView && alphaView.agents.includes("sweep") ? "pullback" : "breakout"),
+      riskPrice,
+      slippagePrice,
+      spreadPoints: liveSpreadPoints,
+      spreadHistory: input.spreadHistory ?? spreadHistoryFor(spreadHistory, input.symbol),
+      timestampMs: lastBar[0] as number,
+      timing: timingLedger,
+      slippage: slippageLedger,
+    });
+    if (!execution.allowed) rejections.push(...executionRejections(execution));
   }
 
   // ── 6. Spread: priced, and ONLY priced ────────────────────────────────────
@@ -1115,16 +1325,84 @@ export function evaluate(input: AgentInput): AgentDecision {
   // No cost ceilings are passed any more: sizing's job is to convert a risk
   // budget into a legal lot size, not to re-litigate the edge. The spread is
   // already inside `expectancyR` (the gate) and inside the widened risk unit.
+  // ── The WP8 portfolio budget ──────────────────────────────────────────────
+  //
+  // When the layer is on, the trade's risk is `min(0.35%, ¼-Kelly(p_LCB))`
+  // scaled by the drawdown state, and then reduced further if the open book is
+  // already carrying the correlation cluster it would join, or if the book's
+  // heat or CVaR would cross their ceilings. Every step is a REDUCTION: the
+  // layer can lower the edge's own budget, never raise it.
+  let sizingRiskPct = riskPct;
+  if (v4On(deskV4().portfolio)) {
+    const equity = input.account.equity;
+    const book = input.positions.map((position) => ({
+      symbol: position.symbol,
+      riskPct: equity > 0 && position.initialRiskMoney ? (position.initialRiskMoney / equity) * 100 : 0,
+    }));
+    const correlation = input.portfolioCorrelation ?? null;
+    const labels = correlation ? correlation.labels : book.map((entry) => entry.symbol);
+    portfolio = portfolioDecision({
+      drawdownPct: drawdownFromPeak({ equity, peakEquity: input.account.peakEquity }),
+      probabilityLowerBound: sizingProbabilityLowerBound,
+      rewardRisk: rrFill,
+      book: book.map((entry, index) => ({
+        ...entry,
+        cluster: null,
+        symbol: labels[index] ?? entry.symbol,
+      })),
+      correlation: correlation ? correlation.matrix : null,
+      candidateIndex: correlation ? correlation.labels.length - 1 : undefined,
+      labels,
+      maxTradeRiskPct: riskPct,
+    });
+    if (!portfolio.allowed) rejections.push(...portfolio.reasons.map((reason) => `[PF] ${reason}`));
+    else sizingRiskPct = Math.min(sizingRiskPct, portfolio.riskPct);
+  }
+
+  // ── The WP7 entry, adopted only when the geometry still clears 1:2 ─────────
+  //
+  // A resting limit at a pullback fills BETTER than the trigger, which moves the
+  // fill price, the risk unit and the reward:risk at once — so adopting it is a
+  // change to the plan's arithmetic, not a cosmetic relabel. The rule here is
+  // the one WP1 established: the R:R the desk arms must be ≥ 2 **at the fill it
+  // expects**, and the stop may not move to make that true. When the new fill
+  // cannot pay 1:2 against the existing stop and target, the entry style is NOT
+  // adopted — the plan keeps the trigger the whole pipeline priced — and the
+  // warning says so. Sizing follows the adopted fill, so the money at risk stays
+  // inside the budget rather than growing with a better price.
+  let entryForSizing = expectedFill;
+  let triggerForPlan = trigger;
+  let entryStyleForPlan: ArmedPlan["triggerType"] = "break";
+  if (
+    execution &&
+    execution.allowed &&
+    v4Live(deskV4().execution) &&
+    (execution.entry.style === "limit" || execution.entry.style === "stop")
+  ) {
+    const restingFill = execution.entry.trigger + (side === "buy" ? 1 : -1) * slippagePrice;
+    const restingRisk = Math.abs(restingFill - sl);
+    const restingMultiple = restingRisk > 0 ? Math.abs(search.tp - restingFill) / restingRisk : 0;
+    if (restingRisk > 0 && restingMultiple >= MIN_RR_FILL) {
+      entryForSizing = restingFill;
+      triggerForPlan = execution.entry.trigger;
+      entryStyleForPlan = execution.entry.style;
+    } else {
+      warnings.push(
+        `WP7 held the ${execution.entry.style} entry: at the resting fill of ${restingFill.toPrecision(7)} the trade pays 1:${restingMultiple.toFixed(2)} against the existing stop and target, under the 1:${MIN_RR_FILL.toFixed(1)} floor — the plan keeps its trigger.`,
+      );
+    }
+  }
+
   const sizing = sizePosition({
     spec: specForSizing,
     side,
-    entry: expectedFill,
+    entry: entryForSizing,
     sl,
     tp: search.tp,
     equity: input.account.equity,
     freeMargin: input.account.freeMargin,
     usedMargin: input.account.margin,
-    riskPct,
+    riskPct: sizingRiskPct,
     // The minimum-lot decision is made against the budget, not the target —
     // see SizingRequest.riskCeilingPct.
     riskCeilingPct: risk.riskCeilingPct,
@@ -1138,7 +1416,7 @@ export function evaluate(input: AgentInput): AgentDecision {
   // user should never have to infer that from the lot size alone.
   if (sizing.ok && sizing.minLotApplied) {
     warnings.push(
-      `Broker minimum lot ${sizing.lots} taken: ${sizing.effectiveRiskPct.toFixed(2)}% of equity at risk vs the ${riskPct.toFixed(2)}% adaptive target (per-trade budget ${risk.riskCeilingPct.toFixed(2)}%).`,
+      `Broker minimum lot ${sizing.lots} taken: ${sizing.effectiveRiskPct.toFixed(2)}% of equity at risk vs the ${sizingRiskPct.toFixed(2)}% adaptive target (per-trade budget ${risk.riskCeilingPct.toFixed(2)}%).`,
     );
   }
 
@@ -1149,6 +1427,8 @@ export function evaluate(input: AgentInput): AgentDecision {
       mode: input.mode,
       armed: false,
       gatekeeper,
+      execution,
+      portfolio,
       plan: null,
       confluence,
       evidence,
@@ -1203,12 +1483,12 @@ export function evaluate(input: AgentInput): AgentDecision {
     symbol: input.symbol,
     side,
     mode: input.mode,
-    trigger,
-    // "break" is the v3.04 behaviour and stays the default until the v4
-    // execution agent (WP7) chooses between limit/stop/confirm entries per
-    // setup. The EA understands all of them; this desk simply has not earned a
-    // better entry style than the trigger yet.
-    triggerType: "break",
+    trigger: triggerForPlan,
+    // "break" is the v3.04 behaviour and the default. The v4 execution agent
+    // (WP7) may replace it with a resting limit/stop — but only when the
+    // adopted fill still clears the 1:2 floor against the existing stop and
+    // target, which is checked directly above.
+    triggerType: entryStyleForPlan,
     confirmTicks: input.mode === "scalp" ? 2 : 1,
     invalidate,
     sl: sizing.sl,
@@ -1287,6 +1567,8 @@ export function evaluate(input: AgentInput): AgentDecision {
     mode: input.mode,
     armed: true,
     gatekeeper,
+    execution,
+    portfolio,
     plan,
     confluence,
     evidence,

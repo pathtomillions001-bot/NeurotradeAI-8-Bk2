@@ -93,6 +93,28 @@ import {
   type GatekeeperStudyReport,
 } from "./gatekeeper-eval";
 import { BH_Q, COST_OVER_SIGMA_MODES, MAX_COST_OVER_HORIZON_SIGMA, MIN_EV_LCB_R } from "../meta/gatekeeper";
+import { DAILY_CVAR_MAX_PCT, PORTFOLIO_HEAT_MAX_PCT, PORTFOLIO_MAX_TRADE_RISK_PCT } from "../portfolio-risk";
+import {
+  EXECUTION_ALLOWANCE_CEILING_MULT,
+  EXECUTION_MIN_FILL_RATE,
+  EXECUTION_PAIRED_TOLERANCE_R,
+  EXECUTION_STRIDE,
+  EXECUTION_TIMING_REFUSAL_MAX,
+  EXECUTION_WARMUP,
+  assessExecutionSeries,
+  executionGatesPass,
+  summariseExecution,
+  type ExecutionSeriesAssessment,
+  type GateRow,
+} from "./execution-eval";
+import {
+  PORTFOLIO_CORRELATION_TARGET,
+  PORTFOLIO_DD_FLOOR,
+  assessPortfolioSeries,
+  portfolioGatesPass,
+  summarisePortfolio,
+  type PortfolioSeriesAssessment,
+} from "./portfolio-eval";
 import { DEFAULT_ALPHA_CONFIG } from "../alpha/edge";
 import { lowerBoundMeanR, tradeStats } from "./metrics";
 import {
@@ -151,6 +173,10 @@ interface CliArgs {
   metaCalibrator: MetaCalibratorKind;
   /** Run the WP6 gatekeeper study instead of a strategy study. */
   gatekeeper: boolean;
+  /** Run the WP7 execution study instead of a strategy study. */
+  execution: boolean;
+  /** Run the WP8 portfolio study instead of a strategy study. */
+  portfolio: boolean;
   /** True when the caller set --stride explicitly. */
   strideExplicit: boolean;
 }
@@ -184,6 +210,17 @@ const USAGE = `research:run — the MT5 Desk v4 research harness
                                     a hard veto; v4-regime-shadow measures the
                                     same permission without changing any trade
   --regime-fit-bars <n>             bars the regime HMM is fitted on (default 1000)
+  --execution                       run the WP7 execution study instead of a
+                                    strategy study: the legacy trigger against a
+                                    resting limit on the same geometry, via the
+                                    executed-policy simulator, plus the timing
+                                    ledger's premise over the same corpus
+  --portfolio                       run the WP8 portfolio study instead of a
+                                    strategy study: a book with a constructed
+                                    correlation, the estimator's recovery of it,
+                                    the layer's ceilings on the book's heat and
+                                    CVaR, and the drawdown scalar on an equity
+                                    path driven by the execution study's trades
   --gatekeeper                      run the WP6 gatekeeper study instead of a
                                     strategy study: the WP5 corpora re-read through
                                     the gate (EV floors, BH q=0.10, cost/sigma_h,
@@ -269,6 +306,8 @@ export function parseArgs(argv: string[]): CliArgs {
     metaBars: Math.max(1200, Math.floor(num("meta-bars", 2500))),
     metaCalibrator: (flags.get("meta-calibrator") ?? META_CALIBRATOR_DEFAULT) as MetaCalibratorKind,
     gatekeeper: flags.has("gatekeeper"),
+    execution: flags.has("execution"),
+    portfolio: flags.has("portfolio"),
     regimeFitBars: Math.max(200, Math.floor(num("regime-fit-bars", DEFAULT_REGIME_HMM_CONFIG.fitBars))),
     mode,
     data: flags.get("data") ?? "synthetic:all",
@@ -1436,6 +1475,292 @@ export function renderMetaStudy(report: MetaStudyReport): string {
 
 
 /**
+ * The WP7 execution study.
+ *
+ * The instrument is the executed-policy simulator: the same geometry, stop,
+ * target and management, simulated twice per decision — once with the legacy
+ * breakout trigger and once resting a limit at the pullback retracement — so the
+ * difference is the entry style and nothing else. The fixtures are the WP5/WP6
+ * ones, so "the entry style is measured on the corpus the desk was calibrated
+ * on" is true by construction rather than by assertion.
+ */
+export interface ExecutionStudyReport {
+  tool: string;
+  mode: TradeMode;
+  generatedAt: string;
+  command: string;
+  contractSpec: Record<string, unknown>;
+  thresholds: {
+    stride: number;
+    warmupBars: number;
+    minFillRate: number;
+    pairedToleranceR: number;
+    timingRefusalMax: number;
+    allowanceCeilingMult: number;
+  };
+  fixtures: {
+    name: string;
+    kind: string;
+    note: string;
+    home: boolean;
+    pooled: ReturnType<typeof summariseExecution>;
+    series: Omit<ExecutionSeriesAssessment, "legacyR">[];
+  }[];
+  gates: GateRow[];
+  verdict: "PASS" | "FAIL";
+  notes: string[];
+}
+
+function executionFixtureAssessment(args: CliArgs, fixture: (typeof META_STUDY_FIXTURES)[number]): ExecutionStudyReport["fixtures"][number] {
+  const frame = SYNTHETIC_BASE_FRAME[args.mode];
+  const count = args.metaSeriesExplicit ? args.metaSeries : fixture.series;
+  const assessments: ExecutionSeriesAssessment[] = [];
+  for (let r = 0; r < count; r++) {
+    const series = syntheticSeriesForMode(args.mode, fixture.kind as GeneratorKind, args.seed + r * 1013, args.metaBars);
+    assessments.push(
+      assessExecutionSeries({
+        bars: series.bars,
+        spec: args.spec.spec,
+        mode: args.mode,
+        symbol: args.symbol,
+        fixture: fixture.name,
+        series: `${fixture.name}#${r + 1}`,
+        frame,
+        stride: EXECUTION_STRIDE,
+        seed: args.seed + r * 7919,
+        horizonBars: MODE_HORIZON_BARS[args.mode],
+      }),
+    );
+  }
+  return {
+    name: fixture.name,
+    kind: fixture.kind,
+    note: fixture.note,
+    home: fixture.home === true,
+    pooled: summariseExecution(assessments),
+    // legacyR is an input to the portfolio study, not a result: keep it out of the report
+    series: assessments.map(({ legacyR: _legacyR, ...rest }) => rest),
+  };
+}
+
+export function runExecutionStudy(args: CliArgs): ExecutionStudyReport {
+  const fixtures = META_STUDY_FIXTURES.map((fixture) => executionFixtureAssessment(args, fixture));
+  const gates = fixtures.flatMap((fixture) => fixture.pooled.gates);
+  const notes: string[] = [];
+  notes.push(
+    "the spread z-score and the slippage ledger are NOT measured here: the synthetic corpora carry no SPREAD column and no fills of their own. Both layers only refuse when a measurement exists, both are unit-tested (wp7-execution.test.ts), and the live desk's own quote and fill records are their measurement",
+  );
+  notes.push(
+    "the entry-style comparison is PAIRED: same decision bar, same stop LEVEL, same target rule, same management policy, two triggers. Each trade is measured in its own R, and the resting plan is additionally re-expressed in the legacy plan's R before the difference is taken",
+  );
+  notes.push(
+    `directions alternate deterministically (buy, sell, buy, …) because the entry-style question is direction-symmetric; always going long on a drifting generator would answer a different question`,
+  );
+  notes.push(
+    `every simulation starts at bar ${EXECUTION_WARMUP} and scans FORWARD from the decision bar (see executed-policy.ts: nothing at or before the decision bar is ever read for a price)`,
+  );
+  notes.push(
+    "the simulator's fill window is executed-policy.ts's own MAX_FILL_WAIT_BARS: the live desk's pending-order EXPIRY (PENDING_EXPIRY_BARS) and its 0.5R cancel rule are EA/desk wiring rules and are covered by wp7-execution.test.ts, not by this study. The plan's invalidation LEVEL is the desk's 0.6 ATR rule, so a pullback that goes too deep kills the plan rather than filling it",
+  );
+  notes.push(
+    "the timing layer is measured as a REFUSAL RATE, not as an edge: the synthetic generators carry no calendar structure, so bucket means on them are noise by construction. What the corpus can say is that the rule is a filter and not a blanket ban; the ledger's own value has to come from the live desk's fills (bridge.ts) and is reported by GET /execution",
+  );
+  return {
+    tool: "MT5 Desk v4 — WP7 execution study",
+    mode: args.mode,
+    generatedAt: new Date().toISOString(),
+    command: process.argv.join(" "),
+    contractSpec: args.spec.spec as unknown as Record<string, unknown>,
+    thresholds: {
+      stride: EXECUTION_STRIDE,
+      warmupBars: EXECUTION_WARMUP,
+      minFillRate: EXECUTION_MIN_FILL_RATE,
+      pairedToleranceR: EXECUTION_PAIRED_TOLERANCE_R,
+      timingRefusalMax: EXECUTION_TIMING_REFUSAL_MAX,
+      allowanceCeilingMult: EXECUTION_ALLOWANCE_CEILING_MULT,
+    },
+    fixtures,
+    gates,
+    verdict: executionGatesPass(gates) ? "PASS" : "FAIL",
+    notes,
+  };
+}
+
+export function renderExecutionStudy(report: ExecutionStudyReport): string {
+  const lines: string[] = [];
+  lines.push(`WP7 execution study — mode ${report.mode} — VERDICT: ${report.verdict}`);
+  lines.push(`  stride ${report.thresholds.stride}, warmup ${report.thresholds.warmupBars} bars, executed-policy simulator`);
+  for (const fixture of report.fixtures) {
+    const pooled = fixture.pooled;
+    const timing = fixture.series[0]?.timing;
+    lines.push(
+      `  ${fixture.name}${fixture.home ? " (home)" : ""}: ${pooled.decisions} decisions — legacy mean ${pooled.legacyMeanR.toFixed(4)}R (fills), resting mean ${pooled.restingMeanR.toFixed(4)}R at a ${(pooled.restingFillRate * 100).toFixed(1)}% fill rate — paired ΔR ${pooled.pairedMeanDeltaR.toFixed(4)} (better in ${(pooled.betterShare * 100).toFixed(1)}%) — timing refuses ${(pooled.timingRefusalRate * 100).toFixed(1)}%`,
+    );
+    if (timing) {
+      lines.push(
+        `      timing buckets: ${timing.measuredBuckets}/${timing.buckets} measured — bucket means ${timing.worstMeanR === null ? "n/a" : timing.worstMeanR.toFixed(3)}R…${timing.bestMeanR === null ? "n/a" : timing.bestMeanR.toFixed(3)}R`,
+      );
+    }
+  }
+  for (const gate of report.gates) {
+    lines.push(`  ${gate.pass ? "ok  " : "FAIL"} ${gate.code.padEnd(22)} ${gate.detail}`);
+  }
+  for (const note of report.notes) lines.push(`  note: ${note}`);
+  return lines.join("\n");
+}
+
+export function writeExecutionReport(report: ExecutionStudyReport, outPath: string | null): string {
+  const stamp = report.generatedAt.slice(0, 10);
+  const target =
+    outPath ?? resolve(process.cwd(), `research-reports/${stamp}-wp7-execution-${report.mode}-study.json`);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return target;
+}
+
+/**
+ * The WP8 portfolio study.
+ *
+ * The book is constructed, not hoped for: a companion instrument is built from
+ * the fixture's own returns at a KNOWN correlation, plus an independent
+ * instrument, so the estimator's answer can be checked against the truth it was
+ * given. The composition then runs over the fixture's decision points, and the
+ * equity path is walked with the R sequence the WP7 study's simulator produced
+ * on the same corpus — the desk's own instrument, not a hypothetical one.
+ */
+export interface PortfolioStudyReport {
+  tool: string;
+  mode: TradeMode;
+  generatedAt: string;
+  command: string;
+  contractSpec: Record<string, unknown>;
+  thresholds: {
+    correlationTarget: number;
+    covarianceBars: number;
+    maxTradeRiskPct: number;
+    heatCeilingPct: number;
+    cvarCeilingPct: number;
+    ddFloorScalar: number;
+  };
+  fixtures: {
+    name: string;
+    kind: string;
+    home: boolean;
+    note: string;
+    pooled: ReturnType<typeof summarisePortfolio>;
+    series: PortfolioSeriesAssessment[];
+  }[];
+  gates: GateRow[];
+  verdict: "PASS" | "FAIL";
+  notes: string[];
+}
+
+export function runPortfolioStudy(args: CliArgs): PortfolioStudyReport {
+  const frame = SYNTHETIC_BASE_FRAME[args.mode];
+  const fixtures: PortfolioStudyReport["fixtures"] = [];
+  const gates: GateRow[] = [];
+  const count = args.metaSeriesExplicit ? args.metaSeries : META_STUDY_FIXTURES[0]!.series;
+  for (const fixture of META_STUDY_FIXTURES) {
+    const series: PortfolioStudyReport["fixtures"][number]["series"] = [];
+    const tradeCounts: number[] = [];
+    for (let r = 0; r < count; r++) {
+      const generated = syntheticSeriesForMode(args.mode, fixture.kind as GeneratorKind, args.seed + r * 1013, args.metaBars);
+      // The R sequence for the drawdown path comes from the same simulator the
+      // WP7 study uses, on the same bars and the same seed.
+      const execution = assessExecutionSeries({
+        bars: generated.bars,
+        spec: args.spec.spec,
+        mode: args.mode,
+        symbol: args.symbol,
+        fixture: fixture.name,
+        series: `${fixture.name}#${r + 1}`,
+        frame,
+        stride: EXECUTION_STRIDE,
+        seed: args.seed + r * 7919,
+        horizonBars: MODE_HORIZON_BARS[args.mode],
+      });
+      tradeCounts.push(execution.legacyR.length);
+      series.push(
+        assessPortfolioSeries({
+          bars: generated.bars,
+          spec: args.spec.spec,
+          mode: args.mode,
+          symbol: args.symbol,
+          fixture: fixture.name,
+          trades: execution.legacyR.map((r2) => ({ r: r2 })),
+          seed: args.seed + 977 + r * 1013,
+          stride: EXECUTION_STRIDE,
+        }),
+      );
+    }
+    const pooled = summarisePortfolio(series);
+    fixtures.push({ name: fixture.name, kind: fixture.kind, home: fixture.home === true, note: fixture.note, pooled, series });
+    gates.push(...pooled.gates);
+  }
+  const notes: string[] = [];
+  notes.push(
+    `the Kelly term is NOT measured here: it consumes the WP5 model's p_LCB and this study does not fit a model, so the composition runs with probabilityLowerBound = null and the ${PORTFOLIO_MAX_TRADE_RISK_PCT}% per-trade cap is the binding constraint. The wiring test wp8-portfolio.test.ts covers the Kelly branch`,
+  );
+  notes.push(
+    `the companion instrument is built as r_c = ${PORTFOLIO_CORRELATION_TARGET}·r_p + √(1−${PORTFOLIO_CORRELATION_TARGET}²)·ε from the primary's own returns, with a separate noise stream for the independent instrument, so the estimator is checked against a correlation it was GIVEN`,
+  );
+  notes.push(
+    "the drawdown comparison walks the WP7 simulator's realised R sequence at a fixed 0.35% per trade with and without the drawdown scalar; it is a measurement of the scalar's effect on THAT path, not a forecast of anyone's equity",
+  );
+  notes.push(
+    "the parametric CVaR is a normal-tail LOWER bound on a fat-tailed number (see portfolio-risk.ts). The composed book's CVaR therefore lands ON its 1.5% ceiling rather than under it: the layer cuts the candidate to the largest size that fits, and a trade that cannot be cut small enough is refused with PF_NO_BUDGET. The 1.5% is only a floor on the true tail risk, which is why the kurtosis caveat is repeated here",
+  );
+  notes.push(
+    "the drawdown comparison walks the SAME realised R sequence twice, with and without the scalar, and then walks it once more mirrored to all-losses. The mirror is the only version a safety gate can hold: on a profitable path a risk scalar can leave a LARGER percentage drawdown behind, because the percentage is measured against an equity curve that also grew more slowly. The mirrored flat path reaches ruin (197% of the initial equity) while the scalar halts the desk at ~10% — that is the mechanism the gate measures, together with the invariant that the layer's risk is never above the cap",
+  );
+  return {
+    tool: "MT5 Desk v4 — WP8 portfolio study",
+    mode: args.mode,
+    generatedAt: new Date().toISOString(),
+    command: process.argv.join(" "),
+    contractSpec: args.spec.spec as unknown as Record<string, unknown>,
+    thresholds: {
+      correlationTarget: PORTFOLIO_CORRELATION_TARGET,
+      covarianceBars: 120,
+      maxTradeRiskPct: PORTFOLIO_MAX_TRADE_RISK_PCT,
+      heatCeilingPct: PORTFOLIO_HEAT_MAX_PCT,
+      cvarCeilingPct: DAILY_CVAR_MAX_PCT,
+      ddFloorScalar: PORTFOLIO_DD_FLOOR,
+    },
+    fixtures,
+    gates,
+    verdict: portfolioGatesPass(gates) ? "PASS" : "FAIL",
+    notes,
+  };
+}
+
+export function renderPortfolioStudy(report: PortfolioStudyReport): string {
+  const lines: string[] = [];
+  lines.push(`WP8 portfolio study — mode ${report.mode} — VERDICT: ${report.verdict}`);
+  lines.push(
+    `  book: ρ_target ${report.thresholds.correlationTarget}, ${report.thresholds.covarianceBars} bars, cap ${report.thresholds.maxTradeRiskPct}%, heat ≤ ${report.thresholds.heatCeilingPct}%, CVaR ≤ ${report.thresholds.cvarCeilingPct}%`,
+  );
+  for (const fixture of report.fixtures) {
+    const a = fixture.pooled;
+    lines.push(
+      `  ${fixture.name}${fixture.home ? " (home)" : ""}: ρ̂ ${a.estimatedRho === null ? "n/a" : a.estimatedRho.toFixed(4)} (independent built: ${a.independentRho === null ? "n/a" : a.independentRho.toFixed(4)}) — cluster captures the neighbour ${a.clusterCapturesNeighbour === 1} / excludes the independent ${a.clusterExcludesIndependent === 1} — heat ${a.maxHeatCappedPct.toFixed(4)}% composed vs ${a.maxHeatNaivePct.toFixed(4)}% uncapped — CVaR ${a.maxCvarCappedPct.toFixed(4)}% composed vs ${a.maxCvarNaivePct.toFixed(4)}% uncapped — candidate risk ${a.cappedRiskPctMean.toFixed(4)}% mean — refusals ${a.refusedCandidates} of ${a.candidateOffers} candidate offers — maxDD ${a.maxDrawdownScaledPct.toFixed(2)}% vs ${a.maxDrawdownFlatPct.toFixed(2)}% flat`,
+    );
+  }
+  for (const gate of report.gates) lines.push(`  ${gate.pass ? "ok  " : "FAIL"} ${gate.code.padEnd(22)} ${gate.detail}`);
+  for (const note of report.notes) lines.push(`  note: ${note}`);
+  return lines.join("\n");
+}
+
+export function writePortfolioReport(report: PortfolioStudyReport, outPath: string | null): string {
+  const stamp = report.generatedAt.slice(0, 10);
+  const target =
+    outPath ?? resolve(process.cwd(), `research-reports/${stamp}-wp8-portfolio-${report.mode}-study.json`);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return target;
+}
+
+/**
  * The WP6 gatekeeper study.
  *
  * Same corpora, same folds, same calibrator as `runMetaStudy` — deliberately, and
@@ -1602,6 +1927,20 @@ export function main(argv = process.argv.slice(2)): number {
   }
   const args = parseArgs(argv);
   const started = Date.now();
+  if (args.execution) {
+    const study = runExecutionStudy(args);
+    const written = writeExecutionReport(study, args.out);
+    if (!args.quiet) process.stdout.write(`${renderExecutionStudy(study)}\n`);
+    process.stdout.write(`  report: ${written}  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`);
+    return study.verdict === "PASS" ? 0 : 1;
+  }
+  if (args.portfolio) {
+    const study = runPortfolioStudy(args);
+    const written = writePortfolioReport(study, args.out);
+    if (!args.quiet) process.stdout.write(`${renderPortfolioStudy(study)}\n`);
+    process.stdout.write(`  report: ${written}  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`);
+    return study.verdict === "PASS" ? 0 : 1;
+  }
   if (args.gatekeeper) {
     const study = runGatekeeperStudy(args);
     const written = writeGatekeeperReport(study, args.out);

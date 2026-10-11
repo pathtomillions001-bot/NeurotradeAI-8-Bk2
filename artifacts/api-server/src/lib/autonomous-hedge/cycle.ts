@@ -17,7 +17,7 @@
  */
 
 import { db, tradesTable } from "@workspace/db";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { logger } from "../logger";
 import { runWithSession } from "../session";
 import * as recoveryEngine from "../agents/recovery-engine";
@@ -153,6 +153,26 @@ const CONSECUTIVE_EXEC_FAILURE_LIMIT = 3;
 /** A tape with no tick for this long belongs to a closed or stalled market and is not ranked. */
 const STALE_TAPE_MS = 15_000;
 const MIN_STAKE = 0.35;
+/**
+ * Longest an unresolved exposure may keep the engine from trading.
+ *
+ * WHY THIS EXISTS (the bug it fixes): the exposure gate was unbounded. A row
+ * Deriv never confirmed stayed `open` in the database, and an open row is the
+ * ONLY thing `exposureResolved` waits on — so the engine held forever and the
+ * dashboard showed "HOLD: settling previous 1-tick trade … waiting 1109m19s"
+ * with no way out but a manual restart. Nothing in the code was wrong "by
+ * design" here; the gate simply had no ceiling, so any cause that made the
+ * reconciler miss a row (a profit-table page that had moved past it, a token
+ * that needed reconnecting, a Deriv outage) became PERMANENT.
+ *
+ * The hold is now bounded. After this long the GATE is released and the engine
+ * resumes ranking and trading, while the row itself is left `open` and stays
+ * the reconciler's job for a week — so if Deriv ever reports the contract the
+ * outcome is still recorded in the recovery ledger exactly once by the same
+ * claim-unique writer. Nothing is dropped, nothing is double-counted, and a
+ * single unsettleable row can no longer disable the engine.
+ */
+const EXPOSURE_MAX_HOLD_MS = 30 * 60 * 1000;
 
 const sessions = new Map<string, HedgeSession>();
 
@@ -293,6 +313,43 @@ async function hydrateExposure(host: HedgeHost, s: HedgeSession): Promise<void> 
   logger.warn({ sessionId: host.sessionId, rowId: row.id }, "Autonomous engine resumed with an unresolved 1-tick exposure — gated until settled");
 }
 
+/**
+ * Release a gate whose row Deriv has still not confirmed after the maximum
+ * hold. The row is deliberately LEFT `open`: the reconciler keeps it (its
+ * sweep window now reaches a week) and settles it with the same claim-unique
+ * writer if the broker ever reports the contract, so the recovery ledger is
+ * corrected rather than guessed. The engine only stops WAITING.
+ */
+function releaseStaleExposure(host: HedgeHost, s: HedgeSession, waitedMs: number): void {
+  const exp = s.exposure;
+  if (!exp) return;
+  const minutes = Math.round(waitedMs / 60_000);
+  logger.warn(
+    { rowId: exp.rowId, symbol: exp.symbol, minutesHeld: minutes },
+    "Autonomous 1-tick exposure held past the maximum hold — releasing the gate so the engine resumes; the row stays open for reconciliation",
+  );
+  clearExposure(s);
+  s.ctx = null;
+  requestReconcile(s);
+  // Annotate the row for the journal. Status and ledger are untouched, so a
+  // later exact settlement still claims it and records the outcome once.
+  void db
+    .update(tradesTable)
+    .set({
+      agentReasoning: sql`coalesce(${tradesTable.agentReasoning}, '') || ${` [GATE RELEASED after ${minutes}m: Deriv had not confirmed the outcome — the engine resumed; the row stays open for reconciliation]`}`,
+    })
+    .where(eq(tradesTable.id, exp.rowId))
+    .catch((err: unknown) => logger.warn({ err, rowId: exp.rowId }, "Could not annotate the released exposure row"));
+  host.emit("exposure_released", {
+    id: exp.rowId,
+    symbol: exp.symbol,
+    contract: exp.contract,
+    stake: exp.stake,
+    heldMinutes: minutes,
+    reason: `Exposure on ${exp.symbol} held for ${minutes}m without a Deriv confirmation — the engine resumed; the trade stays open in the journal and is settled automatically if Deriv reports it.`,
+  });
+}
+
 /** True while the exposure is unresolved. Resolves it from the DB when it has settled. */
 async function exposureResolved(host: HedgeHost, s: HedgeSession): Promise<boolean> {
   if (!s.exposure) return true;
@@ -302,6 +359,13 @@ async function exposureResolved(host: HedgeHost, s: HedgeSession): Promise<boole
   const [row] = await db.select().from(tradesTable).where(eq(tradesTable.id, s.exposure.rowId)).limit(1);
   if (row?.status === "open") {
     requestReconcile(s);
+    // Bounded wait: past the maximum hold the gate opens again. Without this
+    // the engine sat in this branch forever (see EXPOSURE_MAX_HOLD_MS).
+    const waitedMs = s.exposureSince > 0 ? now - s.exposureSince : 0;
+    if (waitedMs >= EXPOSURE_MAX_HOLD_MS) {
+      releaseStaleExposure(host, s, waitedMs);
+      return true;
+    }
     return false;
   }
   if (!row) {
@@ -397,9 +461,13 @@ function formatWait(ms: number): string {
 
 function settlingHoldReason(s: HedgeSession): string {
   const exp = s.exposure;
-  const waiting = s.exposureSince > 0 ? formatWait(Date.now() - s.exposureSince) : null;
+  const waitedMs = s.exposureSince > 0 ? Date.now() - s.exposureSince : 0;
+  const waiting = waitedMs > 0 ? formatWait(waitedMs) : null;
   const what = exp ? ` on ${exp.symbol} (#${exp.rowId}${waiting ? `, waiting ${waiting}` : ""})` : "";
-  return `HOLD: settling previous 1-tick trade${what} — the engine resumes when Deriv confirms the outcome. Nothing is dropped while it waits.`;
+  const maxHoldMin = Math.round(EXPOSURE_MAX_HOLD_MS / 60_000);
+  const left = EXPOSURE_MAX_HOLD_MS - waitedMs;
+  const tail = left > 0 ? ` The engine resumes trading in ${formatWait(left)} even if Deriv has not confirmed.` : "";
+  return `HOLD: settling previous 1-tick trade${what} — the engine resumes as soon as Deriv confirms the outcome, and holds at most ${maxHoldMin}m.${tail} Nothing is dropped while it waits.`;
 }
 
 /**

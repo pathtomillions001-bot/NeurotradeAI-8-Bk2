@@ -1,5 +1,6 @@
 import { RefreshCw, Clock } from "lucide-react";
 import { motion } from "framer-motion";
+import { EnginePowerButton, type EnginePowerState } from "@/components/engine-power-button";
 
 // ── Group scan shapes (SSE: scan_started / group_scanned / scan_complete) ──────
 export interface FamilySummary {
@@ -227,12 +228,15 @@ export function AutonomousEngineCard({
   isScanning,
   winner,
   lastSkipReason,
+  engine,
 }: {
   countdown: number | null;
   groups: Record<string, GroupScanResult | "scanning">;
   isScanning: boolean;
   winner: string | null;
   lastSkipReason: string | null;
+  /** Power control — same control, same top-right corner as the Quick Strike face. */
+  engine?: EnginePowerState;
 }) {
   const status = winner ? "EXECUTING" : isScanning ? "SCANNING" : "ONLINE";
   const statusColor = winner ? "#10b981" : "#00ffff";
@@ -267,18 +271,23 @@ export function AutonomousEngineCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header */}
-        <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-          <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-300/80">
+        {/* Header — the power control stays in the top-right corner, the status
+            badge sits next to it, and the title truncates so neither can ever
+            overlap text on a narrow card. */}
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+          <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-300/80 truncate">
             Autonomous Engine
           </span>
-          <span
-            className="ml-auto text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider"
-            style={{ color: statusColor, borderColor: `${statusColor}50`, background: `${statusColor}15` }}
-          >
-            {status}
-          </span>
+          <div className="ml-auto flex items-center gap-2 shrink-0">
+            <span
+              className="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded border uppercase tracking-wider whitespace-nowrap"
+              style={{ color: statusColor, borderColor: `${statusColor}50`, background: `${statusColor}15` }}
+            >
+              {status}
+            </span>
+            {engine && <EnginePowerButton {...engine} />}
+          </div>
         </div>
 
         {/* Loop status */}

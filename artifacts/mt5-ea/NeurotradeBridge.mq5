@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.04                                                     |
+//| Version 3.05                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -138,6 +138,39 @@
 //|     beat is visible at the source instead of guessed from a stale  |
 //|     board.                                                         |
 //|                                                                    |
+//| WHAT CHANGED IN v3.05                                             |
+//|  19. THE MANAGEMENT PLAN SURVIVES THE FILL.                       |
+//|     v3.04 armed a plan carrying breakeven, partials, a trailing    |
+//|     stop, a time stop and a pyramid ladder — and then, at fill,    |
+//|     set the plan inactive. Every management feature was looked up  |
+//|     through FindPlanForSymbol(), which requires an ACTIVE plan, so |
+//|     after the fill the position lost all of it: breakeven fell     |
+//|     back to a hardcoded +1.0R/+0.2R, the trail never ran, and the  |
+//|     partial/time-stop/session-flatten ladder the server computed   |
+//|     executed nowhere. Management is now a state machine keyed by   |
+//|     TICKET that owns its own policy copy, persists it in the       |
+//|     terminal's common folder (a global variable cannot hold a      |
+//|     29-field record — it stores a double, so it carries the ticket |
+//|     index and the record itself lives in the file), and is         |
+//|     restored after a restart.                                      |
+//|  20. THE TRAIL RUNS ON THE ENTRY TIMEFRAME.                       |
+//|     It used an M15 ATR for every mode: several times a scalp's     |
+//|     whole risk unit, so on a scalp the trail sat BELOW the entry   |
+//|     and never protected anything. Multiples are now 2.0/2.5/3.0    |
+//|     (scalp/intraday/swing) on the frame the stop was placed on,    |
+//|     with a 0.1-ATR minimum step and a never-loosen guarantee.      |
+//|  21. INDICATOR HANDLES ARE CACHED.                                |
+//|     AtrValue() created, copied and released an iATR handle on      |
+//|     every call — several per tick per position. Handles are now    |
+//|     created once per symbol/timeframe/period, guarded by           |
+//|     BarsCalculated(), and released in OnDeinit.                    |
+//|  22. PENDING ORDERS, BAR-CLOSE CONFIRMATION, AND THE TICK TAPE.    |
+//|     Limit/stop entries place a real pending order with an expiry   |
+//|     instead of chasing the trigger tick by tick; confirmation can  |
+//|     be a closed bar rather than N ticks; and (behind an input,     |
+//|     off by default because it is bytes on every beat) the chart    |
+//|     symbol's tick tape rides the heartbeat so a flow agent can     |
+//|     measure something other than one quote per 500 ms.             |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -152,9 +185,8 @@
 //| retries pairing when configuration becomes valid. This prevents a |
 //| transient WebRequest failure from making the EA appear to "not     |
 //| attach" to a chart.                                                |
-//+------------------------------------------------------------------+
 #property copyright "NeuroTrade AI"
-#property version   "3.04"
+#property version   "3.05"
 #property strict
 
 #include <Trade/Trade.mqh>
@@ -179,6 +211,13 @@ input int    NewsBlackoutBeforeMinutes = 30;
 input int    NewsBlackoutAfterMinutes  = 15;
 input bool   VerboseLog                = true;
 
+//--- v3.05 execution and management --------------------------------------------
+input bool   UsePendingOrders          = true;   // Place limit/stop entries as real pending orders
+input bool   ConfirmOnBarClose         = true;   // "confirm" entries wait for a closed bar, not N ticks
+input bool   StreamTicks               = false;  // Send the chart symbol's tick tape (WP4D; bytes per beat)
+input int    TickStreamPerSymbol       = 40;     // Most recent ticks per symbol per heartbeat
+input int    MaxPendingOrderMinutes    = 60;     // Hard local cap on a pending order's life
+
 #define MAX_PLANS      32
 #define MAX_SEEN_CMDS  512
 #define NEWS_REFRESH_SECONDS 60
@@ -198,6 +237,13 @@ ENUM_TIMEFRAMES TF_LIST[TF_COUNT] = {PERIOD_M1, PERIOD_M2, PERIOD_M3, PERIOD_M5,
                                      PERIOD_D1, PERIOD_W1};
 string TF_NAMES[TF_COUNT] = {"M1", "M2", "M3", "M5", "M15", "M30", "H1", "H4", "D1", "W1"};
 
+/** Index of a timeframe name in TF_LIST, or -1 when it is not a broker frame. */
+int TfIndexFromName(const string name)
+{
+   for(int i = 0; i < TF_COUNT; i++) if(TF_NAMES[i] == name) return i;
+   return -1;
+}
+
 struct ArmedPlan
 {
    string id;
@@ -208,16 +254,38 @@ struct ArmedPlan
    double sl;
    double tp;
    double lots;
+   double riskPoints;
+   // v3.05: what the position manager needs, captured AT ARM TIME rather than
+   // looked up at fill time (the defect this version fixes).
+   int    entryType;         // 0 market, 1 limit, 2 stop
+   bool   barConfirm;        // wait for a CLOSED bar beyond the trigger
+   int    mode;              // 0 scalp, 1 intraday, 2 swing
+   int    entryTfIndex;      // index into TF_LIST
+   double costPrice;         // round-trip cost in price units
    double maxSpreadPoints;
    double maxSlippagePoints;
    long   expiresAt;
    int    confirmTicks;
    int    confirmCount;
+   ulong  pendingTicket;     // non-zero while a pending order is working
+   long   pendingPlacedAt;
    double beTriggerR;
    double beOffsetR;
+   bool   beStructure;
+   int    partialCount;
+   double partialAtR[4];
+   double partialPct[4];
    double trailMult;
    double trailActivateR;
+   double trailStepPoints;
+   int    trailPeriod;
    bool   trailEnabled;
+   int    timeStopBars;
+   int    pyramidMaxAdds;
+   double pyramidAddAtR;
+   double pyramidSizeRatio;
+   bool   pyramidRequireBe;
+   bool   flatBeforeClose;
    bool   active;
 };
 
@@ -331,7 +399,13 @@ int OnInit()
    // ever needed again.
    LoadSavedLink();
 
-   Print("NeurotradeBridge v3.04 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   // v3.05: rebuild management state for every position this terminal already
+   // manages. The record lives in the terminal's common folder, so a restart,
+   // a reconnect or an EA reload resumes mid-trade management instead of
+   // leaving open positions unmanaged.
+   PsRestoreAll();
+
+   Print("NeurotradeBridge v3.05 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -349,6 +423,12 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+   // v3.05: flush the management state of every open position, then release the
+   // cached indicator handles. A handle created and never released leaks in the
+   // terminal for the life of the chart.
+   for(int i = 0; i < g_psCount; i++)
+      if(PositionSelectByTicket(g_ps[i].ticket)) PsSave(g_ps[i]);
+   ReleaseAtrHandles();
    Print("NeurotradeBridge: stopped (reason ", reason, ").");
 }
 
@@ -357,6 +437,13 @@ void OnDeinit(const int reason)
 // an XAUUSD/BTCUSD plan safely.
 void OnTick()
 {
+   // v3.05 (WP4D): the chart symbol's tick tape. StreamTicks is off by default
+   // because it is bytes on every heartbeat; the flow agent needs it on.
+   if(StreamTicks)
+   {
+      MqlTick tick;
+      if(SymbolInfoTick(_Symbol, tick)) PushTick(_Symbol, tick);
+   }
    ManageOpenPositions();
    EvaluatePlans();
 }
@@ -500,7 +587,7 @@ void TryPair()
    body += "\"login\":" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + ",";
    body += "\"server\":\"" + JsonEscape(AccountInfoString(ACCOUNT_SERVER)) + "\",";
    body += "\"company\":\"" + JsonEscape(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
-   body += "\"version\":\"3.04\",";
+   body += "\"version\":\"3.05\",";
    body += "\"instanceId\":\"" + JsonEscape(g_instanceId) + "\",";
    body += "\"currency\":\"" + JsonEscape(AccountInfoString(ACCOUNT_CURRENCY)) + "\"},";
    // All broker symbols are discovered once at pairing. This is a catalogue,
@@ -740,7 +827,12 @@ void Sync()
    body += "\"barsAvailable\":" + BarsAvailableJson() + ",";
    body += "\"news\":" + NewsJson() + ",";
    body += "\"positions\":" + PositionsJson() + ",";
-   body += "\"results\":[" + g_results + "]";
+   body += "\"results\":[" + g_results + "],";
+   // v3.05: the tick tape (WP4D) and the management journal. Both are opt-in
+   // shapes — the Desk ignores them when the feature flags are off, and an
+   // older Desk simply never reads the keys.
+   body += "\"ticks\":" + TicksJson(batch, TickStreamPerSymbol) + ",";
+   body += "\"managementEvents\":" + ManagementEventsJson();
    body += "}";
 
    string response = "";
@@ -786,6 +878,8 @@ void Sync()
 
    g_lastOk = NowServer();
    g_results = "";
+   for(int i = 0; i < g_mgmtEventCount; i++) g_mgmtEvents[i] = "";
+   g_mgmtEventCount = 0;
    // Learn the true UTC offset from the platform server's own clock BEFORE the
    // next beat builds its timestamps (v3.04, note 13).
    LearnBrokerClock(response);
@@ -1377,6 +1471,107 @@ bool IsNewsBlackout(const string symbol)
 //+------------------------------------------------------------------+
 //| Local execution / plan management                                 |
 //+------------------------------------------------------------------+
+/**
+ * Place a real pending order for a limit/stop entry.
+ *
+ * v3.04 had no pending-order path at all: a limit entry was simulated by
+ * watching the trigger tick-by-tick and firing a market order the moment price
+ * touched it. That is not a limit order — it pays whatever the market is when
+ * the EA's timer next runs, which on a 500 ms heartbeat is up to half a second
+ * of movement in a fast market, on exactly the entries (pullbacks) where the
+ * fill price is the whole edge.
+ *
+ * Returns true when an order is working (either just placed, or already live).
+ */
+bool TryPlacePending(const int index)
+{
+   string symbol = g_plans[index].symbol;
+   if(g_plans[index].pendingTicket != 0) return true;
+   if(g_plans[index].entryType != 1 && g_plans[index].entryType != 2) return false;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick)) return false;
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0) return false;
+   double spread = (tick.ask - tick.bid) / point;
+   if(g_plans[index].maxSpreadPoints > 0 && spread > g_plans[index].maxSpreadPoints) return false;
+   if(!TradingAllowed(symbol)) return false;
+
+   bool isBuy = g_plans[index].isBuy;
+   bool isLimit = (g_plans[index].entryType == 1);
+   double trigger = g_plans[index].trigger;
+   // Brokers reject a pending order on the wrong side of the market. When the
+   // market is already through the trigger, `false` lets the caller fall back
+   // to the tick-through path — the entry is not lost, it is simply no longer
+   // a resting order.
+   if(isBuy && isLimit && !(trigger < tick.ask - point)) return false;
+   if(isBuy && !isLimit && !(trigger > tick.ask + point)) return false;
+   if(!isBuy && isLimit && !(trigger > tick.bid + point)) return false;
+   if(!isBuy && !isLimit && !(trigger < tick.bid - point)) return false;
+
+   // Expiry: the plan's own TTL, capped by a local maximum so a plan with no
+   // server expiry cannot rest in the book indefinitely.
+   long capMs = NowUtcMs() + (long)MathMax(1, MaxPendingOrderMinutes) * 60 * 1000;
+   long expireMs = (g_plans[index].expiresAt > 0 ? MathMin(g_plans[index].expiresAt, capMs) : capMs);
+   datetime expiry = (datetime)(expireMs / 1000);
+   ENUM_ORDER_TYPE_TIME timeType = ORDER_TIME_SPECIFIED;
+   long modes = SymbolInfoInteger(symbol, SYMBOL_EXPIRATION_MODE);
+   if((modes & SYMBOL_EXPIRATION_SPECIFIED) == 0)
+   {
+      // The broker will not honour a stated expiry; fall back to GTC and rely
+      // on the local expiry check above (which cancels it), rather than
+      // refusing an otherwise valid entry.
+      timeType = ORDER_TIME_GTC;
+      expiry = 0;
+   }
+
+   trade.SetDeviationInPoints((int)MathMax(1, g_plans[index].maxSlippagePoints));
+   string comment = "nt:" + g_plans[index].id;
+   double lots = NormaliseVolume(symbol, g_plans[index].lots);
+   if(lots <= 0) return false;
+   bool ok = false;
+   if(isBuy && isLimit)       ok = trade.BuyLimit(lots, trigger, symbol, g_plans[index].sl, g_plans[index].tp, timeType, expiry, comment);
+   else if(isBuy)             ok = trade.BuyStop(lots, trigger, symbol, g_plans[index].sl, g_plans[index].tp, timeType, expiry, comment);
+   else if(isLimit)           ok = trade.SellLimit(lots, trigger, symbol, g_plans[index].sl, g_plans[index].tp, timeType, expiry, comment);
+   else                       ok = trade.SellStop(lots, trigger, symbol, g_plans[index].sl, g_plans[index].tp, timeType, expiry, comment);
+
+   if(ok)
+   {
+      g_plans[index].pendingTicket = (ulong)trade.ResultOrder();
+      g_plans[index].pendingPlacedAt = NowUtcMs();
+      PmEvent((ulong)trade.ResultOrder(), "pending_placed",
+              StringFormat("%s %s %.5f (%s) expiry %s",
+                           (isBuy ? "BUY" : "SELL"), (isLimit ? "LIMIT" : "STOP"),
+                           trigger, symbol,
+                           (timeType == ORDER_TIME_SPECIFIED ? TimeToString(expiry, TIME_DATE | TIME_MINUTES) : "GTC/local")));
+      AddResult(g_plans[index].id, "done", (long)trade.ResultOrder(), trigger, 0,
+                StringFormat("pending %s placed at %.5f", (isLimit ? "limit" : "stop"), trigger));
+      return true;
+   }
+   AddResult(g_plans[index].id, "rejected", 0, 0, 0,
+             "pending rejected: retcode " + IntegerToString(trade.ResultRetcode()) + " " + trade.ResultRetcodeDescription());
+   return false;
+}
+
+void CancelPending(const int index, const string reason)
+{
+   if(g_plans[index].pendingTicket == 0) return;
+   ulong ticket = g_plans[index].pendingTicket;
+   if(trade.OrderDelete(ticket))
+      PmEvent(ticket, "pending_cancelled", reason);
+   else
+      PmEvent(ticket, "pending_cancel_failed", trade.ResultRetcodeDescription());
+   g_plans[index].pendingTicket = 0;
+}
+
+bool LastClosedBarBeyondTrigger(const string symbol, const bool isBuy, const double trigger)
+{
+   MqlRates rates[];
+   if(CopyRates(symbol, PERIOD_CURRENT, 0, 3, rates) < 3) return false;
+   double closed = rates[1].close; // rates[0] is the forming bar
+   return isBuy ? (closed >= trigger) : (closed <= trigger);
+}
+
 void EvaluatePlans()
 {
    // UTC, because `expiresAt` comes from the server as a UTC epoch in
@@ -1392,6 +1587,7 @@ void EvaluatePlans()
       if(g_plans[i].expiresAt > 0 && nowMs > g_plans[i].expiresAt)
       {
          Log("Plan " + g_plans[i].id + " expired untriggered.");
+         CancelPending(i, "plan expired");
          g_plans[i].active = false;
          continue;
       }
@@ -1408,19 +1604,37 @@ void EvaluatePlans()
       if(invalidated)
       {
          Log("Plan " + g_plans[i].id + " invalidated before trigger.");
+         CancelPending(i, "plan invalidated");
          g_plans[i].active = false;
          continue;
       }
 
-      bool through = g_plans[i].isBuy ? price >= g_plans[i].trigger : price <= g_plans[i].trigger;
-      if(!through)
+      // ── v3.05: a working pending order owns the plan until it fills,
+      // expires, is invalidated, or the market runs away from it.
+      if(UsePendingOrders && g_plans[i].entryType != 0 && g_plans[i].pendingTicket != 0)
       {
-         g_plans[i].confirmCount = 0;
+         ulong pendingTicket = g_plans[i].pendingTicket;
+         if(!OrderSelect(pendingTicket))
+         {
+            // Filled or removed at the terminal: the state is created by
+            // OnTradeTransaction/the reconcile pass, so the plan is done.
+            g_plans[i].pendingTicket = 0;
+            g_plans[i].active = false;
+            continue;
+         }
+         double riskPoints = g_plans[i].riskPoints > 0 ? g_plans[i].riskPoints : MathAbs(g_plans[i].trigger - g_plans[i].sl) / point;
+         // "Ran away": the entry missed by half a risk unit. Chasing it from
+         // here would fill at a price the plan was never sized for.
+         double away = g_plans[i].isBuy ? (price - g_plans[i].trigger) / point
+                                        : (g_plans[i].trigger - price) / point;
+         if(riskPoints > 0 && away >= riskPoints * 0.5)
+         {
+            CancelPending(i, StringFormat("price ran %.2fR away from the trigger unfilled — entry missed", away / riskPoints));
+            g_plans[i].active = false;
+            continue;
+         }
          continue;
       }
-      g_plans[i].confirmCount++;
-      if(g_plans[i].confirmCount < g_plans[i].confirmTicks) continue;
-      if(g_plans[i].maxSpreadPoints > 0 && spread > g_plans[i].maxSpreadPoints) continue;
 
       // Keep the plan through a temporary news blackout; it will expire using
       // its server-generated TTL instead of turning a calendar pause into a
@@ -1435,6 +1649,35 @@ void EvaluatePlans()
          g_plans[i].active = false;
          continue;
       }
+
+      // ── v3.05: prefer a resting order for limit/stop entries ──────────────
+      if(UsePendingOrders && g_plans[i].entryType != 0 && TryPlacePending(i)) continue;
+
+      bool through = g_plans[i].isBuy ? price >= g_plans[i].trigger : price <= g_plans[i].trigger;
+      if(!through)
+      {
+         g_plans[i].confirmCount = 0;
+         continue;
+      }
+      if(ConfirmOnBarClose && g_plans[i].barConfirm)
+      {
+         // Confirmation is a CLOSED bar beyond the trigger, not N ticks of a
+         // forming one: N ticks can all belong to the same wig that immediately
+         // reverses, which is what makes a breakout-chase entry systematically
+         // worse than the level it is chasing.
+         if(!LastClosedBarBeyondTrigger(symbol, g_plans[i].isBuy, g_plans[i].trigger))
+         {
+            g_plans[i].confirmCount = 0;
+            continue;
+         }
+      }
+      else
+      {
+         g_plans[i].confirmCount++;
+         if(g_plans[i].confirmCount < g_plans[i].confirmTicks) continue;
+      }
+      if(g_plans[i].maxSpreadPoints > 0 && spread > g_plans[i].maxSpreadPoints) continue;
+
       ExecutePlan(i, price);
    }
 }
@@ -1471,64 +1714,18 @@ void ExecutePlan(const int index, const double referencePrice)
    }
    // Exactly one terminal attempt per plan. Retrying a failed buy here risks a
    // duplicate position after a broker timeout.
+   g_plans[index].pendingTicket = 0;
    g_plans[index].active = false;
 }
 
-void ManageOpenPositions()
-{
-   if(DailyLossBreached())
-   {
-      FlattenAll("local daily loss circuit breaker");
-      return;
-   }
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      string symbol = PositionGetSymbol(i);
-      if(symbol == "") continue;
-      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
-      ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
-      bool isBuy = PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY;
-      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
-      double sl = PositionGetDouble(POSITION_SL);
-      double tp = PositionGetDouble(POSITION_TP);
-      double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
-      if(point <= 0 || sl == 0) continue;
-
-      MqlTick tick;
-      if(!SymbolInfoTick(symbol, tick)) continue;
-      double current = isBuy ? tick.bid : tick.ask;
-      double riskPoints = MathAbs(entry - sl) / point;
-      if(riskPoints <= 0) continue;
-      double movePoints = (isBuy ? current - entry : entry - current) / point;
-      double progressR = movePoints / riskPoints;
-
-      ArmedPlan plan;
-      bool hasPlan = FindPlanForSymbol(symbol, plan);
-      double beTrigger = hasPlan && plan.beTriggerR > 0 ? plan.beTriggerR : 1.0;
-      double beOffset = hasPlan ? plan.beOffsetR : 0.2;
-      double newSl = sl;
-      if(progressR >= beTrigger)
-      {
-         double candidate = isBuy ? entry + beOffset * riskPoints * point : entry - beOffset * riskPoints * point;
-         if((isBuy && candidate > newSl) || (!isBuy && candidate < newSl)) newSl = candidate;
-      }
-      if(hasPlan && plan.trailEnabled && progressR >= plan.trailActivateR)
-      {
-         double atr = AtrValue(symbol, PERIOD_M15, 14);
-         if(atr > 0)
-         {
-            double candidate = isBuy ? current - atr * plan.trailMult : current + atr * plan.trailMult;
-            if((isBuy && candidate > newSl) || (!isBuy && candidate < newSl)) newSl = candidate;
-         }
-      }
-      if(newSl != sl && RespectsStopLevel(symbol, isBuy, current, newSl))
-      {
-         int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
-         ModifyPositionByTicket(ticket, symbol, NormalizeDouble(newSl, digits), tp);
-      }
-   }
-}
+// NOTE (v3.05): the v3.04 ManageOpenPositions() lived here. It looked its
+// management plan up through the symbol→plan lookup helper, which only ever
+// returns a plan that is still ACTIVE — and a fill deactivates the plan — so
+// after a fill (which deactivates the plan) every threshold fell back to a
+// hard-coded +1.0R/+0.2R breakeven, the trail (M15 ATR for every mode) and the
+// partial/time-stop/pyramid ladder never ran. It has been replaced by the
+// ticket-keyed state machine further down this file; see "v3.05 — POSITION
+// MANAGEMENT STATE MACHINE".
 
 bool ModifyPositionByTicket(const ulong ticket, const string symbol, const double sl, const double tp)
 {
@@ -1564,6 +1761,7 @@ void HandleCommand(const string obj)
    else if(type == "close") ClosePosition((ulong)JsonNumber(obj, "ticket"), 0, id);
    else if(type == "close_partial") ClosePosition((ulong)JsonNumber(obj, "ticket"), JsonNumber(obj, "lots"), id);
    else if(type == "modify") ModifyPositionCommand(obj, id);
+   else if(type == "set_management") ApplyManagementCommand(obj, id);
    else if(type == "flatten_all") { FlattenAll(JsonString(obj, "reason")); AddResult(id, "done", 0, 0, 0, ""); }
    else AddResult(id, "skipped", 0, 0, 0, "unknown command type");
 }
@@ -1612,16 +1810,79 @@ void ArmPlanFromJson(const string obj, const string commandId)
    g_plans[slot].expiresAt = (long)JsonNumber(plan, "expiresAt");
    g_plans[slot].confirmTicks = (int)MathMax(1, JsonNumber(plan, "confirmTicks"));
    g_plans[slot].confirmCount = 0;
+   g_plans[slot].pendingTicket = 0;
+   g_plans[slot].pendingPlacedAt = 0;
+
+   // ── v3.05: entry semantics, mode and the entry frame ──────────────────────
+   // "break"/"market" fire on the trigger tick (legacy behaviour, unchanged);
+   // "limit"/"stop" place a REAL pending order instead of chasing the price;
+   // "confirm"/"retest" wait for a closed bar beyond the trigger when
+   // ConfirmOnBarClose is on.
+   string triggerType = JsonString(plan, "triggerType");
+   if(triggerType == "limit")       g_plans[slot].entryType = 1;
+   else if(triggerType == "stop")   g_plans[slot].entryType = 2;
+   else                             g_plans[slot].entryType = 0;
+   g_plans[slot].barConfirm = (triggerType == "confirm" || triggerType == "retest");
+
+   string modeName = JsonString(plan, "mode");
+   g_plans[slot].mode = (modeName == "scalp" ? 0 : (modeName == "swing" ? 2 : 1));
+   g_plans[slot].costPrice = JsonNumber(plan, "costPrice");
+
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   double riskPoints = JsonNumber(plan, "riskPoints");
+   if(riskPoints <= 0 && point > 0)
+      riskPoints = MathAbs(g_plans[slot].trigger - g_plans[slot].sl) / point;
+   g_plans[slot].riskPoints = riskPoints;
+
+   string entryTf = JsonString(plan, "entryTimeframe");
+   int tfIndex = TfIndexFromName(entryTf);
+   if(tfIndex < 0)
+   {
+      string managementForTf = JsonObject(plan, "management");
+      string timeStopForTf = JsonObject(managementForTf, "timeStop");
+      tfIndex = TfIndexFromName(JsonString(timeStopForTf, "timeframe"));
+   }
+   if(tfIndex < 0)
+      tfIndex = (g_plans[slot].mode == 0 ? 1 : (g_plans[slot].mode == 1 ? 4 : 6)); // M2 / M15 / H1
+   g_plans[slot].entryTfIndex = tfIndex;
+
+   // ── Management policy is captured HERE, at arm time ───────────────────────
+   // The whole point of v3.05: the position must not need the plan later.
    string management = JsonObject(plan, "management");
    string breakeven = JsonObject(management, "breakeven");
-   string trail = JsonObject(management, "trail");
    g_plans[slot].beTriggerR = JsonNumber(breakeven, "triggerR");
    g_plans[slot].beOffsetR = JsonNumber(breakeven, "offsetR");
+   int structureFlag = JsonBool(breakeven, "structureBuffer");
+   g_plans[slot].beStructure = (structureFlag != 0);
+   string trail = JsonObject(management, "trail");
    g_plans[slot].trailMult = JsonNumber(trail, "mult");
    g_plans[slot].trailActivateR = JsonNumber(trail, "activateAtR");
-   g_plans[slot].trailEnabled = trail != "";
+   g_plans[slot].trailStepPoints = JsonNumber(trail, "stepPoints");
+   double trailPeriod = JsonNumber(trail, "period");
+   g_plans[slot].trailPeriod = (trailPeriod > 0 ? (int)trailPeriod : 14);
+   g_plans[slot].trailEnabled = (trail != "");
+   string timeStop = JsonObject(management, "timeStop");
+   g_plans[slot].timeStopBars = (int)JsonNumber(timeStop, "noProgressBars");
+   string pyramid = JsonObject(management, "pyramid");
+   g_plans[slot].pyramidMaxAdds = (int)JsonNumber(pyramid, "maxAdds");
+   g_plans[slot].pyramidAddAtR = JsonNumber(pyramid, "addAtR");
+   g_plans[slot].pyramidSizeRatio = JsonNumber(pyramid, "sizeRatio");
+   g_plans[slot].pyramidRequireBe = (JsonBool(pyramid, "requireBaseAtBreakeven") == 1);
+   string guards = JsonObject(management, "guards");
+   g_plans[slot].flatBeforeClose = (JsonBool(guards, "flatBeforeSessionClose") == 1);
+   PositionState policyCarrier;
+   ParsePartials(management, policyCarrier);
+   g_plans[slot].partialCount = policyCarrier.partialCount;
+   for(int i = 0; i < 4; i++)
+   {
+      g_plans[slot].partialAtR[i] = policyCarrier.partialAtR[i];
+      g_plans[slot].partialPct[i] = policyCarrier.partialPct[i];
+   }
+
    if(g_plans[slot].beTriggerR <= 0) g_plans[slot].beTriggerR = 1.0;
-   if(g_plans[slot].trailMult <= 0) g_plans[slot].trailMult = 2.5;
+   if(g_plans[slot].trailMult <= 0)
+      g_plans[slot].trailMult = (g_plans[slot].mode == 0 ? PM_TRAIL_MULT_SCALP :
+                                (g_plans[slot].mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING));
    g_plans[slot].active = true;
    AddResult(commandId, "done", 0, 0, 0, "");
 }
@@ -1662,9 +1923,139 @@ void ModifyPositionCommand(const string obj, const string commandId)
    AddResult(commandId, ok ? "done" : "rejected", (long)ticket, 0, 0, ok ? "" : "modify rejected");
 }
 
+/**
+ * Parse the `partials` ladder out of a management block into a position state.
+ *
+ * The ladder is a JSON array of objects. It is scanned object-by-object with
+ * the same brace counter the command splitter uses, rather than by string
+ * search for each key, so a nested object inside a rung cannot be mistaken for
+ * the rung itself. Parsing stops at the array's closing bracket — never at the
+ * end of the enclosing document, which is how a missing rung once produced a
+ * "partial" at R=0.
+ */
+int ParsePartials(const string json, PositionState &ps)
+{
+   ps.partialCount = 0;
+   for(int i = 0; i < 4; i++) { ps.partialAtR[i] = 0; ps.partialPct[i] = 0; }
+   int cursor = StringFind(json, "\"partials\"");
+   if(cursor < 0) return 0;
+   int start = StringFind(json, "[", cursor);
+   if(start < 0) return 0;
+   int depth = 0;
+   int objStart = -1;
+   int count = 0;
+   int length = StringLen(json);
+   for(int i = start; i < length && count < 4; i++)
+   {
+      ushort ch = StringGetCharacter(json, i);
+      if(ch == '{')
+      {
+         if(depth == 0) objStart = i;
+         depth++;
+      }
+      else if(ch == '}')
+      {
+         depth--;
+         if(depth == 0 && objStart >= 0)
+         {
+            string obj = StringSubstr(json, objStart, i - objStart + 1);
+            double atR = JsonNumber(obj, "atR");
+            double pct = JsonNumber(obj, "closePct");
+            if(atR > 0 && pct > 0)
+            {
+               ps.partialAtR[count] = atR;
+               ps.partialPct[count] = pct;
+               count++;
+            }
+            objStart = -1;
+         }
+      }
+      else if(ch == ']' && depth == 0) break;
+   }
+   ps.partialCount = count;
+   return count;
+}
+
+/**
+ * `set_management` — replace the management policy of an OPEN position.
+ *
+ * v3.04 declared this command in types.ts and never implemented it: the server
+ * could send it, the EA's switch fell through to "unknown command type", and
+ * the management a plan had described was silently lost when the plan itself
+ * was replaced. It is implemented here against the POSITION STATE (by ticket),
+ * which is the only object that survives the plan.
+ */
+void ApplyManagementCommand(const string obj, const string commandId)
+{
+   ulong ticket = (ulong)JsonNumber(obj, "ticket");
+   if(ticket == 0 || !PositionSelectByTicket(ticket))
+   {
+      AddResult(commandId, "skipped", (long)ticket, 0, 0, "position not found");
+      return;
+   }
+   int index = PsEnsure(ticket);
+   if(index < 0)
+   {
+      AddResult(commandId, "rejected", (long)ticket, 0, 0, "no free position-state slot");
+      return;
+   }
+   string management = JsonObject(obj, "management");
+   if(management == "")
+   {
+      AddResult(commandId, "rejected", (long)ticket, 0, 0, "set_management has no management block");
+      return;
+   }
+   PositionState ps = g_ps[index];
+   string breakeven = JsonObject(management, "breakeven");
+   if(breakeven != "")
+   {
+      ps.beTriggerR = JsonNumber(breakeven, "triggerR");
+      ps.beOffsetR = JsonNumber(breakeven, "offsetR");
+      ps.beStructure = (JsonBool(breakeven, "structureBuffer") == 1);
+   }
+   string trail = JsonObject(management, "trail");
+   ps.trailEnabled = (trail != "");
+   if(trail != "")
+   {
+      ps.trailMult = JsonNumber(trail, "mult");
+      ps.trailActivateR = JsonNumber(trail, "activateAtR");
+      ps.trailStepPoints = JsonNumber(trail, "stepPoints");
+      double period = JsonNumber(trail, "period");
+      ps.trailPeriod = (period > 0 ? (int)period : 14);
+      if(ps.trailMult <= 0)
+         ps.trailMult = (ps.mode == 0 ? PM_TRAIL_MULT_SCALP :
+                        (ps.mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING));
+   }
+   string timeStop = JsonObject(management, "timeStop");
+   ps.timeStopBars = (int)JsonNumber(timeStop, "noProgressBars");
+   ps.timeStopEnabled = (timeStop != "" && ps.timeStopBars > 0);
+   string guards = JsonObject(management, "guards");
+   ps.flatBeforeClose = (JsonBool(guards, "flatBeforeSessionClose") == 1);
+   string pyramid = JsonObject(management, "pyramid");
+   ps.pyramidEnabled = (pyramid != "");
+   if(pyramid != "")
+   {
+      ps.pyramidMaxAdds = (int)JsonNumber(pyramid, "maxAdds");
+      ps.pyramidAddAtR = JsonNumber(pyramid, "addAtR");
+      ps.pyramidSizeRatio = JsonNumber(pyramid, "sizeRatio");
+      ps.pyramidRequireBe = (JsonBool(pyramid, "requireBaseAtBreakeven") == 1);
+   }
+   ps.partialCount = ParsePartials(management, ps);
+   g_ps[index] = ps;
+   PsSave(ps);
+   PmEvent(ticket, "set_management", "management policy replaced by the Desk");
+   AddResult(commandId, "done", (long)ticket, 0, 0, "");
+}
+
 void FlattenAll(const string reason)
 {
-   for(int i = 0; i < MAX_PLANS; i++) g_plans[i].active = false;
+   for(int i = 0; i < MAX_PLANS; i++)
+   {
+      // A pending order is a live order: flattening must remove it, or the
+      // desk has "closed everything" while an entry waits in the book.
+      if(g_plans[i].active && g_plans[i].pendingTicket != 0) CancelPending(i, "flatten_all: " + reason);
+      g_plans[i].active = false;
+   }
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       string symbol = PositionGetSymbol(i);
@@ -1735,21 +2126,1079 @@ double NormaliseVolume(const string symbol, const double lots)
    return NormalizeDouble(normalised, volumeDigits);
 }
 
-double AtrValue(const string symbol, const ENUM_TIMEFRAMES timeframe, const int period)
+// AtrValue() moved to the v3.05 state-machine section: the v3.04 version
+// created, copied and released an indicator handle on EVERY call — several per
+// tick, per position. The cached version lives with the state machine.
+
+// REMOVED in v3.05: FindPlanForSymbol(). It was the path by which management
+// looked a plan up by symbol, and because it required `active` it returned
+// nothing after a fill — the root of the lost-management defect. Management is
+// keyed by ticket now (see ManageOnePosition), so there is no reason for a
+// symbol lookup to exist, and leaving one would invite the defect back.
+
+//+------------------------------------------------------------------+
+//| v3.05 — POSITION MANAGEMENT STATE MACHINE                        |
+//|                                                                  |
+//| WHY THIS REPLACES THE OLD ManageOpenPositions()                  |
+//|                                                                  |
+//| v3.04 lost the management plan at fill. ExecutePlan() set        |
+//| g_plans[i].active = false, and every management feature —        |
+//| breakeven, the trailing stop, partials, the time stop, the       |
+//| session flatten, pyramiding — was looked up through              |
+//| FindPlanForSymbol(), which requires `active`. After a fill the   |
+//| EA therefore fell back to hard-coded +1.0R / +0.2R breakeven,    |
+//| never trailed, and executed NONE of the partial/time-stop/       |
+//| pyramid ladder the server had computed.                          |
+//|                                                                  |
+//| The state below is keyed by TICKET and owns its own copy of the  |
+//| policy. It never consults an armed plan: the plan can be         |
+//| replaced, expired, cancelled or lost with a terminal restart and  |
+//| the position is still managed exactly as it was planned.         |
+//|                                                                  |
+//| The rules implemented here are the SAME rules as                 |
+//| artifacts/api-server/src/lib/multiasset/position-manager.ts, and  |
+//| they are pinned by golden vectors on both sides (see              |
+//| docs/mt5-live-desk-v4.md, "MQL5 ↔ TypeScript mapping").           |
+//+------------------------------------------------------------------+
+
+#define MAX_POS_STATES   128
+#define MAX_ATR_HANDLES  48
+#define MAX_TICK_BUF     4000
+#define MAX_MGMT_EVENTS  64
+// MQL5 global variables hold a DOUBLE only. A 29-field position record cannot
+// fit in one, so the durable record lives in the terminal's COMMON files
+// folder (shared by every chart, exactly like the link file) and a global
+// variable is kept as the TICKET INDEX + freshness mirror. That is what makes
+// `PsRestoreAll()` able to find every position this EA manages after a
+// restart without scanning the filesystem.
+#define PS_PREFIX        "NTPS_"
+#define PS_DIR           "Neurotrade\\pos\\"
+
+// Chandelier multiples on the ENTRY timeframe's ATR (v3.05).
+#define PM_TRAIL_MULT_SCALP    2.0
+#define PM_TRAIL_MULT_INTRADAY 2.5
+#define PM_TRAIL_MULT_SWING    3.0
+#define PM_TRAIL_MIN_STEP_ATR  0.1
+#define PM_BREAKEVEN_PROFIT_R  0.05
+#define PM_MODIFY_COOLDOWN_MS  1500
+#define PM_MODIFY_COOLDOWN_R   0.5
+#define PM_TIME_STOP_PROGRESS_R 0.5
+#define PM_TIME_STOP_MFE_R      1.0
+#define PM_FLAT_BEFORE_CLOSE_MIN 15
+#define PM_SWING_LOOKBACK       2
+// A modify that fails is retried on a later evaluation with this back-off,
+// never in a tight loop: OrderSend() is synchronous and a rejected modify
+// retried immediately is a rejected modify.
+#define PM_RETRY_BACKOFF_MS     2000
+#define PM_MAX_RETRY            4
+
+/** One managed position. Mirrors position-manager.ts `PositionState` 1:1. */
+struct PositionState
 {
-   int handle = iATR(symbol, timeframe, period);
-   if(handle == INVALID_HANDLE) return 0;
-   double buffer[];
-   int copied = CopyBuffer(handle, 0, 0, 1, buffer);
-   IndicatorRelease(handle);
-   return copied > 0 ? buffer[0] : 0;
+   ulong           ticket;
+   string          planId;
+   string          symbol;
+   bool            isBuy;
+   int             mode;            // 0 scalp, 1 intraday, 2 swing
+   int             entryTfIndex;    // index into TF_LIST
+   double          entry;
+   double          initialSl;
+   double          sl;
+   double          tp;
+   double          riskPrice;
+   double          volume;
+   double          initialVolume;
+   long            openedAt;        // UTC epoch ms
+   int             barsSinceEntry;
+   double          progressR;
+   double          mfeR;
+   double          bestPrice;
+   string          stage;
+   int             partialsDone;
+   bool            beDone;
+   bool            trailArmed;
+   int             pyramidAdds;
+   double          closedVolume;
+   double          costPrice;
+   double          atrEntry;
+   long            lastModifyAt;
+   double          lastModifyR;
+   long            retryAfter;
+   int             retryCount;
+   // ── Policy: the position's own copy. Never looked up in g_plans. ──────────
+   double          beTriggerR;
+   double          beOffsetR;
+   bool            beStructure;
+   int             partialCount;
+   double          partialAtR[4];
+   double          partialPct[4];
+   bool            trailEnabled;
+   double          trailMult;
+   double          trailActivateR;
+   double          trailStepPoints;
+   int             trailPeriod;
+   bool            timeStopEnabled;
+   int             timeStopBars;
+   bool            pyramidEnabled;
+   int             pyramidMaxAdds;
+   double          pyramidAddAtR;
+   double          pyramidSizeRatio;
+   bool            pyramidRequireBe;
+   bool            flatBeforeClose;
+};
+
+struct AtrHandleRec
+{
+   string          symbol;
+   ENUM_TIMEFRAMES tf;
+   int             period;
+   int             handle;
+};
+
+struct TickRec
+{
+   string          symbol;
+   long            ts;
+   double          bid;
+   double          ask;
+};
+
+PositionState g_ps[MAX_POS_STATES];
+int           g_psCount = 0;
+AtrHandleRec  g_atrHandles[MAX_ATR_HANDLES];
+int           g_atrHandleCount = 0;
+TickRec       g_ticks[MAX_TICK_BUF];
+int           g_tickCount = 0;
+string        g_mgmtEvents[MAX_MGMT_EVENTS];
+int           g_mgmtEventCount = 0;
+
+//+------------------------------------------------------------------+
+//| State array plumbing                                             |
+//+------------------------------------------------------------------+
+int PsIndex(const ulong ticket)
+{
+   for(int i = 0; i < g_psCount; i++)
+      if(g_ps[i].ticket == ticket) return i;
+   return -1;
 }
 
-bool FindPlanForSymbol(const string symbol, ArmedPlan &out)
+int PsEnsure(const ulong ticket)
 {
-   for(int i = 0; i < MAX_PLANS; i++)
-      if(g_plans[i].active && g_plans[i].symbol == symbol) { out = g_plans[i]; return true; }
+   int index = PsIndex(ticket);
+   if(index >= 0) return index;
+   if(g_psCount >= MAX_POS_STATES) return -1;
+   PositionState blank;
+   blank.ticket = ticket;
+   blank.stage = "OPEN_RISK";
+   blank.beTriggerR = 0;
+   blank.trailMult = 0;
+   blank.beStructure = true;
+   blank.trailPeriod = 14;
+   g_ps[g_psCount] = blank;
+   return g_psCount++;
+}
+
+void PsRemove(const ulong ticket)
+{
+   int index = PsIndex(ticket);
+   if(index < 0) return;
+   for(int i = index; i < g_psCount - 1; i++) g_ps[i] = g_ps[i + 1];
+   g_psCount--;
+   string name = PS_PREFIX + IntegerToString((long)ticket);
+   if(GlobalVariableCheck(name)) GlobalVariableDel(name);
+   string file = PS_DIR + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
+                 IntegerToString((long)ticket) + ".csv";
+   FileDelete(file, FILE_COMMON);
+}
+
+//+------------------------------------------------------------------+
+//| Persistence (COMMON files + global-variable index)               |
+//+------------------------------------------------------------------+
+string PsStageOr(const string stage) { return stage == "" ? "OPEN_RISK" : stage; }
+
+string PsEncode(const PositionState &ps)
+{
+   string f[];
+   ArrayResize(f, 29);
+   f[0]  = "v1";
+   f[1]  = IntegerToString((long)ps.ticket);
+   f[2]  = ps.planId;
+   f[3]  = ps.symbol;
+   f[4]  = ps.isBuy ? "b" : "s";
+   f[5]  = (ps.mode == 0 ? "S" : (ps.mode == 1 ? "I" : "W"));
+   f[6]  = TF_NAMES[ps.entryTfIndex];
+   f[7]  = DoubleToString(ps.entry, 8);
+   f[8]  = DoubleToString(ps.initialSl, 8);
+   f[9]  = DoubleToString(ps.sl, 8);
+   f[10] = (ps.tp > 0 ? DoubleToString(ps.tp, 8) : "");
+   f[11] = DoubleToString(ps.riskPrice, 8);
+   f[12] = DoubleToString(ps.volume, 8);
+   f[13] = DoubleToString(ps.initialVolume, 8);
+   f[14] = IntegerToString(ps.openedAt);
+   f[15] = IntegerToString(ps.barsSinceEntry);
+   f[16] = DoubleToString(ps.progressR, 8);
+   f[17] = DoubleToString(ps.mfeR, 8);
+   f[18] = DoubleToString(ps.bestPrice, 8);
+   f[19] = PsStageOr(ps.stage);
+   f[20] = IntegerToString(ps.partialsDone);
+   f[21] = (ps.beDone ? "1" : "0");
+   f[22] = (ps.trailArmed ? "1" : "0");
+   f[23] = IntegerToString(ps.pyramidAdds);
+   f[24] = DoubleToString(ps.closedVolume, 8);
+   f[25] = DoubleToString(ps.costPrice, 8);
+   f[26] = DoubleToString(ps.atrEntry, 8);
+   f[27] = IntegerToString(ps.lastModifyAt);
+   f[28] = DoubleToString(ps.lastModifyR, 8);
+   string out = f[0];
+   for(int i = 1; i < 29; i++) out += "|" + f[i];
+   return out;
+}
+
+bool PsDecode(const string text, PositionState &ps)
+{
+   string f[];
+   int n = StringSplit(text, StringGetCharacter("|", 0), f);
+   if(n != 29) return false;
+   if(f[0] != "v1") return false;
+   ps.ticket         = (ulong)StringToInteger(f[1]);
+   ps.planId         = f[2];
+   ps.symbol         = f[3];
+   ps.isBuy          = (f[4] == "b");
+   ps.mode           = (f[5] == "S" ? 0 : (f[5] == "I" ? 1 : 2));
+   ps.entryTfIndex   = TfIndexFromName(f[6]);
+   ps.entry          = StringToDouble(f[7]);
+   ps.initialSl      = StringToDouble(f[8]);
+   ps.sl             = StringToDouble(f[9]);
+   ps.tp             = (f[10] == "" ? 0 : StringToDouble(f[10]));
+   ps.riskPrice      = StringToDouble(f[11]);
+   ps.volume         = StringToDouble(f[12]);
+   ps.initialVolume  = StringToDouble(f[13]);
+   ps.openedAt       = (long)StringToInteger(f[14]);
+   ps.barsSinceEntry = (int)StringToInteger(f[15]);
+   ps.progressR      = StringToDouble(f[16]);
+   ps.mfeR           = StringToDouble(f[17]);
+   ps.bestPrice      = StringToDouble(f[18]);
+   ps.stage          = f[19];
+   ps.partialsDone   = (int)StringToInteger(f[20]);
+   ps.beDone         = (f[21] == "1");
+   ps.trailArmed     = (f[22] == "1");
+   ps.pyramidAdds    = (int)StringToInteger(f[23]);
+   ps.closedVolume   = StringToDouble(f[24]);
+   ps.costPrice      = StringToDouble(f[25]);
+   ps.atrEntry       = StringToDouble(f[26]);
+   ps.lastModifyAt   = (long)StringToInteger(f[27]);
+   ps.lastModifyR    = StringToDouble(f[28]);
+   return (ps.entryTfIndex >= 0 && ps.riskPrice > 0);
+}
+
+string PsFileName(const ulong ticket)
+{
+   return PS_DIR + IntegerToString((long)AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
+          IntegerToString((long)ticket) + ".csv";
+}
+
+void PsSave(const PositionState &ps)
+{
+   string file = PsFileName(ps.ticket);
+   int handle = FileOpen(file, FILE_WRITE | FILE_TXT | FILE_COMMON | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+   {
+      Log("position state write failed for #" + IntegerToString((long)ps.ticket));
+      return;
+   }
+   FileWriteString(handle, PsEncode(ps));
+   FileClose(handle);
+   GlobalVariableSet(PS_PREFIX + IntegerToString((long)ps.ticket), (double)NowUtcMs());
+}
+
+bool PsLoad(const ulong ticket, PositionState &ps)
+{
+   string file = PsFileName(ticket);
+   if(!FileIsExist(file, FILE_COMMON)) return false;
+   int handle = FileOpen(file, FILE_READ | FILE_TXT | FILE_COMMON | FILE_ANSI);
+   if(handle == INVALID_HANDLE) return false;
+   string text = "";
+   while(!FileIsEnding(handle)) text += FileReadString(handle);
+   FileClose(handle);
+   StringTrimRight(text);
+   StringTrimLeft(text);
+   if(text == "") return false;
+   return PsDecode(text, ps);
+}
+
+/**
+ * Rebuild every managed position after a restart.
+ *
+ * The global variables are the INDEX (which tickets this terminal manages) and
+ * the files are the RECORD. A ticket whose position no longer exists is
+ * cleared from both — a stale record must never resurrect management for a
+ * position that is already closed.
+ */
+void PsRestoreAll()
+{
+   g_psCount = 0;
+   int total = GlobalVariablesTotal();
+   int restored = 0;
+   for(int i = 0; i < total; i++)
+   {
+      string name = GlobalVariableName(i);
+      if(StringFind(name, PS_PREFIX) != 0) continue;
+      ulong ticket = (ulong)StringToInteger(StringSubstr(name, StringLen(PS_PREFIX)));
+      if(ticket == 0) continue;
+      PositionState ps;
+      if(!PositionSelectByTicket(ticket))
+      {
+         PsRemove(ticket);
+         continue;
+      }
+      if(!PsLoad(ticket, ps)) continue;
+      int slot = PsEnsure(ticket);
+      if(slot < 0) continue;
+      g_ps[slot] = ps;
+      restored++;
+   }
+   if(restored > 0)
+      Print("NeurotradeBridge: restored management for ", restored, " open position(s) after restart.");
+}
+
+//+------------------------------------------------------------------+
+//| Structure and ATR (entry timeframe!)                             |
+//+------------------------------------------------------------------+
+/**
+ * Cached ATR handle.
+ *
+ * The old AtrValue() created an indicator handle, copied one value and
+ * released it ON EVERY CALL — several handles per tick, per position, and the
+ * terminal's indicator subsystem is not free. Handles are now created once per
+ * symbol/timeframe/period, checked with BarsCalculated() before the copy (a
+ * fresh handle returns nothing for the first ticks) and released in OnDeinit.
+ */
+int AtrHandle(const string symbol, const ENUM_TIMEFRAMES tf, const int period)
+{
+   for(int i = 0; i < g_atrHandleCount; i++)
+      if(g_atrHandles[i].symbol == symbol && g_atrHandles[i].tf == tf && g_atrHandles[i].period == period)
+         return g_atrHandles[i].handle;
+   if(g_atrHandleCount >= MAX_ATR_HANDLES) return INVALID_HANDLE;
+   int handle = iATR(symbol, tf, period);
+   if(handle == INVALID_HANDLE) return INVALID_HANDLE;
+   g_atrHandles[g_atrHandleCount].symbol = symbol;
+   g_atrHandles[g_atrHandleCount].tf = tf;
+   g_atrHandles[g_atrHandleCount].period = period;
+   g_atrHandles[g_atrHandleCount].handle = handle;
+   g_atrHandleCount++;
+   return handle;
+}
+
+void ReleaseAtrHandles()
+{
+   for(int i = 0; i < g_atrHandleCount; i++)
+      if(g_atrHandles[i].handle != INVALID_HANDLE) IndicatorRelease(g_atrHandles[i].handle);
+   g_atrHandleCount = 0;
+}
+
+double AtrValue(const string symbol, const ENUM_TIMEFRAMES timeframe, const int period)
+{
+   int handle = AtrHandle(symbol, timeframe, period);
+   if(handle == INVALID_HANDLE) return 0;
+   if(BarsCalculated(handle) < 2) return 0;
+   double buffer[];
+   if(CopyBuffer(handle, 0, 0, 1, buffer) <= 0) return 0;
+   return buffer[0];
+}
+
+/**
+ * Breakeven's structure requirement: a confirmed higher low (buy) / lower high
+ * (sell) beyond the entry, plus a closed bar in profit.
+ *
+ * "Price ticked +1R for one tick" is not structure. This is the difference
+ * between a stop that protects a trade and a stop that scratches one.
+ */
+bool PmStructureConfirmed(const string symbol, const ENUM_TIMEFRAMES tf,
+                          const bool isBuy, const double entry)
+{
+   MqlRates rates[];
+   int need = PM_SWING_LOOKBACK * 2 + 12;
+   if(CopyRates(symbol, tf, 0, need, rates) < need) return false;
+   int n = ArraySize(rates);
+   // The last element is the FORMING bar: only closed bars may confirm.
+   int lastClosed = n - 2;
+   if(lastClosed < PM_SWING_LOOKBACK * 2) return false;
+   if(isBuy && !(rates[lastClosed].close > entry)) return false;
+   if(!isBuy && !(rates[lastClosed].close < entry)) return false;
+
+   // Most recent fractal pivot, scanning backwards; a pivot needs lookback bars
+   // AFTER it, so it can never be one of the last two.
+   for(int i = lastClosed - PM_SWING_LOOKBACK; i >= PM_SWING_LOOKBACK; i--)
+   {
+      bool isPivot = true;
+      for(int j = i - PM_SWING_LOOKBACK; j <= i + PM_SWING_LOOKBACK; j++)
+      {
+         if(j == i) continue;
+         if(isBuy && rates[j].low <= rates[i].low) { isPivot = false; break; }
+         if(!isBuy && rates[j].high >= rates[i].high) { isPivot = false; break; }
+      }
+      if(!isPivot) continue;
+      double pivot = isBuy ? rates[i].low : rates[i].high;
+      return isBuy ? (pivot > entry) : (pivot < entry);
+   }
    return false;
+}
+
+//+------------------------------------------------------------------+
+//| Broker distance rules and modification                           |
+//+------------------------------------------------------------------+
+bool PmRespectsBroker(const string symbol, const bool isBuy, const double sl, const double atr)
+{
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   if(point <= 0) return false;
+   double stops = (double)SymbolInfoInteger(symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+   double buffer = MathMax(stops, atr * 0.1);
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick)) return false;
+   // A buy's stop must clear the BID (that is where it would fill); a sell's the ASK.
+   return isBuy ? (sl <= tick.bid - buffer) : (sl >= tick.ask + buffer);
+}
+
+bool PmModifyStop(const string symbol, const ulong ticket, const double sl, const double tp)
+{
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   if(point <= 0) return false;
+   MqlTradeRequest request = {};
+   MqlTradeResult result = {};
+   request.action = TRADE_ACTION_SLTP;
+   request.position = ticket;
+   request.symbol = symbol;
+   request.sl = NormalizeDouble(sl, digits);
+   request.tp = NormalizeDouble(tp, digits);
+   if(!OrderSend(request, result)) return false;
+   return (result.retcode == TRADE_RETCODE_DONE || result.retcode == TRADE_RETCODE_PLACED);
+}
+
+//+------------------------------------------------------------------+
+//| Management events (the audit trail the journal shows)            |
+//+------------------------------------------------------------------+
+void PmEvent(const ulong ticket, const string kind, const string detail)
+{
+   string entry = "{\"ticket\":" + IntegerToString((long)ticket) +
+                  ",\"kind\":\"" + JsonEscape(kind) +
+                  "\",\"detail\":\"" + JsonEscape(detail) +
+                  "\",\"ts\":" + IntegerToString(NowUtcMs()) + "}";
+   if(g_mgmtEventCount < MAX_MGMT_EVENTS)
+   {
+      g_mgmtEvents[g_mgmtEventCount++] = entry;
+      return;
+   }
+   for(int i = 0; i < MAX_MGMT_EVENTS / 2; i++) g_mgmtEvents[i] = g_mgmtEvents[i + MAX_MGMT_EVENTS / 2];
+   g_mgmtEventCount = MAX_MGMT_EVENTS / 2;
+   g_mgmtEvents[g_mgmtEventCount++] = entry;
+}
+
+string ManagementEventsJson()
+{
+   string json = "[";
+   for(int i = 0; i < g_mgmtEventCount; i++)
+   {
+      if(i > 0) json += ",";
+      json += g_mgmtEvents[i];
+   }
+   return json + "]";
+}
+
+//+------------------------------------------------------------------+
+//| Tick stream (v3.05, WP4D)                                        |
+//|                                                                  |
+//| The flow agent needs the tick TAPE, not a 500 ms sample of it:    |
+//| signed-volume imbalance, 1 s/10 s variance ratios and burst       |
+//| intensity are all invisible in one quote per beat. The chart       |
+//| symbol's ticks are buffered locally on every OnTick and the most   |
+//| recent ones ride the heartbeat; other symbols are sampled once per |
+//| beat (MT5 delivers no OnTick for an unselected chart symbol).      |
+//+------------------------------------------------------------------+
+void PushTick(const string symbol, const MqlTick &tick)
+{
+   if(g_tickCount < MAX_TICK_BUF)
+   {
+      g_ticks[g_tickCount].symbol = symbol;
+      g_ticks[g_tickCount].ts = (long)tick.time_msc;
+      g_ticks[g_tickCount].bid = tick.bid;
+      g_ticks[g_tickCount].ask = tick.ask;
+      g_tickCount++;
+      return;
+   }
+   // Buffer full: drop the OLDEST tick of the same symbol, keeping a rolling
+   // window per symbol rather than the whole tape of one busy instrument.
+   for(int i = 0; i < MAX_TICK_BUF; i++)
+   {
+      if(g_ticks[i].symbol != symbol) continue;
+      for(int j = i; j < MAX_TICK_BUF - 1; j++) g_ticks[j] = g_ticks[j + 1];
+      g_ticks[MAX_TICK_BUF - 1].symbol = symbol;
+      g_ticks[MAX_TICK_BUF - 1].ts = (long)tick.time_msc;
+      g_ticks[MAX_TICK_BUF - 1].bid = tick.bid;
+      g_ticks[MAX_TICK_BUF - 1].ask = tick.ask;
+      return;
+   }
+}
+
+string TicksJson(const string &symbols[], const int perSymbol)
+{
+   if(!StreamTicks) return "[]";
+   string json = "[";
+   bool first = true;
+   for(int s = 0; s < ArraySize(symbols); s++)
+   {
+      string symbol = symbols[s];
+      if(symbol == "") continue;
+      int emitted = 0;
+      for(int i = g_tickCount - 1; i >= 0 && emitted < perSymbol; i--)
+      {
+         if(g_ticks[i].symbol != symbol) continue;
+         if(!first) json += ",";
+         first = false;
+         json += "{\"symbol\":\"" + JsonEscape(symbol) +
+                 "\",\"ts\":" + IntegerToString(g_ticks[i].ts) +
+                 ",\"bid\":" + DoubleToString(g_ticks[i].bid, 8) +
+                 ",\"ask\":" + DoubleToString(g_ticks[i].ask, 8) + "}";
+         emitted++;
+      }
+   }
+   return json + "]";
+}
+
+//+------------------------------------------------------------------+
+//| THE STATE MACHINE                                                |
+//|                                                                  |
+//| Priority: session/news flatten → regime exit → time stop →        |
+//| partials → breakeven → trail → pyramid. At most ONE stop          |
+//| modification per evaluation: several would race into the broker    |
+//| and the last to land would win, which is not a decision.          |
+//+------------------------------------------------------------------+
+int PmTfIndex(const int index)
+{
+   return (index >= 0 && index < TF_COUNT) ? index : 1;
+}
+
+bool PmQuantiseVolume(const string symbol, const double want, double &out)
+{
+   double step = SymbolInfoDouble(symbol, SYMBOL_VOLUME_STEP);
+   double vmin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+   if(step <= 0) step = 0.01;
+   if(vmin <= 0) vmin = step;
+   double units = MathFloor(want / step + 1e-9);
+   out = NormalizeDouble(units * step, 8);
+   return (out >= vmin);
+}
+
+void ManageOnePosition(const int index)
+{
+   ulong ticket = g_ps[index].ticket;
+   if(!PositionSelectByTicket(ticket))
+   {
+      PmEvent(ticket, "closed", "position no longer exists — state cleared");
+      PsRemove(ticket);
+      return;
+   }
+   PositionState ps = g_ps[index];
+   string symbol = PositionGetString(POSITION_SYMBOL);
+   bool isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+   double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+   double currentSl = PositionGetDouble(POSITION_SL);
+   double currentTp = PositionGetDouble(POSITION_TP);
+   double volume = PositionGetDouble(POSITION_VOLUME);
+   double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
+   int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
+   if(point <= 0) return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(symbol, tick)) return;
+
+   // Book-keeping from the broker (the position is the truth, not our copy).
+   ps.volume = volume;
+   if(!ps.isBuy == isBuy) ps.isBuy = isBuy;
+   if(ps.entry <= 0) ps.entry = entry;
+   if(ps.initialSl <= 0 && currentSl > 0) ps.initialSl = currentSl;
+   ps.sl = currentSl;
+   ps.tp = currentTp;
+   if(ps.riskPrice <= 0 && currentSl > 0)
+      ps.riskPrice = MathAbs(entry - currentSl);
+   if(ps.riskPrice <= 0) return;
+   if(ps.entryTfIndex < 0 || ps.entryTfIndex >= TF_COUNT) ps.entryTfIndex = 1;
+   ENUM_TIMEFRAMES tf = TF_LIST[ps.entryTfIndex];
+
+   double exitPrice = isBuy ? tick.bid : tick.ask;
+   double movePrice = isBuy ? (exitPrice - ps.entry) : (ps.entry - exitPrice);
+   ps.progressR = movePrice / ps.riskPrice;
+   ps.mfeR = MathMax(ps.mfeR, ps.progressR);
+   ps.bestPrice = isBuy ? MathMax(ps.bestPrice <= 0 ? ps.entry : ps.bestPrice, exitPrice)
+                        : MathMin(ps.bestPrice <= 0 ? ps.entry : ps.bestPrice, exitPrice);
+
+   // Bars COMPLETED on the entry frame since the fill.
+   datetime openSec = (datetime)(ps.openedAt / 1000);
+   int shift = iBarShift(symbol, tf, openSec, false);
+   ps.barsSinceEntry = (shift > 0 ? shift : 0);
+
+   double atr = AtrValue(symbol, tf, ps.trailPeriod > 0 ? ps.trailPeriod : 14);
+   if(atr <= 0) atr = ps.atrEntry;
+
+   // ── 1. Session / news flatten ─────────────────────────────────────────────
+   if(ps.flatBeforeClose && IsNewsBlackout(symbol) && ps.mode != 2)
+   {
+      if(trade.PositionClose(ticket))
+      {
+         PmEvent(ticket, "flatten_news", "high-impact news blackout — position flattened");
+         ps.stage = "SESSION_NEWS_FLAT";
+         g_ps[index] = ps;
+         PsSave(ps);
+      }
+      return;
+   }
+
+   // ── 2. Time stop ──────────────────────────────────────────────────────────
+   if(ps.timeStopEnabled && ps.barsSinceEntry >= ps.timeStopBars)
+   {
+      if(ps.progressR < PM_TIME_STOP_PROGRESS_R && ps.mfeR < PM_TIME_STOP_MFE_R)
+      {
+         if(trade.PositionClose(ticket))
+         {
+            string detail = StringFormat("%d %s bars with no progress (%.2fR, MFE %.2fR) — time stop",
+                                         ps.barsSinceEntry, TF_NAMES[ps.entryTfIndex], ps.progressR, ps.mfeR);
+            PmEvent(ticket, "time_stop", detail);
+            ps.stage = "TIME_STOP";
+            g_ps[index] = ps;
+            PsSave(ps);
+         }
+         return;
+      }
+   }
+
+   bool modifyDone = false;
+
+   // ── 3. Ladder partials ────────────────────────────────────────────────────
+   if(ps.partialCount > 0 && ps.partialsDone < ps.partialCount && ps.partialsDone < 4)
+   {
+      if(ps.progressR >= ps.partialAtR[ps.partialsDone])
+      {
+         double want = ps.initialVolume * (ps.partialPct[ps.partialsDone] / 100.0);
+         double lots = 0;
+         bool legal = PmQuantiseVolume(symbol, want, lots);
+         double remainder = ps.volume - lots;
+         double vmin = SymbolInfoDouble(symbol, SYMBOL_VOLUME_MIN);
+         if(!legal)
+         {
+            PmEvent(ticket, "partial_skipped",
+                    StringFormat("%.0f%% rung is below the broker minimum — rung consumed",
+                                 ps.partialPct[ps.partialsDone]));
+            ps.partialsDone++;
+         }
+         else if(lots >= ps.volume)
+         {
+            if(trade.PositionClose(ticket))
+            {
+               PmEvent(ticket, "close_all", "ladder rung is the whole position");
+               ps.stage = "CLOSED";
+               g_ps[index] = ps;
+               PsSave(ps);
+            }
+            return;
+         }
+         else if(remainder < vmin)
+         {
+            double shrunk = 0;
+            if(PmQuantiseVolume(symbol, ps.volume - vmin, shrunk) && shrunk >= vmin)
+            {
+               lots = shrunk;
+            }
+            else if(trade.PositionClose(ticket))
+            {
+               PmEvent(ticket, "close_all", "a partial would leave an illegal remainder — closed instead");
+               ps.stage = "CLOSED";
+               g_ps[index] = ps;
+               PsSave(ps);
+               return;
+            }
+         }
+         if(lots > 0 && trade.PositionClosePartial(ticket, lots))
+         {
+            ps.partialsDone++;
+            ps.volume = NormalizeDouble(ps.volume - lots, 8);
+            ps.closedVolume = NormalizeDouble(ps.closedVolume + lots, 8);
+            if(ps.stage == "OPEN_RISK" || ps.stage == "BE_ARMED") ps.stage = "PARTIAL";
+            PmEvent(ticket, "partial", StringFormat("%.0f%% ladder rung: closed %.2f lots at %.2fR, %.2f left",
+                                                    ps.partialPct[ps.partialsDone - 1], lots, ps.progressR, ps.volume));
+            g_ps[index] = ps;
+            PsSave(ps);
+         }
+      }
+   }
+
+   // ── 4. Breakeven ──────────────────────────────────────────────────────────
+   if(ps.beTriggerR > 0 && !ps.beDone && ps.progressR >= ps.beTriggerR)
+   {
+      bool confirmed = !ps.beStructure || PmStructureConfirmed(symbol, tf, isBuy, ps.entry);
+      if(confirmed)
+      {
+         double offset = ps.costPrice + PM_BREAKEVEN_PROFIT_R * ps.riskPrice;
+         double candidate = isBuy ? ps.entry + offset : ps.entry - offset;
+         bool tighter = (currentSl <= 0) || (isBuy ? candidate > currentSl : candidate < currentSl);
+         if(!PmRespectsBroker(symbol, isBuy, candidate, atr))
+         {
+            // Not marked done: a breakeven that never reached the market must
+            // not read as "risk-free" to the pyramid rule or the desk.
+            if(VerboseLog)
+               Log("breakeven deferred on #" + IntegerToString((long)ticket) + ": candidate inside the stop level");
+         }
+         else if(!tighter)
+         {
+            ps.beDone = true;
+            if(ps.stage == "OPEN_RISK") ps.stage = "BE_ARMED";
+            g_ps[index] = ps;
+            PsSave(ps);
+         }
+         else if(NowUtcMs() >= ps.retryAfter)
+         {
+            if(PmModifyStop(symbol, ticket, candidate, currentTp))
+            {
+               ps.beDone = true;
+               ps.sl = candidate;
+               ps.lastModifyAt = NowUtcMs();
+               ps.lastModifyR = ps.progressR;
+               ps.retryCount = 0;
+               if(ps.stage == "OPEN_RISK") ps.stage = "BE_ARMED";
+               modifyDone = true;
+               PmEvent(ticket, "breakeven",
+                       StringFormat("+%.2fR with structure confirmed → stop %.5f (entry + cost + %.2fR)",
+                                    ps.progressR, candidate, PM_BREAKEVEN_PROFIT_R));
+               g_ps[index] = ps;
+               PsSave(ps);
+            }
+            else
+            {
+               ps.retryCount++;
+               ps.retryAfter = NowUtcMs() + PM_RETRY_BACKOFF_MS * ps.retryCount;
+               PmEvent(ticket, "modify_failed",
+                       StringFormat("breakeven modify rejected (attempt %d) — retrying after back-off", ps.retryCount));
+               g_ps[index] = ps;
+               PsSave(ps);
+            }
+         }
+      }
+   }
+
+   // ── 5. Trailing stop (ENTRY timeframe ATR, chandelier) ────────────────────
+   if(ps.trailEnabled && !modifyDone && ps.progressR >= ps.trailActivateR && atr > 0)
+   {
+      double mult = ps.trailMult > 0 ? ps.trailMult : (ps.mode == 0 ? PM_TRAIL_MULT_SCALP :
+                                                      (ps.mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING));
+      double best = ps.bestPrice > 0 ? ps.bestPrice : exitPrice;
+      double candidate = isBuy ? best - mult * atr : best + mult * atr;
+      double minStep = MathMax(ps.trailStepPoints * point, PM_TRAIL_MIN_STEP_ATR * atr);
+      double improvement = isBuy ? (candidate - currentSl) : (currentSl - candidate);
+      bool cooling = (NowUtcMs() - ps.lastModifyAt) < PM_MODIFY_COOLDOWN_MS;
+      bool meaningful = (ps.progressR - ps.lastModifyR) >= PM_MODIFY_COOLDOWN_R;
+      if(improvement >= minStep)
+      {
+         if(cooling && !meaningful)
+         {
+            // Deferred, not lost: the next evaluation re-tests it.
+         }
+         else if(!PmRespectsBroker(symbol, isBuy, candidate, atr))
+         {
+            if(VerboseLog)
+               Log("trail deferred on #" + IntegerToString((long)ticket) + ": candidate inside the stop level");
+         }
+         else if(NowUtcMs() >= ps.retryAfter)
+         {
+            if(PmModifyStop(symbol, ticket, candidate, currentTp))
+            {
+               ps.sl = candidate;
+               ps.trailArmed = true;
+               ps.lastModifyAt = NowUtcMs();
+               ps.lastModifyR = ps.progressR;
+               ps.retryCount = 0;
+               if(ps.beDone && ps.partialsDone > 0) ps.stage = "RUNNER";
+               PmEvent(ticket, "trail",
+                       StringFormat("chandelier: best %.5f − %.1fxATR(%d,%s) = %.5f",
+                                    best, mult, ps.trailPeriod, TF_NAMES[ps.entryTfIndex], candidate));
+               g_ps[index] = ps;
+               PsSave(ps);
+            }
+            else
+            {
+               ps.retryCount++;
+               ps.retryAfter = NowUtcMs() + PM_RETRY_BACKOFF_MS * ps.retryCount;
+               g_ps[index] = ps;
+               PsSave(ps);
+            }
+         }
+      }
+   }
+
+   // ── 6. Pyramid ────────────────────────────────────────────────────────────
+   if(ps.pyramidEnabled && ps.pyramidAdds < ps.pyramidMaxAdds)
+   {
+      bool baseSafe = !ps.pyramidRequireBe || ps.beDone;
+      if(baseSafe && ps.progressR >= ps.pyramidAddAtR)
+      {
+         double addLots = 0;
+         if(PmQuantiseVolume(symbol, ps.initialVolume * ps.pyramidSizeRatio, addLots))
+         {
+            trade.SetDeviationInPoints(10);
+            bool ok = isBuy ? trade.Buy(addLots, symbol, 0.0, ps.initialSl, currentTp,
+                                        "nt-add:" + ps.planId)
+                            : trade.Sell(addLots, symbol, 0.0, ps.initialSl, currentTp,
+                                         "nt-add:" + ps.planId);
+            if(ok)
+            {
+               ps.pyramidAdds++;
+               ps.stage = "PYRAMID";
+               // The add is a NEW position with its own ticket and its own
+               // state; the base keeps managing itself.
+               ulong addTicket = (ulong)trade.ResultOrder();
+               PsCreateFromPlanId(addTicket, ps.planId, isBuy, addLots, trade.ResultPrice(), 0, symbol);
+               PmEvent(ticket, "pyramid",
+                       StringFormat("added %.2f lots at %.5f at %.2fR (stop %.5f)",
+                                    addLots, trade.ResultPrice(), ps.progressR, ps.initialSl));
+            }
+            else
+            {
+               PmEvent(ticket, "pyramid_failed", trade.ResultRetcodeDescription());
+            }
+         }
+         g_ps[index] = ps;
+         PsSave(ps);
+      }
+   }
+
+   g_ps[index] = ps;
+   PsSave(ps);
+}
+
+/**
+ * Reconcile positions whose state is missing.
+ *
+ * This is the path that CATCHES A PENDING-ORDER FILL (and a market fill that
+ * happened while the EA was reloading): the position exists, the tape says so,
+ * but no state was written because the fill did not come from ExecutePlan().
+ * The plan id travels in the position comment (`nt:<planId>`), so the original
+ * policy is recovered from the plan when it is still present; otherwise the
+ * state is seeded from the position itself with conservative defaults.
+ */
+void ReconcileFilledPositions()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      string symbol = PositionGetSymbol(i);
+      if(symbol == "") continue;
+      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+      if(PsIndex(ticket) >= 0) continue;
+      string comment = PositionGetString(POSITION_COMMENT);
+      string planId = "";
+      int marker = StringFind(comment, "nt:");
+      if(marker >= 0)
+      {
+         planId = StringSubstr(comment, marker + 3);
+      }
+      int dash = StringFind(planId, "-add:");
+      if(dash >= 0) planId = StringSubstr(planId, 0, dash);
+      double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+      double sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+      double volume = PositionGetDouble(POSITION_VOLUME);
+      long openedMs = ToUtcMs((datetime)PositionGetInteger(POSITION_TIME));
+      int slot = PsEnsure(ticket);
+      if(slot < 0) return;
+      PositionState ps = g_ps[slot];
+      ps.symbol = symbol;
+      ps.planId = planId;
+      ps.isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+      ps.entry = entry;
+      ps.initialSl = sl;
+      ps.sl = sl;
+      ps.tp = tp;
+      ps.volume = volume;
+      ps.initialVolume = volume;
+      ps.openedAt = openedMs;
+      ps.riskPrice = (sl > 0 ? MathAbs(entry - sl) : 0);
+      ps.bestPrice = entry;
+      ps.stage = "OPEN_RISK";
+      // Recover the plan's policy if the plan is still armed.
+      bool found = false;
+      for(int p = 0; p < MAX_PLANS; p++)
+      {
+         if(!g_plans[p].active || g_plans[p].id != planId) continue;
+         if(planId == "") continue;
+         PsApplyPlanPolicy(ps, g_plans[p]);
+         found = true;
+         break;
+      }
+      if(!found) PsApplyDefaults(ps);
+      else PmEvent(ticket, "reconciled", "state created from the armed plan at reconcile");
+      g_ps[slot] = ps;
+      PsSave(ps);
+   }
+}
+
+/** Conservative defaults for a position with no plan (EA restarted, plan gone). */
+void PsApplyDefaults(PositionState &ps)
+{
+   ps.beTriggerR = 1.0;
+   ps.beOffsetR = PM_BREAKEVEN_PROFIT_R;
+   ps.beStructure = true;
+   ps.partialCount = 0;
+   ps.trailEnabled = true;
+   ps.trailMult = (ps.mode == 0 ? PM_TRAIL_MULT_SCALP : (ps.mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING));
+   ps.trailActivateR = 1.2;
+   ps.trailStepPoints = 1;
+   ps.trailPeriod = 14;
+   ps.timeStopEnabled = false;
+   ps.pyramidEnabled = false;
+   ps.flatBeforeClose = false;
+}
+
+/** Copy an armed plan's management policy onto a position state. */
+void PsApplyPlanPolicy(PositionState &ps, const ArmedPlan &plan)
+{
+   ps.entryTfIndex = PmTfIndex(plan.entryTfIndex);
+   ps.costPrice = plan.costPrice;
+   ps.beTriggerR = (plan.beTriggerR > 0 ? plan.beTriggerR : 1.0);
+   ps.beOffsetR = plan.beOffsetR;
+   ps.beStructure = plan.beStructure;
+   ps.partialCount = (int)MathMin(4, MathMax(0, plan.partialCount));
+   for(int i = 0; i < ps.partialCount; i++)
+   {
+      ps.partialAtR[i] = plan.partialAtR[i];
+      ps.partialPct[i] = plan.partialPct[i];
+   }
+   ps.trailEnabled = plan.trailEnabled;
+   ps.trailMult = (plan.trailMult > 0 ? plan.trailMult :
+                   (ps.mode == 0 ? PM_TRAIL_MULT_SCALP : (ps.mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING)));
+   ps.trailActivateR = plan.trailActivateR;
+   ps.trailStepPoints = (plan.trailStepPoints > 0 ? plan.trailStepPoints : 1);
+   ps.trailPeriod = (plan.trailPeriod > 0 ? plan.trailPeriod : 14);
+   ps.timeStopEnabled = (plan.timeStopBars > 0);
+   ps.timeStopBars = plan.timeStopBars;
+   ps.pyramidEnabled = (plan.pyramidMaxAdds > 0);
+   ps.pyramidMaxAdds = plan.pyramidMaxAdds;
+   ps.pyramidAddAtR = plan.pyramidAddAtR;
+   ps.pyramidSizeRatio = plan.pyramidSizeRatio;
+   ps.pyramidRequireBe = plan.pyramidRequireBe;
+   ps.flatBeforeClose = plan.flatBeforeClose;
+}
+
+/**
+ * Create the state for a position that has just been opened by an order this
+ * EA placed (`resultTicket` is the ORDER ticket; the position ticket may
+ * differ, but MT5 assigns both from the same sequence and the reconcile pass
+ * above is the safety net either way).
+ */
+void PsCreateFromPlanId(const ulong orderTicket, const string planId, const bool isBuy,
+                        const double lots, const double fillPrice, const int modeHint,
+                        const string symbolHint)
+{
+   // Find the newest position on that symbol that has no state yet.
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      string symbol = PositionGetSymbol(i);
+      if(symbol == "") continue;
+      if(symbolHint != "" && symbol != symbolHint) continue;
+      if((int)PositionGetInteger(POSITION_MAGIC) != MagicNumber) continue;
+      ulong ticket = (ulong)PositionGetInteger(POSITION_TICKET);
+      if(PsIndex(ticket) >= 0) continue;
+      int slot = PsEnsure(ticket);
+      if(slot < 0) return;
+      PositionState ps = g_ps[slot];
+      ps.symbol = symbol;
+      ps.planId = planId;
+      ps.isBuy = isBuy;
+      ps.mode = (modeHint >= 0 ? modeHint : 1);
+      ps.entry = (fillPrice > 0 ? fillPrice : PositionGetDouble(POSITION_PRICE_OPEN));
+      ps.initialSl = PositionGetDouble(POSITION_SL);
+      ps.sl = ps.initialSl;
+      ps.tp = PositionGetDouble(POSITION_TP);
+      ps.volume = lots;
+      ps.initialVolume = lots;
+      ps.openedAt = ToUtcMs((datetime)PositionGetInteger(POSITION_TIME));
+      ps.riskPrice = (ps.initialSl > 0 ? MathAbs(ps.entry - ps.initialSl) : 0);
+      ps.bestPrice = ps.entry;
+      ps.stage = "OPEN_RISK";
+      ps.entryTfIndex = (ps.mode == 0 ? 1 : (ps.mode == 1 ? 4 : 6)); // M2 / M15 / H1
+      bool found = false;
+      for(int p = 0; p < MAX_PLANS; p++)
+      {
+         if(!g_plans[p].active || g_plans[p].id != planId || planId == "") continue;
+         PsApplyPlanPolicy(ps, g_plans[p]);
+         found = true;
+         break;
+      }
+      if(!found) PsApplyDefaults(ps);
+      if(!(ps.riskPrice > 0))
+      {
+         // No stop on the position: nothing can be managed. Say so loudly —
+         // an unprotected position is the one state the desk must never hide.
+         PmEvent(ticket, "unprotected",
+                 "position opened without a stop loss — management cannot size R; close it or set a stop");
+      }
+      g_ps[slot] = ps;
+      PsSave(ps);
+      PmEvent(ticket, "opened",
+              StringFormat("state created at fill: entry %.5f, stop %.5f, R %.5f, %s",
+                           ps.entry, ps.initialSl, ps.riskPrice, TF_NAMES[ps.entryTfIndex]));
+      return;
+   }
+   // The order is working but not filled yet (a pending order): the reconcile
+   // pass creates the state when it fills.
+}
+
+//+------------------------------------------------------------------+
+//| OnTradeTransaction — the fastest path from fill to managed state  |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   if(trans.type != TRADE_TRANSACTION_DEAL_ADD) return;
+   if(!HistoryDealSelect(trans.deal)) return;
+   if((int)HistoryDealGetInteger(trans.deal, DEAL_MAGIC) != MagicNumber) return;
+   if(HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_IN) return;
+   ulong positionId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+   if(PsIndex(positionId) >= 0) return;
+   string symbol = HistoryDealGetString(trans.deal, DEAL_SYMBOL);
+   double price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+   double volume = HistoryDealGetDouble(trans.deal, DEAL_VOLUME);
+   string comment = HistoryDealGetString(trans.deal, DEAL_COMMENT);
+   string planId = "";
+   int marker = StringFind(comment, "nt:");
+   if(marker >= 0) planId = StringSubstr(comment, marker + 3);
+   int dash = StringFind(planId, "-add:");
+   if(dash >= 0) planId = StringSubstr(planId, 0, dash);
+   bool isBuy = (HistoryDealGetInteger(trans.deal, DEAL_TYPE) == DEAL_TYPE_BUY);
+   PsCreateFromPlanId(positionId, planId, isBuy, volume, price, -1, symbol);
+}
+
+//+------------------------------------------------------------------+
+//| The management loop                                              |
+//+------------------------------------------------------------------+
+void ManageOpenPositions()
+{
+   if(DailyLossBreached())
+   {
+      // Local circuit breaker: flatten and record why for every position, so
+      // the journal shows the management path that led there.
+      for(int i = g_psCount - 1; i >= 0; i--) PmEvent(g_ps[i].ticket, "flatten_daily_loss", "local daily loss circuit breaker");
+      FlattenAll("local daily loss circuit breaker");
+      return;
+   }
+
+   // Positions that appeared without an ExecutePlan() fill (pending orders,
+   // an EA reload mid-trade) get their state here, before management runs.
+   ReconcileFilledPositions();
+
+   for(int i = g_psCount - 1; i >= 0; i--)
+   {
+      if(i >= g_psCount) continue;
+      ManageOnePosition(i);
+   }
 }
 
 //+------------------------------------------------------------------+

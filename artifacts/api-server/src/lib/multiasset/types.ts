@@ -339,7 +339,23 @@ export interface ArmedPlan {
   side: Side;
   mode: TradeMode;
   trigger: number;
-  triggerType: "break" | "retest" | "market";
+  /**
+   * How the EA is allowed to enter.
+   *
+   *   "market"   fire on the next evaluation, at the market
+   *   "break"    fire when price trades through `trigger` (legacy default)
+   *   "retest"   fire when price returns to `trigger`
+   *   "confirm"  wait for a CLOSED bar beyond the trigger (v3.05)
+   *   "limit"    rest a real BuyLimit/SellLimit at `trigger` (v3.05)
+   *   "stop"     rest a real BuyStop/SellStop at `trigger` (v3.05)
+   *
+   * The last four exist because "limit" and "confirm" entries are where the
+   * edge actually lives for a pullback/sweep strategy, and a tick-through
+   * market order is not a limit order: it pays whatever the market is when the
+   * EA's heartbeat next runs. Older EAs ignore the extra values and treat them
+   * as "break", which is the pre-v3.05 behaviour.
+   */
+  triggerType: "break" | "retest" | "market" | "confirm" | "limit" | "stop";
   confirmTicks: number;
   invalidate: number;
   sl: number;
@@ -353,6 +369,15 @@ export interface ArmedPlan {
   createdAt: number;
   management: ManagementPlan;
   rationale: PlanRationale;
+  /**
+   * v3.05 optional execution context. The EA uses these to build the position's
+   * management state at fill; every one of them has a documented fallback, so
+   * an older EA (and an older server) keep working unchanged.
+   */
+  /** The frame stops, ATR and the time stop are measured on. */
+  entryTimeframe?: Timeframe;
+  /** Round-trip cost (spread + commission + slippage) in price units. */
+  costPrice?: number;
 }
 
 export interface PlanRationale {

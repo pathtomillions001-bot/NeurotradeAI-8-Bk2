@@ -1,0 +1,58 @@
+{
+  "kind": "ladder",
+  "options": {
+    "method": "instant",
+    "set": "DIGITEVEN:-1",
+    "capital": 200,
+    "base": 1,
+    "maxStake": 500,
+    "episodes": 200000,
+    "seed": 1,
+    "maxTrades": 3000,
+    "mode": "ladder",
+    "selector": "engine",
+    "cooldownTicks": 60,
+    "lossLimit": 4,
+    "maxTicks": 3000,
+    "originPayout": 1.4,
+    "name": "baseline-paper-ladder-replica"
+  },
+  "contracts": {
+    "Even": {
+      "p0": 0.5,
+      "payout": 1.95,
+      "margin": 0.025,
+      "splitDriftAt10xBase": -0.002255077738239783,
+      "splitDriftAt20xBase": 0.00006249609413175664,
+      "metrics": {
+        "episodes": 200000,
+        "clearRate": 0.99141,
+        "ruinRate": 0.00859,
+        "unresolvedRate": 0,
+        "tradesToClear": {
+          "p50": 1,
+          "p90": 4,
+          "p95": 5,
+          "p99": 6
+        },
+        "peakDebt": {
+          "p50": 2.48,
+          "p90": 11.76,
+          "p95": 24.560000000000002,
+          "p99": 104.78
+        },
+        "meanFinalCash": -1.3141934925040046,
+        "cvar99FinalCash": -171.6457767499959,
+        "trueLossRun": {
+          "mean": 1.99423,
+          "max": 8,
+          "pGe6": 0.030885,
+          "pGe8": 0.00788,
+          "pGe10": 0
+        },
+        "capTrapRate": 0.007565,
+        "meanDecisionLatencyTicks": 0
+      }
+    }
+  }
+}

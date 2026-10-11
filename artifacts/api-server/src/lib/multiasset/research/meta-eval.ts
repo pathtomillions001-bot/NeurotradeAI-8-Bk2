@@ -38,13 +38,15 @@
  * filtered by the rule under test measures the rule, not the market (see
  * `meta/dataset.ts`).
  */
-import { buildAlphaAgents, readAlphaAgents, type AlphaAgent, type AlphaId } from "../alpha";
+import { buildAlphaAgents, type AlphaAgent, type AlphaId } from "../alpha";
 import { wilsonInterval } from "../alpha/edge";
-import { defaultAllowlistForMode } from "../desk-v4-config";
 import { pointValuePerLot } from "../sizing";
-import { assessRegime, type RegimeKind } from "../regime";
+import type { RegimeKind } from "../regime";
 import type { Bar, SymbolSpec, Timeframe, TradeMode } from "../types";
 import { binaryOutcomes, buildMetaDataset, type MetaDataset, type MetaView } from "../meta/dataset";
+import { metaViewAt } from "../meta/view";
+import { trailingRangeMean } from "../meta/range";
+export { trailingRangeMean };
 import { combinatorialEventSplits, purgedEventFolds } from "../meta/folds";
 import {
   MIN_CALIBRATION_SAMPLES,
@@ -159,6 +161,21 @@ export interface MetaOosRow {
   armed: boolean;
   targetMultipleR: number;
   weight: number;
+  /**
+   * The WP6 inputs, carried per row so the gatekeeper study measures the gate on
+   * exactly the corpus the calibration was fitted and judged on. Nothing below
+   * changes the WP5 statistics; these are the same rows, read more closely.
+   */
+  /** Independent observations behind this row's p_LCB — its fold's evidence. */
+  evidence: number;
+  /** Round trip in R. */
+  costR: number;
+  /** The risk unit in price units (the desk's own stop placement). */
+  riskPrice: number;
+  /** Bars allowed before the time stop. */
+  horizonBars: number;
+  /** Direction of the view this row came from: +1 long, -1 short. */
+  direction: 1 | -1;
 }
 
 export interface MetaBucket {
@@ -313,7 +330,6 @@ export function buildMetaViewStream(input: MetaSeriesInput): MetaViewStream {
   const warmup = Math.max(120, input.warmupBars);
   const regimeWindow = Math.max(60, input.regimeWindowBars ?? 200);
   const horizonBars = input.horizonBars;
-  const allowlist = defaultAllowlistForMode(mode);
   const views: MetaView[] = [];
   let evaluations = 0;
   let decisions = 0;
@@ -321,85 +337,40 @@ export function buildMetaViewStream(input: MetaSeriesInput): MetaViewStream {
   const lastDecision = bars.length - horizonBars - 2;
   if (lastDecision <= warmup) return { views, evaluations, decisions };
 
-  const kinds: (RegimeKind | null)[] = new Array(bars.length).fill(null);
-  let streak = 0;
   const cache = new Map<string, unknown>();
+  let previous: { index: number; kind: RegimeKind | null; streak: number } | null = null;
 
   for (let i = warmup; i <= lastDecision; i += stride) {
     evaluations++;
-    const visible = bars.slice(0, i + 1);
-    const now = (bars[i] as Bar)[0] + frameWidthMs;
-    const close = (bars[i] as Bar)[4] as number;
-    const readings = readAlphaAgents(
-      {
-        symbol,
-        mode,
-        spec,
-        series: { [frame]: visible } as Partial<Record<Timeframe, Bar[]>>,
-        quote: {
-          symbol,
-          bid: close,
-          ask: close + spec.spreadPoints * spec.point,
-          spreadPoints: spec.spreadPoints,
-          ts: now,
-          ageMs: 100,
-        },
-        now,
-        cache,
-      },
-      agents,
-    );
-    const firing = readings.filter((reading) => reading.view !== null);
-    if (firing.length === 0) continue;
-
-    const window = bars.slice(Math.max(0, i - regimeWindow + 1), i + 1);
-    const assessment = window.length >= 20 ? assessRegime(window) : null;
-    const kind = assessment ? assessment.kind : null;
-    kinds[i] = kind;
-    streak = kind !== null && kinds[i - stride] === kind ? streak + 1 : 1;
-
-    const buys = firing.filter((reading) => reading.view?.direction === "buy").length;
-    const sells = firing.length - buys;
-    const direction: 1 | -1 =
-      buys === sells
-        ? bestProbability(firing) >= 0.5
-          ? 1
-          : -1
-        : buys > sells
-          ? 1
-          : -1;
-    const agreeing = firing.filter(
-      (reading) => (direction === 1 ? reading.view?.direction === "buy" : reading.view?.direction === "sell"),
-    );
-    const agentProbabilities: Record<string, number> = {};
-    for (const reading of firing) agentProbabilities[reading.id] = reading.view?.probability ?? 0.5;
-    const meanProbability =
-      agreeing.reduce((sum, reading) => sum + (reading.view?.probability ?? 0.5), 0) /
-      Math.max(1, agreeing.length);
-    const emitted = agreeing.some((reading) => allowlist.includes(reading.id));
-
-    views.push({
-      index: i,
-      direction,
-      probability: meanProbability,
-      agents: agreeing.map((reading) => reading.id),
-      agentProbabilities,
-      emitted,
+    const built = metaViewAt({
+      symbol,
       mode,
-      regimeKind: kind,
-      regimeStreakBars: streak,
-      changeProbability: null,
+      spec,
+      frame,
+      bars,
+      index: i,
+      frameWidthMs,
+      regimeWindowBars: regimeWindow,
+      agents,
+      cache,
       targetMultipleR: input.targetMultipleR,
       horizonBars,
+      previous,
     });
+    // An abstention is not a row: the corpus is the decisions where at least one
+    // agent had a view. It is still a DECISION for the streak feature, so the
+    // previous-state record is advanced on every step — with a null kind, which
+    // is what makes the next matching reading restart at 1.
+    previous = built
+      ? { index: i, kind: built.kind, streak: built.streak }
+      : { index: i, kind: null, streak: 0 };
+    if (!built) continue;
+    views.push(built.view);
     decisions++;
   }
   return { views, evaluations, decisions };
 }
 
-function bestProbability(firing: { view: { probability: number } | null }[]): number {
-  return firing.reduce((best, reading) => Math.max(best, reading.view?.probability ?? 0), 0);
-}
 
 export function measureMeta(input: MetaSeriesInput & { series: string; kind: string }): MetaStudyMeasurement {
   const started = Date.now();
@@ -627,6 +598,11 @@ function fitAndPredict(
       armed,
       targetMultipleR,
       weight: dataset.weights[i] as number,
+      evidence,
+      costR,
+      riskPrice: dataset.riskPrice[i] as number,
+      horizonBars: dataset.horizonBars[i] as number,
+      direction: dataset.direction[i] as 1 | -1,
     });
   }
   return { rows, calibration: scored.length, calibrated, shrinkage };
@@ -1012,20 +988,6 @@ export function runMetaFixture(input: {
 }
 
 /** Causal trailing mean of finished bar ranges (high − low). */
-export function trailingRangeMean(bars: Bar[], period: number): (number | null)[] {
-  const out: (number | null)[] = new Array(bars.length).fill(null);
-  let sum = 0;
-  for (let i = 0; i < bars.length; i++) {
-    const bar = bars[i] as Bar;
-    sum += (bar[2] as number) - (bar[3] as number);
-    if (i >= period) {
-      const old = bars[i - period] as Bar;
-      sum -= (old[2] as number) - (old[3] as number);
-    }
-    if (i >= period - 1) out[i] = sum / period;
-  }
-  return out;
-}
 
 function mean(values: number[]): number {
   if (values.length === 0) return 0;

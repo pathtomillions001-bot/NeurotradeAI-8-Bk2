@@ -353,12 +353,11 @@ export function simulatePlan(input: {
   return { trade };
 }
 
-/** ATR series for the entry timeframe, computed causally (index i uses ≤ i). */
-export function causalAtrSeries(bars: Bar[], period = 14): number[] {
-  // `math.atrSeries` is the identical recursion in one forward pass; the
-  // slice-based version this used to be was O(n²) and dominated the harness's
-  // runtime on longer series. Equivalence at every index is asserted in
-  // `executed-policy.test.ts`.
-  const series = atrSeries(bars, period);
-  return series.map((value, i) => (i < period + 1 ? 0 : value));
-}
+/**
+ * ATR series for the entry timeframe, computed causally (index i uses ≤ i).
+ *
+ * Moved to `meta/atr.ts` when the live meta-model needed the same series — a
+ * live module must not import from the research harness — and re-exported here so
+ * every existing caller and the equivalence test are unchanged.
+ */
+export { causalAtrSeries } from "../meta/atr";

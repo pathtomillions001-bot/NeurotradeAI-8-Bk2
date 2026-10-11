@@ -40,7 +40,7 @@
  * layer re-charges it, and the study reports gross and net numbers side by side
  * so the difference is visible instead of asserted.
  */
-import { STOP_ATR_MULT, MIN_COST_COVERAGE } from "../agent";
+import { STOP_ATR_MULT, MIN_COST_COVERAGE } from "../desk-constants";
 import { slippageAllowancePoints } from "../asset-costs";
 import { CLOSE } from "../math";
 import type { RegimeKind } from "../regime";
@@ -133,6 +133,16 @@ export interface MetaDataset {
   rMultiple: number[];
   /** Round-trip cost expressed in R for this row. */
   costR: number[];
+  /**
+   * The risk unit in PRICE units at the decision bar — the desk's own
+   * `riskPriceAt` (structural stop, widened by the cost-coverage floor).
+   *
+   * Carried because a cost in R is not enough to judge the WP6 cost/sigma_h
+   * ratio: that comparison is between two PRICE distances, and re-deriving the
+   * stop inside a study is how a study ends up measuring a geometry the desk
+   * never trades.
+   */
+  riskPrice: number[];
   targetMultipleR: number[];
   horizonBars: number[];
   /** Views offered, before label filters. */
@@ -176,13 +186,26 @@ export interface BuildMetaDatasetInput {
 }
 
 /**
+ * The part of the build input the cost model reads.
+ *
+ * Narrowed deliberately: the WP6 study has to price the SAME round trip and the
+ * SAME risk unit the corpus was labelled and trained under, and it has a spec but
+ * no dataset to point at. Two cost models that agree "by construction" in code
+ * are the only kind that cannot drift.
+ */
+export interface MetaCostInput {
+  spec: { point: number; spreadPoints: number; commissionPerLot: number; assetClass: AssetClass };
+  pointValuePerLot: number;
+}
+
+/**
  * Round-trip cost in price units for one decision bar.
  *
  * Exported because the study and the gatekeeper must agree to the last decimal:
  * a cost that differs between the number the model was trained under and the
  * number the gate applies is a silent change of the trade's economics.
  */
-export function roundTripCostPrice(input: BuildMetaDatasetInput, mode: TradeMode): number {
+export function roundTripCostPrice(input: MetaCostInput, mode: TradeMode): number {
   const slippage = slippageAllowancePoints(input.spec, mode);
   const commissionPoints =
     input.pointValuePerLot > 0 ? input.spec.commissionPerLot / input.pointValuePerLot : 0;
@@ -196,7 +219,7 @@ export function roundTripCostPrice(input: BuildMetaDatasetInput, mode: TradeMode
  * trades would make the model's target barrier unreachable in practice — the
  * classic way to train a beautiful model that can never be executed.
  */
-export function riskPriceAt(input: BuildMetaDatasetInput, mode: TradeMode, atr: number): number {
+export function riskPriceAt(input: MetaCostInput, mode: TradeMode, atr: number): number {
   const cost = roundTripCostPrice(input, mode);
   return Math.max(atr * (STOP_ATR_MULT[mode] ?? 1), cost * MIN_COST_COVERAGE);
 }
@@ -214,6 +237,7 @@ export function buildMetaDataset(input: BuildMetaDatasetInput): MetaDataset {
     direction: 1 | -1;
     rMultiple: number;
     costR: number;
+    riskPrice: number;
     targetMultipleR: number;
     horizonBars: number;
     mode: TradeMode;
@@ -264,6 +288,7 @@ export function buildMetaDataset(input: BuildMetaDatasetInput): MetaDataset {
       direction: view.direction,
       rMultiple: resolved.rMultiple,
       costR: costPrice / riskPrice,
+      riskPrice,
       targetMultipleR: view.targetMultipleR,
       horizonBars: view.horizonBars,
       mode: view.mode,
@@ -285,6 +310,7 @@ export function buildMetaDataset(input: BuildMetaDatasetInput): MetaDataset {
     direction: rows.map((r) => r.direction),
     rMultiple: rows.map((r) => r.rMultiple),
     costR: rows.map((r) => r.costR),
+    riskPrice: rows.map((r) => r.riskPrice),
     targetMultipleR: rows.map((r) => r.targetMultipleR),
     horizonBars: rows.map((r) => r.horizonBars),
     offered: views.length,
@@ -297,7 +323,14 @@ export function buildMetaDataset(input: BuildMetaDatasetInput): MetaDataset {
   };
 }
 
-function featuresOf(
+/**
+ * The feature vector for one view, in `META_FEATURE_NAMES` order.
+ *
+ * Exported because the LIVE model must build its inputs the same way the study
+ * did: a model fitted on these numbers and spent on a differently-computed set is
+ * the classic silent train/serve skew. `meta/model.ts` is the only other caller.
+ */
+export function featuresOf(
   view: MetaView,
   ctx: { atrValue: number; rangeMean: number | null; spreadPrice: number; bar: Bar },
   hourEncoding: "linear" | "cyclic",

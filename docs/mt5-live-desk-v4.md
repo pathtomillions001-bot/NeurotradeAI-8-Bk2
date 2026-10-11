@@ -886,7 +886,158 @@ that has found nothing.
    desk keeps using the measured allowlist until WP6 wires the gatekeeper and
    WP9 persists the calibration online.
 
-## 8. Documented assumptions and conservative choices
+## 8. WP6 — the gatekeeper, and the composition point
+
+### 8.1 What it is
+
+Everything upstream of this section produces either a **calibrated probability**
+(WP4, WP5) or a **hard permission** (WP3, and the desk's own plan gates). Neither
+is a decision. The gatekeeper (`src/lib/multiasset/meta/gatekeeper.ts`) is where
+they become one:
+
+> arm the trade only if its edge survives **every** layer, at the **lower bound**
+> of the probability, at the **expected fill**, net of the **measured cost**.
+
+It is a pure function — no I/O, no clock, no randomness — and it is composed at
+the **end** of `evaluate()`, after every veto the desk already had. It can only
+ever ADD a refusal. Every gate is recorded whether it passed or failed, each with
+its numbers, so a decision can be audited a week later for the gates it silently
+skipped as well as the ones it failed.
+
+### 8.2 The layers, and where each number comes from
+
+| # | layer | bar | source |
+| --- | --- | --- | --- |
+| 1 | plan geometry | risk unit, cost, entry, horizon all usable | the plan's own numbers |
+| 2 | calibrated model | `p_LCB` with ≥ 1 independent observation behind it | WP5 (`meta/pcb.ts`) — never `p̂` |
+| 3 | R:R at the fill | ≥ 2.0 | `MIN_RR_FILL` (the desk's own constant, re-stated not re-invented) |
+| 4 | cost / σ_h | ≤ 0.15 (scalp only) | the brief; the study reports it for every mode |
+| 5 | EV at the bound | ≥ 0.25R scalp, ≥ 0.20R intraday / swing | the brief; the study measures what the floor costs |
+| 6 | regime permit | WP3's three conditions | WP3, composed here |
+| 7 | executed-policy geometry | target reachable in ≥ 2% of simulated paths; block-mean 5th percentile ≥ −1.5R | this section, §8.4 |
+| 8 | multiplicity | BH at q = 0.10 over the scan's family | `benjaminiHochberg` |
+
+`GK_BAD_INPUT`, `GK_NO_MODEL`, `GK_MC_UNAVAILABLE` and `GK_REGIME` are all
+**fail-closed**: an unmeasurable layer refuses rather than passing. "We could not
+measure it" is not "it is fine", which is the single rule that most often decides
+whether a layered desk is real.
+
+### 8.3 The executed-policy Monte Carlo
+
+`src/lib/multiasset/montecarlo-v2.ts` is GARCH-filtered historical simulation
+with a stationary block bootstrap:
+
+1. fit a GARCH(1,1) to the recent returns and filter them into standardised
+   residuals `z_t = r_t/σ_t`;
+2. resample bar **shapes** with a stationary block bootstrap (Politis–Romano —
+   geometric block lengths, so runs of pressure survive);
+3. re-scale by **today's** σ from the same fit, and simulate the desk's own
+   barrier policy (target, stop, time stop, the round trip) through
+   `meta/labels.ts` — one label implementation, not two.
+
+**It is fitted with a mean.** A first version treated returns as zero-mean, which
+made a trend read as one enormous shock: on a 0.06%/bar drift the filtered σ came
+out at 5.3e-4 against a sample σ of 6.0e-5, and 5,000 of 5,000 simulated trades
+were stopped by a volatility the market did not have. `meanReturn` is fitted and
+the residuals are demeaned; `gatekeeper.test.ts` keeps a regression for exactly
+that shape.
+
+Resolution is **200 paths × 25 trades** live and **100 × 8** in the study (a
+runtime budget, printed in the report), sampled every 60th decision bar. When the
+history is too short for a fit the function says so (`pathsUsingGarch: false`) and
+the gatekeeper refuses.
+
+### 8.4 What the study caught: the first MC gate was unsatisfiable
+
+The WP6 study (`--gatekeeper`, §12) re-reads the WP5 corpora through the gate and
+measures three policies side by side: WP5's own `EV_LCB > 0`, the mode's **floor**,
+and the floor **plus** BH at q = 0.10. It also samples the Monte Carlo.
+
+Its first run failed — on one gate, in both modes:
+
+```
+FAIL the simulation layer agrees more often than not —
+     0 of 61 (intraday) / 0 of 57 (swing) sampled decision bars have a positive
+     executed-policy tail (need ≥ 50%)
+```
+
+And the null fixtures failed it too, which is the tell. The simulated per-row
+mean R was centred near **−0.1R**, with a 5th percentile near **−0.75R per trade**.
+That is not a defect in the resampler: the MC resamples the market's own paths,
+enters at the fill, and holds **no alpha view** — so its expectation *is* the
+random-entry expectation, and the entire gate stack exists precisely because that
+expectation is negative. "The random-entry simulation must be profitable" is
+unsatisfiable by construction. A gate that can never pass is not a safety gate; it
+is a stopped desk.
+
+The layer was therefore **redefined, with the measurement in the report**, into
+what a model-free resimulation can actually veto — and both new bars were placed
+**below the entire measured range** so they cannot act as an alpha filter in
+disguise:
+
+| statistic over sampled bars (WP6 corpora, both modes) | measured range | bar |
+| --- | --- | --- |
+| target reached inside the horizon (`targetShare`) | 0.043 … 0.230 (median 0.12–0.23) | ≥ **0.02** |
+| 5th percentile of block means (`p05MeanR`, 8 trades/path) | −1.053 … −0.678 | ≥ **−1.5R** |
+
+Every sampled reading is stored in the report (`mc.readings`), so a reader can
+recompute any bar over them. The alpha claim itself stays where it is measurable:
+in `EV_LCB`.
+
+### 8.5 The result (stored in `research-reports/2026-10-11-wp6-gatekeeper-*-study.json`)
+
+Both modes **PASS**. (Numbers below are from the stored reports; `floor` is the
+mode's EV floor, `gated` is floor **and** BH.)
+
+| fixture (intraday) | rows | EV>0 armed / meanR | floor armed / meanR | gated armed / meanR | corpusR | BH rej% |
+| --- | --- | --- | --- | --- | --- | --- |
+| positive-control | 3525 | 2246 / 0.98 | 1771 / 1.03 | **977 / 1.12** | 0.58 | 67.1% |
+| seasonal | 2666 | 1085 / 1.36 | 980 / 1.38 | 979 / 1.38 | 0.51 | 49.2% |
+| mean-reverting | 1652 | 23 / 0.50 | 9 / 1.41 | 9 / 1.41 | −0.16 | 75.5% |
+| null-driftless | 1747 | 28 / −0.53 | 10 / −0.48 | 10 / −0.48 | −0.13 | 80.1% |
+| null-shuffled | 1763 | 56 / −0.04 | 27 / 0.22 | 27 / 0.22 | −0.09 | 73.4% |
+
+| fixture (swing) | rows | EV>0 armed / meanR | floor armed / meanR | gated armed / meanR | corpusR | BH rej% |
+| --- | --- | --- | --- | --- | --- | --- |
+| positive-control | 3302 | 2252 / 1.21 | 2091 / 1.22 | **490 / 1.32** | 0.70 | 76.7% |
+| seasonal | 2602 | 95 / 0.54 | 27 / 0.46 | 24 / 0.59 | −0.00 | 85.1% |
+| mean-reverting | 1712 | 2 / 1.98 | 2 / 1.98 | 2 / 1.98 | −0.17 | 80.6% |
+| null-driftless | 1807 | 35 / 0.07 | 13 / 0.07 | 13 / 0.07 | −0.08 | 84.9% |
+| null-shuffled | 1769 | 39 / −0.06 | 14 / 0.38 | 14 / 0.38 | −0.06 | 79.6% |
+
+The gates that decide the verdict:
+
+* **home**: ≥ 20 arms survive the floor and BH (977 / 490 — a 17–28% arm rate, not
+  a filter that empties the desk); the survivors beat the corpus (1.118 vs 0.576
+  intraday, 1.324 vs 0.702 swing); demanding the floor does not cost realised edge
+  (1.029 vs 0.979; 1.220 vs 1.208, bar −0.02R); the geometry layer admits every
+  sampled bar (61/61, 57/57).
+* **nulls**: 37 armed of 3510 (intraday) with mean R 0.033 and a 95% lower bound
+  of −0.689; 27 of 3576 with 0.231 and −0.655. Refusing to arm passes; arming into
+  noise would not. Every null fixture is reported by name.
+* **cost/σ_h**: the round trip is 0.7–3.1% of the horizon's volatility on these
+  corpora — the scalp ceiling never binds here because the meta corpus has no
+  scalp frames, which the report says rather than implying coverage.
+
+### 8.6 What is wired, and what this does not claim
+
+* **Flags.** `DESK_V4_GATEKEEPER` defaults **off**; with every v4 flag off the
+  decision path is byte-for-byte the v3.05 one, and the wiring test asserts the
+  gatekeeper decided *nothing* rather than merely agreeing.
+* **Composition.** The WP3 permit is computed only under `DESK_V4_REGIME_HMM`;
+  absent, the gatekeeper refuses with `GK_REGIME`. The MC runs only under
+  `DESK_V4_MONTE_CARLO_V2`; absent, `GK_MC_UNAVAILABLE`. Both are fail-closed by
+  design, and both are asserted in `wp6-gatekeeper-wiring.test.ts`.
+* **`shadow` does not soften a veto** (§9, assumption 32).
+* **The study does not re-measure WP3 or the live MC.** The permit is measured in
+  the WP3 study; the composition is measured by the wiring tests; the MC here is
+  sampled (every 60th bar), and the report says so. **Scalp is not in the meta
+  corpus at all** — the 0.25R floor and the 15% cost ceiling are asserted by the
+  unit and wiring tests only, and the report prints that limitation.
+* **The gatekeeper is not an alpha source.** It cannot make a bad plan good; it
+  can only refuse one. Every number it prints is a bound, a cost, or a count.
+
+## 9. Documented assumptions and conservative choices
 
 Each of these was a fork in the road where the conservative option was taken and
 the reasoning recorded.
@@ -1020,8 +1171,38 @@ the reasoning recorded.
 27. **The Kaplan–Meier of `p_LCB` uses the fold's own training evidence.** A bound
    computed from the *test* set would be reading the answer key; a bound computed
    from the row count would be double-counting overlapping events.
+28. **The EV floor is the brief's number, not a measured one — and the study
+   reports what it costs.** `MIN_EV_LCB_R` is 0.25R scalp and 0.20R intraday /
+   swing. The WP6 study prints armed counts and realised mean R under three
+   policies (EV_LCB > 0, the floor, the floor + BH) so a reader can see the price
+   of the margin. A later work package may RAISE the floor per cohort; nothing may
+   lower it (§10, gate ledger).
+29. **The executed-policy Monte Carlo is a *geometry* check, not an alpha claim.**
+   It resamples the market's own paths at the fill with no alpha view, so its
+   expectation is the random-entry expectation — measured on the WP6 corpora as a
+   per-row mean R near −0.1R. The layer therefore vetoes exactly three things: a
+   simulation that cannot be measured or fitted, a target unreachable inside the
+   horizon (< 2% of simulated paths), and a block-mean tail past −1.5R per trade
+   at the 5th percentile. Both bars sit BELOW the whole measured range (§8.4).
+30. **Simulation size is not a gate threshold.** The MC resolves at 100 paths × 8
+   trades in the study and 200 × 25 live; more paths buy a tighter tail estimate
+   and cost linear runtime, so the study samples every 60th decision bar and
+   stores every sampled reading.
+31. **Benjamini–Hochberg is applied per fold in the study and per *scan* live.**
+   A single-market decision has no cross-sectional family, so the honest proxy is
+   the set of candidates the same cycle considered — passed to the gatekeeper as
+   `familySize` (1 while the desk evaluates one candidate per decision, and the
+   report says so rather than implying a correction it did not apply).
+32. **`shadow` does not soften the gatekeeper.** For an ADDITIVE veto, reading
+   "shadow" as "record but do not enforce" would be a weakened safety gate: the
+   gatekeeper enforces whenever `DESK_V4_GATEKEEPER=1`, and the shadow/live
+   distinction governs whether the desk may place orders at all (the rollout
+   phases) rather than whether a refusal is honoured.
+33. **The WP3 permit is composed, never inferred.** With `DESK_V4_REGIME_HMM` off
+   the permit is absent and the gate refuses with `GK_REGIME`; a flag being off
+   must never read as permission. Same for the MC under `DESK_V4_MONTE_CARLO_V2`.
 
-## 9. Changelog — every behavioural change, and the gate ledger
+## 10. Changelog — every behavioural change, and the gate ledger
 
 ### Behavioural changes
 
@@ -1057,6 +1238,14 @@ the reasoning recorded.
 | 28 | The logistic fit takes a joint Newton step with backtracking over the intercept and the coefficients and declares convergence on the step size | **correctness**: the split-step version reported `converged: false` on fits that had arrived — the objective-based test cannot resolve 1e-8 at a log-likelihood of −215 |
 | 29 | `eventWeights` reports the independent-observation count (the sum of uniquenesses) beside Kish, and the two are never interchanged | **correctness**: ten identical events were being counted as ten observations by the Kish reading |
 | 30 | `defaultAllowlistForMode()` in `desk-v4-config.ts` exposes the measured WP4 allowlist per mode as data | config only — one table maps the shipped agent ids onto their flag keys so the study and the desk cannot answer "who may propose in swing?" differently |
+| 31 | The WP6 gatekeeper (`meta/gatekeeper.ts`): EV floor, cost/σ_h, BH q=0.10, regime permit, MC geometry, all with machine-readable codes and human sentences | **added, off by default** — `DESK_V4_GATEKEEPER` off leaves the decision path byte-for-byte the v3.05 one (asserted by the wiring test: the gatekeeper must decide *nothing*, not merely agree) |
+| 32 | The gatekeeper is composed at the END of `evaluate()` and can only ADD rejections | **tighter** — an intersection with every existing veto; the wiring test asserts a refused plan stays refused and keeps every legacy sentence |
+| 33 | The WP3 regime permit is wired into the live decision for the first time (gated on `DESK_V4_REGIME_HMM`) | **tighter when on, fail-closed always**: a permit that cannot be computed refuses with `GK_REGIME` |
+| 34 | The executed-policy Monte Carlo (`montecarlo-v2.ts`): demeaned GARCH(1,1)-FHS + stationary block bootstrap, refuse-to-run on an un-fittable history | **added**; fixes a defect where a trend's drift was read as volatility (filtered σ 8.9× the sample's; 5,000/5,000 simulated trades stopped) |
+| 35 | The MC layer's pass condition was redefined after the study measured the first one unsatisfiable (0 of 197 sampled bars had a positive tail, home and null alike) | **redefined with the measurement in the report** (§8.4): geometry bars — target reachable in ≥ 2% of paths, block-mean 5th percentile ≥ −1.5R — both below the entire measured range, instead of "the random-entry simulation must be profitable" |
+| 36 | `bestProbability` in `meta/view.ts` restored to the zero floor, and the regime streak restored to consecutive DECISION bars | **correctness**: a 0.5 floor turned every equal-heads tie into a LONG (directional bias in a helper), and the streak change re-fitted the WP5 corpus. Re-run #3 reproduces the stored WP5 numbers exactly |
+| 37 | `riskPrice` is carried through `MetaDataset` → `MetaOosRow` instead of a study re-deriving the stop from RR geometry | **correctness**: the cost/σ_h comparison is between two PRICE distances and must use the desk's own `riskPriceAt` |
+| 38 | `meta/gatekeeper.test.ts` and `wp6-gatekeeper-wiring.test.ts` joined the standing `package.json` test script | coverage only |
 
 ### Gate ledger
 
@@ -1085,7 +1274,21 @@ the reasoning recorded.
   20`; the 200-independent-observation floor on fitting a calibrator at all; and
   the rule that an unidentifiable calibration slope is a failure rather than a
   number to report.
-* **Removed**: **none.** No safety gate was removed in WP0–WP5. Everything in
+* **Added (WP6)**: the gatekeeper's eight layers (§8.2) — the mode-specific EV
+  floors (0.25R scalp / 0.20R intraday+swing), the cost/σ_h ceiling (15%, scalp),
+  Benjamini–Hochberg at q = 0.10, the executed-policy geometry bars (target
+  reachability ≥ 2%, block-mean 5th percentile ≥ −1.5R), and the fail-closed codes
+  `GK_BAD_INPUT` / `GK_NO_MODEL` / `GK_MC_UNAVAILABLE` / `GK_REGIME`; the
+  compose-last rule ("the gatekeeper can only add rejections"); the WP3 permit's
+  live wiring; and the Monte Carlo's refuse-to-run rule.
+* **Redefined (WP6)**: the executed-policy Monte Carlo's pass condition. Its first
+  form — "the simulated 5th percentile of block means is positive" — is
+  unsatisfiable by construction (measured: 0 of 197 sampled bars on the desk's own
+  corpora, home and null alike, §8.4). It was replaced by the geometry bars above,
+  which lie below the whole measured range. Recorded here rather than changed
+  quietly: a gate that can never pass is a stopped desk, and a gate relaxed
+  without a stored measurement is a removed one.
+* **Removed**: **none.** No safety gate was removed in WP0–WP6. Everything in
   §1's constraint list (fail-closed news gate, quote integrity, clock
   normalisation, one-account-one-desk, live-off default, daily-loss and drawdown
   limits) is intact, and the position-manager tests assert the ones that touch
@@ -1093,7 +1296,7 @@ the reasoning recorded.
   loosened, and no agent can place a trade — the alpha layer has no order path at
   all.
 
-## 10. Open risks and unverifiable items
+## 11. Open risks and unverifiable items
 
 1. **The EA has never been compiled** (no MetaEditor here). Compile
    `NeurotradeBridge.mq5` in MetaEditor before any live or demo use; the
@@ -1110,7 +1313,7 @@ the reasoning recorded.
    slope inside [0.8, 1.2] on held-out data.
 5. **Slippage is modelled, not measured.** The ledger (WP7) replaces the
    allowance with observed slippage by symbol, session and order type.
-6. **Portfolio effects are not yet simulated** (see §8.5); WP8 owns them.
+6. **Portfolio effects are not yet simulated** (see §9.5); WP8 owns them.
 7. **The harness's own blind spots**: uniform spread when the file has no SPREAD
    column, no queue position at the trigger, no partial fills at the entry,
    intrabar ambiguity resolved pessimistically (stop first), and a decision
@@ -1197,8 +1400,22 @@ the reasoning recorded.
     the probabilities, and the `emitted`/feature set must be re-measured on it —
     in particular the `hourOfDay`/`session` features, which a broker's server
     clock (GMT+3) shifts relative to the UTC hours the generator uses.
+20. **WP6's gate is measured on the same synthetic corpora, and scalp is not in
+    them at all.** The meta corpus has no scalp frames, so the 0.25R scalp floor
+    and the 15% cost ceiling are asserted by the unit and wiring tests only; and
+    the regime permit's share of refusals is measured by the WP3 study rather than
+    re-derived here. Both facts are printed in the WP6 reports rather than left
+    for a reader to discover.
+21. **The Monte Carlo's bars sit below the measured range by construction, and
+    that is the point — but it means the layer is quiet.** It vetoes broken
+    geometry (an unreachable target, a leaking tail), not marginal edge; the alpha
+    claim lives in `EV_LCB`. If a future cohort's `targetShare` distribution drifts
+    toward the 2% bar — a much slower market than any measured here — the layer
+    would start refusing trades, and WP9's weekly report is where that would show
+    up first. The readings stored in every WP6 report are what make that
+    detectable.
 
-## 11. Tests and commands
+## 12. Tests and commands
 
 ```bash
 # the standing regression — every api-server test, including the desk suites
@@ -1220,6 +1437,13 @@ cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset
 
 # typecheck (all packages)
 pnpm run typecheck
+
+# the WP6 gatekeeper study, per mode (≈ 85 s intraday, ≈ 75 s swing; writes
+# research-reports/2026-10-11-wp6-gatekeeper-<mode>-study.json)
+# measures the WP5 corpora through the gate: EV floor, BH q=0.10, cost/sigma_h,
+# and the sampled executed-policy Monte Carlo (every 60th decision bar)
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --gatekeeper --mode intraday|swing
 
 # the harness
 pnpm --filter @workspace/api-server run research:run -- --help

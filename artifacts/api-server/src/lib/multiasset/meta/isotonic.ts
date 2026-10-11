@@ -271,6 +271,27 @@ export function applyIsotonic(map: IsotonicMap, p: number): number {
 }
 
 /**
+ * Apply a calibrator of either shipped kind.
+ *
+ * The map carries both possibilities — a PAV step function, or the two-parameter
+ * Platt recalibration the WP5 study selected on the measured slopes — and every
+ * consumer must resolve it the same way. `applyIsotonic` alone ignores `platt`,
+ * so calling it on a Platt map would silently return the base rate; this function
+ * is the one entry point, and the live model and the report use it.
+ */
+export function applyCalibrator(map: IsotonicMap, pRaw: number): number {
+  const platt = map.platt;
+  if (platt) {
+    const clipped = Math.min(1 - 1e-9, Math.max(1e-9, pRaw));
+    const z = platt.a + platt.b * Math.log(clipped / (1 - clipped));
+    if (z >= 0) return 1 / (1 + Math.exp(-z));
+    const e = Math.exp(z);
+    return e / (1 + e);
+  }
+  return applyIsotonic(map, pRaw);
+}
+
+/**
  * Fit per regime, falling back to the pooled map below the floor.
  *
  * `keyOf` maps a row to its regime label; rows without one use the pooled map.

@@ -79,6 +79,20 @@ import {
   type MetaFixtureVerdict,
   type MetaStudyReport,
 } from "./meta-eval";
+import {
+  GK_MC_PATHS,
+  GK_MC_STRIDE,
+  GK_MC_TRADES_PER_PATH,
+  assessGatekeeperSeries,
+  gatekeeperNullGates,
+  poolGatekeeperHomes,
+  poolGatekeeperSeries,
+  renderGatekeeperStudy,
+  type GatekeeperFixtureAssessment,
+  type GatekeeperSeriesAssessment,
+  type GatekeeperStudyReport,
+} from "./gatekeeper-eval";
+import { BH_Q, COST_OVER_SIGMA_MODES, MAX_COST_OVER_HORIZON_SIGMA, MIN_EV_LCB_R } from "../meta/gatekeeper";
 import { DEFAULT_ALPHA_CONFIG } from "../alpha/edge";
 import { lowerBoundMeanR, tradeStats } from "./metrics";
 import {
@@ -135,6 +149,8 @@ interface CliArgs {
   metaSeriesExplicit: boolean;
   metaBars: number;
   metaCalibrator: MetaCalibratorKind;
+  /** Run the WP6 gatekeeper study instead of a strategy study. */
+  gatekeeper: boolean;
   /** True when the caller set --stride explicitly. */
   strideExplicit: boolean;
 }
@@ -168,6 +184,10 @@ const USAGE = `research:run — the MT5 Desk v4 research harness
                                     a hard veto; v4-regime-shadow measures the
                                     same permission without changing any trade
   --regime-fit-bars <n>             bars the regime HMM is fitted on (default 1000)
+  --gatekeeper                      run the WP6 gatekeeper study instead of a
+                                    strategy study: the WP5 corpora re-read through
+                                    the gate (EV floors, BH q=0.10, cost/sigma_h,
+                                    sampled executed-policy Monte Carlo)
   --alphas                          run the WP4 alpha-agent study instead of a
                                     strategy study: every agent is measured on
                                     its own labelled fixture and on the nulls
@@ -248,6 +268,7 @@ export function parseArgs(argv: string[]): CliArgs {
     metaSeriesExplicit: flags.has("meta-series"),
     metaBars: Math.max(1200, Math.floor(num("meta-bars", 2500))),
     metaCalibrator: (flags.get("meta-calibrator") ?? META_CALIBRATOR_DEFAULT) as MetaCalibratorKind,
+    gatekeeper: flags.has("gatekeeper"),
     regimeFitBars: Math.max(200, Math.floor(num("regime-fit-bars", DEFAULT_REGIME_HMM_CONFIG.fitBars))),
     mode,
     data: flags.get("data") ?? "synthetic:all",
@@ -1413,6 +1434,141 @@ export function renderMetaStudy(report: MetaStudyReport): string {
   return lines.join("\n");
 }
 
+
+/**
+ * The WP6 gatekeeper study.
+ *
+ * Same corpora, same folds, same calibrator as `runMetaStudy` — deliberately, and
+ * by construction: the gatekeeper exists to spend that model, so measuring it on
+ * any other corpus would answer a question nobody asked. The one addition is what
+ * WP6 needs and WP5 never had: a MEASURED break-even rate per row (the
+ * direction-matched random-entry rate at that row's own bar), the mode's EV
+ * floors, BH at q = 0.10, the cost against the horizon's volatility, and the
+ * sampled executed-policy Monte Carlo.
+ */
+export function runGatekeeperStudy(args: CliArgs): GatekeeperStudyReport {
+  const notes: string[] = [];
+  const frame = SYNTHETIC_BASE_FRAME[args.mode];
+  const frameWidth = frameMinutes(frame) * 60_000;
+  const seriesCount = args.metaSeriesExplicit ? args.metaSeries : undefined;
+  // Every closed bar is a decision: the gate is measured at decision cadence, and
+  // the corpus has to be large enough to calibrate at all (see `uniqueness.ts`).
+  // Same cadence as the WP5 study this consumes: every closed bar unless the
+  // caller says otherwise. The gatekeeper is measured on the corpus the model was
+  // fitted and judged on, or it is measuring a different desk.
+  const stride = args.strideExplicit ? args.stride : 1;
+  const horizonBars = args.horizonBarsExplicit ? args.horizonBars : MODE_HORIZON_BARS[args.mode];
+  const fixtures: GatekeeperFixtureAssessment[] = [];
+  let mcSamples = 0;
+  let mcFailed = 0;
+  let costSigmaMeasured = 0;
+
+  for (const fixture of META_STUDY_FIXTURES) {
+    const count = seriesCount ?? fixture.series;
+    const assessments: GatekeeperSeriesAssessment[] = [];
+    for (let r = 0; r < count; r++) {
+      const series = generate(fixture.kind as GeneratorKind, {
+        ...DEFAULT_GENERATOR_SPEC,
+        seed: args.seed + r * 1013,
+        bars: args.metaBars,
+        timeframeMs: frameWidth,
+        volatility: args.mode === "scalp" ? 0.00035 : args.mode === "intraday" ? 0.0008 : 0.0016,
+      });
+      const measurement = measureMeta({
+        bars: series.bars,
+        series: `${fixture.name}#${r + 1}`,
+        kind: fixture.kind,
+        mode: args.mode,
+        spec: args.spec.spec,
+        symbol: args.symbol,
+        frame,
+        frameWidthMs: frameWidth,
+        stride: Math.max(1, Math.min(stride, 5)),
+        warmupBars: 150,
+        targetMultipleR: META_TARGET_MULTIPLE_R,
+        horizonBars,
+        calibrator: args.metaCalibrator,
+      });
+      const assessment = assessGatekeeperSeries({
+        measurement,
+        bars: series.bars,
+        spec: args.spec.spec,
+        mode: args.mode,
+        horizonBars,
+        seed: args.seed + r * 7919,
+      });
+      mcSamples += assessment.mc.samples;
+      mcFailed += assessment.mc.failedFit;
+      costSigmaMeasured += assessment.costSigma.measured;
+      assessments.push(assessment);
+    }
+    const pooled = poolGatekeeperSeries(assessments, {
+      hitRate:
+        assessments.reduce((a, s) => a + s.corpus.hitRate * s.rows, 0) /
+        Math.max(1, assessments.reduce((a, s) => a + s.rows, 0)),
+      meanR:
+        assessments.reduce((a, s) => a + s.corpus.meanR * s.rows, 0) /
+        Math.max(1, assessments.reduce((a, s) => a + s.rows, 0)),
+    });
+    fixtures.push({
+      name: fixture.name,
+      kind: fixture.kind,
+      mode: args.mode,
+      home: fixture.home === true,
+      null: fixture.null === true,
+      note: fixture.note,
+      series: assessments,
+      pooled,
+    });
+  }
+
+  const homes = fixtures.filter((fixture) => fixture.home);
+  const nulls = fixtures.filter((fixture) => fixture.null);
+  const homeGates = homes.length > 0 ? poolGatekeeperHomes(homes) : null;
+  const nullGates = nulls.length > 0 ? gatekeeperNullGates(nulls) : null;
+  if (homes.length === 0) notes.push("no home fixture in this run: the verdict rests on the nulls alone");
+  notes.push(
+    "the WP3 regime permit and the executed-policy Monte Carlo are NOT the same measurement here: the permit is measured by the WP3 study (research-reports/2026-10-11-wp3-regime-study-*.json) and its composition by wp6-gatekeeper-wiring.test.ts; the MC is SAMPLED at the stride below, and the per-decision path is covered by the wiring tests",
+  );
+  notes.push(
+    `sampled MC: ${mcSamples} decision bars (every ${GK_MC_STRIDE}th row), ${mcFailed} refused for want of a GARCH fit`,
+  );
+  notes.push(
+    `cost/sigma_h measured on ${costSigmaMeasured} rows with a usable trailing sigma; enforced only on scalp (${COST_OVER_SIGMA_MODES.join(", ")})`,
+  );
+  notes.push(
+    `scalp is not measured here: the meta corpus has no scalp frames, so the ${MIN_EV_LCB_R.scalp}R scalp floor and the ${MAX_COST_OVER_HORIZON_SIGMA} cost ceiling are asserted by the unit and wiring tests only`,
+  );
+  if (args.mode !== "intraday" && args.mode !== "swing") {
+    notes.push(`mode ${args.mode} is not one of the corpus modes this study was designed around`);
+  }
+
+  return {
+    tool: "MT5 Desk v4 — WP6 gatekeeper study",
+    mode: args.mode,
+    generatedAt: new Date().toISOString(),
+    command: process.argv.join(" "),
+    mc: { stride: GK_MC_STRIDE, paths: GK_MC_PATHS, tradesPerPath: GK_MC_TRADES_PER_PATH },
+    thresholds: { evLcbFloorR: MIN_EV_LCB_R, bhQ: BH_Q, costSigmaMax: MAX_COST_OVER_HORIZON_SIGMA },
+    contractSpec: args.spec.spec as unknown as Record<string, unknown>,
+    fixtures,
+    homeGates,
+    nullGates,
+    verdict: (homeGates === null || homeGates.pass) && (nullGates === null || nullGates.pass) ? "PASS" : "FAIL",
+    notes,
+  };
+}
+
+export function writeGatekeeperReport(report: GatekeeperStudyReport, outPath: string | null): string {
+  const stamp = report.generatedAt.slice(0, 10);
+  const target =
+    outPath ??
+    resolve(process.cwd(), `research-reports/${stamp}-wp6-gatekeeper-${report.mode}-gatekeeper-study.json`);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return target;
+}
+
 export function writeMetaReport(report: MetaStudyReport, outPath: string | null): string {
   const stamp = report.generatedAt.slice(0, 10);
   const target =
@@ -1446,6 +1602,15 @@ export function main(argv = process.argv.slice(2)): number {
   }
   const args = parseArgs(argv);
   const started = Date.now();
+  if (args.gatekeeper) {
+    const study = runGatekeeperStudy(args);
+    const written = writeGatekeeperReport(study, args.out);
+    if (!args.quiet) process.stdout.write(`${renderGatekeeperStudy(study)}\n`);
+    process.stdout.write(`  report: ${written}  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`);
+    // WP6's verdict: the gate must select something better than the corpus on its
+    // POSITIVE CONTROL and must claim nothing on the nulls.
+    return study.verdict === "PASS" ? 0 : 1;
+  }
   if (args.meta) {
     const study = runMetaStudy(args);
     const written = writeMetaReport(study, args.out);

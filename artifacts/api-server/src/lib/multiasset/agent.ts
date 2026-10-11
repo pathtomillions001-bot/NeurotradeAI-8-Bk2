@@ -1,4 +1,11 @@
 /**
+ * Re-exported so every existing caller keeps working. The definitions live in
+ * `desk-constants.ts`, which depends on nothing (§ the file's header explains the
+ * import cycle that made this necessary).
+ */
+export { ENTRY_TIMEFRAME, MIN_COST_COVERAGE, MIN_RR_FILL, STOP_ATR_MULT };
+
+/**
  * Multi-Asset Desk — the agent.
  *
  * Pipeline, in order, with a veto at every stage:
@@ -29,11 +36,27 @@ import {
 import { buildEvidence, MODE_MIN_AGREEING_FAMILIES, type EvidenceResult } from "./evidence";
 import { markovFromPrices, directionalPersistence, sampleConfidence } from "./markov";
 import { betaPosterior, blendProbability, garchVolatility } from "./analytics";
-import { assessRegime, isRegimeTradeable } from "./regime";
+import { assessRegime, isRegimeTradeable, type RegimeKind } from "./regime";
 import { bestTarget, MIN_TARGET_R, simulateTrade, type MonteCarloResult } from "./montecarlo";
 import { evaluateRisk, type RiskDecision, type RiskPolicy, type RiskState } from "./risk";
 import { kellyFraction, pointValuePerLot, priceToPoints, sizePosition, type SizingResult } from "./sizing";
 import { assessNewsGate, type NewsGate } from "./news";
+import {
+  ENTRY_TIMEFRAME,
+  MIN_COST_COVERAGE,
+  MIN_RR_FILL,
+  STOP_ATR_MULT,
+} from "./desk-constants";
+import { deskV4, v4On } from "./desk-v4-config";
+import { regimePermit, type RegimePermit } from "./regime-hmm";
+import { executedPolicyMonteCarlo } from "./montecarlo-v2";
+import { metaViewAt } from "./meta/view";
+import { metaPredictContext, predictMetaModel, type MetaModelSnapshot, type MetaModelPrediction } from "./meta/model";
+import {
+  gatekeeperDecision,
+  gatekeeperRejections,
+  type GatekeeperDecision,
+} from "./meta/gatekeeper";
 import {
   MODE_ANALYSIS_TIMEFRAMES,
   ALL_TIMEFRAMES,
@@ -80,6 +103,17 @@ export interface AgentInput {
   outcomes?: { wins: number; losses: number };
   /** Force the evidence ensemble's direction instead of inferring it. */
   direction?: "up" | "down";
+  /**
+   * The fitted WP5 meta-model the WP6 gatekeeper spends, if one is loaded.
+   *
+   * Supplied by the caller rather than read from a global registry: the decision
+   * must be reproducible from its own inputs, and a desk that silently picks up
+   * whatever model happens to be in memory is a desk whose record cannot be
+   * audited. WP9 persists these (`desk_shadow_evaluations` / the calibrator
+   * artifacts) and hands them in here. Absent or null means "no model", which the
+   * gatekeeper turns into a refusal, never into a pass.
+   */
+  metaModel?: MetaModelSnapshot | null;
 }
 
 export interface AgentDecision {
@@ -123,6 +157,17 @@ export interface AgentDecision {
   stopWidened: boolean;
   /** Every gate that failed, in evaluation order. Shown verbatim in the UI. */
   rejections: string[];
+  /**
+   * The WP6 gatekeeper's verdict, when the subsystem is enabled.
+   *
+   * Null means the gatekeeper did not decide this plan — either because the
+   * `DESK_V4_GATEKEEPER` flag is off (the legacy gates are then the whole
+   * decision, exactly as before) or because evaluation stopped before reaching
+   * it. Present-and-refusing is the interesting case: `codes` is machine-readable
+   * and `reason` is the sentence a human reads, so a trade the desk did not take
+   * is as auditable as one it did.
+   */
+  gatekeeper: GatekeeperDecision | null;
   /** Non-blocking cautions that were recorded but did not stop the trade. */
   warnings: string[];
   /** Short machine-readable summary for the signal log. */
@@ -130,51 +175,11 @@ export interface AgentDecision {
   evaluatedAt: number;
 }
 
-/**
- * Entry timeframe used for stop placement and horizons, per style.
- *
- * These sit inside each mode's analysis band by construction:
- *   scalp → M2 (inside S10–M3; the 2-minute frame is where a scalp stop has
- *            enough range to survive a spread but is still a scalp's stop)
- *   intraday → M15 (the middle of M5–M30)
- *   swing → H1 (the fast end of H1–W1, where a swing stop belongs)
- */
-export const ENTRY_TIMEFRAME: Record<TradeMode, Timeframe> = {
-  scalp: "M2",
-  intraday: "M15",
-  swing: "H1",
-};
 
-/**
- * ATR multiple for the initial structural stop, per style.
- *
- * A scalp's stop must be reachable in minutes or the trade is not a scalp, so
- * it is the tightest; a swing stop has to survive a full session of noise.
- */
-export const STOP_ATR_MULT: Record<TradeMode, number> = {
-  scalp: 0.8,
-  intraday: 1.5,
-  swing: 2.0,
-};
 
-/**
- * The stop may never be smaller than this many times the round-trip cost.
- *
- * THIS IS THE FIX FOR "the expectancy is always below 0.15R".
- *
- * Every gate in the desk is measured in R — the distance to the stop. If R is
- * about the same size as the spread, then "one R" of edge can never cover "one
- * R" of cost, and the expectancy is structurally negative no matter how good
- * the setup is. That is exactly what a 0.8 × ATR stop on a one-minute FX frame
- * produces on a broker quoting a 0.8-pip spread: an 8-point spread against a
- * 10-point stop is 0.8R of cost before the trade has any edge at all.
- *
- * Four is a deliberate number: it caps the round-trip cost at 25% of the money
- * risked, which still leaves room for a 0.15R+ net edge on a genuine setup.
- * The spread is *not* filtered out anywhere — it is priced here, inside the
- * risk the trade is taking.
- */
-export const MIN_COST_COVERAGE = 4;
+
+
+
 
 /**
  * ...and the stop may never be smaller than this many ATRs of the entry frame,
@@ -204,23 +209,7 @@ const PLAN_TTL_MS: Record<TradeMode, number> = {
   swing: 60 * 60_000,
 };
 
-/**
- * MINIMUM REWARD:RISK, MEASURED AT THE EXPECTED FILL — the owner's hard rule.
- *
- * The old desk computed reward:risk from the QUOTE, then handed the EA a
- * trigger placed 0.08–0.12 ATR BEYOND that quote. Every fill was therefore
- * worse than the geometry the decision was made on: with a 0.10 ATR offset on
- * a 1.5 ATR stop, a plan sold as "1:2" was really 1:1.87, and on a scalp
- * (0.08 ATR against a minimum 0.8 ATR stop) it was 1:1.82. Small differences,
- * but the whole edge lives in that ratio.
- *
- * The fill is modelled as the trigger plus the mode's slippage allowance —
- * worst case, since the plan only fires when price is already moving — and the
- * ratio is recomputed from THAT price. Anything under 2.0 is refused with the
- * number in the reason, so the terminal can show exactly what was rejected and
- * why.
- */
-export const MIN_RR_FILL = 2.0;
+
 
 /**
  * How much of the final quality score comes from the evidence ensemble rather
@@ -250,6 +239,145 @@ export const DEFAULT_MIN_EDGE_R = 0.15;
  * is how the offline research harness isolates price logic from regime logic.
  */
 export const DEFAULT_MIN_PERSISTENCE = 0;
+
+/**
+ * Resolution of the WP6 executed-policy Monte Carlo.
+ *
+ * Simulation SIZE, not a gate threshold: more paths buy a tighter tail estimate
+ * and cost linear runtime. 200 paths x 25 trades x the mode's horizon is between
+ * 60k and 240k labelled steps per decision — seconds, not minutes — and the
+ * tail it reports is the 5th percentile of 200 per-path means rather than the
+ * minimum of anything.
+ */
+const GATEKEEPER_MC_PATHS = 200;
+const GATEKEEPER_MC_TRADES_PER_PATH = 25;
+
+/** How many regime permits to keep. A per-decision HMM fit is the expensive part. */
+const REGIME_PERMIT_MEMO_LIMIT = 64;
+const regimePermitMemo = new Map<string, RegimePermit>();
+
+/**
+ * The WP3 regime permit for one candidate, memoised per (symbol, mode, frame,
+ * bar, side).
+ *
+ * The permit is a pure function of its inputs, so a cache can never change a
+ * verdict — it only stops the same HMM fit from being paid for twice when the
+ * desk re-evaluates the same closed bar. Empty bars return null, which the
+ * gatekeeper turns into GK_REGIME: a permit that could not be computed refuses.
+ */
+function gatekeeperRegimePermit(input: {
+  symbol: string;
+  mode: TradeMode;
+  frame: Timeframe;
+  bars: Bar[];
+  side: "buy" | "sell";
+}): RegimePermit | null {
+  if (input.bars.length === 0) return null;
+  const last = input.bars[input.bars.length - 1] as Bar;
+  const key = [input.symbol, input.mode, input.frame, input.bars.length, last[0], input.side].join("|");
+  const hit = regimePermitMemo.get(key);
+  if (hit) return hit;
+  const permit = regimePermit({ bars: input.bars, mode: input.mode, side: input.side });
+  if (regimePermitMemo.size >= REGIME_PERMIT_MEMO_LIMIT) regimePermitMemo.clear();
+  regimePermitMemo.set(key, permit);
+  return permit;
+}
+
+/**
+ * The per-series regime reading, kept between decisions so the meta-model's
+ * `regimeDuration` feature means the same thing live as it did in training.
+ *
+ * The WP5 corpus counts a streak across consecutive DECISION bars; the shipped
+ * study runs at stride 1, so a streak measured per closed bar is the same
+ * statistic. Bounded like the permit memo, and keyed by series.
+ */
+const gatekeeperViewStates = new Map<string, { index: number; kind: RegimeKind | null; streak: number }>();
+
+interface GatekeeperPredictionResult {
+  prediction: MetaModelPrediction | null;
+  /** The measured break-even rate, available even when the model is not. */
+  breakEvenProbability: number | null;
+  /** Why there is no prediction, in words, for the decision record. */
+  note: string | undefined;
+}
+
+/**
+ * The calibrated probability for this decision, or an honest explanation of why
+ * there is none.
+ *
+ * The model is only asked about the question it was fitted on: the view must
+ * point the same way as the plan (a model asked about a long setup when the
+ * agents see a short one would answer confidently about the wrong thing), the
+ * horizon must match the corpus's, and the ATR must be real. Every refusal is
+ * named, because "no prediction" and "the model says the other direction" are
+ * different facts about a trade.
+ */
+function gatekeeperPrediction(input: {
+  snapshot: MetaModelSnapshot | null;
+  bars: Bar[];
+  symbol: string;
+  mode: TradeMode;
+  frame: Timeframe;
+  spec: SymbolSpec;
+  side: "buy" | "sell";
+  spreadPrice: number;
+  horizonBars: number;
+  targetMultipleR: number;
+}): GatekeeperPredictionResult {
+  const snapshot = input.snapshot;
+  if (!snapshot) {
+    return { prediction: null, breakEvenProbability: null, note: "no fitted meta-model is loaded for this desk" };
+  }
+  const breakeven = snapshot.cohort.breakEvenProbability;
+  const index = input.bars.length - 1;
+  if (index < 0) return { prediction: null, breakEvenProbability: breakeven, note: "there are no closed bars to read" };
+  const stateKey = [input.symbol, input.mode, input.frame].join("|");
+  const built = metaViewAt({
+    symbol: input.symbol,
+    mode: input.mode,
+    spec: input.spec,
+    frame: input.frame,
+    bars: input.bars,
+    index,
+    frameWidthMs: TIMEFRAME_MINUTES[input.frame] * 60_000,
+    targetMultipleR: input.targetMultipleR,
+    horizonBars: input.horizonBars,
+    previous: gatekeeperViewStates.get(stateKey) ?? null,
+  });
+  if (!built) {
+    // A decision bar with no view still advances the regime state: the streak is
+    // a property of the decision sequence (the corpus the model was fitted on),
+    // and an abstention breaks it.
+    gatekeeperViewStates.set(stateKey, { index, kind: null, streak: 0 });
+    return {
+      prediction: null,
+      breakEvenProbability: breakeven,
+      note: "no alpha agent had a view on the decision bar",
+    };
+  }
+  gatekeeperViewStates.set(stateKey, { index, kind: built.kind, streak: built.streak });
+  const wanted = input.side === "buy" ? 1 : -1;
+  if (built.view.direction !== wanted) {
+    return {
+      prediction: null,
+      breakEvenProbability: breakeven,
+      note: `the agents' view is ${built.view.direction === 1 ? "long" : "short"}, against this ${input.side} plan`,
+    };
+  }
+  const ctx = metaPredictContext({ bars: input.bars, index, spreadPrice: input.spreadPrice });
+  if (!ctx) {
+    return { prediction: null, breakEvenProbability: breakeven, note: "the decision bar has no usable ATR yet" };
+  }
+  const prediction = predictMetaModel(snapshot, built.view, ctx);
+  if (!prediction) {
+    return {
+      prediction: null,
+      breakEvenProbability: breakeven,
+      note: "the loaded snapshot does not match this decision's mode, horizon or feature set",
+    };
+  }
+  return { prediction, breakEvenProbability: prediction.breakEvenProbability, note: undefined };
+}
 
 /** Below this, persistence is surfaced as a caution rather than a failure. */
 const PERSISTENCE_ADVISORY = 0.45;
@@ -439,6 +567,8 @@ export function evaluate(input: AgentInput): AgentDecision {
   const minPersistence = input.minPersistence ?? DEFAULT_MIN_PERSISTENCE;
   const rejections: string[] = [];
   const warnings: string[] = [];
+  /** Filled by §5c when the WP6 gatekeeper is switched on. */
+  let gatekeeper: GatekeeperDecision | null = null;
   /** Set once the entry frame is resolved; reported on every decision. */
   let resolvedEntryFrame: Timeframe | null = null;
 
@@ -467,6 +597,7 @@ export function evaluate(input: AgentInput): AgentDecision {
       symbol: input.symbol,
       mode: input.mode,
       armed: false,
+      gatekeeper,
       plan: null,
       confluence,
       evidence: usedEvidence,
@@ -818,6 +949,94 @@ export function evaluate(input: AgentInput): AgentDecision {
     );
   }
 
+  // ── 5c. The WP6 gatekeeper — the composition point ────────────────────────
+  //
+  // Everything above is the legacy pipeline. This is where the v4 layers meet:
+  // the WP3 regime permit, the WP4 agents' view, the WP5 calibrated probability
+  // and the WP6 executed-policy Monte Carlo are all spent in ONE decision, and
+  // the result is an ADDITIONAL veto. Nothing here can arm a trade the legacy
+  // gates refused, and nothing here removes one they accepted — the two are
+  // composed by intersection.
+  //
+  // It runs only when `DESK_V4_GATEKEEPER` is on. Its own sub-inputs are each
+  // flag-gated; a missing sub-input is a REFUSAL (GK_NO_MODEL, GK_MC_UNAVAILABLE,
+  // GK_REGIME), never a silent pass — "we could not measure it" is not "it is
+  // fine". The flags default to off, so the shipped desk is byte-for-byte the
+  // v3.05 decision path.
+  if (v4On(deskV4().gatekeeper)) {
+    const riskAtFill = Math.abs(expectedFill - sl);
+    const v4 = deskV4();
+    // The WP3 layer participates only when it is switched on. An absent permit
+    // is not "no objection": the gatekeeper reads null as "the state could not be
+    // measured" and refuses (GK_REGIME), which is the same rule the MC and the
+    // model follow.
+    const permit = v4On(v4.regimeHmm)
+      ? gatekeeperRegimePermit({
+          symbol: input.symbol,
+          mode: input.mode,
+          frame: entrySeries.timeframe,
+          bars: entrySeries.bars,
+          side,
+        })
+      : null;
+    const prediction = gatekeeperPrediction({
+      snapshot: v4On(v4.metaModel) ? (input.metaModel ?? null) : null,
+      bars: entrySeries.bars,
+      symbol: input.symbol,
+      mode: input.mode,
+      frame: entrySeries.timeframe,
+      spec: input.spec,
+      side,
+      spreadPrice: costPrice,
+      horizonBars: horizon,
+      targetMultipleR: rrFill,
+    });
+    // The executed-policy MC needs enough closes to fit a GARCH(1,1); when it
+    // cannot, it says so and the gatekeeper refuses rather than resampling a
+    // volatility that is not today's.
+    const mc = v4On(v4.monteCarloV2)
+      ? executedPolicyMonteCarlo({
+          closes: closes(entrySeries.bars),
+          entry: expectedFill,
+          riskPrice: riskAtFill,
+          targetMultipleR: rrFill,
+          side,
+          costPrice,
+          horizonBars: horizon,
+          tradesPerPath: GATEKEEPER_MC_TRADES_PER_PATH,
+          paths: GATEKEEPER_MC_PATHS,
+          seed: seed ^ 0x6b1f2c3d,
+        })
+      : null;
+    gatekeeper = gatekeeperDecision({
+      mode: input.mode,
+      side,
+      rrFill,
+      expectedFill,
+      riskPrice: riskAtFill,
+      costPrice,
+      stepVolatility: simulationVolatility,
+      horizonBars: horizon,
+      probability: prediction.prediction?.probability ?? null,
+      probabilityLowerBound: prediction.prediction?.probabilityLowerBound ?? null,
+      evidence: prediction.prediction?.evidence ?? 0,
+      breakEvenProbability: prediction.breakEvenProbability,
+      regime: permit
+        ? {
+            permit: permit.permit,
+            codes: permit.codes,
+            reason: permit.reason,
+            probability: permit.probability,
+            required: permit.required,
+          }
+        : null,
+      mc,
+      familySize: 1,
+      modelNote: prediction.note,
+    });
+    if (!gatekeeper.armed) rejections.push(...gatekeeperRejections(gatekeeper));
+  }
+
   // ── 6. Spread: priced, and ONLY priced ────────────────────────────────────
   //
   // There is exactly one cost decision in this desk, and this is it: the spread
@@ -929,6 +1148,7 @@ export function evaluate(input: AgentInput): AgentDecision {
       symbol: input.symbol,
       mode: input.mode,
       armed: false,
+      gatekeeper,
       plan: null,
       confluence,
       evidence,
@@ -1066,6 +1286,7 @@ export function evaluate(input: AgentInput): AgentDecision {
     symbol: input.symbol,
     mode: input.mode,
     armed: true,
+    gatekeeper,
     plan,
     confluence,
     evidence,

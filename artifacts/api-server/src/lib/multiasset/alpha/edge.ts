@@ -42,7 +42,7 @@
  */
 import { CLOSE, HIGH, LOW, atrSeries, mean, stdev } from "../math";
 import type { AlphaContext } from "./types";
-import { ENTRY_TIMEFRAME, MIN_RR_FILL, STOP_ATR_MULT } from "../agent";
+import { ENTRY_TIMEFRAME, MIN_RR_FILL, STOP_ATR_MULT } from "../desk-constants";
 import { MODE_HORIZON_BARS } from "../confluence";
 import type { Bar, Side, Timeframe, TradeMode } from "../types";
 

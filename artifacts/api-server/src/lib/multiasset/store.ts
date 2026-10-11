@@ -85,7 +85,12 @@ export function outcomeKey(symbol: string, mode: TradeMode): string {
 export interface JournalEntry {
   id: string;
   ts: number;
-  kind: "signal" | "no_trade" | "execution" | "risk" | "bridge";
+  // "management" carries what the terminal's position machine DID to an
+  // open position — a stop moved, a partial banked, the trail advanced, the
+  // time stop fired. It is its own kind, not "execution": these are the
+  // decisions that determine the outcome, and a reader filtering for fills
+  // should not have to read through them to find one.
+  kind: "signal" | "no_trade" | "execution" | "risk" | "bridge" | "management";
   symbol: string | null;
   message: string;
   detail?: unknown;

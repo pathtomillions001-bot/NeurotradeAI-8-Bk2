@@ -941,6 +941,11 @@ export function evaluate(input: AgentInput): AgentDecision {
     expiresAt: now + PLAN_TTL_MS[input.mode],
     createdAt: now,
     management,
+    // The frame the risk was measured on, and the round-trip cost in points.
+    // The terminal's position machine uses the first for its chandelier ATR and
+    // the second to place break-even at entry + cost rather than at entry.
+    entryTimeframe: entrySeries.timeframe,
+    costPoints: Number((liveSpreadPoints + commissionPoints + slippagePoints).toFixed(2)),
     rationale: {
       confluenceScore: Number(qualityScore.toFixed(1)),
       grade: confluence.grade,

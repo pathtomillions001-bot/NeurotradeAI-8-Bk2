@@ -353,6 +353,24 @@ export interface ArmedPlan {
   createdAt: number;
   management: ManagementPlan;
   rationale: PlanRationale;
+
+  /**
+   * The timeframe the risk unit was measured on (M2 / M15 / H1 by mode).
+   *
+   * OPTIONAL so older consumers keep working. The terminal's position machine
+   * needs it because the trailing stop is a chandelier on the ENTRY frame's ATR:
+   * a plan whose stop was placed on M15 structure must not be trailed by an M5
+   * ATR, or the trail is measuring a different market from the one the stop was
+   * chosen for.
+   */
+  entryTimeframe?: Timeframe;
+  /**
+   * Round-trip cost at arm time, in points (live spread + commission + the
+   * slippage allowance). Captured by the machine at fill so break-even can be
+   * placed at entry + the cost of getting in: without it, a "break-even" stop
+   * still books a small loss every time it is hit.
+   */
+  costPoints?: number;
 }
 
 export interface PlanRationale {
@@ -415,6 +433,24 @@ export type BridgeCommand =
   | { id: string; type: "modify"; ticket: number; sl: number | null; tp: number | null }
   | { id: string; type: "set_management"; ticket: number; management: ManagementPlan }
   | { id: string; type: "flatten_all"; reason: string };
+
+/**
+ * One action taken by the terminal's position machine.
+ *
+ * `action` is a stable identifier (`modify_sl`, `close_partial`, `close_all`,
+ * `pyramid_add`, `captured`, `closed`, `management_updated`), not prose — the
+ * human sentence travels separately in `detail` so the desk can filter by action
+ * without parsing English.
+ */
+export interface ManagementEvent {
+  ticket: number;
+  symbol: string;
+  action: string;
+  /** The action's own number where it has one: lots closed, or the new stop. */
+  value: number;
+  detail: string;
+  ts: number;
+}
 
 export type CommandStatus = "filled" | "rejected" | "expired" | "skipped" | "done";
 
@@ -487,6 +523,18 @@ export interface SyncRequest {
   news?: NewsFeed;
   positions?: Position[];
   results?: CommandResult[];
+  /**
+   * What the position-management machine DID to open positions, reported by
+   * EA v4.00+.
+   *
+   * WHY IT EXISTS: management runs in the terminal, on the tick, because that
+   * is where the stop has to move. Without this the desk's journal could only
+   * report that a position appeared and later vanished — never that break-even
+   * was armed, a partial was banked, the trail advanced or the time stop fired,
+   * which are the decisions that determine the result. Each event carries its
+   * own human sentence so the journal reads as a narrative of the trade.
+   */
+  management?: ManagementEvent[];
   /**
    * `symbol|timeframe` → bars the terminal holds, reported by EA v3.04+.
    * Lets the desk ask for history only while the terminal has bars it lacks

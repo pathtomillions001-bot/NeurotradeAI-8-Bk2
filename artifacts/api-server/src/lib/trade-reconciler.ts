@@ -23,7 +23,7 @@
 import { db } from "@workspace/db";
 import { accountsTable, settingsTable, tradesTable } from "@workspace/db";
 import { and, eq, gte, inArray, isNull, lte, notLike, or, like } from "drizzle-orm";
-import { fetchDerivProfitTable } from "./deriv";
+import { fetchDerivProfitTable, onJournalTransactions } from "./deriv";
 import { logger } from "./logger";
 import { runWithSession } from "./session";
 import * as recoveryEngine from "./agents/recovery-engine";
@@ -85,8 +85,19 @@ const AUTONOMOUS_PAGE_SIZE = 500;
  * account. We stop as soon as a page reaches past the row's own creation time.
  */
 const AUTONOMOUS_MAX_PAGES = 4;
+/**
+ * Gap between two pages of one autonomous walk.
+ *
+ * The journal spaces its own paginated `profit_table` requests 5 s apart to
+ * respect Deriv's account-wide request budget. The autonomous sweep used to
+ * issue follow-up pages immediately, then throw away all earlier pages if a
+ * later request failed. Pacing this walk and retaining successful pages means
+ * a temporary rejection no longer hides a settled contract already returned
+ * on page one.
+ */
+const AUTONOMOUS_PAGE_DELAY_MS = 5_000;
 
-interface UnsettledRow {
+export interface UnsettledRow {
   id: number;
   sessionId: string;
   symbol: string;
@@ -127,27 +138,76 @@ export function profitTablePageReachedWindow(
  *
  * Pages back with `offset` until the page reaches the row's own era, so an
  * unsettled row is always visible to the matcher no matter how many newer
- * transactions have accumulated on top of it. `strict` propagates: a failed
- * lookup must never be read as "no such trade".
+ * transactions have accumulated on top of it.
+ *
+ * Safety properties:
+ *
+ *  - Pages are spaced by `AUTONOMOUS_PAGE_DELAY_MS`, matching the journal's
+ *    conservative 5 s pagination cadence.
+ *  - A failed page never discards earlier responses. Exact contract-id matches
+ *    from the pages already fetched can still settle; all other rows remain
+ *    pending.
+ *  - The common case (all rows have exact ids and page one contains them) uses
+ *    one request. A stale or id-less row never counts as "found" merely because
+ *    it has no id, and its lookup is not prematurely declared complete.
+ *
+ * `complete` reports whether the lookup saw the row's whole window (table
+ * exhausted, window reached, or every exact-id row matched). Only a complete
+ * lookup may release a no-id row as "no such trade" or fuzzy-match it: a partial
+ * page cannot prove either that a purchase never happened or that an apparent
+ * symbol/stake/time match is unique.
+ *
+ * `options` exists for tests (fake fetcher, zero delay); production uses the
+ * real Deriv client and the paced delay.
  */
-async function fetchAutonomousTransactions(
+export interface AutonomousWalkOptions {
+  fetchProfitTable?: typeof fetchDerivProfitTable;
+  pageDelayMs?: number;
+}
+
+export async function fetchAutonomousTransactions(
   token: string,
   accountId: string,
+  rows: UnsettledRow[],
   earliestMs: number,
-): Promise<any[]> {
+  options: AutonomousWalkOptions = {},
+): Promise<{ transactions: any[]; complete: boolean }> {
+  const fetchProfitTable = options.fetchProfitTable ?? fetchDerivProfitTable;
+  const pageDelayMs = options.pageDelayMs ?? AUTONOMOUS_PAGE_DELAY_MS;
   const dateFromSec = Math.floor((earliestMs - AUTONOMOUS_LOOKBACK_MS) / 1000);
   const all: any[] = [];
+  // Early completion is safe only when every row has an exact broker id AND
+  // every id was found. A no-id row still needs the full search window so a
+  // partial first page cannot be mistaken for a unique match or a ghost buy.
+  const allExactRowsFound = () =>
+    rows.length > 0 &&
+    rows.every(
+      (row) =>
+        Boolean(row.derivContractId) &&
+        all.some((tx) => String(tx.contract_id ?? "") === String(row.derivContractId)),
+    );
   for (let page = 0; page < AUTONOMOUS_MAX_PAGES; page++) {
-    const batch = await fetchDerivProfitTable(token, accountId, AUTONOMOUS_PAGE_SIZE, {
-      dateFrom: dateFromSec,
-      offset: page * AUTONOMOUS_PAGE_SIZE,
-      strict: true,
-    });
+    if (page > 0) await sleep(pageDelayMs);
+    let batch: any[];
+    try {
+      batch = await fetchProfitTable(token, accountId, AUTONOMOUS_PAGE_SIZE, {
+        dateFrom: dateFromSec,
+        offset: page * AUTONOMOUS_PAGE_SIZE,
+        strict: true,
+      });
+    } catch (err) {
+      // Partial walk: keep what we have. The caller settles exact-id matches it
+      // can see and leaves everything else for the next sweep — never reads a
+      // failed lookup as "no such trade".
+      logger.warn({ err, page }, "Autonomous profit-table walk interrupted — settling from the pages already fetched");
+      return { transactions: all, complete: false };
+    }
     all.push(...batch);
-    if (batch.length < AUTONOMOUS_PAGE_SIZE) break;
-    if (profitTablePageReachedWindow(batch, dateFromSec)) break;
+    if (batch.length < AUTONOMOUS_PAGE_SIZE) return { transactions: all, complete: true };
+    if (profitTablePageReachedWindow(batch, dateFromSec)) return { transactions: all, complete: true };
+    if (allExactRowsFound()) return { transactions: all, complete: true };
   }
-  return all;
+  return { transactions: all, complete: false };
 }
 
 function normalizeContractType(ct: string): string[] {
@@ -191,22 +251,33 @@ export function findTransaction(row: UnsettledRow, transactions: any[]): any | n
  * durable BEFORE the row is claimed, and a row is recorded at most once. A row whose outcome is not yet on
  * the broker's books stays open, so the exposure gate keeps the engine from
  * trading over it.
+ *
+ * `lookupComplete` says the transaction list covers the rows' WHOLE window
+ * (the walk was not cut short by a page failure or the page cap). Only then
+ * may a missing transaction be read as "no such trade" and release a no-id
+ * row — a partial or failed lookup settles what it can see and changes
+ * nothing else.
  */
 export async function settleAutonomousRows(
   sessionId: string,
   rows: UnsettledRow[],
   transactions: any[],
   maxRecoverySteps: number,
+  lookupComplete = true,
 ): Promise<number> {
   let settled = 0;
   const claimed = await loadClaimedContractIds(sessionId, new Date(Date.now() - RECONCILE_WINDOW_MS));
-  const matches = matchAutonomousRows(rows as ReconRow[], transactions as DerivTx[], claimed);
+  // Exact contract ids are safe to settle from a partial page. Fuzzy matching
+  // a row without an id is not: a later page could contain a second plausible
+  // transaction and make the apparent match ambiguous.
+  const matchableRows = lookupComplete ? rows : rows.filter((row) => Boolean(row.derivContractId));
+  const matches = matchAutonomousRows(matchableRows as ReconRow[], transactions as DerivTx[], claimed);
 
   for (const row of rows) {
     const tx = matches.get(row.id);
     if (!tx) {
       const unresolvedFor = Date.now() - row.createdAt.getTime();
-      if (!row.derivContractId && unresolvedFor > AUTONOMOUS_UNRESOLVED_AFTER_MS) {
+      if (lookupComplete && !row.derivContractId && unresolvedFor > AUTONOMOUS_UNRESOLVED_AFTER_MS) {
         const released = await claimUnsettledRow(row.id, {
           status: "error",
           profit: "0",
@@ -252,11 +323,97 @@ export async function settleAutonomousRows(
   return settled;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Real-time settle path: the journal merged a profit_table batch (Deriv pushed
+ * a `transaction`/sell event and the quick refresh answered with the settled
+ * rows). Any still-open autonomous row whose exact contract id is in that batch
+ * is settled NOW, through the same claim-unique writer as the sweep — no extra
+ * Deriv request, no rate-limit pressure, and no minutes-long wait for the next
+ * sweep. Exact contract ids only; a batch can never fuzzy-match a row.
+ *
+ * Only transactions that carry a settlement (`sell_price` and `sell_time`) are
+ * offered to the matcher: profit_table rows are settled contracts, and this
+ * filter makes it impossible for a half-filled payload to be recorded as a loss.
+ */
+export async function settleFromJournalBatch(accountId: string, transactions: any[]): Promise<number> {
+  try {
+    const settledTxs = transactions.filter(
+      (t) => t?.contract_id != null && t.sell_price != null && t.sell_time != null,
+    );
+    if (settledTxs.length === 0) return 0;
+    const ids = settledTxs.map((t) => String(t.contract_id));
+    const rows = (await db
+      .select({
+        id: tradesTable.id,
+        sessionId: tradesTable.sessionId,
+        symbol: tradesTable.symbol,
+        contractType: tradesTable.contractType,
+        barrier: tradesTable.barrier,
+        stake: tradesTable.stake,
+        derivContractId: tradesTable.derivContractId,
+        entryPayout: tradesTable.entryPayout,
+        agentReasoning: tradesTable.agentReasoning,
+        createdAt: tradesTable.createdAt,
+      })
+      .from(tradesTable)
+      .where(and(
+        eq(tradesTable.status, "open"),
+        like(tradesTable.agentReasoning, `${AUTONOMOUS_HEDGE_PREFIX}%`),
+        inArray(tradesTable.derivContractId, ids),
+      ))
+      .limit(RECONCILE_BATCH)) as UnsettledRow[];
+    if (rows.length === 0) return 0;
+
+    let settled = 0;
+    const bySession = new Map<string, UnsettledRow[]>();
+    for (const row of rows) {
+      const list = bySession.get(row.sessionId) ?? [];
+      list.push(row);
+      bySession.set(row.sessionId, list);
+    }
+    for (const [sessionId, sessionRows] of bySession) {
+      const settingsRows = await db
+        .select()
+        .from(settingsTable)
+        .where(eq(settingsTable.sessionId, sessionId))
+        .limit(1);
+      const maxRecoverySteps = Number((settingsRows[0] as any)?.maxRecoverySteps ?? 3) || 3;
+      settled += await settleAutonomousRows(sessionId, sessionRows, settledTxs, maxRecoverySteps, true);
+    }
+    if (settled > 0) {
+      logger.info({ accountId, settled }, "Reconciler settled autonomous 1-tick trades from the journal's real-time feed");
+    }
+    return settled;
+  } catch (err) {
+    logger.warn({ err, accountId }, "Real-time journal settle failed — the periodic sweep still covers these rows");
+    return 0;
+  }
+}
+
 /**
  * Settle every `open`/`error` trade that Deriv has already resolved.
  * Returns the number of rows settled.
+ *
+ * One sweep at a time: the exposure gate re-requests reconciliation every few
+ * seconds while it holds, and the periodic timer adds its own — concurrent
+ * sweeps would multiply the profit_table walk (and its rate-limit pressure)
+ * without settling anything sooner.
  */
-export async function reconcileUnsettledTrades(): Promise<number> {
+let sweepInFlight: Promise<number> | null = null;
+
+export function reconcileUnsettledTrades(): Promise<number> {
+  if (sweepInFlight) return sweepInFlight;
+  sweepInFlight = runReconcileSweep().finally(() => {
+    sweepInFlight = null;
+  });
+  return sweepInFlight;
+}
+
+async function runReconcileSweep(): Promise<number> {
   let settled = 0;
   try {
     const since = new Date(Date.now() - RECONCILE_WINDOW_MS);
@@ -336,15 +493,16 @@ export async function reconcileUnsettledTrades(): Promise<number> {
 
         const accountId = account.derivAccountId ?? account.loginId;
 
-        // Autonomous 1-tick rows: a bounded, STRICT, PAGED lookup. A failed
-        // lookup throws and the rows stay open, so an outage can never be read
-        // as "no such trade" and released out of the recovery ledger; the
-        // walk-back pages keep an old row findable under newer transactions.
+        // Autonomous 1-tick rows: a paced, paged walk. The walk settles from
+        // whatever pages it could fetch (a failed page never discards the
+        // earlier ones), and only a COMPLETE walk may release a no-id row —
+        // so neither a Deriv outage nor a walk cut short by the page cap can
+        // ever be read as "no such trade".
         const autonomousRows = sessionRows.filter((r) => isAutonomousHedgeRow(r.agentReasoning));
         if (autonomousRows.length > 0) {
           const earliest = Math.min(...autonomousRows.map((r) => r.createdAt.getTime()));
-          const autonomousTx = await fetchAutonomousTransactions(token, accountId, earliest);
-          settled += await settleAutonomousRows(sessionId, autonomousRows, autonomousTx, maxRecoverySteps);
+          const walk = await fetchAutonomousTransactions(token, accountId, autonomousRows, earliest);
+          settled += await settleAutonomousRows(sessionId, autonomousRows, walk.transactions, maxRecoverySteps, walk.complete);
         }
 
         // Legacy rows: unchanged lookup and matching.
@@ -414,10 +572,19 @@ export async function reconcileUnsettledTrades(): Promise<number> {
 }
 
 let reconcilerTimer: ReturnType<typeof setInterval> | null = null;
+let journalHookInstalled = false;
 
 /** Start the periodic sweep (idempotent). */
 export function startTradeReconciler(intervalMs = 60_000): void {
   if (reconcilerTimer) return;
+  // Real-time fast path: settle from the journal's own profit_table batches
+  // the moment Deriv confirms a contract, instead of waiting for a sweep.
+  if (!journalHookInstalled) {
+    journalHookInstalled = true;
+    onJournalTransactions((accountId, transactions) => {
+      void settleFromJournalBatch(accountId, transactions);
+    });
+  }
   // First sweep shortly after boot so a redeploy heals immediately.
   setTimeout(() => { void reconcileUnsettledTrades(); }, 15_000).unref?.();
   reconcilerTimer = setInterval(() => { void reconcileUnsettledTrades(); }, intervalMs);

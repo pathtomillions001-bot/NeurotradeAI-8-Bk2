@@ -118,6 +118,53 @@ Fix:
   A crash after the write but before the claim overstates debt, which is the safe direction.
 - Debt is never reduced without an exact or uniquely claimed settlement.
 
+### The unbounded hold (fixed)
+
+The gate above shipped WITHOUT a ceiling, and that turned a transient
+reconciliation miss into a permanent engine outage. The chain:
+
+1. A 1-tick trade is inserted `open` and the exposure is held — correct.
+2. The engine's own 31 s settlement wait expires (or the buy was not
+   acknowledged): the row stays `open` — also correct.
+3. From then on **only the reconciler** can end the hold.
+4. The reconciler looked the row up in ONE newest-first `profit_table` page of
+   100 transactions (`sort: DESC` with a `date_from` at the row's own creation).
+   This account is shared with every specialist bot, the FAB and manual trades,
+   so as soon as ~100 transactions existed after that row, the contract was
+   pushed out of the page. The page only moves forward and the row only gets
+   older, so the contract was **never visible again**.
+5. Rows WITH a contract id were never released (`AUTONOMOUS_UNRESOLVED_AFTER_MS`
+   is explicitly gated on `!row.derivContractId`), and after 24 h the row left
+   the sweep window entirely.
+
+Result: the row stayed `open` forever → `exposureResolved()` returned false
+forever → the engine never reached step 1 of a cycle again. The dashboard showed
+"HOLD: settling previous 1-tick trade on JD25 (#44410, waiting 1109m19s) — the
+engine resumes when Deriv confirms the outcome." The engine had not stopped; it
+was deadlocked, and only a manual restart could clear it.
+
+Fix (three parts, all bounded):
+
+- **The lookup can always see the row again (`trade-reconciler.ts`).**
+  `fetchDerivProfitTable` gained an `offset`; the autonomous lookup pages
+  backwards through Deriv's 500-row pages (max 4 pages per sweep) until a page
+  reaches the row's own era (`profitTablePageReachedWindow`), so newer
+  transactions can never hide an unsettleable row again. A failed lookup still
+  throws and leaves the row open — an outage is never read as "no such trade".
+- **Autonomous rows get their own sweep window.** 7 days instead of 24 h, so the
+  only thing that can end the gate never ages out of the sweep that resolves it.
+- **The hold has a ceiling (`EXPOSURE_MAX_HOLD_MS`, 30 min).** Past it the GATE
+  is released — the engine resumes ranking and trading — while the row is left
+  `open` (annotated `[GATE RELEASED after Nm: …]`) and stays the reconciler's
+  job. If Deriv reports the contract later, the same claim-unique writer records
+  it in the recovery ledger exactly once, so no outcome is dropped and debt is
+  never guessed. The cycle emits `exposure_released` and the HOLD text states
+  the ceiling, so the wait is never open-ended or silent.
+
+`cycle.test.ts` pins both halves: a fresh exposure still holds and reports the
+ceiling, and a 31-minute-old exposure releases the gate, resumes the contest and
+leaves the row `open` in the database.
+
 ## Duration
 
 Deriv's public docs show 5-tick Rise/Fall examples and do not state a per-type

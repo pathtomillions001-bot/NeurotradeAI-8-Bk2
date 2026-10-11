@@ -46,6 +46,16 @@ import {
 const RECONCILE_AFTER_MS = 90_000;
 /** How far back to look for unsettled rows (a day is plenty). */
 const RECONCILE_WINDOW_MS = 24 * 60 * 60 * 1000;
+/**
+ * Autonomous 1-tick rows keep their own, much longer sweep window.
+ *
+ * WHY: an autonomous row that has not settled yet is the ONE thing that can
+ * gate the autonomous engine (see `exposureResolved`). Dropping it out of the
+ * sweep after 24 h would make the gate permanent with nothing left to resolve
+ * it, so these rows stay reachable for a week — long enough for any Deriv
+ * outage, token expiry or pagination miss to be healed on a later sweep.
+ */
+const AUTONOMOUS_RECONCILE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 /** How many unsettled rows to examine per sweep. */
 const RECONCILE_BATCH = 100;
 /**
@@ -61,6 +71,20 @@ const AUTONOMOUS_RECONCILE_AFTER_MS = 15_000;
 const AUTONOMOUS_UNRESOLVED_AFTER_MS = 10 * 60 * 1000;
 /** How far before a row's creation the broker lookup starts (covers an in-flight buy). */
 const AUTONOMOUS_LOOKBACK_MS = 2 * 60 * 1000;
+/** Deriv's hard cap on `profit_table` rows per request. */
+const AUTONOMOUS_PAGE_SIZE = 500;
+/**
+ * How many 500-row pages one sweep may walk back per account.
+ *
+ * A single 100-row window was the ORIGINAL BUG: the account is shared with
+ * every bot, the FAB and manual trades, so once ~100 transactions had happened
+ * after a stuck autonomous row, its contract could never appear in a
+ * newest-first page again — the window only moves forward, the row only gets
+ * older. Four pages (2 000 transactions) is a bounded, rate-limit-friendly
+ * walk back that reaches any row of the last week on all but an extremely busy
+ * account. We stop as soon as a page reaches past the row's own creation time.
+ */
+const AUTONOMOUS_MAX_PAGES = 4;
 
 interface UnsettledRow {
   id: number;
@@ -74,6 +98,56 @@ interface UnsettledRow {
   entryPayout: string | null;
   agentReasoning: string | null;
   createdAt: Date;
+}
+
+/**
+ * True when a page of newest-first transactions has walked back far enough that
+ * no later page can contain something older than `dateFromSec`.
+ *
+ * Exported (and pure) so the walk-back contract is pinned by a test: the bug it
+ * guards against — a stuck row disappearing out of a fixed-size window forever
+ * — is exactly a "the loop stopped too early" bug.
+ */
+export function profitTablePageReachedWindow(
+  batch: Array<{ purchase_time?: unknown; sell_time?: unknown }>,
+  dateFromSec: number,
+): boolean {
+  if (batch.length === 0) return true;
+  let oldest = Number.POSITIVE_INFINITY;
+  for (const tx of batch) {
+    const at = Number(tx?.purchase_time ?? tx?.sell_time ?? 0) || Number.POSITIVE_INFINITY;
+    if (at < oldest) oldest = at;
+  }
+  if (!Number.isFinite(oldest)) return false;
+  return oldest <= dateFromSec;
+}
+
+/**
+ * Every profit-table transaction at/after `earliestMs`, newest page first.
+ *
+ * Pages back with `offset` until the page reaches the row's own era, so an
+ * unsettled row is always visible to the matcher no matter how many newer
+ * transactions have accumulated on top of it. `strict` propagates: a failed
+ * lookup must never be read as "no such trade".
+ */
+async function fetchAutonomousTransactions(
+  token: string,
+  accountId: string,
+  earliestMs: number,
+): Promise<any[]> {
+  const dateFromSec = Math.floor((earliestMs - AUTONOMOUS_LOOKBACK_MS) / 1000);
+  const all: any[] = [];
+  for (let page = 0; page < AUTONOMOUS_MAX_PAGES; page++) {
+    const batch = await fetchDerivProfitTable(token, accountId, AUTONOMOUS_PAGE_SIZE, {
+      dateFrom: dateFromSec,
+      offset: page * AUTONOMOUS_PAGE_SIZE,
+      strict: true,
+    });
+    all.push(...batch);
+    if (batch.length < AUTONOMOUS_PAGE_SIZE) break;
+    if (profitTablePageReachedWindow(batch, dateFromSec)) break;
+  }
+  return all;
 }
 
 function normalizeContractType(ct: string): string[] {
@@ -186,6 +260,7 @@ export async function reconcileUnsettledTrades(): Promise<number> {
   let settled = 0;
   try {
     const since = new Date(Date.now() - RECONCILE_WINDOW_MS);
+    const autonomousSince = new Date(Date.now() - AUTONOMOUS_RECONCILE_WINDOW_MS);
     const cutoff = new Date(Date.now() - RECONCILE_AFTER_MS);
     const autonomousCutoff = new Date(Date.now() - AUTONOMOUS_RECONCILE_AFTER_MS);
 
@@ -204,21 +279,22 @@ export async function reconcileUnsettledTrades(): Promise<number> {
       })
       .from(tradesTable)
       .where(
-        and(
-          gte(tradesTable.createdAt, since),
-          or(
-            // Autonomous 1-tick rows: only while still open, on the short grace.
-            and(
-              eq(tradesTable.status, "open"),
-              like(tradesTable.agentReasoning, `${AUTONOMOUS_HEDGE_PREFIX}%`),
-              lte(tradesTable.createdAt, autonomousCutoff),
-            ),
-            // Every other row keeps the original rule, unchanged.
-            and(
-              inArray(tradesTable.status, ["open", "error"]),
-              or(isNull(tradesTable.agentReasoning), notLike(tradesTable.agentReasoning, `${AUTONOMOUS_HEDGE_PREFIX}%`)),
-              lte(tradesTable.createdAt, cutoff),
-            ),
+        or(
+          // Autonomous 1-tick rows: only while still open, on the short grace —
+          // but with their OWN (much longer) age window, so a stuck row can
+          // never age out of the only sweep that can resolve it.
+          and(
+            gte(tradesTable.createdAt, autonomousSince),
+            eq(tradesTable.status, "open"),
+            like(tradesTable.agentReasoning, `${AUTONOMOUS_HEDGE_PREFIX}%`),
+            lte(tradesTable.createdAt, autonomousCutoff),
+          ),
+          // Every other row keeps the original rule, unchanged.
+          and(
+            gte(tradesTable.createdAt, since),
+            inArray(tradesTable.status, ["open", "error"]),
+            or(isNull(tradesTable.agentReasoning), notLike(tradesTable.agentReasoning, `${AUTONOMOUS_HEDGE_PREFIX}%`)),
+            lte(tradesTable.createdAt, cutoff),
           ),
         ),
       )
@@ -260,16 +336,14 @@ export async function reconcileUnsettledTrades(): Promise<number> {
 
         const accountId = account.derivAccountId ?? account.loginId;
 
-        // Autonomous 1-tick rows: a bounded, STRICT lookup. A failed lookup
-        // throws and the rows stay open, so an outage can never be read as
-        // "no such trade" and released out of the recovery ledger.
+        // Autonomous 1-tick rows: a bounded, STRICT, PAGED lookup. A failed
+        // lookup throws and the rows stay open, so an outage can never be read
+        // as "no such trade" and released out of the recovery ledger; the
+        // walk-back pages keep an old row findable under newer transactions.
         const autonomousRows = sessionRows.filter((r) => isAutonomousHedgeRow(r.agentReasoning));
         if (autonomousRows.length > 0) {
           const earliest = Math.min(...autonomousRows.map((r) => r.createdAt.getTime()));
-          const autonomousTx = await fetchDerivProfitTable(token, accountId, 100, {
-            dateFrom: Math.floor((earliest - AUTONOMOUS_LOOKBACK_MS) / 1000),
-            strict: true,
-          });
+          const autonomousTx = await fetchAutonomousTransactions(token, accountId, earliest);
           settled += await settleAutonomousRows(sessionId, autonomousRows, autonomousTx, maxRecoverySteps);
         }
 

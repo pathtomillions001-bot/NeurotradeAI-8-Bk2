@@ -156,6 +156,56 @@ describe("autonomous 1-tick cycle (tick-driven, coalesced)", () => {
       // Nothing was evaluated while gated, so no scanning pulse is claimed.
       assert.equal(emitted.some((e) => e.event === "scan_started"), false);
       assert.equal(emitted.some((e) => e.event === "trade_started" || e.event === "trade_completed"), false);
+      // The hold announces its own ceiling, so the wait is never open-ended.
+      assert.match(String(holds[0].data["rejectReason"]), /holds at most 30m/);
+    } finally {
+      await db.delete(tradesTable).where(eq(tradesTable.id, row.id));
+    }
+  });
+
+  it("releases a gate held past the maximum and resumes evaluating (never deadlocks)", async () => {
+    const sessionId = randomUUID();
+    // A row Deriv never confirmed, ~31 minutes old: exactly the production
+    // deadlock (a held exposure whose contract the reconciler could not see).
+    const createdAt = new Date(Date.now() - 31 * 60 * 1000);
+    const [row] = await db.insert(tradesTable).values({
+      sessionId,
+      symbol: "R_100",
+      displayName: "Volatility 100 Index",
+      contractType: "CALL",
+      stake: "1",
+      direction: "up",
+      status: "open",
+      derivContractId: "99112233",
+      isAutonomous: true,
+      agentReasoning: `${AUTONOMOUS_HEDGE_PREFIX}READY CALL on R_100 (stale exposure)`,
+      createdAt,
+    }).returning({ id: tradesTable.id });
+    try {
+      const { host, emitted } = fakeHost(sessionId);
+      runWithSession(sessionId, () => requestHedgeCycle(host));
+      await settle(() => emitted.some((e) => e.event === "scan_started"), 5000);
+
+      const released = emitted.find((e) => e.event === "exposure_released");
+      assert.ok(released, "the gate announces its release instead of holding forever");
+      assert.equal(released.data["id"], row.id);
+      assert.ok(
+        Number(released.data["heldMinutes"]) >= 30,
+        "the release names how long the exposure was held",
+      );
+
+      // The engine is TRADING again: it evaluated the contest this cycle.
+      assert.equal(
+        emitted.some((e) => e.event === "scan_started"),
+        true,
+        "a released gate lets the cycle reach the contest instead of returning early",
+      );
+
+      // The row itself is untouched: still open, still the reconciler's job, so
+      // a late Deriv confirmation is still recorded exactly once in the ledger.
+      const [after] = await db.select().from(tradesTable).where(eq(tradesTable.id, row.id)).limit(1);
+      assert.equal(after.status, "open", "the row is released from the gate, not dropped from the ledger");
+      assert.match(String(after.agentReasoning), /GATE RELEASED after 31m/);
     } finally {
       await db.delete(tradesTable).where(eq(tradesTable.id, row.id));
     }

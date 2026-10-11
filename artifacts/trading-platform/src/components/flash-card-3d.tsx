@@ -4,6 +4,7 @@ import { useExecuteTrade, useGetSettings } from "@workspace/api-client-react";
 import { toast } from "sonner";
 import { Zap, TrendingUp, TrendingDown, ChevronDown, ChevronUp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
+import { EnginePowerButton, type EnginePowerState } from "@/components/engine-power-button";
 
 // ── Contract type groups ────────────────────────────────────────────────────────
 const CONTRACT_GROUPS = [
@@ -64,9 +65,16 @@ function WinProbBar({ value }: { value: number }) {
 // ── Quick Strike Card ──────────────────────────────────────────────────────────
 export function MarketOpportunityFlashCard({
   onTrade,
+  engine,
 }: {
   onTrade?: () => void;
   currentStreak?: number;
+  /**
+   * Autonomous engine power control. Rendered in the card's top-right corner —
+   * the single place the engine is started, stopped and resumed now that the
+   * dashboard header button and the status strip are gone.
+   */
+  engine?: EnginePowerState;
 }) {
   const [selectedGroupIdx, setSelectedGroupIdx] = useState(0);
   const [executingSymbol, setExecutingSymbol] = useState<string | null>(null);
@@ -204,34 +212,40 @@ export function MarketOpportunityFlashCard({
       }} />
 
       <div className="relative z-10 p-4 flex flex-col gap-3 h-full">
-        {/* Header: label + contract group selector + live dot */}
-        <div className="flex items-center gap-2">
+        {/* Header: label + live dot, then the group tabs and the engine power
+            control pinned to the top-right. The label is the only flexible
+            element (`min-w-0 truncate`) while the controls are `shrink-0`, so
+            the row can never push text under the button on a narrow card. */}
+        <div className="flex items-center gap-2 min-w-0">
           <Zap className="w-3.5 h-3.5 text-primary shrink-0" />
-          <span className="text-[10px] font-mono uppercase tracking-widest" style={{ color: "rgba(0,255,255,0.7)" }}>
+          <span className="text-[10px] font-mono uppercase tracking-widest truncate" style={{ color: "rgba(0,255,255,0.7)" }}>
             Quick Strike
           </span>
+          <span className="w-1.5 h-1.5 rounded-full animate-pulse bg-green-500 shrink-0" />
 
-          {/* Contract group tab selector — only shows enabled families */}
-          {visibleGroups.length > 0 && (
-            <div className="ml-auto flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5">
-              {visibleGroups.map((g, i) => (
-                <button
-                  key={g.short}
-                  onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
-                  className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
-                    i === clampedIdx
-                      ? "text-primary border border-primary/50"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                  style={i === clampedIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
-                >
-                  {g.short}
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="ml-auto flex items-center gap-2 shrink-0">
+            {/* Contract group tab selector — only shows enabled families */}
+            {visibleGroups.length > 0 && (
+              <div className="flex items-center bg-black/40 rounded-lg p-0.5 gap-0.5 shrink-0">
+                {visibleGroups.map((g, i) => (
+                  <button
+                    key={g.short}
+                    onClick={() => { setSelectedGroupIdx(i); setShowMarkets(false); }}
+                    className={`text-[8px] font-mono font-bold px-2 py-1 rounded transition-all ${
+                      i === clampedIdx
+                        ? "text-primary border border-primary/50"
+                        : "text-muted-foreground hover:text-foreground"
+                    }`}
+                    style={i === clampedIdx ? { background: `${contractColor(g.types[0])}20` } : {}}
+                  >
+                    {g.short}
+                  </button>
+                ))}
+              </div>
+            )}
 
-          <span className="w-1.5 h-1.5 rounded-full animate-pulse ml-1 bg-green-500" />
+            {engine && <EnginePowerButton {...engine} />}
+          </div>
         </div>
 
         {/* Market info + win prob + execute */}

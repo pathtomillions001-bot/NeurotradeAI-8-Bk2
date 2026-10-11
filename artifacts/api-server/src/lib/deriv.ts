@@ -3294,6 +3294,13 @@ export async function fetchDerivProfitTable(
     /** Unix seconds: only transactions bought/settled at or after this time. */
     dateFrom?: number;
     /**
+     * Skip this many transactions from the newest one. The table is returned
+     * newest-first (`sort: DESC`), so paging with offset walks BACKWARDS in
+     * time — the only way to reach a transaction that has been pushed out of a
+     * single page by newer ones. Deriv's own hard limit is 500 per request.
+     */
+    offset?: number;
+    /**
      * Throw instead of returning [] when Deriv errors or does not answer. Used
      * where an empty list must not be read as "no such trade" (ledger release).
      */
@@ -3307,6 +3314,7 @@ export async function fetchDerivProfitTable(
   }
   const request: Record<string, unknown> = { profit_table: 1, description: 1, sort: "DESC", limit };
   if (options.dateFrom && options.dateFrom > 0) request.date_from = Math.floor(options.dateFrom);
+  if (options.offset && options.offset > 0) request.offset = Math.floor(options.offset);
   try {
     const msg = await accountRequest(bearerToken, accountId, request, 15_000);
     if (!msg || msg.error) {

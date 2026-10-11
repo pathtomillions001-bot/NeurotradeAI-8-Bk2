@@ -165,6 +165,53 @@ Fix (three parts, all bounded):
 ceiling, and a 31-minute-old exposure releases the gate, resumes the contest and
 leaves the row `open` in the database.
 
+### The recurring settle miss (settlement path hardened)
+
+The reported `HOLD: settling previous 1-tick trade …` means the autonomous row
+is still `open`; it is not the analysis/timing engine pausing a completed
+trade. The source history provides a concrete regression: PR #201 reverted the
+settlement changes from PR #200, restoring the old all-or-nothing paginated
+lookup and empty-on-error snapshot behavior. The exact production response for
+a particular contract still requires its service logs, but the code-level
+failure path is demonstrable:
+
+1. `fetchAutonomousTransactions` requests multiple 500-row `profit_table`
+   pages without the 5 s spacing used by the journal's own pagination chain.
+   Under Deriv/account rate pressure, a later request can fail.
+2. The previous implementation propagated that failure and discarded pages
+   already received. If the settled contract was in an earlier page, the
+   reconciler never passed it to the claim-unique settlement writer; the row
+   stayed `open` and each subsequent sweep tried again.
+3. Searching from the oldest open autonomous row can expand the window and
+   request unnecessary older pages. The earlier implementation did not stop
+   when the known contract ids had already been found.
+4. A failed settlement snapshot replaced the previous transaction list with an
+   empty list marked fresh, so the live wait path could miss a known result
+   during a transient failure.
+
+The fix changes settlement/reconciliation only. The current autonomous engine's
+analysis, timing, contract selection and trade execution are untouched:
+
+- Page requests use the journal's conservative 5 s cadence. Successful pages
+  survive a later failure, and exact-id rows found on those pages can still be
+  settled.
+- The walk stops after one page when every swept row has a known contract id
+  and all those ids were found. A no-id row is never treated as "found" just
+  because its id is absent; fuzzy matching and ghost-buy release require a
+  complete lookup. A page-cap or request failure remains incomplete.
+- Reconciliation sweeps are single-flight, so the timer and exposure gate do
+  not stack duplicate walks.
+- Settled journal batches fan out to a real-time exact-contract-id settlement
+  path, using the existing claim-unique writer. The periodic sweep remains the
+  recovery path.
+- A failed settlement snapshot preserves the last valid transaction list
+  instead of presenting an empty response as fresh data.
+
+`trade-reconciler.test.ts` covers page failure with prior data retained, the
+one-page exact-id path, id-less rows on incomplete/capped walks, exact-only
+settlement from partial results, real-time journal settlement exactly once,
+and no-id release only after a complete lookup.
+
 ## Duration
 
 Deriv's public docs show 5-tick Rise/Fall examples and do not state a per-type

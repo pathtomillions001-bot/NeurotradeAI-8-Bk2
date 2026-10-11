@@ -22,6 +22,7 @@ import { closedBarsAt, legacyDeskStrategy, runHarness, type Strategy } from "./h
 import { generate } from "./generators";
 import { specForSymbol } from "./specs";
 import { evaluate, type AgentInput } from "../agent";
+import { atr } from "../math";
 import { createRiskState } from "../risk";
 import type { ArmedPlan, Bar, ManagementPlan, SymbolSpec } from "../types";
 
@@ -357,4 +358,17 @@ test("the simulator is deterministic: same inputs, same trade", () => {
   const b = runHarness({ frames: { M15: generated }, symbol: "EURUSD", strategy: legacyDeskStrategy("desk-v3"), options });
   assert.equal(JSON.stringify(a), JSON.stringify(b));
   assert.ok(a.evaluations > 10);
+});
+
+test("the ATR series is exactly the slice-based ATR at every index", () => {
+  // `causalAtrSeries` used to call `atr(bars.slice(0, i + 1))` per bar — O(n²).
+  // It now uses the one-pass recursion in `math.atrSeries`, which is only safe if
+  // the two agree at EVERY index, so that is asserted rather than assumed.
+  const bars = generate("positive-control", { seed: 21, bars: 400, timeframeMs: 300_000, startMs: 0 }).bars;
+  const fast = causalAtrSeries(bars, 14);
+  assert.equal(fast.length, bars.length);
+  for (let i = 0; i < bars.length; i++) {
+    const expected = i < 15 ? 0 : atr(bars.slice(0, i + 1), 14);
+    assert.ok(Math.abs((fast[i] as number) - expected) < 1e-12, `index ${i}: ${fast[i]} vs ${expected}`);
+  }
 });

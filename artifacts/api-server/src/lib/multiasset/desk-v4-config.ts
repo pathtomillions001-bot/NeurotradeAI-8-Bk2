@@ -57,13 +57,28 @@ export interface DeskV4Config {
   /** 3-state HMM regime agent + Bayesian online change-point detection (WP3). */
   regimeHmm: DeskV4Feature;
   changePoint: DeskV4Feature;
-  /** Alpha agents (WP4). Each is independently switchable. */
+  /**
+   * Alpha agents (WP4). Each is independently switchable.
+   *
+   * The keys are the SHIPPED agents, one per file in `alpha/`, and they are
+   * named exactly as `ALPHA_IDS` names them so that a flag, a report and a
+   * journal entry can never disagree about which detector is meant:
+   *   trend         → alpha/trend.ts            (A)
+   *   meanReversion → alpha/mean-reversion.ts   (B)
+   *   sweep         → alpha/liquidity-sweep.ts  (C)
+   *   volRegime     → alpha/vol-regime.ts       (D)
+   *   seasonality   → alpha/seasonality.ts      (E)
+   *
+   * Being switchable is not permission: the WP4 study measured which agents may
+   * be wired in, per mode (research-reports/2026-10-11-wp4-alpha-*-agent-study.json),
+   * and the composition point is the WP6 gatekeeper. All five default OFF.
+   */
   agents: {
     trend: DeskV4AgentFlag;
     meanReversion: DeskV4AgentFlag;
     sweep: DeskV4AgentFlag;
-    flow: DeskV4AgentFlag;
-    crossSection: DeskV4AgentFlag;
+    volRegime: DeskV4AgentFlag;
+    seasonality: DeskV4AgentFlag;
   };
   /** Triple-barrier labels + logistic/isotonic calibration (WP5). */
   metaModel: DeskV4Feature;
@@ -84,12 +99,36 @@ export interface DeskV4Config {
 }
 
 /** Modes an agent is allowed to propose in by default. */
+/**
+ * The modes each agent may propose in **by default**, and it is not a guess: the
+ * list is the WP4 study's measured allowlist per mode
+ * (`research-reports/2026-10-11-wp4-alpha-*-agent-study.json`, §6 of
+ * docs/mt5-live-desk-v4.md).
+ *
+ *   intraday allowlist: liquidity-sweep, seasonality
+ *   swing allowlist:    (none — the swing study's verdict is FAIL)
+ *
+ * An agent that failed its gates in BOTH modes gets an EMPTY list, so it cannot
+ * propose anywhere until an operator sets `DESK_V4_AGENT_*_MODES` explicitly —
+ * a deliberate two-step, because the one thing this layer must not do is quietly
+ * come back to life. Note what emptiness does NOT mean: `trend` and
+ * `meanReversion` both measure a *positive* edge in one or both modes and are
+ * still not allowed, because they fail the selectivity bar or the Brier gate
+ * (§6.6). The lists encode the whole verdict, not the sign of one number.
+ */
 export const DEFAULT_AGENT_MODES: Record<keyof DeskV4Config["agents"], TradeMode[]> = {
-  trend: ["intraday", "swing"],
-  meanReversion: ["intraday", "scalp"],
-  sweep: ["intraday", "scalp"],
-  flow: ["scalp"],
-  crossSection: ["swing"],
+  // −8.2 / −7.4 points against a matched random entry: worse than entering at
+  // random in its own fixture, in both modes.
+  trend: [],
+  // +5.9 points in both modes, but it fires on 13.1% of driftless decisions
+  // against the 3% bar (§6.5) — a measured edge in the wrong place.
+  meanReversion: [],
+  sweep: ["intraday"],
+  // No edge on its GARCH fixture in either mode (+/−4.5 points at n ≈ 545).
+  volRegime: [],
+  // An intraday-scale effect: on swing the hour drift averages out inside the
+  // holding window (measured: −0.8 points against +43.7 intraday).
+  seasonality: ["intraday"],
 };
 
 type Env = Record<string, string | undefined>;
@@ -153,8 +192,8 @@ export function resolveDeskV4Config(env: Env = process.env): DeskV4Config {
       trend: agentFlag(env, `${V4_ENV_PREFIX}AGENT_TREND`, "trend"),
       meanReversion: agentFlag(env, `${V4_ENV_PREFIX}AGENT_MEANREV`, "meanReversion"),
       sweep: agentFlag(env, `${V4_ENV_PREFIX}AGENT_SWEEP`, "sweep"),
-      flow: agentFlag(env, `${V4_ENV_PREFIX}AGENT_FLOW`, "flow"),
-      crossSection: agentFlag(env, `${V4_ENV_PREFIX}AGENT_CROSSSECTION`, "crossSection"),
+      volRegime: agentFlag(env, `${V4_ENV_PREFIX}AGENT_VOLREGIME`, "volRegime"),
+      seasonality: agentFlag(env, `${V4_ENV_PREFIX}AGENT_SEASONALITY`, "seasonality"),
     },
     metaModel: gate(feature(env, `${V4_ENV_PREFIX}META_MODEL`, false)),
     gatekeeper: gate(feature(env, `${V4_ENV_PREFIX}GATEKEEPER`, false)),

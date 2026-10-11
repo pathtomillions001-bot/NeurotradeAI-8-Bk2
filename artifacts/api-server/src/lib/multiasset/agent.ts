@@ -139,7 +139,7 @@ export interface AgentDecision {
  *   intraday → M15 (the middle of M5–M30)
  *   swing → H1 (the fast end of H1–W1, where a swing stop belongs)
  */
-const ENTRY_TIMEFRAME: Record<TradeMode, Timeframe> = {
+export const ENTRY_TIMEFRAME: Record<TradeMode, Timeframe> = {
   scalp: "M2",
   intraday: "M15",
   swing: "H1",
@@ -151,7 +151,7 @@ const ENTRY_TIMEFRAME: Record<TradeMode, Timeframe> = {
  * A scalp's stop must be reachable in minutes or the trade is not a scalp, so
  * it is the tightest; a swing stop has to survive a full session of noise.
  */
-const STOP_ATR_MULT: Record<TradeMode, number> = {
+export const STOP_ATR_MULT: Record<TradeMode, number> = {
   scalp: 0.8,
   intraday: 1.5,
   swing: 2.0,

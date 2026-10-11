@@ -37,7 +37,7 @@
  * straight into the statistics, the calibration and the null gates.
  */
 
-import { atr } from "../math";
+import { atr, atrSeries } from "../math";
 import {
   initialPositionState,
   managePosition,
@@ -355,9 +355,10 @@ export function simulatePlan(input: {
 
 /** ATR series for the entry timeframe, computed causally (index i uses ≤ i). */
 export function causalAtrSeries(bars: Bar[], period = 14): number[] {
-  const out: number[] = [];
-  for (let i = 0; i < bars.length; i++) {
-    out.push(i < period + 1 ? 0 : atr(bars.slice(0, i + 1), period));
-  }
-  return out;
+  // `math.atrSeries` is the identical recursion in one forward pass; the
+  // slice-based version this used to be was O(n²) and dominated the harness's
+  // runtime on longer series. Equivalence at every index is asserted in
+  // `executed-policy.test.ts`.
+  const series = atrSeries(bars, period);
+  return series.map((value, i) => (i < period + 1 ? 0 : value));
 }

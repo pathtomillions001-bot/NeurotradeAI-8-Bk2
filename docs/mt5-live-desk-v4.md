@@ -15,6 +15,13 @@ Everything described as OFF is off by default: the v4 subsystems live behind the
 `DESK_V4_*` flags in `lib/multiasset/desk-v4-config.ts`, and the pre-v4 desk runs
 unchanged when they are unset.
 
+**Status after WP4:** the desk's LIVE behaviour is still the pre-v4 desk. WP0–WP3
+built the position manager, the RR floor, the research harness and the regime
+agent; WP4 built and measured five alpha agents (§6) and allowlisted two of them
+for intraday and none for swing. Nothing in WP0–WP4 is consulted by the live
+decision path — every flag defaults off, and the composition point is the WP6
+gatekeeper.
+
 ---
 
 ## 1. The problem v4 exists to solve
@@ -484,7 +491,251 @@ and its reports exist; the flags `DESK_V4_REGIME_HMM` and `DESK_V4_CHANGEPOINT`
 default to off, and the composition point for every permission — the gatekeeper
 — is WP6. Until then the shipped desk behaves exactly as it did after WP2.
 
-## 6. Documented assumptions and conservative choices
+## 6. WP4 — the alpha agents
+
+Five detectors, one interface, and one rule that shaped all of it: **no agent may
+state a probability it has not measured.**
+
+### 6.1 The five agents, and the catalogue that is not here
+
+| id | file | the claim it trades |
+| --- | --- | --- |
+| A `trend` | `alpha/trend.ts` | after a directional move, a shallow counter-move that holds the structure resumes |
+| B `mean-reversion` | `alpha/mean-reversion.ts` | a close in the outer tenth of its own 20-bar range, with the push stalling, reverts |
+| C `liquidity-sweep` | `alpha/liquidity-sweep.ts` | a raid through a prior extreme that closes back inside and gives back half the raid fails |
+| D `vol-regime` | `alpha/vol-regime.ts` | volatility expanding 1.25–3× its own base rate carries the drift with it |
+| E `seasonality` | `alpha/seasonality.ts` | the UTC hour has a measured, persistent drift (t ≥ 2.5 on its own history) |
+
+Each is a file with one exported factory, a declared frame list, a minimum
+history, and a single `view(ctx)` method that returns **either a view or null**.
+Abstention is a first-class answer, and an agent that throws is reported as an
+abstention rather than taking the desk down (`readAlphaAgents`).
+
+The brief's longer catalogue — Ichimoku balance, ADX > 26, CCI, RSI(2),
+pips-of-pullback, Keltner, Gaussian channels, alligator spreads, round-number
+distances — is deliberately **not** shipped as a set of hard-coded thresholds.
+A dozen authoritative-looking numbers with no measurement behind them is the
+defect this whole programme exists to remove (§1). They belong in this table as
+future per-family studies, each with a fixture and a report; what ships is the
+five families whose claims could be measured.
+
+### 6.2 Where a probability comes from (`alpha/edge.ts`)
+
+There is no hand-set probability anywhere in `alpha/`. Each agent measures its
+own hit rate for **this exact setup** on the bars it can see, and states the
+shrunk estimate
+
+```
+P̂ = (hits + k · p₀) / (occurrences + k)      k = 8,  p₀ = the measured baseline
+```
+
+* `occurrences` counts setups whose outcome window has **fully closed** by the
+  decision bar. A setup still in flight is not evidence, and counting it would be
+  lookahead dressed as statistics.
+* `hit` is defined structurally and identically for all five agents: the move
+  reaches `rr` × the structural stop before the stop, with a same-bar tie
+  resolved as a **loss** — the executed-policy simulator's convention.
+* `p₀` is the **measured random-entry baseline** for the same stop and horizon,
+  and it is **direction-matched** (see below). It is not `1/(1+rr)`.
+
+The tables extend incrementally, so a study pays one pass rather than one pass
+per decision, and the live desk (which keeps ~400 bars) pays a bounded cost.
+
+### 6.3 Why the baseline had to be direction-matched — a defect found by measuring
+
+The first version of the comparator was the textbook one: the hit rate of a
+random entry, both directions, for the same geometry. It produced a **+8.6 point
+"edge" for the seasonality agent on pure noise**, which is the kind of number
+that gets a detector switched on.
+
+The cause was not the agent. A driftless fixture is driftless *in expectation*,
+but a realised 3000-bar path ends 25–35σ from where it started, and on such a
+path buys simply do better than sells — measured: 15.5–17.2% for random buys
+against 13.9–16.2% for random sells on four driftless seeds. An agent whose
+views are 95% long on that path therefore "beats a coin flip" with no skill at
+all. The seasonality agent behaved exactly that way: on a trending path almost
+every UTC hour measures a positive mean, so it is nearly always long.
+
+The comparator is therefore **direction-matched**: a long view is compared
+against random longs, a short against random shorts, each measured causally on
+the windows that had closed by the decision bar. Skill then means "this setup's
+bar is better than a random bar in this direction" — which is the claim the
+agents actually make. The correction flipped A's fixture reading from +8.4 to
+**−8.2 points** (§6.5), i.e. from "a measured edge" to "worse than entering at
+random", and the change is recorded as a gate change rather than a footnote.
+
+### 6.4 How they are measured
+
+`research/alpha-eval.ts` walks a series and offers the agent every 3rd bar, with
+the same `closedBarsAt` rule the harness uses: an agent at bar *t* sees bars
+whose own close is ≤ *t*'s, and nothing else. Each of the five is measured on
+every fixture, but only its **home** fixture decides its gates:
+
+| fixture | kind | series | the claim it belongs to |
+| --- | --- | --- | --- |
+| `trend-control` | positive-control | 12 | A |
+| `mean-reverting` | OU, 16-bar half-life | 12 | B |
+| `sweep-rich` | OU + absorbed raids (1% of bars, 6σ) | 12 | C |
+| `vol-clustered` | GARCH(1,1) | 12 | D |
+| `seasonal` | hour-of-day drift | 12 | E |
+| `regime-labelled` | the WP3 3-state control | 12 | cross-table only |
+| `null-driftless` | random walk | 12 | the ≤ 3% selectivity gate |
+| `null-phase` | phase-randomised | 12 | strictest null |
+| `null-shuffled` | block-shuffled | 12 | the easy null |
+
+The **paper-trading leg** then runs the same agent through `alphaStrategy`
+(`research/harness.ts`): the desk supplies the geometry and the shipped
+`position-manager` supplies the management, while the agent supplies only the
+direction and the probability — which becomes the plan's stated probability.
+`--alpha-series N` sets the series count **uniformly** for every fixture: a flag
+that gave one agent more data than another would be a knob that changes which
+agent passes.
+
+### 6.5 The gates
+
+| gate | threshold | what it protects |
+| --- | --- | --- |
+| enough to judge | ≥ 60 views on the home fixture | UNIDENTIFIABLE is a failure, not a pass |
+| the edge | hit rate ≥ direction-matched baseline + max(3 points, 2 SE) | `SE` is `√(p(1−p)/n)`: a one-point edge on a huge sample and a large edge on a tiny one both fail |
+| the claim | \|stated − realised\| ≤ 15 points | the probability must describe the hit rate it claims |
+| the claim, again | Brier skill ≥ 0 vs the 1:2 constant | a probability that does not move with the outcome is noise, however well it averages |
+| selectivity | **≤ 3% of driftless decisions** | the brief's bar: on a fair coin the detector must rarely fire |
+| no edge on noise | ≤ 15% of pooled null decisions, and edge ≤ 2 SE | the strictest reading of the null |
+
+### 6.6 The result
+
+Intraday (`…-wp4-alpha-intraday-agent-study.json`), M15, EURUSD, 12 series per
+fixture, 3,000 bars each, stride 3:
+
+| agent | home hit rate | matched baseline | edge | driftless firing | verdict |
+| --- | --- | --- | --- | --- | --- |
+| A trend | 39.1% (936 views) | 47.3% | **−8.2 pts** | **9.80%** | **DISABLED** (3 gates) |
+| B mean-reversion | 17.5% (1,390) | 11.6% | **+5.9 pts** | **13.10%** | **DISABLED** (selectivity) |
+| C liquidity-sweep | 23.8% (147) | 15.5% | **+8.3 pts** | 1.75% | **ENABLED** |
+| D vol-regime | 13.4% (545) | 14.9% | −1.5 pts | 0.40% | **DISABLED** (no edge) |
+| E seasonality | 67.4% (2,156) | 23.7% | **+43.7 pts** | 2.08% | **ENABLED** |
+
+Swing (`…-wp4-alpha-swing-agent-study.json`), H1, same design:
+
+| agent | home hit rate | matched baseline | edge | driftless firing | verdict |
+| --- | --- | --- | --- | --- | --- |
+| A trend | 50.9% (923) | 58.4% | −7.4 pts | 9.81% | **DISABLED** |
+| B mean-reversion | 15.8% (1,376) | 10.0% | **+5.9 pts** | 13.06% | **DISABLED** (selectivity) |
+| C liquidity-sweep | 28.5% (144) | 15.1% | **+13.4 pts** | 1.71% | **DISABLED** (Brier skill −0.037) |
+| D vol-regime | 12.4% (541) | 16.9% | −4.5 pts | 0.39% | **DISABLED** |
+| E seasonality | 20.7% (2,221) | 21.4% | −0.8 pts | 2.20% | **DISABLED** |
+
+**Allowlist — the agents that may be wired in:** intraday
+`liquidity-sweep, seasonality`; swing **none**. The swing study's report verdict
+is **FAIL** for exactly that reason: a mode with no allowlisted agent is a mode
+with nothing to switch on, and the report says so rather than rounding up.
+
+### 6.7 What the negative results actually say
+
+* **A (trend) is worse than a random entry in its own fixture, in both modes.**
+  A matched random *long* on the regime-control fixture hits 47.3% while the
+  pullback entry hits 39.1%. The pattern is real — an EMA band with a rising
+  slow line does separate trending from ranging tape (that is WP3's finding) —
+  but **entering on the pullback inside the band is not the way to trade it**:
+  the retracement is not a discount, it is the beginning of the distribution's
+  move against the position. It also fails the selectivity bar outright (9.8% of
+  driftless decisions) and its Brier skill is negative: its probability varies
+  in a way that does not track outcomes. Three independent gates, one conclusion.
+* **D (volatility expansion) has no edge on the GARCH fixture in either mode**,
+  at 545 and 541 views — a large sample with a negative point estimate. The
+  EWMA-ratio expansion test identifies *when* volatility expands; it does not
+  identify *which way* the market will go next, which is what a directional trade
+  needs.
+* **B (mean reversion) has a real edge and is still disabled.** Its corrected
+  form measures +5.9 points above a matched random entry in BOTH modes (n ≈ 1,390
+  and 1,376 — the largest samples of any agent), its probability tracks the
+  outcome (Brier skill +0.13 / +0.17), and it fires on 13.1% of **driftless**
+  decisions — four times the 3% bar. The pattern ("the previous bar closed at the
+  extreme of its own 20-bar window, then the next bar closed back") is common in
+  a random walk: a new 20-bar extreme happens roughly every 20 bars. A detector
+  that arms on 13% of noise is not a filter, and the gate refuses it while
+  recording that the *edge* is real. This is the cleanest example in the
+  programme of a number that is positive and still not shippable.
+* **The long-only defect, and why B's numbers changed.** B's first form asked one
+  bar to be both the window's extreme AND closing back the other way, and it
+  measured ZERO sell signals across 12 series: bars open at the previous close, so
+  a close that is its window's maximum is never below its own open. The agent was
+  structurally long-only and its fixture reading (+5.5 points) was a long-side
+  reading. The two-bar form (climax bar, then stall bar) is symmetric — 478 long /
+  473 short — and the corrected edge is +5.9. Recorded because the fix came from a
+  measurement, not from a review.
+* **C (liquidity sweep)** is enabled intraday and disabled in swing on the Brier
+  gate: its directional edge is real in both modes (+8.3 / +13.4 points at n ≈ 145)
+  but its probability carries information only intraday. That is exactly the kind
+  of distinction WP5's calibration is for. Note also its sample: C fires on 1.3% of
+  decisions, so 12 series buys only 147 views — the margin over the 2-SE bar is
+  real but the smallest in the family.
+* **E (seasonality)** is enabled intraday at +43.7 points and has *no* edge in
+  swing (−0.8), which is coherent rather than contradictory: a 48-bar H1 horizon
+  spans two days, and an hour-of-day drift averages out inside it. The effect is
+  intraday-scale by construction, and the swing verdict follows from it.
+
+### 6.8 The finding that matters most for the wiring
+
+The paper-trading legs answer "if this were switched on tomorrow, what would
+happen?" — and for both agents the study would enable, the answer is **nothing**:
+
+| agent (intraday) | decisions | desk refused | agent had no view | taken | result |
+| --- | --- | --- | --- | --- | --- |
+| A trend | 1,142 | 137 | 928 | 71 | 65 fills, E[R] +0.593 |
+| B mean-reversion | 1,142 | 1,132 | 10 | **0** | no trades |
+| C liquidity-sweep | 1,142 | 1,124 | 18 | **0** | no trades |
+| D vol-regime | 1,106 | 887 | 208 | 9 | 6 fills, E[R] −0.078 |
+| E seasonality | 1,070 | 768 | 231 | 58 | 51 fills, E[R] +0.467 |
+
+The alpha layer is a **filter**, and the desk's own geometry currently refuses
+89–99% of decisions on these fixtures before any agent is consulted. Both enabled
+agents (C and E) score **zero takes** on their home fixtures as things stand.
+
+That is not a defect in the agent — it is the measurement that says where the
+bottleneck is, and it is the argument for WP6: the gatekeeper replaces the final
+arm decision, so it is the layer that turns an agent's view into a position, with
+the RR ≥ 2 floor, the cost test and `p_LCB` in front of it.
+
+### 6.9 What is wired, and what is not
+
+The five agents exist, are tested, and are measured; **none of them is consulted
+by the live decision path.** The five flags
+(`DESK_V4_AGENT_TREND`, `…_MEANREV`, `…_SWEEP`, `…_VOLREGIME`, `…_SEASONALITY`)
+join the existing `DESK_V4_*` set and default to OFF, and their default mode sets
+encode the whole study verdict rather than one number: `sweep` and `seasonality`
+intraday only, `trend`, `meanReversion` and `volRegime` **nowhere** — note that
+`meanReversion` is refused despite a measured +5.9-point edge (selectivity) and
+`seasonality` is refused in swing despite being enabled intraday. An empty list
+means the agent cannot propose until an operator sets
+`DESK_V4_AGENT_*_MODES` explicitly, which is deliberately two steps. The
+composition point is the WP6 gatekeeper; until then the desk's behaviour is the
+WP2 baseline, unchanged.
+
+### 6.10 The limits of this evidence, stated
+
+1. **The fixtures are synthetic.** They test whether a *claim* is measurable and
+   whether the detector measures it — not whether EURUSD behaves this way. The
+   owner's real M1/M5 export (§4.2) is still required before any threshold or
+   allowlist is treated as final.
+2. **The margins are thin in places.** B's driftless selectivity is 2.92% against
+   a 3.00% bar, and at 5 series the same measurement read 3.03% — i.e. the point
+   estimate is statistically indistinguishable from the bar. C's intraday Brier
+   skill is +0.007 and its swing reading is −0.037, so "C is enabled intraday" is
+   the weaker of the three enablements. Both are recorded as measured rather than
+   rounded to a verdict.
+3. **The 24 hours are tested independently.** The seasonality agent's t ≥ 2.5 bar
+   implies roughly one false hour in 25 on pure noise; the pooled null gate
+   (75–411 views, edge ≤ 2 SE) is what contains that, and it is the gate with the
+   smallest margin (+3.2 points against a 4.0-point allowance intraday). WP5's
+   Benjamini–Hochberg control at q = 0.10 is the correct fix, and it belongs
+   there rather than here.
+4. **Five agents were tested, so one "significant" reading at the 5% level is
+   expected by chance alone.** Each agent's gates are reported separately and the
+   full cross-table is in every report; WP9's e-process (halve at 5, disable at
+   20) is the mechanism that will police them in production.
+
+## 7. Documented assumptions and conservative choices
 
 Each of these was a fork in the road where the conservative option was taken and
 the reasoning recorded.
@@ -547,8 +798,42 @@ the reasoning recorded.
    aged out of the window is correctly no longer recent. The veto is 0.30, not
    the 0.35 the false-veto measurements might have permitted — the conservative
    direction.
+15. **An alpha agent states its own measured hit rate as its probability, shrunk
+   toward a measured baseline** (§6.2), rather than a hand-set constant. The
+   prior strength is 8 pseudo-occurrences against a floor of 4 real ones, so a
+   four-occurrence sample can move the estimate by at most an eighth of its own
+   excess over the baseline. The evidence bar for an *edge claim* lives in the
+   gate (≥ 60 views), not in the estimator: refusing to state anything below 60
+   occurrences would have hidden every reading between 4 and 59, including the
+   ones that show an agent is not working.
+16. **The random-entry baseline is direction-matched and measured, not
+   `1/(1+rr)`** (§6.3). The conservative reading was the textbook constant and it
+   was measured to be wrong in the flattering direction (+8.6 points of "edge" on
+   pure noise). Both the shrinkage target and the edge test now use the measured,
+   direction-matched, causally-computed rate.
+17. **An agent that fails a gate is left disabled and reported**, and the
+   allowlist is per mode. This costs coverage — three of five agents are disabled
+   intraday, four of five in swing — and the alternative (shipping a detector
+   whose probability does not track its outcomes) is what the programme exists to
+   stop. A disabled agent costs nothing at runtime because nothing calls it.
+18. **The selectivity bar is the brief's 3% on driftless decisions, not the 15%
+   pooled-null bar.** Measured consequences: A fires on 9.8% of driftless
+   decisions and B on 13.1%, so both are disabled even though B's edge is
+   positive in both modes; C (1.75%) and E (2.08%) pass. The strict bar was
+   applied as written rather than softened to make the family look better, and
+   the one agent with the strongest *statistical* case is the one it rejects —
+   which is the point of having it.
+19. **`--alpha-series` sets the series count uniformly for every fixture.**
+   Per-fixture counts would be a knob that changes which agent passes, which is
+   not a knob a study should have. The default (12) was chosen as the smallest
+   uniform count that gives a 3-point edge enough views to clear two standard
+   errors on the sparsest fixture (C: 147 views, 1.3% firing rate).
+20. **The paper-trading leg runs for every agent, enabled or not.** A measured
+   zero is evidence (it is how the "the desk refuses 89–99% of decisions" finding
+   in §6.8 surfaced); running it only for the allowlist would have hidden the
+   bottleneck.
 
-## 7. Changelog — every behavioural change, and the gate ledger
+## 8. Changelog — every behavioural change, and the gate ledger
 
 ### Behavioural changes
 
@@ -570,6 +855,13 @@ the reasoning recorded.
 | 14 | `regimePermit` refuses with `REGIME_UNAVAILABLE` instead of guessing when history is short or a fit fails | **tighter** (fail-closed) |
 | 15 | Null-family gates in the research report now report the *worst series* per gate, with the aggregate beside it | reporting only — no strategy behaviour changes; the two baselines were re-run so every stored report shares one format |
 | 16 | The 10 WP0–WP3 test files are now part of `package.json`'s `test` script (they were only runnable by hand) | coverage only — the same assertions now run in the standing regression |
+| 17 | Five alpha agents added (A–E) plus the registry and the `alphaStrategy` paper-trading adapter | **added, not wired**: all five `DESK_V4_AGENT_*` flags default OFF and nothing in the live path calls them; the composition point is WP6 |
+| 18 | Every agent's probability is its own measured hit rate shrunk toward a measured random-entry baseline (`alpha/edge.ts`) | **new estimator** — no hand-set probability exists anywhere in `alpha/`; the v3 weights are not used by this layer |
+| 19 | The random-entry baseline is direction-matched and causal instead of the two-sided textbook constant | **tighter**: it removed a spurious +8.6-point "edge" on pure noise and flipped A's fixture reading from +8.4 to −8.2 points |
+| 20 | Three research fixtures added: `mean-reverting` (OU + optional sweep jumps), `vol-clustered` (GARCH(1,1)), `seasonal` (hour-of-day drift) | **research fixture only** — no shipped code path reads them |
+| 21 | The WP4 gate set: ≥ 60 views, edge ≥ max(3 pts, 2 SE) over the matched baseline, \|stated − realised\| ≤ 15 pts, Brier skill ≥ 0, ≤ 3% driftless firing, ≤ 15% pooled-null firing with no edge beyond 2 SE | **added, research-side** — these decide the allowlist; they cannot be satisfied by a strategy that has not been measured |
+| 22 | `desk-v4-config.ts` agent keys renamed to the shipped agents (`volRegime`, `seasonality`) and their default mode sets set from the measurement (`volRegime` none, `seasonality` intraday) | config only — `DESK_V4_AGENT_VOLREGIME` / `…_SEASONALITY` replace `…_AGENT_FLOW` / `…_AGENT_CROSSSECTION`, which named agents that do not exist |
+| 23 | `math.atrSeries` added and `causalAtrSeries` re-implemented on top of it | performance only — was O(n²) over the harness's per-bar ATR; equivalence at every index is asserted in `executed-policy.test.ts` |
 
 ### Gate ledger
 
@@ -584,13 +876,21 @@ the reasoning recorded.
   bar in `labelStates` (±2.0); the "detector within 10 points of the supervised
   ceiling" gate; `null:v4-regime` — the same null gates applied to the gated
   family, which is what turns "it feels safer" into a number (17.5% → 0.18%).
-* **Removed**: **none.** No safety gate was removed in WP0–WP3. Everything in
+* **Added (WP4)**: the six agent gates of §6.5, the driftless selectivity bar
+  (≤ 3% of decisions on a fair coin — the brief's number, measured per agent),
+  the pooled-null gate (≤ 15% firing and no edge beyond 2 standard errors), the
+  direction-matched baseline as the comparator for both the estimator and the
+  edge test, and the "UNIDENTIFIABLE is a failure" rule for an agent with fewer
+  than 60 views.
+* **Removed**: **none.** No safety gate was removed in WP0–WP4. Everything in
   §1's constraint list (fail-closed news gate, quote integrity, clock
   normalisation, one-account-one-desk, live-off default, daily-loss and drawdown
   limits) is intact, and the position-manager tests assert the ones that touch
-  management.
+  management. WP4 adds gates and wiring only: nothing that existed before was
+  loosened, and no agent can place a trade — the alpha layer has no order path at
+  all.
 
-## 8. Open risks and unverifiable items
+## 9. Open risks and unverifiable items
 
 1. **The EA has never been compiled** (no MetaEditor here). Compile
    `NeurotradeBridge.mq5` in MetaEditor before any live or demo use; the
@@ -607,7 +907,7 @@ the reasoning recorded.
    slope inside [0.8, 1.2] on held-out data.
 5. **Slippage is modelled, not measured.** The ledger (WP7) replaces the
    allowance with observed slippage by symbol, session and order type.
-6. **Portfolio effects are not yet simulated** (see §6.5); WP8 owns them.
+6. **Portfolio effects are not yet simulated** (see §7.5); WP8 owns them.
 7. **The harness's own blind spots**: uniform spread when the file has no SPREAD
    column, no queue position at the trigger, no partial fills at the entry,
    intrabar ambiguity resolved pessimistically (stop first), and a decision
@@ -633,8 +933,44 @@ the reasoning recorded.
     flags default off and the composition point is the WP6 gatekeeper (§5.5).
     Between now and then the desk's behaviour is exactly the WP2 baseline —
     including the null-gate failures above.
+11. **None of the five alpha agents is consulted either, and two of the three
+    enabled ones would trade nothing as things stand.** On the study's fixtures
+    the desk's own geometry refuses 89–99% of decisions before an agent is
+    consulted (§6.8): both enabled agents score zero takes. The
+    measurement is a property of the *fixtures*, and the real export may refuse
+    far less — but the wiring risk is real and it is WP6's, not the agents'.
+12. **The alpha allowlist is mode-specific and some of its margins are thin.**
+    C's Brier skill is +0.007 intraday and −0.037 in swing, so its enablement
+    rests on a margin of hundredths; E's pooled-null margin is 0.8 points; and
+    B's +5.9-point edge is refused purely on selectivity (13.1% against a 3% bar),
+    and the swing allowlist is empty. These are recorded as measured rather than
+    hardened by a threshold change, and they are exactly the numbers WP5's
+    calibration and WP9's e-process are meant to move.
+13. **The agents are detectors, not per-trade gates, and the composition is
+    unbuilt.** A view is a claim about a setup; whether the trade is taken is
+    WP6's decision (RR ≥ 2 at the expected fill, the cost test, `p_LCB`). Reading
+    an allowlist entry as "this agent trades" would be wrong today.
+14. **The five agents were measured against fixtures whose parameters I chose**
+    (OU half-life 16, GARCH α 0.12 / β 0.80, the `DEFAULT_HOUR_DRIFT` profile,
+    the 6σ / 1% raids). A fixture is a hypothesis, and a detector that fails on a
+    badly parameterised fixture fails for the wrong reason. The OU and GARCH
+    parameters are standard textbook values. The sweep agent's filters were set
+    against a **measured event rate** rather than by eye, and the measurement is
+    worth recording: a raid-and-close-back-inside happens 399–514 times in 3,000
+    bars of either fixture, of which 223–323 clear the 0.1-ATR penetration test;
+    the first version of the absorption filter ("the wick must be at least half
+    the bar's range") left **3** of those — a detector that fires twice a series
+    cannot be measured at all — and the shipped version (give back ≥ 50% of the
+    excursion, rejection side ≥ max(body, 0.2 × range)) leaves ≈ 59, i.e. ~2% of
+    bars. All fixture parameters are configurable per study, and every one of them
+    is re-measured on the owner's own export before use.
+15. **Five agents were tested at once, so one "significant" reading is expected
+    by chance.** No family-wise correction is applied in WP4 — each agent is
+    reported separately, the cross-table is in every report, and the correction
+    belongs to WP5 (Benjamini–Hochberg at q = 0.10) and the governance layer
+    (WP9).
 
-## 9. Tests and commands
+## 10. Tests and commands
 
 ```bash
 # the standing regression — every api-server test, including the desk suites
@@ -659,6 +995,17 @@ cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
   --mode intraday --data synthetic:null --runs 3 --seed 1 --bars 2000 --stride 25 \
   --strategy v4-regime --label wp3-regime-null
+
+# the WP4 alpha-agent study, per mode (≈ 2.5 min intraday, ≈ 3.5 min swing: nine
+# fixtures × 12 series × five agents, decision-level, plus the paper legs)
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --alphas --mode intraday --seed 1 --label agent-study --alpha-series 12 --alpha-bars 3000
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --alphas --mode swing --seed 1 --label agent-study --alpha-series 12 --alpha-bars 3000
+
+# one agent, one fixture (fast iteration while a detector is being written)
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --alphas --mode intraday --alpha mean-reversion --alpha-series 4 --alpha-bars 2000
 ```
 
 Stored reports (`artifacts/api-server/research-reports/`):
@@ -670,8 +1017,22 @@ Stored reports (`artifacts/api-server/research-reports/`):
 | `2026-10-11-wp3-regime-study-intraday.json` | WP3 accuracy gate, 5 labelled series | **PASS** |
 | `2026-10-11-wp3-regime-study-swing.json` | the same, swing, 3 series | **PASS** |
 | `2026-10-11-wp3-regime-null.json` | null gates for desk-v3 vs v4-regime | FAIL (desk-v3 null gates; v4-regime fails one gate on a single trade — §5.5) |
+| `2026-10-11-wp4-alpha-intraday-agent-study.json` | five agents × nine fixtures, M15, 12 series each | **PASS** — allowlist `liquidity-sweep, seasonality` |
+| `2026-10-11-wp4-alpha-swing-agent-study.json` | the same, H1 | **FAIL** — allowlist empty (§6.6) |
 
-Current state: **416/416** desk tests (was 382 before WP3), **1,060/1,060**
-api-server tests overall, **37/37** trading-platform tests (including the 6/6
-EA-download parity check that keeps `public/downloads/NeurotradeBridge.mq5`
-byte-identical to the source), typecheck clean across all packages.
+Current state: **434/434** desk tests (multiasset + research + alpha; was 416
+before WP4), **1,082/1,082** api-server tests overall (131 suites, 176 s; both
+readings wander by a handful between runs because a few pre-existing suites build
+their cases from data — 438 and 1,093 were the same suites on an earlier run),
+**37/37** trading-platform tests (including the 6/6 EA-download parity check that
+keeps `public/downloads/NeurotradeBridge.mq5` byte-identical to the source),
+typecheck clean across all packages. WP4 added 17 contract tests
+(`alpha/alpha.test.ts`) and 4 fixture-property tests
+(`research/generators.test.ts`).
+
+The alpha tests deliberately do **not** assert the study's outcome. A unit test
+small enough to run in the standing regression cannot support an edge claim, and
+a test that asserted "agent E fires on the seasonal fixture" would turn a
+measurement into an oracle and freeze whatever the fixture happened to do. The
+study is the evidence; the suite is the contract (causality, determinism,
+abstention, the view shape, the estimator's arithmetic, the wiring's refusals).

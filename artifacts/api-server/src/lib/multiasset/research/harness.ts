@@ -45,6 +45,8 @@ import {
 } from "./metrics";
 import type { SyntheticSeries } from "./generators";
 import { regimePermit, type RegimeHmmConfig, type RegimePermit } from "../regime-hmm";
+import { DEFAULT_ALPHA_CONFIG, type AlphaConfig } from "../alpha/edge";
+import type { AlphaAgent } from "../alpha";
 
 // ── A strategy the harness can run ──────────────────────────────────────────
 
@@ -302,6 +304,180 @@ export function legacyDeskStrategy(id = "desk-v3"): Strategy {
       };
       const decision = evaluate(input);
       return decision.armed ? decision.plan : null;
+    },
+  };
+}
+
+// ── The WP4 alpha agents as a strategy ──────────────────────────────────────
+
+/**
+ * One entry per decision an alpha strategy made (or refused to make).
+ *
+ * The ledger is the audit trail, and it records the REFUSALS as carefully as the
+ * takes: whether the desk had no plan, the agent had no view, the two disagreed
+ * on direction, or the probability was below a floor. A study that only reported
+ * its trades could not tell "the agent never fires" from "the agent and the desk
+ * never agree", and those are different problems with different fixes.
+ *
+ * The reason codes are mutually exclusive and PRIORITY ORDERED, exactly as listed
+ * in the `reason` union: a decision where the desk had no plan is recorded as
+ * `desk-refused` even if the agent also had no view, because the desk's refusal
+ * is what stopped it.
+ */
+export interface AlphaLedgerEntry {
+  index: number;
+  agent: string;
+  /** null when the agent had no view. */
+  direction: string | null;
+  outOfBand: boolean;
+  probability: number | null;
+  /** Machine-readable reason code. */
+  reason:
+    | "taken"
+    | "desk-refused"
+    | "agent-no-view"
+    | "direction-mismatch"
+    | "below-probability-floor";
+  detail: string | null;
+}
+
+/** Counts of every ledger reason over a paper-trading leg. */
+export function summariseAlphaLedger(ledger: AlphaLedgerEntry[]): Record<AlphaLedgerEntry["reason"], number> {
+  const out = {
+    taken: 0,
+    "desk-refused": 0,
+    "agent-no-view": 0,
+    "direction-mismatch": 0,
+    "below-probability-floor": 0,
+  } as Record<AlphaLedgerEntry["reason"], number>;
+  for (const entry of ledger) out[entry.reason] = (out[entry.reason] ?? 0) + 1;
+  return out;
+}
+
+export interface AlphaStrategyOptions {
+  agent: AlphaAgent;
+  /**
+   * The strategy that supplies the trade's GEOMETRY — entry type, stop, targets,
+   * sizing. The agent supplies the direction and the probability; it never
+   * places a stop, because a stop is an execution decision and mixing the two
+   * into one object is how a research finding becomes unauditable.
+   */
+  inner?: Strategy;
+  /**
+   * Minimum stated probability before the strategy will act at all.
+   *
+   * Defaults to 0 — deliberately. A probability threshold is a SIZING and
+   * GATEKEEPER decision (WP6 owns `p_LCB`), and a study that silently applied
+   * one here would measure a threshold nobody chose.
+   */
+  minProbability?: number;
+  /** The frame the agent reads; default: the fastest visible frame. */
+  frame?: Timeframe;
+  config?: AlphaConfig;
+  /** Shared per-series scratch (see `AlphaContext.cache`). */
+  cache?: Map<string, unknown>;
+  id?: string;
+}
+
+export interface AlphaStrategy extends Strategy {
+  ledger: AlphaLedgerEntry[];
+}
+
+/**
+ * Wrap the desk with one alpha agent: the desk decides the geometry, the agent
+ * decides whether this is its setup.
+ *
+ * This is the PAPER-TRADING interface: a study through this strategy executes
+ * exactly the trades the same wiring would execute live (the shipped
+ * `position-manager` runs inside the simulator), so a claim that survives here
+ * has been through the desk's real stop, targets and management rather than a
+ * simplified stand-in.
+ */
+export function alphaStrategy(options: AlphaStrategyOptions): AlphaStrategy {
+  const inner = options.inner ?? legacyDeskStrategy("desk-v3");
+  const ledger: AlphaLedgerEntry[] = [];
+  const cfg = options.config ?? DEFAULT_ALPHA_CONFIG;
+  return {
+    id: options.id ?? `${inner.id}+${options.agent.id}`,
+    ledger,
+    decide(ctx) {
+      const frame = options.frame ?? fastestFrame(ctx.series);
+      const bars = (frame ? ctx.series[frame] : undefined) ?? [];
+      const barIndex = Math.max(0, bars.length - 1);
+      const view = options.agent.view({
+        symbol: ctx.symbol,
+        mode: ctx.mode,
+        spec: ctx.spec,
+        series: ctx.series,
+        quote: ctx.quote,
+        now: ctx.now,
+        ...(options.cache ? { cache: options.cache } : {}),
+      });
+      const plan = inner.decide(ctx);
+      if (!plan) {
+        ledger.push({
+          index: barIndex,
+          agent: options.agent.id,
+          direction: view ? view.direction : null,
+          outOfBand: false,
+          probability: view ? view.probability : null,
+          reason: "desk-refused",
+          detail: "the desk's own geometry gates found no plan at this bar",
+        });
+        return null;
+      }
+      if (!view) {
+        ledger.push({
+          index: barIndex,
+          agent: options.agent.id,
+          direction: null,
+          outOfBand: false,
+          probability: null,
+          reason: "agent-no-view",
+          detail: "the agent had no setup (or not enough closed occurrences) here",
+        });
+        return null;
+      }
+      if (view.direction !== plan.side) {
+        ledger.push({
+          index: barIndex,
+          agent: options.agent.id,
+          direction: view.direction,
+          outOfBand: false,
+          probability: view.probability,
+          reason: "direction-mismatch",
+          detail: `agent says ${view.direction}, the desk's plan is ${plan.side}`,
+        });
+        return null;
+      }
+      if ((options.minProbability ?? 0) > 0 && view.probability < (options.minProbability as number)) {
+        ledger.push({
+          index: barIndex,
+          agent: options.agent.id,
+          direction: view.direction,
+          outOfBand: true,
+          probability: view.probability,
+          reason: "below-probability-floor",
+          detail: `probability ${view.probability.toFixed(3)} below the ${(options.minProbability as number).toFixed(3)} floor`,
+        });
+        return null;
+      }
+      ledger.push({
+        index: barIndex,
+        agent: options.agent.id,
+        direction: view.direction,
+        outOfBand: false,
+        probability: view.probability,
+        reason: "taken",
+        detail: null,
+      });
+      // The agent's MEASURED probability becomes the plan's stated probability:
+      // that is the number the harness calibrates, the journal records and WP6
+      // will size from. Everything else — stop, targets, size — stays the desk's.
+      return {
+        ...plan,
+        rationale: { ...plan.rationale, winProbability: view.probability },
+      };
     },
   };
 }

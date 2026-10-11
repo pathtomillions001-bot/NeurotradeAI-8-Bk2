@@ -12,6 +12,11 @@
  *                      non-linear structure, and driftless despite the source
  *   positive control — real, persistent autocorrelation and a drift that
  *                      switches regimes
+ *   mean-reverting — a STATIONARY level (the OU process pulls back) with fat
+ *                      tails when the sweep jumps are switched on
+ *   vol-clustered  — |returns| are autocorrelated (GARCH: quiet and violent
+ *                      stretches) while returns themselves are not
+ *   seasonal       — the drift depends on the UTC hour and on nothing else
  */
 
 import { strict as assert } from "node:assert";
@@ -126,4 +131,99 @@ test("generated bars are well-formed OHLC with monotone timestamps", () => {
     // The bar opens where the previous bar closed: a continuous series.
     assert.ok(Math.abs(bar[1] - prev[4]) < 1e-12);
   }
+});
+
+// ── WP4 fixtures ────────────────────────────────────────────────────────────
+
+function autocorrelation(values: number[], lag: number): number {
+  const m = mean(values);
+  let numerator = 0;
+  let denominator = 0;
+  for (let i = lag; i < values.length; i++) numerator += (values[i] as number - m) * (values[i - lag] as number - m);
+  for (const value of values) denominator += (value - m) ** 2;
+  return denominator === 0 ? 0 : numerator / denominator;
+}
+
+/** The bar-to-bar log-return series, which is what the agents actually read. */
+function logReturns(returns: number[]): number[] {
+  return returns;
+}
+
+test("mean-reverting is STATIONARY: its level wanders far less than a random walk's", () => {
+  const spec = { ...DEFAULT_GENERATOR_SPEC, bars: 3000, seed: 5, volatility: 0.0008 };
+  const level = (kind: "driftless" | "mean-reverting"): { min: number; max: number } => {
+    const { returns } = generate(kind, spec);
+    let cumulative = 0;
+    let min = 0;
+    let max = 0;
+    for (const r of returns) {
+      cumulative += r / 0.0008;
+      min = Math.min(min, cumulative);
+      max = Math.max(max, cumulative);
+    }
+    return { min, max };
+  };
+  const walk = level("driftless");
+  const ou = level("mean-reverting");
+  const walkRange = walk.max - walk.min;
+  const ouRange = ou.max - ou.min;
+  // The whole point of the fixture: the level is pinned. A driftless walk of 3000
+  // bars ranges over roughly ±2.5√3000 ≈ ±140σ; the OU process is bounded by its
+  // own half-life. The bar is deliberately loose (half the walk's range) so this
+  // asserts stationarity rather than a particular parameterisation.
+  assert.ok(ouRange < walkRange * 0.5, `the OU level must stay pinned: ${ouRange.toFixed(1)}σ vs ${walkRange.toFixed(1)}σ`);
+  // And the pulling is visible in the RETURNS: a negative lag-1 autocorrelation,
+  // which is what "mean reverting" means in a series an agent can read.
+  const ouReturns = logReturns(generate("mean-reverting", spec).returns);
+  assert.ok(autocorrelation(ouReturns, 1) < 0, "OU returns must be negatively autocorrelated");
+});
+
+test("mean-reverting with jumps switched on has fat tails; without them it does not", () => {
+  const spec = { ...DEFAULT_GENERATOR_SPEC, bars: 3000, seed: 7, volatility: 0.0008 };
+  const kurtosis = (returns: number[]): number => {
+    const s = stdev(returns);
+    return returns.reduce((a, r) => a + (r / s) ** 4, 0) / returns.length;
+  };
+  const calm = generate("mean-reverting", spec).returns;
+  const jumpy = generate("mean-reverting", { ...spec, jumpProbability: 0.01, jumpSigma: 6 }).returns;
+  assert.ok(kurtosis(jumpy) > kurtosis(calm) * 1.2, "sweep jumps must fatten the tails");
+  assert.ok(kurtosis(jumpy) > 3.5, "a 6σ jump 1% of the time must show in the fourth moment");
+});
+
+test("vol-clustered has autocorrelated ABSOLUTE returns and no return drift", () => {
+  const spec = { ...DEFAULT_GENERATOR_SPEC, bars: 3000, seed: 3, volatility: 0.0008 };
+  const garch = generate("vol-clustered", spec).returns;
+  const noise = generate("driftless", spec).returns;
+  const garchAbs = autocorrelation(garch.map(Math.abs), 1);
+  const noiseAbs = autocorrelation(noise.map(Math.abs), 1);
+  // Measured on this seed: ≈ +0.11 for the GARCH fixture, ≈ −0.02 for the walk.
+  assert.ok(garchAbs > 0.06, `GARCH |returns| must cluster: lag-1 autocorrelation ${garchAbs.toFixed(3)}`);
+  assert.ok(garchAbs > noiseAbs + 0.05, "the clustering must be the fixture's, not an artefact of the seed");
+  assert.ok(Math.abs(autocorrelation(garch, 1)) < 0.1, "returns themselves must stay nearly unautocorrelated");
+  assert.ok(Math.abs(mean(garch) / stdev(garch)) < 0.05, "the fixture must not carry a drift");
+});
+
+test("seasonal carries the hour-of-day drift, and driftless does not", () => {
+  const spec = { ...DEFAULT_GENERATOR_SPEC, bars: 3000, seed: 3, volatility: 0.0008, timeframeMs: 15 * 60_000, startMs: Date.UTC(2026, 0, 5) };
+  const hourMeans = (kind: "seasonal" | "driftless"): number[] => {
+    const { returns } = generate(kind, spec);
+    const sums = new Array(24).fill(0) as number[];
+    const counts = new Array(24).fill(0) as number[];
+    for (let i = 0; i < returns.length; i++) {
+      const hour = new Date(spec.startMs + i * spec.timeframeMs).getUTCHours();
+      sums[hour] = (sums[hour] as number) + (returns[i] as number);
+      counts[hour] = (counts[hour] as number) + 1;
+    }
+    return sums.map((sum, h) => (counts[h] as number) > 0 ? sum / (counts[h] as number) : 0);
+  };
+  const seasonal = hourMeans("seasonal");
+  const noise = hourMeans("driftless");
+  // DEFAULT_HOUR_DRIFT is positive through the London morning and negative into
+  // the New York afternoon; the fixture must show both.
+  assert.ok((seasonal[8] as number) > 0, "hour 08 UTC must be bid");
+  assert.ok((seasonal[9] as number) > 0, "hour 09 UTC must be bid");
+  assert.ok((seasonal[14] as number) < 0, "hour 14 UTC must be offered");
+  const spread = Math.max(...seasonal) - Math.min(...seasonal);
+  const noiseSpread = Math.max(...noise) - Math.min(...noise);
+  assert.ok(spread > noiseSpread * 2, "the clock structure must dominate the sampling noise");
 });

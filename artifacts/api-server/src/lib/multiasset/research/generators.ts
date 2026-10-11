@@ -42,7 +42,11 @@ export type GeneratorKind =
   | "block-shuffled"
   | "phase-randomised"
   | "positive-control"
-  | "three-regime";
+  | "three-regime"
+  // WP4 fixtures: market structures a specific alpha agent claims to exploit.
+  | "mean-reverting"
+  | "vol-clustered"
+  | "seasonal";
 
 export interface GeneratorSpec {
   /** Bars to produce. */
@@ -71,6 +75,35 @@ export interface GeneratorSpec {
   rangeVolScale?: number;
   /** Persistence of the three-regime chain (per bar). */
   regimePStay?: number;
+  /**
+   * `mean-reverting`: half-life of the Ornstein–Uhlenbeck pull, in bars.
+   *
+   * A half-life of 20 bars is a tape that swings around a level and takes about
+   * a day (on M15) to work off a displacement — the structure a mean-reversion
+   * agent claims to trade, and which a driftless walk does not have.
+   */
+  meanReversionHalfLife?: number;
+  /**
+   * `mean-reverting`: a jump that lands BEYOND the recent extreme and is then
+   * absorbed. This is the liquidity sweep an execution agent claims to trade,
+   * and it is deliberately rare (a few per thousand bars) because sweeps are.
+   */
+  jumpProbability?: number;
+  /** `mean-reverting`: jump size in per-bar σ. */
+  jumpSigma?: number;
+  /** `vol-clustered`: GARCH(1,1) coefficients (α + β < 1). */
+  garchAlpha?: number;
+  garchBeta?: number;
+  /**
+   * `seasonal`: per-UTC-hour drift multipliers, indexed 0–23.
+   *
+   * The default pattern is a plausible FX day: a positive drift through the
+   * London open, a negative one into the New York afternoon. It is a property
+   * of the CLOCK, not of the price history, so an agent can only find it by
+   * looking at past returns of the same hour — which is exactly what the
+   * seasonality agent does.
+   */
+  hourDrift?: number[];
 }
 
 export interface SyntheticSeries {
@@ -358,6 +391,94 @@ export function threeRegime(spec: GeneratorSpec): SyntheticSeries & { regimeLabe
 }
 
 /**
+ * The MEAN-REVERTING control (OU in log price).
+ *
+ *   r_t = −θ · level_{t−1} + σ · ε_t
+ *
+ * with θ = ln2 / halfLife, so a displacement decays with a half-life of
+ * `meanReversionHalfLife` bars. The level is stationary, which is precisely what
+ * a random walk is not: every push has a measurable expected return of the
+ * opposite sign. A mean-reversion agent that cannot find THIS one has a broken
+ * detector; an agent that finds it on a driftless walk is fitting noise.
+ *
+ * With `jumpProbability` > 0 the process occasionally jumps beyond the recent
+ * range and is then pulled back — the liquidity-sweep fixture.
+ */
+export function meanReverting(spec: GeneratorSpec): SyntheticSeries {
+  const halfLife = Math.max(1, spec.meanReversionHalfLife ?? 20);
+  const theta = Math.log(2) / halfLife;
+  const jumpProbability = spec.jumpProbability ?? 0;
+  const jumpSigma = spec.jumpSigma ?? 4;
+  const sigma = spec.volatility;
+  const rng = makeRng(spec.seed);
+  const returns: number[] = [];
+  let level = 0;
+  for (let i = 0; i < spec.bars; i++) {
+    let r = -theta * level + sigma * gaussian(rng);
+    if (jumpProbability > 0 && rng() < jumpProbability) {
+      r += sigma * jumpSigma * (rng() < 0.5 ? -1 : 1);
+    }
+    level += r;
+    returns.push(r);
+  }
+  return { kind: "mean-reverting", returns, bars: barsFromReturns({ ...spec, returns }) };
+}
+
+/**
+ * The VOLATILITY-CLUSTERING control: GARCH(1,1).
+ *
+ *   h_t = ω + α·r²_{t−1} + β·h_{t−1},  ω = σ²_unc·(1 − α − β)
+ *
+ * Quiet stretches beget quiet stretches and shocks beget shocks — the one
+ * property of real returns that survives every null generator (a driftless walk
+ * has constant volatility by construction, and block shuffling destroys the
+ * clustering because it destroys the order). An expansion agent that cannot
+ * find structure here has nothing to measure on any market.
+ */
+export function volClustered(spec: GeneratorSpec): SyntheticSeries {
+  const alpha = spec.garchAlpha ?? 0.12;
+  const beta = spec.garchBeta ?? 0.8;
+  const unconditional = spec.volatility * spec.volatility;
+  const omega = unconditional * Math.max(0.01, 1 - alpha - beta);
+  const rng = makeRng(spec.seed);
+  const returns: number[] = [];
+  let h = unconditional;
+  for (let i = 0; i < spec.bars; i++) {
+    const r = Math.sqrt(h) * gaussian(rng);
+    returns.push(r);
+    h = omega + alpha * r * r + beta * h;
+  }
+  return { kind: "vol-clustered", returns, bars: barsFromReturns({ ...spec, returns }) };
+}
+
+/** The default clock pattern of the seasonal generator (24 UTC-hour multipliers). */
+const DEFAULT_HOUR_DRIFT = [
+  0.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.2, 0.4, 0.6, 0.5, 0.3, 0.1,
+  -0.1, -0.3, -0.4, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+];
+
+/**
+ * The SEASONALITY control: a drift that depends only on the UTC hour of the bar.
+ *
+ * The pattern is a property of the clock, so it is knowable in advance and
+ * measurable from history — which is the whole hypothesis of the seasonality
+ * agent. There is deliberately no autocorrelation and no volatility clustering
+ * here: this fixture isolates the clock, so an agent that passes on it and
+ * fails everywhere else is measuring the clock, not the tape.
+ */
+export function seasonal(spec: GeneratorSpec): SyntheticSeries {
+  const pattern = spec.hourDrift ?? DEFAULT_HOUR_DRIFT;
+  const rng = makeRng(spec.seed);
+  const returns: number[] = [];
+  for (let i = 0; i < spec.bars; i++) {
+    const hour = new Date(spec.startMs + i * spec.timeframeMs).getUTCHours();
+    const drift = (pattern[hour] ?? 0) * spec.volatility;
+    returns.push(drift + spec.volatility * gaussian(rng));
+  }
+  return { kind: "seasonal", returns, bars: barsFromReturns({ ...spec, returns }) };
+}
+
+/**
  * Build any generator by name. Real data is loaded by loader.ts instead.
  *
  * The spec is merged over `DEFAULT_GENERATOR_SPEC` and then VALIDATED: a spec
@@ -409,6 +530,12 @@ function generateUnchecked(kind: GeneratorKind, full: GeneratorSpec): SyntheticS
     }
     case "three-regime":
       return threeRegime(spec);
+    case "mean-reverting":
+      return meanReverting(spec);
+    case "vol-clustered":
+      return volClustered(spec);
+    case "seasonal":
+      return seasonal(spec);
     default: {
       const exhaustive: never = kind;
       throw new Error(`unknown generator: ${String(exhaustive)}`);

@@ -64,6 +64,19 @@ import {
   type RegimeHmmConfig,
   type RegimePermit,
 } from "../regime-hmm";
+import { ALPHA_IDS, buildAlphaAgents, type AlphaAgent, type AlphaId } from "../alpha";
+import { DEFAULT_ALPHA_CONFIG } from "../alpha/edge";
+import { lowerBoundMeanR, tradeStats } from "./metrics";
+import {
+  alphaDriftlessGates,
+  alphaFixtureGates,
+  alphaNullGates,
+  measureAlpha,
+  poolAlphaMeasurements,
+  type AlphaGateReport,
+  type AlphaMeasurement,
+} from "./alpha-eval";
+import { alphaStrategy, summariseAlphaLedger, type AlphaLedgerEntry } from "./harness";
 import type { SimulatedTrade } from "./executed-policy";
 import { loadMt5Bars, resampleBars } from "./loader";
 import type { Strategy } from "./harness";
@@ -94,6 +107,12 @@ interface CliArgs {
   specOverrides: Parameters<typeof specForSymbol>[1];
   strategy: StrategyChoice;
   regimeFitBars: number;
+  alphas: boolean;
+  alphasOnly: AlphaId[];
+  alphaSeries: number;
+  /** True when the caller set --alpha-series explicitly. */
+  alphaSeriesExplicit: boolean;
+  alphaBars: number;
 }
 
 /** Which decision layer a study runs. */
@@ -125,6 +144,12 @@ const USAGE = `research:run — the MT5 Desk v4 research harness
                                     a hard veto; v4-regime-shadow measures the
                                     same permission without changing any trade
   --regime-fit-bars <n>             bars the regime HMM is fitted on (default 1000)
+  --alphas                          run the WP4 alpha-agent study instead of a
+                                    strategy study: every agent is measured on
+                                    its own labelled fixture and on the nulls
+  --alpha <id,id>                   restrict the study to these agents
+  --alpha-series <n>                independent series per fixture (default 4)
+  --alpha-bars <n>                  bars per series (default 3000)
   --quiet                           only the verdict line
 `;
 
@@ -173,8 +198,17 @@ export function parseArgs(argv: string[]): CliArgs {
   if (!["desk-v3", "v4-regime", "v4-regime-shadow"].includes(strategy)) {
     throw new Error(`--strategy must be desk-v3, v4-regime or v4-regime-shadow (got "${String(flags.get("strategy"))}")`);
   }
+  const alphasOnly = (flags.get("alpha") ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry): entry is AlphaId => (ALPHA_IDS as readonly string[]).includes(entry));
   return {
     strategy,
+    alphas: flags.has("alphas"),
+    alphasOnly,
+    alphaSeries: Math.max(1, Math.floor(num("alpha-series", 4))),
+    alphaSeriesExplicit: flags.has("alpha-series"),
+    alphaBars: Math.max(1200, Math.floor(num("alpha-bars", 3000))),
     regimeFitBars: Math.max(200, Math.floor(num("regime-fit-bars", DEFAULT_REGIME_HMM_CONFIG.fitBars))),
     mode,
     data: flags.get("data") ?? "synthetic:all",
@@ -667,6 +701,420 @@ function heldOutCalibration(run: HarnessRun): { p: number; outcome: 0 | 1 }[] {
     .map((t) => ({ p: t.predictedProbability as number, outcome: (t.r > 0 ? 1 : 0) as 0 | 1 }));
 }
 
+// ── The WP4 alpha study ─────────────────────────────────────────────────────
+
+/**
+ * The fixtures each agent is measured on.
+ *
+ * `home` is the fixture that expresses the agent's CLAIM — the market structure
+ * it says it can trade — and it is the fixture its edge gate runs on. Every agent
+ * is also measured on every other fixture, because a detector that "works"
+ * everywhere is measuring something other than the structure it claims, and the
+ * cross-table is where that shows.
+ *
+ * The three nulls are the OTHER half of the gate. `phase-randomised` is the
+ * strictest of them (it preserves linear structure), which is why it carries the
+ * most series.
+ */
+export interface AlphaFixture {
+  name: string;
+  kind: GeneratorKind;
+  series: number;
+  bars: number;
+  spec?: Record<string, number>;
+  home?: AlphaId[];
+  null?: boolean;
+  note: string;
+}
+
+export const ALPHA_STUDY_FIXTURES: AlphaFixture[] = [
+  { name: "trend-control", kind: "positive-control", series: 4, bars: 3000, home: ["trend"],
+    note: "regime-switching drift + AR(1) residual: the desk's own positive control, and the fixture the trend claim is about" },
+  { name: "mean-reverting", kind: "mean-reverting", series: 5, bars: 3000, spec: { meanReversionHalfLife: 16 },
+    home: ["mean-reversion"],
+    note: "OU around a level with a 16-bar half-life: the structure a fade is supposed to trade" },
+  { name: "sweep-rich", kind: "mean-reverting", series: 5, bars: 3000,
+    spec: { meanReversionHalfLife: 16, jumpProbability: 0.01, jumpSigma: 6 }, home: ["liquidity-sweep"],
+    note: "the same level plus a raid every ~100 bars that is absorbed: sweep-rich on purpose, because a setup that happens twice a series cannot be measured" },
+  { name: "vol-clustered", kind: "vol-clustered", series: 4, bars: 3000, home: ["vol-regime"],
+    note: "GARCH(1,1): quiet stretches and shock clusters, the one property of real returns no null generator has" },
+  { name: "seasonal", kind: "seasonal", series: 4, bars: 3000, home: ["seasonality"],
+    note: "a drift that depends only on the UTC hour: clock structure and nothing else" },
+  { name: "regime-labelled", kind: "three-regime", series: 3, bars: 3000, home: [],
+    note: "the WP3 labelled control: bull/bear/range, useful for the trend agent's direction rather than its probability" },
+  { name: "null-driftless", kind: "driftless", series: 4, bars: 3000, null: true,
+    note: "driftless random walk: no structure of any kind" },
+  { name: "null-phase", kind: "phase-randomised", series: 6, bars: 3000, null: true,
+    note: "phase-randomised: linear structure survives, non-linear does not — the strictest null" },
+  { name: "null-shuffled", kind: "block-shuffled", series: 4, bars: 3000, null: true,
+    note: "block-shuffled returns: the marginal distribution kept exactly, every temporal dependence destroyed" },
+];
+
+export interface AlphaPaperLeg {
+  summary: RunSummary;
+  ledger: Record<string, number>;
+  /** Decisions the paper leg walked through. */
+  decisions: number;
+}
+
+export interface AlphaAgentVerdict {
+  agent: AlphaId;
+  label: string;
+  /** The fixture its claim was measured on. */
+  home: string;
+  fixture: AlphaMeasurement;
+  null: AlphaMeasurement;
+  fixtureGates: AlphaGateReport;
+  nullGates: AlphaGateReport;
+  /** The brief's selectivity gate, measured on the driftless fixture alone. */
+  driftless: AlphaMeasurement;
+  driftlessGates: AlphaGateReport;
+  /** Every fixture the agent was measured on, for the cross-table. */
+  all: AlphaMeasurement[];
+  /** Paper trading: the executed-policy leg on its home fixture + the null. */
+  paper: { fixture: AlphaPaperLeg; null: AlphaPaperLeg } | null;
+  verdict: "enabled" | "disabled";
+  reason: string;
+}
+
+export interface AlphaStudyReport {
+  label: string;
+  generatedAt: string;
+  command: string;
+  mode: TradeMode;
+  symbol: string;
+  seed: number;
+  dataSource: string;
+  barsPerSeries: number;
+  stride: number;
+  contractSpec: Record<string, unknown>;
+  assumedSpecValues: string[];
+  fixtures: { name: string; kind: string; series: number; bars: number; note: string }[];
+  agents: AlphaAgentVerdict[];
+  /** Agents whose gates all passed — the only ones that may be wired in. */
+  allowlist: AlphaId[];
+  verdict: "pass" | "fail";
+  notes: string[];
+}
+
+/** How many agents' measurements are kept in the report (all of them). */
+export function runAlphaStudy(args: CliArgs): AlphaStudyReport {
+  const notes: string[] = [];
+  const agents = buildAlphaAgents();
+  const ids: AlphaId[] = args.alphasOnly.length > 0 ? args.alphasOnly : [...ALPHA_IDS];
+  // `--alpha-series` overrides every fixture uniformly. Uniformly on purpose: a
+  // flag that gave one agent's fixture more series than another's would be a
+  // knob that changes which agent passes, which is not a knob a study should have.
+  const fixtures = ALPHA_STUDY_FIXTURES.map((fixture) => ({
+    ...fixture,
+    series: args.alphaSeriesExplicit ? args.alphaSeries : fixture.series,
+    bars: args.alphaBars,
+  }));
+  const frame = SYNTHETIC_BASE_FRAME[args.mode];
+  const frameWidth = frameMinutes(frame) * 60_000;
+
+  // One pass: measure every requested agent on every series of every fixture.
+  const measurements = new Map<string, AlphaMeasurement[]>(); // `${agent}|${fixture}`
+  const homeBars = new Map<string, { bars: Bar[]; fixture: AlphaFixture; label: string }[]>();
+  for (const fixture of fixtures) {
+    const seriesBars: { bars: Bar[]; fixture: AlphaFixture; label: string }[] = [];
+    for (let r = 0; r < fixture.series; r++) {
+      const series = generate(fixture.kind, {
+        ...DEFAULT_GENERATOR_SPEC,
+        seed: args.seed + r * 1013,
+        bars: fixture.bars,
+        timeframeMs: frameWidth,
+        volatility: args.mode === "scalp" ? 0.00035 : args.mode === "intraday" ? 0.0008 : 0.0016,
+        ...(fixture.spec ?? {}),
+      });
+      seriesBars.push({ bars: series.bars, fixture, label: `${fixture.name}#${r + 1}` });
+    }
+    for (const id of ids) {
+      const collected: AlphaMeasurement[] = [];
+      for (const entry of seriesBars) {
+        collected.push(
+          measureAlpha({
+            agent: agents[id],
+            bars: entry.bars,
+            frame,
+            symbol: args.symbol,
+            spec: args.spec.spec,
+            mode: args.mode,
+            series: entry.label,
+            kind: fixture.kind,
+            stride: Math.max(1, Math.min(args.stride, 3)),
+            // A series must be long enough for the agent to have seen the setup
+            // before it can say anything about it; the default is its own floor.
+            warmupBars: Math.max(120, agents[id].minBars),
+            frameWidthMs: frameWidth,
+          }),
+        );
+      }
+      measurements.set(`${id}|${fixture.name}`, collected);
+      if (fixture.home?.includes(id)) homeBars.set(id, seriesBars);
+    }
+  }
+
+  const nullFixtures = fixtures.filter((f) => f.null);
+  const verdicts: AlphaAgentVerdict[] = [];
+  for (const id of ids) {
+    const agent = agents[id] as AlphaAgent;
+    const home = fixtures.find((f) => f.home?.includes(id)) ?? fixtures[0];
+    // The fixture gates are decided on the HOME fixture alone, never on a pool of
+    // fixtures: the random-entry baseline is a property of the series (it ranged
+    // 10–34% across these fixtures), so pooling two of them would compare an
+    // agent against the average of two different coin flips. The other fixtures
+    // are still measured and reported, in the cross-table.
+    const homeMeasurements = measurements.get(`${id}|${home.name}`) ?? [];
+    const fixtureMeasurement = poolAlphaMeasurements(homeMeasurements);
+    const nullMeasurements = nullFixtures.flatMap((f) => measurements.get(`${id}|${f.name}`) ?? []);
+    const nullMeasurement = poolAlphaMeasurements(nullMeasurements);
+    const driftlessMeasurement = poolAlphaMeasurements(measurements.get(`${id}|null-driftless`) ?? []);
+    const fixtureGates = alphaFixtureGates(fixtureMeasurement);
+    const nullGates = alphaNullGates(nullMeasurements);
+    const driftlessGates = alphaDriftlessGates(driftlessMeasurement);
+
+    // Paper trading: the same agent through the desk's real geometry and the
+    // shipped position manager, on its home fixture and on the pooled null.
+    let paper: AlphaAgentVerdict["paper"] = null;
+    const paperSeries = homeBars.get(id);
+    if (paperSeries && paperSeries.length > 0) {
+      const runOne = (seriesBars: { bars: Bar[]; label: string }[], kind: string): AlphaPaperLeg => {
+        const runs: HarnessRun[] = [];
+        const ledger: AlphaLedgerEntry[] = [];
+        let decisions = 0;
+        for (const entry of seriesBars.slice(0, 2)) {
+          const strategy = alphaStrategy({
+            agent,
+            id: `alpha:${id} (${kind})`,
+            frame,
+            cache: new Map<string, unknown>(),
+          });
+          const run = runHarness({
+            frames: framesForMode(args.mode, entry.bars, frame),
+            symbol: args.symbol,
+            strategy,
+            options: {
+              spec: args.spec.spec,
+              mode: args.mode,
+              stride: Math.max(1, Math.min(args.stride, 5)),
+              warmupBars: Math.max(120, agent.minBars),
+              horizonBars: DEFAULT_ALPHA_CONFIG.horizonBars[args.mode],
+              trials: 1,
+            },
+          });
+          runs.push(run);
+          ledger.push(...strategy.ledger);
+          decisions += strategy.ledger.length;
+        }
+        return {
+          summary: summariseRun(mergeRuns(runs, `alpha:${id} (${kind})`), false),
+          ledger: { ...summariseAlphaLedger(ledger) },
+          decisions,
+        };
+      };
+      const paperNullSeries: { bars: Bar[]; label: string }[] = [];
+      const firstNull = nullFixtures[0];
+      if (firstNull) {
+        for (let r = 0; r < Math.min(3, firstNull.series); r++) {
+          const series = generate(firstNull.kind, {
+            ...DEFAULT_GENERATOR_SPEC,
+            seed: args.seed + r * 1013,
+            bars: firstNull.bars,
+            timeframeMs: frameWidth,
+            volatility: args.mode === "intraday" ? 0.0008 : 0.0016,
+          });
+          paperNullSeries.push({ bars: series.bars, label: `${firstNull.name}#${r + 1}` });
+        }
+      }
+      paper = {
+        fixture: runOne(paperSeries, home.name),
+        null:
+          paperNullSeries.length > 0
+            ? runOne(paperNullSeries, firstNull?.name ?? "null")
+            : {
+                summary: summariseRun(emptyHarnessRun(`alpha:${id}`, args.symbol, args.mode), false),
+                ledger: {},
+                decisions: 0,
+              },
+      };
+    }
+
+    const gates = [...fixtureGates.gates, ...driftlessGates.gates, ...nullGates.gates];
+    const failed = gates.filter((g) => !g.pass);
+    verdicts.push({
+      agent: id,
+      label: agent.label,
+      home: home.name,
+      fixture: fixtureMeasurement,
+      null: nullMeasurement,
+      fixtureGates,
+      nullGates,
+      driftless: driftlessMeasurement,
+      driftlessGates,
+      all: fixtures.map((f) => poolAlphaMeasurements(measurements.get(`${id}|${f.name}`) ?? [])),
+      paper,
+      verdict: failed.length === 0 ? "enabled" : "disabled",
+      reason:
+        failed.length === 0
+          ? `all ${gates.length} gates passed on ${home.name} and the pooled nulls`
+          : failed.map((g) => `${g.gate} → ${g.detail}`).join("; "),
+    });
+  }
+
+  verdicts.sort((a, b) => ALPHA_IDS.indexOf(a.agent) - ALPHA_IDS.indexOf(b.agent));
+  const allowlist = verdicts.filter((v) => v.verdict === "enabled").map((v) => v.agent);
+  notes.push(
+    "Every agent states a probability, and the probability is its own measured hit rate for this exact setup, shrunk " +
+      "toward the MEASURED random-entry baseline for the same stop and horizon (see alpha/edge.ts). The gate is " +
+      "whether that number beats the baseline on the fixture and fails to beat it on the nulls.",
+  );
+  notes.push(
+    "The 'baseline' column is the random-entry hit rate with identical geometry AND the same direction as each view, " +
+      "measured causally on windows that had closed by the decision bar. It is not 1/(1+RR): with a time horizon most " +
+      "setups expire, and on these M15 fixtures the coin-flip rate measures 0.10–0.34 depending on the fixture's " +
+      "volatility, so judging an agent against 1/3 would have measured the calendar. It is also direction-matched on " +
+      "purpose: a realised driftless path still ends 25–35σ from its start, buys then do better than sells, and an agent " +
+      "that is simply long on such a path would otherwise show an edge it does not have (measured: +8.6 points on pure " +
+      "noise before the comparator was matched).",
+  );
+  notes.push(
+    "Paper trading runs the agent through the SHIPPED position manager and the executed-policy simulator " +
+      "(alphaStrategy in research/harness.ts): the stop, targets, partials, break-even and trail are the desk's, and " +
+      "only the direction and the probability come from the agent. It is reported for EVERY agent with a home fixture, " +
+      "enabled or not — a measured zero is evidence — and it is a smaller sample by construction. The ledger beside it " +
+      "says which layer refused each decision.",
+  );
+  notes.push(
+    "An agent that fails its gates is left DISABLED. Its code, its fixture and its numbers stay in the repository: a " +
+      "measured negative result is a result, and the next person to have the same idea should find it here.",
+  );
+
+  return {
+    label: args.label,
+    generatedAt: new Date().toISOString(),
+    command: process.argv.join(" "),
+    mode: args.mode,
+    symbol: args.symbol,
+    seed: args.seed,
+    dataSource: "synthetic (WP4 alpha fixtures)",
+    barsPerSeries: args.alphaBars,
+    stride: Math.max(1, Math.min(args.stride, 3)),
+    contractSpec: args.spec.spec as unknown as Record<string, unknown>,
+    assumedSpecValues: args.spec.assumed,
+    fixtures: fixtures.map((f) => ({ name: f.name, kind: f.kind, series: f.series, bars: f.bars, note: f.note })),
+    agents: verdicts,
+    allowlist,
+    verdict: allowlist.length > 0 ? "pass" : "fail",
+    notes,
+  };
+}
+
+/** Merge several runs of the same strategy into one summary (pooled trades). */
+function mergeRuns(runs: HarnessRun[], id: string): HarnessRun {
+  const first = runs[0] as HarnessRun;
+  const trades = runs.flatMap((r) => r.trades);
+  const stats = tradeStats(trades as never);
+  return {
+    ...first,
+    strategy: id,
+    evaluations: runs.reduce((a, r) => a + r.evaluations, 0),
+    arms: runs.reduce((a, r) => a + r.arms, 0),
+    armRate: 0,
+    fills: trades.length,
+    fillRate: 0,
+    trades,
+    stats,
+    lowerBoundMeanR: lowerBoundMeanR(stats),
+    dsr: 0,
+    meanPredicted: trades.length === 0 ? 0 : trades.reduce((a, t) => a + (t.predictedProbability ?? 0), 0) / trades.length,
+    predictedVsRealised: 0,
+  };
+}
+
+function emptyHarnessRun(strategy: string, symbol: string, mode: TradeMode): HarnessRun {
+  const stats = tradeStats([]);
+  return {
+    strategy,
+    symbol,
+    mode,
+    evaluations: 0,
+    arms: 0,
+    armRate: 0,
+    fills: 0,
+    fillRate: 0,
+    trades: [],
+    stats,
+    lowerBoundMeanR: 0,
+    dsr: 0,
+    meanPredicted: 0,
+    predictedVsRealised: 0,
+  };
+}
+
+export function renderAlphaStudy(report: AlphaStudyReport): string {
+  const lines: string[] = [];
+  lines.push(`MT5 Desk v4 — WP4 alpha-agent study (${report.label})`);
+  lines.push(`  ${report.generatedAt}  |  mode ${report.mode}  |  symbol ${report.symbol}  |  seed ${report.seed}`);
+  lines.push(`  ${report.barsPerSeries} bars per series, stride ${report.stride}, decision-level measurement`);
+  lines.push("");
+  for (const agent of report.agents) {
+    const f = agent.fixture;
+    const n = agent.null;
+    lines.push(`  ${agent.label}  [${agent.verdict.toUpperCase()}]`);
+    lines.push(
+      `    fixture ${agent.home.padEnd(16)} views ${String(f.views).padStart(4)}  hit ${(f.hitRate * 100).toFixed(1).padStart(5)}%  ` +
+        `base ${(f.baselineRate * 100).toFixed(1).padStart(5)}%  edge ${(f.edgeOverBaseline * 100).toFixed(1).padStart(6)} pp  ` +
+        `stated ${(f.meanProbability * 100).toFixed(1).padStart(5)}%  skill ${f.brierSkill.toFixed(3)}`,
+    );
+    lines.push(
+      `    nulls   ${"pooled".padEnd(16)} views ${String(n.views).padStart(4)}  hit ${(n.hitRate * 100).toFixed(1).padStart(5)}%  ` +
+        `base ${(n.baselineRate * 100).toFixed(1).padStart(5)}%  edge ${(n.edgeOverBaseline * 100).toFixed(1).padStart(6)} pp  ` +
+        `stated ${(n.meanProbability * 100).toFixed(1).padStart(5)}%  skill ${n.brierSkill.toFixed(3)}`,
+    );
+    lines.push(
+      `    driftless ${"".padEnd(14)} views ${String(agent.driftless.views).padStart(4)}  ` +
+        `rate ${(agent.driftless.viewRate * 100).toFixed(2).padStart(5)}%  hit ${(agent.driftless.hitRate * 100).toFixed(1).padStart(5)}%  ` +
+        `base ${(agent.driftless.baselineRate * 100).toFixed(1).padStart(5)}%  edge ${(agent.driftless.edgeOverBaseline * 100).toFixed(1).padStart(6)} pp`,
+    );
+    for (const gate of [...agent.fixtureGates.gates, ...agent.driftlessGates.gates, ...agent.nullGates.gates]) {
+      lines.push(`      ${gate.pass ? "ok  " : "FAIL"} ${gate.gate} — ${gate.detail}`);
+    }
+    if (agent.paper) {
+      const p = agent.paper.fixture;
+      const pn = agent.paper.null;
+      lines.push(
+        `    paper   home: ${p.summary.arms} arms / ${p.summary.fills} fills / E[R] ${p.summary.stats.meanR.toFixed(3)} ` +
+          `(hit ${(p.summary.stats.hitRate * 100).toFixed(0)}%)   ` +
+          `null: ${pn.summary.arms} arms / ${pn.summary.fills} fills / E[R] ${pn.summary.stats.meanR.toFixed(3)}`,
+      );
+      lines.push(
+        `    ledger  home: ${Object.entries(p.ledger).map(([k, v]) => `${k} ${v}`).join(", ")}`,
+      );
+    }
+    if (agent.verdict === "disabled") lines.push(`    why: ${agent.reason}`);
+    lines.push("");
+  }
+  // Cross-table: every agent on every fixture (the "works everywhere" test).
+  lines.push("  cross-table (edge over the measured baseline, in hit-rate points):");
+  const header = ["fixture".padEnd(18), ...report.agents.map((a) => a.agent.slice(0, 12).padStart(13))].join("");
+  lines.push(`    ${header}`);
+  const fixtureNames = report.agents[0]?.all.map((m) => m.series.split(",")[0]?.split("#")[0] ?? m.series) ?? [];
+  for (let i = 0; i < report.fixtures.length; i++) {
+    const cells = report.agents.map((a) => {
+      const m = a.all[i];
+      if (!m) return "".padStart(13);
+      return `${(m.edgeOverBaseline * 100).toFixed(1)} (${m.views})`.padStart(13);
+    });
+    lines.push(`    ${(report.fixtures[i]?.name ?? fixtureNames[i] ?? "").padEnd(18)}${cells.join("")}`);
+  }
+  lines.push("");
+  lines.push(`  ALLOWLIST (agents that may be wired in): ${report.allowlist.length > 0 ? report.allowlist.join(", ") : "none"}`);
+  lines.push(`  VERDICT: ${report.verdict.toUpperCase()}`);
+  for (const note of report.notes) lines.push(`  note: ${note}`);
+  return lines.join("\n");
+}
+
 // ── Report output ───────────────────────────────────────────────────────────
 
 export function renderReport(report: StudyReport): string {
@@ -741,6 +1189,15 @@ export function renderReport(report: StudyReport): string {
   return lines.join("\n");
 }
 
+export function writeAlphaReport(report: AlphaStudyReport, outPath: string | null): string {
+  const stamp = report.generatedAt.slice(0, 10);
+  const target =
+    outPath ?? resolve(process.cwd(), `research-reports/${stamp}-wp4-alpha-${report.mode}-${report.label}.json`);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  return target;
+}
+
 export function writeReport(report: StudyReport, outPath: string | null): string {
   const stamp = report.generatedAt.slice(0, 10);
   const target = outPath ?? resolve(process.cwd(), `research-reports/${stamp}-${report.label}-${report.mode}.json`);
@@ -756,6 +1213,17 @@ export function main(argv = process.argv.slice(2)): number {
   }
   const args = parseArgs(argv);
   const started = Date.now();
+  if (args.alphas) {
+    const study = runAlphaStudy(args);
+    const written = writeAlphaReport(study, args.out);
+    if (!args.quiet) process.stdout.write(`${renderAlphaStudy(study)}\n`);
+    process.stdout.write(`  report: ${written}  (${((Date.now() - started) / 1000).toFixed(1)}s)\n`);
+    // A WP4 study exits 0 when AT LEAST ONE agent earned its gates — this is a
+    // per-agent gate, not a family gate: an agent left disabled is a correct
+    // outcome, but a family where nothing passed means the wiring has nothing to
+    // switch on and CI should say so.
+    return study.allowlist.length > 0 ? 0 : 1;
+  }
   const report = runStudy(args);
   const written = writeReport(report, args.out);
   if (!args.quiet) process.stdout.write(`${renderReport(report)}\n`);

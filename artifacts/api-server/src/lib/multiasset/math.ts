@@ -87,6 +87,39 @@ export function atr(bars: Bar[], period = 14): number {
 }
 
 /** Wilder RSI in [0,100]. Returns 50 when there is not enough data. */
+/**
+ * Wilder ATR at EVERY index, in one pass.
+ *
+ * `atr(bars.slice(0, i + 1))` is O(i), so asking for the value at every bar is
+ * O(n²) — and an agent that needs the current ATR on every decision point cannot
+ * afford that. This is the identical recursion (`atr()`'s own definition) run
+ * forward once, and `math.test.ts` asserts it matches the slice-based value at
+ * every index so the two can never drift apart.
+ */
+export function atrSeries(bars: Bar[], period = 14): number[] {
+  const out: number[] = new Array(bars.length).fill(0) as number[];
+  if (bars.length < 2) return out;
+  const tr = (i: number): number => {
+    const high = bars[i][HIGH];
+    const low = bars[i][LOW];
+    const prevClose = bars[i - 1][CLOSE];
+    return Math.max(high - low, Math.abs(high - prevClose), Math.abs(low - prevClose));
+  };
+  // ATR at index i uses TRs 1..i. Below the period it is their plain mean (that
+  // is `atr()`'s own seeding rule); at and above it, Wilder smoothing.
+  let acc = 0;
+  for (let i = 1; i < bars.length; i++) {
+    const value = tr(i);
+    if (i <= period) {
+      acc = (acc * (i - 1) + value) / i;
+    } else {
+      acc = (acc * (period - 1) + value) / period;
+    }
+    out[i] = acc;
+  }
+  return out;
+}
+
 export function rsi(values: number[], period = 14): number {
   if (values.length < period + 1) return 50;
   let gain = 0;

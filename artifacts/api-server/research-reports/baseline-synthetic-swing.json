@@ -1191,8 +1191,8 @@
     }
   ],
   "label": "baseline-synthetic",
-  "generatedAt": "2026-10-11T13:54:16.973Z",
-  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts -- --mode swing --data synthetic:all --seed 1 --stride 10 --bars 2400 --runs 6 --label baseline-synthetic --out research-reports/baseline-synthetic-swing.json",
+  "generatedAt": "2026-10-11T14:27:41.952Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --mode swing --data synthetic:all --seed 1 --stride 10 --bars 2400 --runs 6 --label baseline-synthetic --out research-reports/baseline-synthetic-swing.json",
   "mode": "swing",
   "symbol": "EURUSD",
   "seed": 1,
@@ -1229,7 +1229,7 @@
   ],
   "dataSource": "synthetic:all",
   "seriesKind": "driftless,driftless,driftless,driftless,driftless,driftless,block-shuffled,block-shuffled,block-shuffled,block-shuffled,block-shuffled,block-shuffled,phase-randomised,phase-randomised,phase-randomised,phase-randomised,phase-randomised,phase-randomised,positive-control",
-  "barsPerRun": 2400,
+  "barsPerRun": 2401,
   "timeframe": "M1",
   "walkForward": {
     "splits": 9,
@@ -1244,23 +1244,23 @@
         {
           "gate": "null: arm rate ≤ 3%",
           "pass": false,
-          "measured": 0.044444444444444446,
+          "measured": 0.17333333333333334,
           "threshold": 0.03,
-          "detail": "10 arms in 225 evaluations on structureless data"
+          "detail": "39 arms in 225 evaluations — worst of 18 structureless series (desk-v3 (block-shuffled))"
         },
         {
           "gate": "null: mean realised R ≥ −(cost+0.05)",
           "pass": false,
-          "measured": -0.4472549052402349,
+          "measured": -0.8480110614685245,
           "threshold": -0.1,
-          "detail": "9 realised trades, mean -0.447R"
+          "detail": "4 realised trades at mean -0.848R — worst series (desk-v3 (block-shuffled))"
         },
         {
           "gate": "null: DSR not significant",
           "pass": true,
-          "measured": 0.03813502801288937,
+          "measured": 0.9031438678964769,
           "threshold": 0.95,
-          "detail": "Deflated Sharpe probability 3.8% on noise"
+          "detail": "Deflated Sharpe probability 90.3% — worst series (desk-v3 (block-shuffled))"
         },
         {
           "gate": "null: ≤ 5% of runs DSR-significant",
@@ -1268,6 +1268,13 @@
           "measured": 0,
           "threshold": 0.05,
           "detail": "0.0% of 18 structureless runs looked profitable at DSR ≥ 0.95"
+        },
+        {
+          "gate": "null: aggregate arm rate ≤ 3%",
+          "pass": false,
+          "measured": 0.08463541666666667,
+          "threshold": 0.03,
+          "detail": "325 arms in 3840 evaluations over 18 structureless series"
         }
       ],
       "runs": 18
@@ -1384,5 +1391,6 @@
     ],
     "slopeIdentifiable": true,
     "logitStdDev": 1.7118607433890953
-  }
+  },
+  "regime": null
 }

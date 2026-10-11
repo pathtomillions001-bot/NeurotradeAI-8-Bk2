@@ -46,6 +46,32 @@ export interface SpecOverrides {
 /** Currencies MT5 brokers quote with a 3-digit price (JPY crosses, HUF, …). */
 const THREE_DIGIT_QUOTES = ["JPY", "HUF", "KRW", "THB", "IDR"];
 
+/**
+ * The ISO codes a broker is likely to be quoting in a symbol name.
+ *
+ * The list exists so a pair can be RECOGNISED rather than pattern-matched on
+ * "six letters": `EURUSD_raw` and `EURUSD.a` are both EURUSD, while `USDRUB` is
+ * a legitimately different animal and `EURUSDRRAW` is not a symbol at all.
+ */
+const CURRENCIES = [
+  "USD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CAD", "SEK", "NOK", "DKK",
+  "PLN", "HUF", "CZK", "TRY", "ZAR", "MXN", "SGD", "HKD", "CNH", "CNY", "RUB",
+  "BRL", "INR", "THB", "IDR", "KRW", "ILS", "RON", "BGN", "ISK", "CLP", "COP",
+  "PEN", "PHP", "MYR", "TWD", "AED", "SAR", "QAR", "KWD", "OMR", "BHD", "EGP",
+  "NGN", "KES", "GHS", "ZMW", "UAH", "KZT", "PKR", "BDT", "LKR",
+];
+
+/** The currency pair inside a broker symbol name, if there is one. */
+export function forexPair(symbol: string): { base: string; quote: string } | null {
+  const bare = symbol.toUpperCase().replace(/[^A-Z]/g, "");
+  for (let i = 0; i + 6 <= bare.length; i++) {
+    const base = bare.slice(i, i + 3);
+    const quote = bare.slice(i + 3, i + 6);
+    if (CURRENCIES.includes(base) && CURRENCIES.includes(quote)) return { base, quote };
+  }
+  return null;
+}
+
 const INDEX_TOKENS = ["US30", "US100", "US500", "US2000", "NAS", "SPX", "DAX", "DE40", "GER", "UK100", "FTSE", "JP225", "NIKKEI", "HK50", "F40", "CAC", "AUS200", "EU50", "STOXX"];
 const METAL_TOKENS = ["XAU", "XAG", "GOLD", "SILVER", "XPT", "XPD", "PLATINUM"];
 const CRYPTO_TOKENS = ["BTC", "ETH", "XRP", "LTC", "BCH", "SOL", "ADA", "DOGE", "DOT", "LINK"];
@@ -60,20 +86,26 @@ export function inferAssetClass(symbol: string): AssetClass {
   if (INDEX_TOKENS.some((t) => s.includes(t))) return "indices";
   if (COMMODITY_TOKENS.some((t) => s.includes(t))) return "commodities";
   if (FUTURES_TOKENS.some((t) => s.startsWith(t))) return "futures";
-  // Six letters that are two ISO codes, or the broker's .a/.pro/.raw suffixes.
+  // Two ISO currency codes next to each other — with or without the broker's
+  // .a/.pro/.raw decoration, which must not change the reading.
+  if (forexPair(s)) return "forex";
   const bare = s.replace(/[^A-Z]/g, "");
-  if (bare.length >= 6 && (THREE_DIGIT_QUOTES.includes(bare.slice(3, 6)) || THREE_DIGIT_QUOTES.includes(bare.slice(0, 3)))) return "forex";
-  if (bare.length === 6 || /^[A-Z]{3}\/[A-Z]{3}$/.test(s)) return "forex";
   if (bare.length <= 5) return "stocks";
   return "other";
+}
+
+/** Whether the pair's QUOTE currency is quoted to three decimals. */
+function threeDigitQuote(pair: { base: string; quote: string } | null): boolean {
+  if (!pair) return false;
+  return THREE_DIGIT_QUOTES.includes(pair.quote) || THREE_DIGIT_QUOTES.includes(pair.base);
 }
 
 /** Default point/price granularity for the guessed class. */
 function defaultPoint(assetClass: AssetClass, symbol: string): number {
   const s = symbol.toUpperCase();
   if (assetClass === "forex") {
-    const bare = s.replace(/[^A-Z]/g, "");
-    return THREE_DIGIT_QUOTES.includes(bare.slice(-3)) ? 0.001 : 0.00001;
+    const pair = forexPair(s);
+    return threeDigitQuote(pair) ? 0.001 : 0.00001;
   }
   if (assetClass === "metals") return s.includes("XAG") || s.includes("SILVER") ? 0.001 : 0.01;
   if (assetClass === "indices") return 0.1;

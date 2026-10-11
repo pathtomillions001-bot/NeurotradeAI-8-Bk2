@@ -33,21 +33,40 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { generate, DEFAULT_GENERATOR_SPEC, type GeneratorKind, type SyntheticSeries } from "./generators";
+import {
+  generate,
+  DEFAULT_GENERATOR_SPEC,
+  type GeneratorKind,
+  type SyntheticSeries,
+  type ThreeRegimeLabel,
+} from "./generators";
 import { calibrationReport } from "./metrics";
 import {
+  NULL_ARM_RATE_MAX,
   calibrationGates,
   controlGates,
   legacyDeskStrategy,
   nullGates,
   nullSignificanceRate,
+  regimeGatedDeskStrategy,
   runHarness,
   type GateReport,
+  type GateResult,
   type HarnessRun,
   type HarnessOptions,
+  type RegimeStrategy,
+  type RegimeTally,
 } from "./harness";
+import {
+  DEFAULT_REGIME_HMM_CONFIG,
+  measureRegimeAccuracy,
+  type RegimeAccuracy,
+  type RegimeHmmConfig,
+  type RegimePermit,
+} from "../regime-hmm";
 import type { SimulatedTrade } from "./executed-policy";
 import { loadMt5Bars, resampleBars } from "./loader";
+import type { Strategy } from "./harness";
 import { specForSymbol } from "./specs";
 import { walkForwardSplits } from "./walkforward";
 import { MODE_ANALYSIS_TIMEFRAMES, type Bar, type Timeframe, type TradeMode } from "../types";
@@ -73,7 +92,12 @@ interface CliArgs {
   quiet: boolean;
   spec: ReturnType<typeof specForSymbol>;
   specOverrides: Parameters<typeof specForSymbol>[1];
+  strategy: StrategyChoice;
+  regimeFitBars: number;
 }
+
+/** Which decision layer a study runs. */
+export type StrategyChoice = "desk-v3" | "v4-regime" | "v4-regime-shadow";
 
 const USAGE = `research:run — the MT5 Desk v4 research harness
 
@@ -95,6 +119,12 @@ const USAGE = `research:run — the MT5 Desk v4 research harness
   --point --digits --tick-size --tick-value --contract-size
   --volume-min --volume-step --stops-level --spread --commission
   --asset-class <forex|metals|indices|crypto|commodities|futures|stocks|other>
+  --strategy <desk-v3|v4-regime|v4-regime-shadow>
+                                    desk-v3 (default) is the shipped desk;
+                                    v4-regime adds the WP3 regime permission as
+                                    a hard veto; v4-regime-shadow measures the
+                                    same permission without changing any trade
+  --regime-fit-bars <n>             bars the regime HMM is fitted on (default 1000)
   --quiet                           only the verdict line
 `;
 
@@ -139,7 +169,13 @@ export function parseArgs(argv: string[]): CliArgs {
   if (flags.has("asset-class")) opt("assetClass", "asset-class");
 
   const symbol = flags.get("symbol") ?? "EURUSD";
+  const strategy = (flags.get("strategy") ?? "desk-v3") as StrategyChoice;
+  if (!["desk-v3", "v4-regime", "v4-regime-shadow"].includes(strategy)) {
+    throw new Error(`--strategy must be desk-v3, v4-regime or v4-regime-shadow (got "${String(flags.get("strategy"))}")`);
+  }
   return {
+    strategy,
+    regimeFitBars: Math.max(200, Math.floor(num("regime-fit-bars", DEFAULT_REGIME_HMM_CONFIG.fitBars))),
     mode,
     data: flags.get("data") ?? "synthetic:all",
     symbol,
@@ -310,14 +346,32 @@ export interface StudyReport {
   gates: Record<string, GateReport & { runs?: number }>;
   verdict: "pass" | "fail";
   notes: string[];
+  /**
+   * The WP3 regime layer, when the study ran it: accuracy against the
+   * generator's own labels (the gate), and what the permission did to the
+   * trades.
+   */
+  regime: {
+    accuracy: { series: string; accuracy: RegimeAccuracy }[];
+    tallies: { strategy: string; series: string; tally: RegimeTally }[];
+  } | null;
   /** Held-out calibration for the configuration, when enough trades exist. */
   calibration: ReturnType<typeof calibrationReport> | null;
 }
 
+/** WP3's acceptance criterion, in one place. */
+export const REGIME_ACCURACY_MIN = 0.8;
+
 export function runStudy(args: CliArgs): StudyReport {
   const notes: string[] = [];
   const barsPerRun = args.bars;
-  const seriesList: { label: string; bars: Bar[]; kind: GeneratorKind | "real"; frame: Timeframe }[] = [];
+  const seriesList: {
+    label: string;
+    bars: Bar[];
+    kind: GeneratorKind | "real";
+    frame: Timeframe;
+    regimeLabels?: ThreeRegimeLabel[];
+  }[] = [];
 
   if (args.data.startsWith("synthetic:")) {
     const which = args.data.slice("synthetic:".length);
@@ -332,11 +386,13 @@ export function runStudy(args: CliArgs): StudyReport {
     for (const kind of kinds) {
       const count = kind === "positive-control" ? 1 : args.runs;
       for (let r = 0; r < count; r++) {
+        const series = syntheticSeriesForMode(args.mode, kind, args.seed + r * 1013, barsPerRun);
         seriesList.push({
           label: `${kind}#${r + 1}`,
-          bars: syntheticSeriesForMode(args.mode, kind, args.seed + r * 1013, barsPerRun).bars,
+          bars: series.bars,
           kind,
           frame: SYNTHETIC_BASE_FRAME[args.mode],
+          ...(series.regimeLabels ? { regimeLabels: series.regimeLabels } : {}),
         });
       }
     }
@@ -362,6 +418,9 @@ before believing anything below."
 
   const runs: HarnessRun[] = [];
   let calibrationSamples: { p: number; outcome: 0 | 1 }[] = [];
+  const regimeConfig: Partial<RegimeHmmConfig> = { fitBars: args.regimeFitBars };
+  const regimeTallies: { strategy: string; series: string; tally: RegimeTally }[] = [];
+  const regimeAccuracy: { series: string; accuracy: RegimeAccuracy }[] = [];
 
   for (const entry of seriesList) {
     const options: HarnessOptions = {
@@ -372,51 +431,107 @@ before believing anything below."
       warmupBars: args.warmupBars,
       trials: args.trials,
     };
-    const run = runHarness({
-      frames: framesForMode(args.mode, entry.bars, entry.frame),
-      symbol: args.symbol,
-      strategy: legacyDeskStrategy(`desk-v3 (${entry.kind})`),
-      options,
-    });
-    runs.push(run);
+    const frames = framesForMode(args.mode, entry.bars, entry.frame);
+    // One memo per series: the veto and shadow variants answer the same
+    // question at the same bar, and a study must not pay for two EM fits — nor
+    // report two different answers to one question.
+    const memo = new Map<string, RegimePermit>();
+    const baseline = legacyDeskStrategy(`desk-v3 (${entry.kind})`);
+    const gated: RegimeStrategy[] =
+      args.strategy === "desk-v3"
+        ? []
+        : [
+            regimeGatedDeskStrategy({
+              veto: true,
+              id: `v4-regime (${entry.kind})`,
+              config: regimeConfig,
+              memo,
+            }),
+            regimeGatedDeskStrategy({
+              veto: false,
+              id: `v4-regime-shadow (${entry.kind})`,
+              config: regimeConfig,
+              memo,
+            }),
+          ];
+    for (const strategy of [baseline, ...gated] as Strategy[]) {
+      const run = runHarness({ frames, symbol: args.symbol, strategy, options });
+      runs.push(run);
+    }
+    for (const strategy of gated) {
+      regimeTallies.push({ strategy: strategy.id, series: entry.label, tally: strategy.tally });
+    }
+    const baselineRun = runs[runs.length - 1 - gated.length] as HarnessRun;
     if (entry.kind === "real" || entry.kind === "positive-control") {
-      calibrationSamples = calibrationSamples.concat(heldOutCalibration(run));
+      calibrationSamples = calibrationSamples.concat(heldOutCalibration(baselineRun));
+    }
+    if (entry.regimeLabels) {
+      // The accuracy gate is measured on the SAME bars the strategy read: the
+      // series' own fastest frame.
+      regimeAccuracy.push({
+        series: entry.label,
+        accuracy: measureRegimeAccuracy(entry.bars, entry.regimeLabels as string[], regimeConfig),
+      });
     }
   }
 
-  const nullRuns = runs.filter((r) => r.strategy.includes("driftless") || r.strategy.includes("block-shuffled") || r.strategy.includes("phase-randomised"));
-  const controlRuns = runs.filter((r) => r.strategy.includes("positive-control"));
+  // Gates are measured on the BASELINE strategy only in a multi-strategy study:
+  // mixing a gated run into the null arm rate would compare a filter against
+  // the thing it filters.
+  const baselineRuns = runs.filter((r) => r.strategy.startsWith("desk-v3"));
+  const nullRuns = baselineRuns.filter((r) => r.strategy.includes("driftless") || r.strategy.includes("block-shuffled") || r.strategy.includes("phase-randomised"));
+  const controlRuns = baselineRuns.filter((r) => r.strategy.includes("positive-control"));
 
   const meanCostR = 0.05; // the desk's own MIN_COST_COVERAGE floor, in R
   const gates: Record<string, GateReport & { runs?: number }> = {};
-  if (nullRuns.length > 0) {
-    const worst: GateReport = { pass: true, gates: [] };
-    for (const run of nullRuns) {
-      const report = nullGates(run, meanCostR);
-      for (const gate of report.gates) {
-        const existing = worst.gates.find((g) => g.gate === gate.gate);
-        if (!existing) worst.gates.push(gate);
-        else if (!gate.pass) existing.pass = false;
-        if (!gate.pass) worst.pass = false;
-      }
-    }
-    const significance = nullSignificanceRate(nullRuns);
-    worst.gates.push({
-      gate: "null: ≤ 5% of runs DSR-significant",
-      pass: significance <= 0.05 + 1e-12,
-      measured: significance,
-      threshold: 0.05,
-      detail: `${(significance * 100).toFixed(1)}% of ${nullRuns.length} structureless runs looked profitable at DSR ≥ 0.95`,
-    });
-    worst.pass = worst.pass && worst.gates.every((g) => g.pass);
-    gates["null"] = { ...worst, runs: nullRuns.length };
-  }
+  if (nullRuns.length > 0) gates["null"] = nullFamilyGates(nullRuns, meanCostR);
+  // The same null gates for the WP3-gated strategy. This is an ADDED gate: the
+  // regime permission either reduces the structureless arm rate or it does not
+  // earn its milliseconds — and "it feels safer" is not a measurement.
+  const gatedNullRuns = runs.filter(
+    (r) =>
+      r.strategy.startsWith("v4-regime (") &&
+      (r.strategy.includes("driftless") || r.strategy.includes("block-shuffled") || r.strategy.includes("phase-randomised")),
+  );
+  if (gatedNullRuns.length > 0) gates["null:v4-regime"] = nullFamilyGates(gatedNullRuns, meanCostR);
   if (controlRuns.length > 0) {
     const control = controlGates(controlRuns[0] as HarnessRun);
     gates["control"] = { ...control, runs: controlRuns.length };
   }
   const calibration = calibrationSamples.length > 0 ? calibrationReport(calibrationSamples) : null;
   if (calibration) gates["calibration"] = calibrationGates(calibration);
+  if (regimeAccuracy.length > 0) {
+    const worst = regimeAccuracy.reduce((a, b) => (a.accuracy.causal <= b.accuracy.causal ? a : b));
+    gates["regime"] = {
+      runs: regimeAccuracy.length,
+      pass: worst.accuracy.causal >= REGIME_ACCURACY_MIN,
+      gates: [
+        {
+          gate: "regime: causal accuracy ≥ 80% on labelled 3-regime data",
+          pass: worst.accuracy.causal >= REGIME_ACCURACY_MIN,
+          measured: worst.accuracy.causal,
+          threshold: REGIME_ACCURACY_MIN,
+          detail:
+            `worst of ${regimeAccuracy.length} series: ${(worst.accuracy.causal * 100).toFixed(1)}% causal ` +
+            `(Wilson 95% LCB ${(worst.accuracy.causalLowerBound * 100).toFixed(1)}%) on ${worst.accuracy.samples} held-out bars; ` +
+            `supervised ceiling for the same series ${(worst.accuracy.ceiling * 100).toFixed(1)}%`,
+        },
+        {
+          gate: "regime: the detector is within 10 points of the supervised ceiling",
+          pass: worst.accuracy.ceiling - worst.accuracy.causal <= 0.1,
+          measured: worst.accuracy.ceiling - worst.accuracy.causal,
+          threshold: 0.1,
+          detail:
+            `a gap wider than this means the fit failed, not the data: fitted ${(worst.accuracy.causal * 100).toFixed(1)}% ` +
+            `vs ceiling ${(worst.accuracy.ceiling * 100).toFixed(1)}% on ${worst.series}`,
+        },
+      ],
+    };
+    notes.push(
+      `Regime accuracy is measured causally (the filtered posterior, forward pass only) against the generator's own ` +
+        `labels on the held-out second half of each series, with the state→label mapping learned on the first half.`,
+    );
+  }
 
   const wf = walkForwardSplits(
     (seriesList[0]?.bars.length ?? barsPerRun),
@@ -433,6 +548,20 @@ before believing anything below."
     "Calibration is reported on trades whose decision fell in the last two thirds of each series (quasi-held-out). A " +
       "fitted model's calibration (WP5) is reported from the walk-forward test windows instead.",
   );
+  if (args.data.startsWith("synthetic:three-regime")) {
+    notes.push(
+      "This is a REGIME-DETECTOR study: the labelled three-regime series has known states, and the gate here is the " +
+        "accuracy of the causal posterior against those labels. The probability-calibration gates are deliberately " +
+        "absent (the labelled series is not a probability study) — they are measured on synthetic:control and on real " +
+        "data, and the legacy desk FAILS them in both WP2 baselines (research-reports/baseline-*.json).",
+    );
+    notes.push(
+      "The v4-regime-shadow row must have EXACTLY the trades of the desk-v3 row: it observes the permission without " +
+        "acting on it. The inner desk's arm count can still differ between the veto and shadow rows, because a vetoed " +
+        "trade leaves no outcome to feed back into the desk's risk state (loss ladder, cooldown, consecutive-loss " +
+        "backstop) — that feedback is part of the live desk and is not switched off for the study.",
+    );
+  }
 
   return {
     runs: runs.map((run) => summariseRun(run, args.includeTrades)),
@@ -455,7 +584,73 @@ before believing anything below."
     verdict,
     notes,
     calibration,
+    regime:
+      regimeAccuracy.length > 0 || regimeTallies.length > 0
+        ? { accuracy: regimeAccuracy, tallies: regimeTallies }
+        : null,
   };
+}
+
+/**
+ * The null gates for one family of runs: no structureless series may tempt it.
+ *
+ * Every reading is the WORST series in the family, and the detail names it. A
+ * family must not be able to pass by averaging a bad series against a good one,
+ * and a reader must be able to see which series produced a failure — an earlier
+ * version of this function reported the first series' number next to another
+ * series' verdict, which is exactly the kind of report that lies quietly.
+ */
+function nullFamilyGates(runs: HarnessRun[], meanCostR: number): GateReport & { runs: number } {
+  const evaluations = runs.reduce((a, r) => a + r.evaluations, 0);
+  const arms = runs.reduce((a, r) => a + r.arms, 0);
+  const highest = (pick: (run: HarnessRun) => number): HarnessRun => runs.reduce((a, b) => (pick(b) > pick(a) ? b : a));
+  const worstArm = highest((r) => r.armRate);
+  const worstDsr = highest((r) => r.dsr);
+  const traded = runs.filter((r) => r.stats.trades > 0);
+  const worstMean =
+    traded.length > 0 ? traded.reduce((a, b) => (b.stats.meanR < a.stats.meanR ? b : a)) : null;
+  const significance = nullSignificanceRate(runs);
+  const aggregateArmRate = arms / Math.max(1, evaluations);
+  const gates: GateResult[] = [
+    {
+      gate: "null: arm rate ≤ 3%",
+      pass: worstArm.armRate <= NULL_ARM_RATE_MAX + 1e-12,
+      measured: worstArm.armRate,
+      threshold: NULL_ARM_RATE_MAX,
+      detail: `${worstArm.arms} arms in ${worstArm.evaluations} evaluations — worst of ${runs.length} structureless series (${worstArm.strategy})`,
+    },
+    {
+      gate: "null: mean realised R ≥ −(cost+0.05)",
+      pass: worstMean === null || worstMean.stats.meanR >= -(meanCostR + 0.05) - 1e-9,
+      measured: worstMean ? worstMean.stats.meanR : 0,
+      threshold: -(meanCostR + 0.05),
+      detail: worstMean
+        ? `${worstMean.stats.trades} realised trades at mean ${worstMean.stats.meanR.toFixed(3)}R — worst series (${worstMean.strategy})`
+        : "no trades were taken on any structureless series",
+    },
+    {
+      gate: "null: DSR not significant",
+      pass: worstDsr.dsr < 0.95,
+      measured: worstDsr.dsr,
+      threshold: 0.95,
+      detail: `Deflated Sharpe probability ${(worstDsr.dsr * 100).toFixed(1)}% — worst series (${worstDsr.strategy})`,
+    },
+    {
+      gate: "null: ≤ 5% of runs DSR-significant",
+      pass: significance <= 0.05 + 1e-12,
+      measured: significance,
+      threshold: 0.05,
+      detail: `${(significance * 100).toFixed(1)}% of ${runs.length} structureless runs looked profitable at DSR ≥ 0.95`,
+    },
+    {
+      gate: "null: aggregate arm rate ≤ 3%",
+      pass: aggregateArmRate <= NULL_ARM_RATE_MAX + 1e-12,
+      measured: aggregateArmRate,
+      threshold: NULL_ARM_RATE_MAX,
+      detail: `${arms} arms in ${evaluations} evaluations over ${runs.length} structureless series`,
+    },
+  ];
+  return { pass: gates.every((g) => g.pass), gates, runs: runs.length };
 }
 
 /**
@@ -507,6 +702,32 @@ export function renderReport(report: StudyReport): string {
         `        ${g.pass ? "ok  " : "FAIL"} ${g.gate} — measured ${Number(g.measured).toFixed(4)} ` +
           `(threshold ${Number(g.threshold).toFixed(4)}): ${g.detail}`,
       );
+    }
+  }
+  if (report.regime) {
+    lines.push("");
+    lines.push("  WP3 regime layer:");
+    for (const entry of report.regime.accuracy) {
+      const a = entry.accuracy;
+      lines.push(
+        `    ${entry.series.padEnd(24)} causal ${(a.causal * 100).toFixed(1).padStart(5)}%  ` +
+          `(LCB ${(a.causalLowerBound * 100).toFixed(1)}%)  viterbi ${(a.viterbi * 100).toFixed(1)}%  ` +
+          `ceiling ${(a.ceiling * 100).toFixed(1)}%  n=${a.samples}  states=${a.fittedLabels.join("/")}`,
+      );
+    }
+    for (const entry of report.regime.tallies) {
+      const t = entry.tally;
+      const codes = Object.entries(t.byCode)
+        .map(([code, n]) => `${code}×${n}`)
+        .join(" ");
+      lines.push(
+        `    ${entry.strategy.padEnd(36)} asked ${String(t.asked).padStart(4)}  permits ${String(t.permits).padStart(4)}  ` +
+          `vetoes ${String(t.vetoes).padStart(4)}  |  ${codes}`,
+      );
+      const states = Object.entries(t.byState)
+        .map(([state, n]) => `${state} ${n}`)
+        .join(" ");
+      lines.push(`      ${" ".repeat(34)}states: ${states}`);
     }
   }
   if (report.calibration) {

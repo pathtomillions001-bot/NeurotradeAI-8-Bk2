@@ -41,7 +41,8 @@ export type GeneratorKind =
   | "driftless"
   | "block-shuffled"
   | "phase-randomised"
-  | "positive-control";
+  | "positive-control"
+  | "three-regime";
 
 export interface GeneratorSpec {
   /** Bars to produce. */
@@ -66,6 +67,10 @@ export interface GeneratorSpec {
   driftHigh?: number;
   driftLow?: number;
   ar1?: number;
+  /** Volatility of the range regime, as a multiple of `volatility`. */
+  rangeVolScale?: number;
+  /** Persistence of the three-regime chain (per bar). */
+  regimePStay?: number;
 }
 
 export interface SyntheticSeries {
@@ -75,7 +80,17 @@ export interface SyntheticSeries {
   returns: number[];
   /** Regime label per bar, for the positive control. */
   regime?: ("high" | "low")[];
+  /**
+   * Ground-truth regime label per bar, for generators that have one.
+   *
+   * A labelled series is the only way to measure a regime detector's accuracy
+   * honestly: without it, "the model found three clusters" is unfalsifiable.
+   */
+  regimeLabels?: ThreeRegimeLabel[];
 }
+
+/** The three regimes of the labelled control: an up-trend, a down-trend, a range. */
+export type ThreeRegimeLabel = "bull" | "bear" | "range";
 
 /** Symmetric wick as a fraction of the bar's own body plus a volatility floor. */
 const WICK_FRACTION = 0.35;
@@ -295,6 +310,54 @@ export function positiveControl(spec: GeneratorSpec): SyntheticSeries {
 }
 
 /**
+ * The LABELLED three-regime series — the ground truth for WP3's accuracy gate.
+ *
+ * Three states with a realistic dwell (p_stay 0.99 ⇒ ~100 bars) and moderate
+ * separation: a +0.6σ drift in the bull, −0.6σ in the bear, and a range that
+ * drifts nowhere but is half as volatile. Deliberately not trivially separable
+ * — a detector that only notices "big move up" or "big move down" confuses the
+ * range with whichever trend it sits next to — but separable enough that a
+ * competent causal detector can clear the 80% gate. The regime tests measure
+ * the SUPERVISED ceiling of the same series alongside the fitted accuracy, so a
+ * failure of identifiability can never be disguised as a modelling failure (or
+ * the other way round).
+ */
+export function threeRegime(spec: GeneratorSpec): SyntheticSeries & { regimeLabels: ThreeRegimeLabel[] } {
+  const rng = makeRng(spec.seed);
+  const bullDrift = spec.driftHigh ?? spec.volatility * 0.6;
+  const bearDrift = spec.driftLow ?? -spec.volatility * 0.6;
+  const rangeVolScale = spec.rangeVolScale ?? 0.5;
+  // p_stay 0.99 ⇒ a ~100-bar regime: on 15-minute bars that is a day-long
+  // character, which is what "regime" means in practice. It also keeps the
+  // test FAIR: a causal detector needs several bars of evidence to notice a
+  // switch, so a 33-bar regime makes ~20% of bars unrecoverable by ANY causal
+  // filter and the 80% accuracy gate would measure the generator, not the
+  // detector. The tests report the supervised ceiling next to the fitted
+  // accuracy so that distinction can never be blurred.
+  const pStay = spec.regimePStay ?? 0.99;
+  const returns: number[] = [];
+  const regimeLabels: ThreeRegimeLabel[] = [];
+  let state: ThreeRegimeLabel = "bull";
+  for (let i = 0; i < spec.bars; i++) {
+    if (rng() >= pStay) {
+      // Move to one of the other two, equally likely.
+      const others = (["bull", "bear", "range"] as ThreeRegimeLabel[]).filter((s) => s !== state);
+      state = rng() < 0.5 ? (others[0] as ThreeRegimeLabel) : (others[1] as ThreeRegimeLabel);
+    }
+    regimeLabels.push(state);
+    const drift = state === "bull" ? bullDrift : state === "bear" ? bearDrift : 0;
+    const scale = state === "range" ? rangeVolScale : 1;
+    returns.push(drift + spec.volatility * scale * gaussian(rng));
+  }
+  return {
+    kind: "three-regime",
+    returns,
+    regimeLabels,
+    bars: barsFromReturns({ ...spec, returns }),
+  };
+}
+
+/**
  * Build any generator by name. Real data is loaded by loader.ts instead.
  *
  * The spec is merged over `DEFAULT_GENERATOR_SPEC` and then VALIDATED: a spec
@@ -344,6 +407,8 @@ function generateUnchecked(kind: GeneratorKind, full: GeneratorSpec): SyntheticS
       const returns = phaseRandomise({ returns: source, seed: spec.seed ^ 0x85ebca6b });
       return { kind, returns, bars: barsFromReturns({ ...spec, returns }) };
     }
+    case "three-regime":
+      return threeRegime(spec);
     default: {
       const exhaustive: never = kind;
       throw new Error(`unknown generator: ${String(exhaustive)}`);

@@ -16,14 +16,16 @@ import {
   legacyDeskStrategy,
   nullGates,
   nullSignificanceRate,
+  regimeGatedDeskStrategy,
   runHarness,
   type HarnessRun,
   type Strategy,
 } from "./harness";
+import { DEFAULT_REGIME_HMM_CONFIG, type RegimeHmmConfig, type RegimePermit } from "../regime-hmm";
 import { framesForMode, parseArgs } from "./cli";
 import { specForSymbol } from "./specs";
 import { tradeStats } from "./metrics";
-import type { Bar } from "../types";
+import type { ArmedPlan, Bar, Side } from "../types";
 
 const W = 15 * 60_000;
 const START = Date.UTC(2026, 0, 5);
@@ -196,4 +198,139 @@ test("framesForMode builds the mode's own band, never a faster invented one", ()
   assert.deepEqual(Object.keys(scalp).sort(), ["M1", "M2", "M3"]);
   assert.equal(Object.keys(scalp).includes("S10"), false, "sub-minute bars must never be invented from minute bars");
   assert.equal(Object.keys(scalp).includes("S30"), false);
+});
+
+// ── The WP3 regime gate ─────────────────────────────────────────────────────
+
+/**
+ * An inner strategy that arms on a fixed schedule, so the gate can be measured
+ * without depending on whether the desk happens to like this series.
+ */
+function armsOnSchedule(id: string, everyNth: number, side: Side = "buy"): Strategy {
+  let seen = 0;
+  return {
+    id,
+    decide(ctx) {
+      seen++;
+      if (seen % everyNth !== 0) return null;
+      const bars = (Object.values(ctx.series)[0] as Bar[] | undefined) ?? [];
+      const last = bars[bars.length - 1] as Bar | undefined;
+      if (!last) return null;
+      const price = (last[4] as number) + (side === "buy" ? spec.spreadPoints * spec.point : 0);
+      const riskPrice = 0.001;
+      const plan: ArmedPlan = {
+        id: "00000000-0000-4000-8000-000000000000",
+        symbol: ctx.symbol,
+        side,
+        mode: ctx.mode,
+        trigger: price,
+        triggerType: "market",
+        confirmTicks: 1,
+        invalidate: side === "buy" ? price - 2 * riskPrice : price + 2 * riskPrice,
+        sl: side === "buy" ? price - riskPrice : price + riskPrice,
+        tp: [side === "buy" ? price + 3 * riskPrice : price - 3 * riskPrice],
+        lots: 0.1,
+        riskMoney: 50,
+        riskPoints: riskPrice / spec.point,
+        maxSpreadPoints: 40,
+        maxSlippagePoints: 15,
+        expiresAt: ctx.now + 600_000,
+        createdAt: ctx.now,
+        management: {
+          breakeven: { triggerR: 1, offsetR: 0.2, structureBuffer: true },
+          partials: [{ atR: 1.5, closePct: 50 }],
+          trail: null,
+          pyramid: null,
+          timeStop: { noProgressBars: 20, timeframe: "M15" },
+          guards: { maxSpreadPoints: 40, newsBlackoutMin: 30, flatBeforeSessionClose: true },
+        },
+        rationale: {
+          confluenceScore: 70,
+          grade: "B",
+          regime: "range",
+          winProbability: 0.45,
+          expectancyR: 0.35,
+          rewardRisk: 3,
+          markovPersistence: 0.5,
+          factors: [],
+          warnings: [],
+        },
+      };
+      return plan;
+    },
+  };
+}
+
+/** A test-sized regime config: the same code, a fraction of the milliseconds. */
+const FAST_REGIME: Partial<RegimeHmmConfig> = { windowBars: 150, fitBars: 300 };
+
+function regimeSeries(bars = 700, seed = 5): { M15: Bar[] } {
+  return { M15: generate("driftless", { seed, bars, timeframeMs: W, startMs: START }).bars };
+}
+
+test("the gate vetoes arms on a trendless tape, and the shadow variant changes nothing", () => {
+  const frames = regimeSeries();
+  const memo = new Map<string, RegimePermit>();
+  const options = { spec, mode: "intraday" as const, stride: 40, warmupBars: 120, horizonBars: 25 };
+  const bare = runHarness({ frames, symbol: "EURUSD", strategy: armsOnSchedule("scheduled", 1), options });
+  const shadow = regimeGatedDeskStrategy({ veto: false, inner: armsOnSchedule("scheduled", 1), config: FAST_REGIME, memo });
+  const vetoed = regimeGatedDeskStrategy({ veto: true, inner: armsOnSchedule("scheduled", 1), config: FAST_REGIME, memo });
+  const shadowRun = runHarness({ frames, symbol: "EURUSD", strategy: shadow, options });
+  const vetoRun = runHarness({ frames, symbol: "EURUSD", strategy: vetoed, options });
+
+  // The schedule arms at every evaluation, so nothing here depends on the desk.
+  assert.equal(bare.arms, bare.evaluations);
+  // Shadow: the same trades, to the last trade — it may not alter the desk.
+  assert.equal(shadowRun.arms, bare.arms);
+  assert.equal(shadowRun.trades.length, bare.trades.length);
+  assert.deepEqual(
+    shadowRun.trades.map((t) => [t.r, t.exitReason, t.bars]),
+    bare.trades.map((t) => [t.r, t.exitReason, t.bars]),
+  );
+  // Veto: the driftless tape has no significant drift anywhere, so nothing is
+  // permitted and no trade is taken at all.
+  assert.equal(vetoed.tally.asked, bare.arms);
+  assert.equal(vetoed.tally.permits, 0);
+  assert.equal(vetoed.tally.vetoes, bare.arms);
+  const codeTotal = Object.values(vetoed.tally.byCode).reduce((a, b) => a + b, 0);
+  assert.ok(codeTotal >= bare.arms, "every refusal must carry at least one reason code");
+  assert.ok(Object.keys(vetoed.tally.byCode).includes("STATE_PROBABILITY_LOW"));
+  assert.equal(vetoed.tally.unavailable, 0, "the frame was there — this is a refusal, not a blackout");
+  assert.equal(vetoRun.arms, 0, "the veto must stop the trade, not merely annotate it");
+  assert.equal(vetoRun.stats.trades, 0);
+
+  // The memo paid for one fit per evaluation, not two.
+  assert.equal(memo.size, bare.arms);
+  assert.equal(shadow.tally.vetoes, vetoed.tally.vetoes);
+  assert.equal(shadow.tally.permits, vetoed.tally.permits);
+});
+
+test("a gate that cannot see any bars refuses instead of passing", () => {
+  const inner = armsOnSchedule("scheduled", 1);
+  const vetoed = regimeGatedDeskStrategy({
+    veto: true,
+    inner,
+    frame: "M15",
+    config: FAST_REGIME,
+  });
+  const run = runHarness({
+    frames: {},
+    symbol: "EURUSD",
+    strategy: vetoed,
+    options: { spec, mode: "intraday", stride: 10 },
+  });
+  // No frames at all: the harness never evaluates, so the gate is never asked —
+  // and the empty run is what a study of missing data must produce.
+  assert.equal(run.evaluations, 0);
+  assert.equal(vetoed.tally.asked, 0);
+  assert.equal(run.arms, 0);
+});
+
+test("the production regime defaults keep the fit window long enough to see switches", () => {
+  // The dwell condition is a transition probability, and a 250-bar window holds
+  // two or three switches. The defaults must buy the transition more history
+  // than the filter window — this is the assertion that keeps a future
+  // "optimisation" from quietly removing it.
+  assert.ok(DEFAULT_REGIME_HMM_CONFIG.fitBars >= 4 * DEFAULT_REGIME_HMM_CONFIG.windowBars);
+  assert.ok(DEFAULT_REGIME_HMM_CONFIG.windowBars >= 100);
 });

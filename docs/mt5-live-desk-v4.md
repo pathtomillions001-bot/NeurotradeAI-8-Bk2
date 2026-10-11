@@ -283,12 +283,16 @@ unmeasurable calibration slope fails rather than passing by default.
 positive control, seed 1. Full report:
 `artifacts/api-server/research-reports/baseline-synthetic-intraday.json`.
 
+Every null reading below is the **worst series** in the family (the report names
+it); the aggregate is printed as well. A family may not pass by averaging a bad
+series against a good one.
+
 **Intraday**
 
 | | measured | gate | verdict |
 | --- | --- | --- | --- |
-| null arm rate | **8.0%** | ≤ 3% | **FAIL** |
-| null mean realised R | **−0.198R** | ≥ −0.10R | **FAIL** |
+| null arm rate (worst series) | **18.4%** (aggregate 8.2%: 316 arms in 3840 evaluations) | ≤ 3% | **FAIL** |
+| null mean realised R (worst series) | **−0.481R** | ≥ −0.10R | **FAIL** |
 | null runs DSR-significant | 0.0% of 18 | ≤ 5% | pass |
 | control arm rate | 86.7% | ≥ 10% | pass |
 | control mean realised R | +1.055R | ≥ +0.30R | pass |
@@ -300,12 +304,12 @@ positive control, seed 1. Full report:
 
 | | measured | gate | verdict |
 | --- | --- | --- | --- |
-| null arm rate | **4.4%** (range 2.2–17.3% across the 18 series) | ≤ 3% | **FAIL** |
-| null mean realised R | **−0.447R** | ≥ −0.10R | **FAIL** |
+| null arm rate (worst series) | **17.3%** (aggregate 8.5%: 325 arms in 3840 evaluations) | ≤ 3% | **FAIL** |
+| null mean realised R (worst series) | **−0.848R** | ≥ −0.10R | **FAIL** |
 | control arm rate | 81.3% | ≥ 10% | pass |
 | control mean realised R | +1.238R | ≥ +0.30R | pass |
 | control \|predicted − realised\| | **0.351** | ≤ 0.15 | **FAIL** |
-| calibration slope | unmeasurable (predictions barely vary) | ∈ [0.8, 1.2] | **FAIL** |
+| calibration slope | **23,785** — unmeasureable, not "perfect" | ∈ [0.8, 1.2] | **FAIL** |
 
 **How to read this.** The desk *can* find a real edge — it arms on 87% of the
 positive control and makes +1.06R per trade there — but it also arms on 4–17% of
@@ -327,7 +331,160 @@ the mechanism working.
 
 ---
 
-## 5. Documented assumptions and conservative choices
+## 5. WP3 — the regime agent
+
+### 5.1 What it is
+
+Two modules, both pure functions of `(bars, config)`, both deterministic, both
+free of lookahead:
+
+* **`change-point.ts`** — Bayesian online change-point detection (Adams–MacKay),
+  a Normal–Inverse-Gamma predictive in log space with an explicit log-sum-exp.
+  It reports the run-length posterior, `P(a change in the last N bars)` at every
+  bar, and the bars where that path crossed 0.5. It reads the series once,
+  forward.
+* **`regime-hmm.ts`** — a 3-state diagonal-Gaussian HMM fitted by Baum–Welch
+  (seeded k-means++ init, then eight Lloyd iterations, up to 20 EM iterations
+  from two seeded starts), with a strictly forward `filterPosterior` for the
+  live reading and an offline `viterbiPath` for reporting.
+
+The regime layer's product is a **permission**, not a score:
+
+| condition | threshold | what it catches |
+| --- | --- | --- |
+| `P(required state)` | ≥ 0.60 | the model is guessing |
+| expected dwell ≥ 1.5 × holding bars | 18 / 36 / 72 bars for scalp / intraday / swing | the trade outlives the regime |
+| `P(change point in the last 5 bars)` | < 0.30 | the world just changed — a filter is most confident exactly when it is most wrong |
+
+Every refusal carries machine-readable codes (`STATE_PROBABILITY_LOW`,
+`DWELL_TOO_SHORT`, `CHANGEPOINT_RECENT`, `REGIME_UNAVAILABLE`) and one human
+sentence. `REGIME_UNAVAILABLE` **refuses**: "we could not measure the regime" is
+not the same as "the regime is fine".
+
+The observation vector is five causal features per bar: `ret_z` (the bar's
+return in robust-σ units), `drift_z` (cumulative 5-bar return / σ — the feature
+that actually carries a regime), `vol_ratio` (20-bar realised volatility / σ),
+`slope_z` (least-squares slope of the last 20 closes), and `markov_z` — the v3
+Markov model, **kept as one low-weight feature** (× 0.25) rather than deleted or
+trusted: its raw signal is bounded in [−1, 1] while the others are standardised,
+so the weight keeps it visible in the fitted means without letting it dominate
+the geometry.
+
+### 5.2 The measurement, and the one thing that had to be fixed first
+
+The acceptance criterion is ≥ 80% accuracy on simulated 3-regime data against
+the generator's **known labels**. The first run of that gate failed — and the
+failure was in the *fixture*, not the detector: the original labelled generator
+used `p_stay = 0.97`, a ~33-bar regime on 15-minute bars. Fitting even the
+**supervised** filter — the true generative parameters, given the true labels,
+filtered causally — recovered only ~70–74% of those bars, because a causal
+detector needs several bars of evidence to notice a switch and 33-bar regimes
+make a fifth of all bars unrecoverable by any causal method. The gate would have
+been measuring the generator.
+
+So the fixture now models a regime as a day-long character (`p_stay = 0.99`,
+~100 bars per regime) with a +0.6σ drift in the bull, −0.6σ in the bear and a
+range at half the volatility — still deliberately not trivially separable. And
+the measurement itself now always reports the **supervised ceiling** next to the
+fitted accuracy, with a test asserting the ceiling clears 80% — so this specific
+confusion can never come back disguised as a modelling failure.
+
+### 5.3 Why the fit window is longer than the filter window
+
+The emissions identify themselves on a few hundred bars. The **transitions** do
+not: a 250-bar window contains two or three regime switches, and the
+maximum-likelihood self-transition from three observations is a lottery.
+Measured on the first labelled series: the fitted dwell of a regime whose truth
+was ~100 bars bounced between **10 and 35** across adjacent decision points, so
+the dwell condition refused a *correct* up-trend on 96% of its bars (3 permits
+in 76) and only permitted it 81 bars after the switch.
+
+Fitting on four times the filter window (`fitBars = 1000`) costs about 3× the
+milliseconds and fixes it: the same series' fitted dwell reads 220–232 bars, the
+permission arrives 20 bars after the switch, and the buy-permit rate inside bull
+runs went from 4% to **87–100%** across seeds (with **0** short permits inside a
+bull run, which is the property that matters). The filter still runs causally
+from the first bar the fit saw, so nothing is gained from the future — only from
+more of the past. A test asserts `fitBars ≥ 4 × windowBars` so a future
+"optimisation" cannot quietly remove this.
+
+Cost: ~130 ms per permit on 900 bars, ~84 ms when the caller supplies the live
+store's 400-bar cap. This is paid once per plan evaluation, not per tick.
+
+### 5.4 A trend must be statistically significant
+
+State labels cannot come from the state index (k-means++ decides that), and
+"the state with the highest mean return" is not enough either: a fit can split
+one trending tape into a strong and a mild up-state, and calling the mild one
+"range" throws away a real permission.
+
+A state is a trend only when its **trend score** — mean per-bar return in σ
+units × √dwell, i.e. the t-statistic of the drift over a typical stay — clears
+±2.0. Random walks travel ~√dwell σ by accident, so this asks whether the tape
+moved further than noise explains. The threshold is measured, not picked: over
+12 seeds of the driftless null the largest |score| was **1.44**, while the
+labelled control's trend states scored **3.31–10.16** and the range state never
+exceeded **0.78**. The dwell is capped at the sample size, so a degenerate fit
+cannot inflate the score through an unmeasurable persistence. The permit sums
+`P(required label)` over *every* state carrying the label, so a split trend is
+one permission rather than two half-permissions.
+
+### 5.5 The result
+
+Accuracy against the generator's labels — fitted on the first half of each
+series, graded causally on the held-out second half — with the supervised
+ceiling for the same series:
+
+| mode | series | causal | Wilson 95% LCB | Viterbi | ceiling |
+| --- | --- | --- | --- | --- | --- |
+| intraday | 5 labelled series | **85.5 – 90.5%** | 83.4 – 88.7% | 88.0 – 92.2% | 86.7 – 91.1% |
+| swing | 3 labelled series | **89.0 – 90.5%** | 87.1 – 88.7% | 89.9 – 91.9% | 89.6 – 90.6% |
+
+The gate is **≥ 80%** and it is met on every series, within 1.2 points of the
+supervised ceiling — the remaining error is the information limit of the
+features at regime boundaries, not slack in the fit. Reports:
+`research-reports/2026-10-11-wp3-regime-study-intraday.json` (5 series, verdict
+**PASS**) and `…-wp3-regime-study-swing.json` (3 series, verdict **PASS**).
+
+What the permission does to trades, on the labelled series (113 decisions each):
+
+| series | desk-v3 arms / E[R] | v4-regime arms / E[R] | vetoes |
+| --- | --- | --- | --- |
+| #1 | 66 / +1.441R | 49 / **+1.608R** | 17 |
+| #2 | 71 / +1.276R | 47 / **+1.540R** | 24 |
+| #3 | 4 / **−0.890R** | 31 / **+1.365R** | 17 |
+| #4 | 75 / +0.903R | 39 / **+1.198R** | 39 |
+| #5 | 55 / +0.992R | 41 / **+1.114R** | 15 |
+
+Series #3 is the interesting one: the un-gated desk lost 4 trades, tripped its
+own consecutive-loss/cooldown logic and then stopped arming for the rest of the
+series — while the gated desk, its trade sequence cleansed of the trades that
+would have tripped it, armed 31 times at +1.365R. The veto removes 15–39 of
+55–75 arms and improves the mean on all five.
+
+The null result is the safety claim, and it is the number this work package
+exists for (`…-wp3-regime-null.json`, 9 structureless series, 549 evaluations):
+
+| family | aggregate arm rate | worst series | arms |
+| --- | --- | --- | --- |
+| desk-v3 | **17.5%** | 25.7% | 96 in 549 evaluations |
+| v4-regime | **0.18%** | 1.35% | **1 in 549 evaluations** |
+
+The v4-regime family's report verdict is nevertheless **FAIL**, and it is worth
+being precise about why: one of its 549 evaluations armed on a block-shuffled
+series and lost 1.0R, so the family's "mean realised R ≥ −(cost+0.05)" null gate
+reads −1.000R and fails. A single trade is the minimum possible sample and
+evidence of nothing either way; the gate is applied exactly as written rather
+than relaxed for it, and the honest summary is: the *arm-rate* gates — the ones
+that measure whether the layer is doing its job on noise — pass at 0.18% versus
+the desk's 17.5%.
+
+**WP3 is not yet wired into the live decision path.** The agent, its measurement
+and its reports exist; the flags `DESK_V4_REGIME_HMM` and `DESK_V4_CHANGEPOINT`
+default to off, and the composition point for every permission — the gatekeeper
+— is WP6. Until then the shipped desk behaves exactly as it did after WP2.
+
+## 6. Documented assumptions and conservative choices
 
 Each of these was a fork in the road where the conservative option was taken and
 the reasoning recorded.
@@ -361,8 +518,37 @@ the reasoning recorded.
    per point per lot is right for a 5-digit USD-quoted pair and wrong nearly
    everywhere else.
 8. **The EA is treated as unverified MQL5 until the owner compiles it** (§2.3).
+9. **A refusal is a default, not an exception.** Every path in `regimePermit`
+   that cannot produce a reading — too little history, a fit that throws, an
+   empty frame — returns `permit: false` with `REGIME_UNAVAILABLE`. The
+   alternative (treating "no measurement" as "no objection") is how a filter
+   silently becomes a no-op.
+10. **The regime veto is measured on the labelled control with a supervised
+   ceiling reported beside it.** No claim about the detector is made without
+   also stating what the data allows; the test asserts the ceiling clears the
+   gate, so a bad fixture cannot be mistaken for a bad detector.
+11. **The three-regime fixture models a day-long regime** (`p_stay = 0.99` on
+   M15, ~100 bars), not the 33-bar regime the first version used. Rationale and
+   measurement in §5.2 — with 33-bar regimes ~20% of bars are unrecoverable by
+   *any* causal filter, which makes an 80% gate unpassable by construction.
+12. **A trend must clear a significance bar (±2.0 t-statistic of the state's
+   drift over its own dwell).** Measured separation, not a taste: null ≤ 1.44,
+   control's trend states 3.31–10.16, control's range state ≤ 0.78 (§5.4).
+13. **`fitBars = 1000` versus `windowBars = 250`.** The dwell condition is a
+   transition probability and the transition needs more history than the
+   emissions; measured cost ~130 ms per permit against the alternative of a
+   lottery (§5.3). `regimePermit` reports the bars it actually got
+   (`bars`), the bars it wants (`wanted`) and the floor below which the reading
+   is flagged inadequate (`minimum`), so a caller with a short history is told
+   rather than left to find out from the fills.
+14. **The change-point veto reads the *last* bar's probability of a run length
+   shorter than 5**, which is exactly "a change in the last five bars", and
+   nothing looks at the final value of an *older* reading: a break that has
+   aged out of the window is correctly no longer recent. The veto is 0.30, not
+   the 0.35 the false-veto measurements might have permitted — the conservative
+   direction.
 
-## 6. Changelog — every behavioural change, and the gate ledger
+## 7. Changelog — every behavioural change, and the gate ledger
 
 ### Behavioural changes
 
@@ -379,6 +565,11 @@ the reasoning recorded.
 | 9 | Target selection: multiples restricted to [2, 2.5, 3] R and the one-SE rule | **tighter / more conservative** |
 | 10 | Sizing measured from the expected fill | risk now matches the budget instead of exceeding it |
 | 11 | Consecutive-loss halt 5 → 10 (backstop) | **looser** — justified by the measured streak distribution; the loss ladder and WP9's e-process remain |
+| 12 | Labelled 3-regime generator: `p_stay` 0.97 → 0.99, bull/bear drift 0.45σ → 0.6σ, range volatility ×0.6 → ×0.5, all configurable | **research fixture only** — no shipped code path reads it; it exists to make the WP3 gate measurable (§5.2) |
+| 13 | The regime layer's permission (HMM state probability + dwell + change-point veto) | **added, not yet wired**: `DESK_V4_REGIME_HMM` / `DESK_V4_CHANGEPOINT` default off; the live desk is unchanged until WP6 composes the permissions |
+| 14 | `regimePermit` refuses with `REGIME_UNAVAILABLE` instead of guessing when history is short or a fit fails | **tighter** (fail-closed) |
+| 15 | Null-family gates in the research report now report the *worst series* per gate, with the aggregate beside it | reporting only — no strategy behaviour changes; the two baselines were re-run so every stored report shares one format |
+| 16 | The 10 WP0–WP3 test files are now part of `package.json`'s `test` script (they were only runnable by hand) | coverage only — the same assertions now run in the standing regression |
 
 ### Gate ledger
 
@@ -387,13 +578,19 @@ the reasoning recorded.
 * **Tightened**: the R:R ratio is now measured at the fill rather than the
   quote; the target search is constrained to ≥ 2R; the one-SE rule replaces the
   argmax.
-* **Removed**: **none.** No safety gate was removed in WP0–WP2. Everything in
+* **Added (WP3)**: the regime permission itself (state probability ≥ 0.60,
+  dwell ≥ 1.5 × holding bars, change-point veto < 0.30 — three conditions, all
+  must hold); `REGIME_UNAVAILABLE` as a refusing path; the trend-significance
+  bar in `labelStates` (±2.0); the "detector within 10 points of the supervised
+  ceiling" gate; `null:v4-regime` — the same null gates applied to the gated
+  family, which is what turns "it feels safer" into a number (17.5% → 0.18%).
+* **Removed**: **none.** No safety gate was removed in WP0–WP3. Everything in
   §1's constraint list (fail-closed news gate, quote integrity, clock
   normalisation, one-account-one-desk, live-off default, daily-loss and drawdown
   limits) is intact, and the position-manager tests assert the ones that touch
   management.
 
-## 7. Open risks and unverifiable items
+## 8. Open risks and unverifiable items
 
 1. **The EA has never been compiled** (no MetaEditor here). Compile
    `NeurotradeBridge.mq5` in MetaEditor before any live or demo use; the
@@ -410,27 +607,71 @@ the reasoning recorded.
    slope inside [0.8, 1.2] on held-out data.
 5. **Slippage is modelled, not measured.** The ledger (WP7) replaces the
    allowance with observed slippage by symbol, session and order type.
-6. **Portfolio effects are not yet simulated** (see §5.5); WP8 owns them.
+6. **Portfolio effects are not yet simulated** (see §6.5); WP8 owns them.
 7. **The harness's own blind spots**: uniform spread when the file has no SPREAD
    column, no queue position at the trigger, no partial fills at the entry,
    intrabar ambiguity resolved pessimistically (stop first), and a decision
    clock on the fastest frame of the mode's band.
+8. **The regime agent needs more history than the desk currently retains.**
+   `regimePermit` wants `fitBars = 1000` bars of the frame it reads (§5.3), and
+   the bar store keeps `MAX_BARS = 400`. Wired as it stands, the model would fit
+   on ~370 rows and the dwell estimate would return to the measured lottery
+   (fitted dwell 10–35 bars against a ~100-bar truth, permitting a correct
+   up-trend on 4% of its bars). WP6 must either raise retention for the regime
+   frame or have the agent read a coarser frame — and the permit now carries
+   `fit.bars / wanted / minimum / adequate` so the journal can say which
+   happened. A coarse frame is not a free lunch either: the horizon in
+   `MODE_HORIZON_BARS` is denominated in the *fastest* frame's bars, so the
+   conversion has to be explicit and tested.
+9. **The 85–91% accuracy is on simulated regimes.** The generator's dwell
+   (~100 bars) and drift (±0.6σ) are modelling choices, not measurements of
+   EURUSD. A market with shorter regimes would make the dwell condition refuse
+   more often (the conservative direction) and a market with longer regimes
+   would make it bite less; both must be re-measured on the owner's own export
+   (§4.2) before the gate is treated as final for a live symbol.
+10. **The regime agent is not consulted by the live decision path yet.** Its
+    flags default off and the composition point is the WP6 gatekeeper (§5.5).
+    Between now and then the desk's behaviour is exactly the WP2 baseline —
+    including the null-gate failures above.
 
-## 8. Tests and commands
+## 9. Tests and commands
 
 ```bash
-# every desk test (multiasset + research)
+# the standing regression — every api-server test, including the desk suites
+cd artifacts/api-server && pnpm run test
+
+# every desk test on its own (multiasset + research)
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx --test \
-  --test-timeout=120000 --test-force-exit src/lib/multiasset/*.test.ts src/lib/multiasset/research/*.test.ts
+  --test-timeout=180000 --test-force-exit src/lib/multiasset/*.test.ts src/lib/multiasset/research/*.test.ts
 
 # typecheck (all packages)
 pnpm run typecheck
 
 # the harness
 pnpm --filter @workspace/api-server run research:run -- --help
+
+# the WP3 regime study, from scratch (≈ 55 s, writes its own report)
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --mode intraday --data synthetic:three-regime --runs 5 --seed 1 --bars 2400 --stride 20 \
+  --strategy v4-regime --label wp3-regime-study
+
+# the WP3 safety claim: the null gates, applied to the gated family (≈ 35 s)
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --mode intraday --data synthetic:null --runs 3 --seed 1 --bars 2000 --stride 25 \
+  --strategy v4-regime --label wp3-regime-null
 ```
 
-Current state: **382/382** desk tests, **37/37** trading-platform tests
-(including the 6/6 EA-download parity check that keeps
-`public/downloads/NeurotradeBridge.mq5` byte-identical to the source), typecheck
-clean across all packages.
+Stored reports (`artifacts/api-server/research-reports/`):
+
+| report | what it is | verdict |
+| --- | --- | --- |
+| `baseline-synthetic-intraday.json` | the WP2 baseline (desk-v3), intraday | FAIL (null, control, calibration) |
+| `baseline-synthetic-swing.json` | the same, swing | FAIL |
+| `2026-10-11-wp3-regime-study-intraday.json` | WP3 accuracy gate, 5 labelled series | **PASS** |
+| `2026-10-11-wp3-regime-study-swing.json` | the same, swing, 3 series | **PASS** |
+| `2026-10-11-wp3-regime-null.json` | null gates for desk-v3 vs v4-regime | FAIL (desk-v3 null gates; v4-regime fails one gate on a single trade — §5.5) |
+
+Current state: **416/416** desk tests (was 382 before WP3), **1,060/1,060**
+api-server tests overall, **37/37** trading-platform tests (including the 6/6
+EA-download parity check that keeps `public/downloads/NeurotradeBridge.mq5`
+byte-identical to the source), typecheck clean across all packages.

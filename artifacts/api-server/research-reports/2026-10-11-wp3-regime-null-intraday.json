@@ -1,0 +1,1744 @@
+{
+  "runs": [
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 74,
+      "arms": 13,
+      "armRate": 0.17567567567567569,
+      "fills": 10,
+      "fillRate": 0.7692307692307693,
+      "stats": {
+        "trades": 10,
+        "hitRate": 0.6,
+        "meanR": -0.06457534747192663,
+        "meanRStdErr": 0.10701230244764652,
+        "rStdDev": 0.3384026133933746,
+        "cvar5R": 1,
+        "bestR": 0.1552704739216757,
+        "worstR": -1,
+        "profitFactor": 0.45140952157129477,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 1.0218858689967063,
+        "meanMaeR": 0.5323799357916525,
+        "meanMfeR": 0.5331088853540873,
+        "meanBars": 22.2
+      },
+      "lowerBoundMeanR": -0.15463690121186593,
+      "dsr": 0.23968023292655039,
+      "meanPredicted": 0.1873,
+      "predictedVsRealised": -0.41269999999999996,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.00R",
+          "count": 6
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 9,
+        "stop": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (driftless)",
+      "evaluations": 74,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (driftless)",
+      "evaluations": 74,
+      "arms": 13,
+      "armRate": 0.17567567567567569,
+      "fills": 10,
+      "fillRate": 0.7692307692307693,
+      "stats": {
+        "trades": 10,
+        "hitRate": 0.6,
+        "meanR": -0.06457534747192663,
+        "meanRStdErr": 0.10701230244764652,
+        "rStdDev": 0.3384026133933746,
+        "cvar5R": 1,
+        "bestR": 0.1552704739216757,
+        "worstR": -1,
+        "profitFactor": 0.45140952157129477,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 1.0218858689967063,
+        "meanMaeR": 0.5323799357916525,
+        "meanMfeR": 0.5331088853540873,
+        "meanBars": 22.2
+      },
+      "lowerBoundMeanR": -0.15463690121186593,
+      "dsr": 0.23968023292655039,
+      "meanPredicted": 0.1873,
+      "predictedVsRealised": -0.41269999999999996,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.00R",
+          "count": 6
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 9,
+        "stop": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 74,
+      "arms": 14,
+      "armRate": 0.1891891891891892,
+      "fills": 12,
+      "fillRate": 0.8571428571428571,
+      "stats": {
+        "trades": 12,
+        "hitRate": 0.5,
+        "meanR": -0.07824552794312846,
+        "meanRStdErr": 0.16782550661948753,
+        "rStdDev": 0.5813646085418787,
+        "cvar5R": 1,
+        "bestR": 0.8943267130562947,
+        "worstR": -1,
+        "profitFactor": 0.7109194335764004,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 1.5639850900427263,
+        "meanMaeR": 0.6026361431974311,
+        "meanMfeR": 0.5211848617295126,
+        "meanBars": 23.333333333333332
+      },
+      "lowerBoundMeanR": -0.21948747431408916,
+      "dsr": 0.32593285491515256,
+      "meanPredicted": 0.18050000000000002,
+      "predictedVsRealised": -0.3195,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 9,
+        "stop": 2,
+        "horizon": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (driftless)",
+      "evaluations": 74,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (driftless)",
+      "evaluations": 74,
+      "arms": 14,
+      "armRate": 0.1891891891891892,
+      "fills": 12,
+      "fillRate": 0.8571428571428571,
+      "stats": {
+        "trades": 12,
+        "hitRate": 0.5,
+        "meanR": -0.07824552794312846,
+        "meanRStdErr": 0.16782550661948753,
+        "rStdDev": 0.5813646085418787,
+        "cvar5R": 1,
+        "bestR": 0.8943267130562947,
+        "worstR": -1,
+        "profitFactor": 0.7109194335764004,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 1.5639850900427263,
+        "meanMaeR": 0.6026361431974311,
+        "meanMfeR": 0.5211848617295126,
+        "meanBars": 23.333333333333332
+      },
+      "lowerBoundMeanR": -0.21948747431408916,
+      "dsr": 0.32593285491515256,
+      "meanPredicted": 0.18050000000000002,
+      "predictedVsRealised": -0.3195,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 9,
+        "stop": 2,
+        "horizon": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 74,
+      "arms": 6,
+      "armRate": 0.08108108108108109,
+      "fills": 6,
+      "fillRate": 1,
+      "stats": {
+        "trades": 6,
+        "hitRate": 0.3333333333333333,
+        "meanR": -0.2817621011518345,
+        "meanRStdErr": 0.17650012759487954,
+        "rStdDev": 0.4323352521435796,
+        "cvar5R": 0.705244474465332,
+        "bestR": 0.37927362389247565,
+        "worstR": -0.705244474465332,
+        "profitFactor": 0.2209383175655308,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 2.170011239197622,
+        "meanMaeR": 0.6368786691582097,
+        "meanMfeR": 0.399231905774385,
+        "meanBars": 24.166666666666668
+      },
+      "lowerBoundMeanR": -0.4303046085356851,
+      "dsr": 0.10178234108942597,
+      "meanPredicted": 0.12949999999999998,
+      "predictedVsRealised": -0.20383333333333334,
+      "rHistogram": [
+        {
+          "bucket": "-0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 6
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (driftless)",
+      "evaluations": 74,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (driftless)",
+      "evaluations": 74,
+      "arms": 6,
+      "armRate": 0.08108108108108109,
+      "fills": 6,
+      "fillRate": 1,
+      "stats": {
+        "trades": 6,
+        "hitRate": 0.3333333333333333,
+        "meanR": -0.2817621011518345,
+        "meanRStdErr": 0.17650012759487954,
+        "rStdDev": 0.4323352521435796,
+        "cvar5R": 0.705244474465332,
+        "bestR": 0.37927362389247565,
+        "worstR": -0.705244474465332,
+        "profitFactor": 0.2209383175655308,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 2.170011239197622,
+        "meanMaeR": 0.6368786691582097,
+        "meanMfeR": 0.399231905774385,
+        "meanBars": 24.166666666666668
+      },
+      "lowerBoundMeanR": -0.4303046085356851,
+      "dsr": 0.10178234108942597,
+      "meanPredicted": 0.12949999999999998,
+      "predictedVsRealised": -0.20383333333333334,
+      "rHistogram": [
+        {
+          "bucket": "-0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 6
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 74,
+      "arms": 19,
+      "armRate": 0.25675675675675674,
+      "fills": 14,
+      "fillRate": 0.7368421052631579,
+      "stats": {
+        "trades": 14,
+        "hitRate": 0.42857142857142855,
+        "meanR": -0.03474336253914572,
+        "meanRStdErr": 0.17780663896018892,
+        "rStdDev": 0.6652915240828381,
+        "cvar5R": 1,
+        "bestR": 1.1952012256910571,
+        "worstR": -1,
+        "profitFactor": 0.8825364639207444,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 1.7060055248124966,
+        "meanMaeR": 0.5180962296319891,
+        "meanMfeR": 0.5674940325365013,
+        "meanBars": 23.785714285714285
+      },
+      "lowerBoundMeanR": -0.1843854298880407,
+      "dsr": 0.4257533044420686,
+      "meanPredicted": 0.12928571428571428,
+      "predictedVsRealised": -0.29928571428571427,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 4
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.00R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 9,
+        "horizon": 3,
+        "stop": 2
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (block-shuffled)",
+      "evaluations": 74,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (block-shuffled)",
+      "evaluations": 74,
+      "arms": 19,
+      "armRate": 0.25675675675675674,
+      "fills": 14,
+      "fillRate": 0.7368421052631579,
+      "stats": {
+        "trades": 14,
+        "hitRate": 0.42857142857142855,
+        "meanR": -0.03474336253914572,
+        "meanRStdErr": 0.17780663896018892,
+        "rStdDev": 0.6652915240828381,
+        "cvar5R": 1,
+        "bestR": 1.1952012256910571,
+        "worstR": -1,
+        "profitFactor": 0.8825364639207444,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 1.7060055248124966,
+        "meanMaeR": 0.5180962296319891,
+        "meanMfeR": 0.5674940325365013,
+        "meanBars": 23.785714285714285
+      },
+      "lowerBoundMeanR": -0.1843854298880407,
+      "dsr": 0.4257533044420686,
+      "meanPredicted": 0.12928571428571428,
+      "predictedVsRealised": -0.29928571428571427,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 4
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.00R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 9,
+        "horizon": 3,
+        "stop": 2
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 74,
+      "arms": 15,
+      "armRate": 0.20270270270270271,
+      "fills": 10,
+      "fillRate": 0.6666666666666666,
+      "stats": {
+        "trades": 10,
+        "hitRate": 0.7,
+        "meanR": 0.17727675614148594,
+        "meanRStdErr": 0.23448478117202937,
+        "rStdDev": 0.7415059851497795,
+        "cvar5R": 1,
+        "bestR": 1.1305351041604208,
+        "worstR": -1,
+        "profitFactor": 1.8226688916115372,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 1.1548980148528059,
+        "meanMaeR": 0.559005820985633,
+        "meanMfeR": 0.6349959731890464,
+        "meanBars": 24.2
+      },
+      "lowerBoundMeanR": -0.020065635692893963,
+      "dsr": 0.7527376072458724,
+      "meanPredicted": 0.1914,
+      "predictedVsRealised": -0.5085999999999999,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.00R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "horizon": 3,
+        "stop": 2,
+        "time_stop": 5
+      },
+      "partialsFired": 2
+    },
+    {
+      "strategy": "v4-regime (block-shuffled)",
+      "evaluations": 74,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (block-shuffled)",
+      "evaluations": 74,
+      "arms": 15,
+      "armRate": 0.20270270270270271,
+      "fills": 10,
+      "fillRate": 0.6666666666666666,
+      "stats": {
+        "trades": 10,
+        "hitRate": 0.7,
+        "meanR": 0.17727675614148594,
+        "meanRStdErr": 0.23448478117202937,
+        "rStdDev": 0.7415059851497795,
+        "cvar5R": 1,
+        "bestR": 1.1305351041604208,
+        "worstR": -1,
+        "profitFactor": 1.8226688916115372,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 1.1548980148528059,
+        "meanMaeR": 0.559005820985633,
+        "meanMfeR": 0.6349959731890464,
+        "meanBars": 24.2
+      },
+      "lowerBoundMeanR": -0.020065635692893963,
+      "dsr": 0.7527376072458724,
+      "meanPredicted": 0.1914,
+      "predictedVsRealised": -0.5085999999999999,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.00R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "horizon": 3,
+        "stop": 2,
+        "time_stop": 5
+      },
+      "partialsFired": 2
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 74,
+      "arms": 12,
+      "armRate": 0.16216216216216217,
+      "fills": 8,
+      "fillRate": 0.6666666666666666,
+      "stats": {
+        "trades": 8,
+        "hitRate": 0.25,
+        "meanR": -0.4448939290626959,
+        "meanRStdErr": 0.18072292688447597,
+        "rStdDev": 0.5111616284635744,
+        "cvar5R": 1,
+        "bestR": 0.27823088184546135,
+        "worstR": -1,
+        "profitFactor": 0.08469585673249998,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 3.5591514325015674,
+        "meanMaeR": 0.8745280986259315,
+        "meanMfeR": 0.3034733385567717,
+        "meanBars": 18.625
+      },
+      "lowerBoundMeanR": -0.5969903443286709,
+      "dsr": 0.01228920261259403,
+      "meanPredicted": 0.24362499999999998,
+      "predictedVsRealised": -0.0063750000000000195,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 3
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "stop": 3,
+        "time_stop": 5
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (block-shuffled)",
+      "evaluations": 74,
+      "arms": 1,
+      "armRate": 0.013513513513513514,
+      "fills": 1,
+      "fillRate": 1,
+      "stats": {
+        "trades": 1,
+        "hitRate": 0,
+        "meanR": -1,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 1,
+        "bestR": -1,
+        "worstR": -1,
+        "profitFactor": 0,
+        "longestLosingStreak": 1,
+        "maxDrawdownR": 1,
+        "meanMaeR": 1.0799541900249139,
+        "meanMfeR": 0.07460710340300794,
+        "meanBars": 14
+      },
+      "lowerBoundMeanR": -1,
+      "dsr": 0,
+      "meanPredicted": 0.2,
+      "predictedVsRealised": 0.2,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "stop": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (block-shuffled)",
+      "evaluations": 74,
+      "arms": 12,
+      "armRate": 0.16216216216216217,
+      "fills": 8,
+      "fillRate": 0.6666666666666666,
+      "stats": {
+        "trades": 8,
+        "hitRate": 0.25,
+        "meanR": -0.4448939290626959,
+        "meanRStdErr": 0.18072292688447597,
+        "rStdDev": 0.5111616284635744,
+        "cvar5R": 1,
+        "bestR": 0.27823088184546135,
+        "worstR": -1,
+        "profitFactor": 0.08469585673249998,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 3.5591514325015674,
+        "meanMaeR": 0.8745280986259315,
+        "meanMfeR": 0.3034733385567717,
+        "meanBars": 18.625
+      },
+      "lowerBoundMeanR": -0.5969903443286709,
+      "dsr": 0.01228920261259403,
+      "meanPredicted": 0.24362499999999998,
+      "predictedVsRealised": -0.0063750000000000195,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 3
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "stop": 3,
+        "time_stop": 5
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 35,
+      "arms": 5,
+      "armRate": 0.14285714285714285,
+      "fills": 4,
+      "fillRate": 0.8,
+      "stats": {
+        "trades": 4,
+        "hitRate": 0.25,
+        "meanR": -0.03653340787449185,
+        "meanRStdErr": 0.1698098352517653,
+        "rStdDev": 0.3396196705035306,
+        "cvar5R": 0.273522096787862,
+        "bestR": 0.4646363789680372,
+        "worstR": -0.273522096787862,
+        "profitFactor": 0.7607386921527621,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 0.3985918252984004,
+        "meanMaeR": 0.3668138805163601,
+        "meanMfeR": 0.4753936902545368,
+        "meanBars": 24.25
+      },
+      "lowerBoundMeanR": -0.17944536522237753,
+      "dsr": 0,
+      "meanPredicted": 0.081,
+      "predictedVsRealised": -0.16899999999999998,
+      "rHistogram": [
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 4
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (phase-randomised)",
+      "evaluations": 35,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (phase-randomised)",
+      "evaluations": 35,
+      "arms": 5,
+      "armRate": 0.14285714285714285,
+      "fills": 4,
+      "fillRate": 0.8,
+      "stats": {
+        "trades": 4,
+        "hitRate": 0.25,
+        "meanR": -0.03653340787449185,
+        "meanRStdErr": 0.1698098352517653,
+        "rStdDev": 0.3396196705035306,
+        "cvar5R": 0.273522096787862,
+        "bestR": 0.4646363789680372,
+        "worstR": -0.273522096787862,
+        "profitFactor": 0.7607386921527621,
+        "longestLosingStreak": 2,
+        "maxDrawdownR": 0.3985918252984004,
+        "meanMaeR": 0.3668138805163601,
+        "meanMfeR": 0.4753936902545368,
+        "meanBars": 24.25
+      },
+      "lowerBoundMeanR": -0.17944536522237753,
+      "dsr": 0,
+      "meanPredicted": 0.081,
+      "predictedVsRealised": -0.16899999999999998,
+      "rHistogram": [
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 4
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 35,
+      "arms": 3,
+      "armRate": 0.08571428571428572,
+      "fills": 3,
+      "fillRate": 1,
+      "stats": {
+        "trades": 3,
+        "hitRate": 0,
+        "meanR": -0.4292830797134697,
+        "meanRStdErr": 0.2875380203624878,
+        "rStdDev": 0.4980304603756033,
+        "cvar5R": 1,
+        "bestR": -0.08272014966866012,
+        "worstR": -1,
+        "profitFactor": 0,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 1.287849239140409,
+        "meanMaeR": 0.7251303705084012,
+        "meanMfeR": 0.31193161728188984,
+        "meanBars": 17
+      },
+      "lowerBoundMeanR": -0.6712750776505394,
+      "dsr": 0,
+      "meanPredicted": 0.22433333333333336,
+      "predictedVsRealised": 0.22433333333333336,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 2,
+        "stop": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (phase-randomised)",
+      "evaluations": 35,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (phase-randomised)",
+      "evaluations": 35,
+      "arms": 3,
+      "armRate": 0.08571428571428572,
+      "fills": 3,
+      "fillRate": 1,
+      "stats": {
+        "trades": 3,
+        "hitRate": 0,
+        "meanR": -0.4292830797134697,
+        "meanRStdErr": 0.2875380203624878,
+        "rStdDev": 0.4980304603756033,
+        "cvar5R": 1,
+        "bestR": -0.08272014966866012,
+        "worstR": -1,
+        "profitFactor": 0,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 1.287849239140409,
+        "meanMaeR": 0.7251303705084012,
+        "meanMfeR": 0.31193161728188984,
+        "meanBars": 17
+      },
+      "lowerBoundMeanR": -0.6712750776505394,
+      "dsr": 0,
+      "meanPredicted": 0.22433333333333336,
+      "predictedVsRealised": 0.22433333333333336,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 2,
+        "stop": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 35,
+      "arms": 9,
+      "armRate": 0.2571428571428571,
+      "fills": 7,
+      "fillRate": 0.7777777777777778,
+      "stats": {
+        "trades": 7,
+        "hitRate": 0.5714285714285714,
+        "meanR": 0.11513491501333198,
+        "meanRStdErr": 0.30757411954369124,
+        "rStdDev": 0.8137646300322582,
+        "cvar5R": 0.8083412366602759,
+        "bestR": 1.4486210167471214,
+        "worstR": -0.8083412366602759,
+        "profitFactor": 1.431546862038188,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 1.8675710009496131,
+        "meanMaeR": 0.5290691942873835,
+        "meanMfeR": 0.5774965688073349,
+        "meanBars": 25.142857142857142
+      },
+      "lowerBoundMeanR": -0.14371946399463856,
+      "dsr": 0.6387840530923199,
+      "meanPredicted": 0.14028571428571426,
+      "predictedVsRealised": -0.43114285714285716,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "target": 1,
+        "time_stop": 5,
+        "horizon": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime (phase-randomised)",
+      "evaluations": 35,
+      "arms": 0,
+      "armRate": 0,
+      "fills": 0,
+      "fillRate": 0,
+      "stats": {
+        "trades": 0,
+        "hitRate": 0,
+        "meanR": 0,
+        "meanRStdErr": 0,
+        "rStdDev": 0,
+        "cvar5R": 0,
+        "bestR": 0,
+        "worstR": 0,
+        "profitFactor": 0,
+        "longestLosingStreak": 0,
+        "maxDrawdownR": 0,
+        "meanMaeR": 0,
+        "meanMfeR": 0,
+        "meanBars": 0
+      },
+      "lowerBoundMeanR": 0,
+      "dsr": 0,
+      "meanPredicted": 0,
+      "predictedVsRealised": 0,
+      "rHistogram": [],
+      "exitReasons": {},
+      "partialsFired": 0
+    },
+    {
+      "strategy": "v4-regime-shadow (phase-randomised)",
+      "evaluations": 35,
+      "arms": 9,
+      "armRate": 0.2571428571428571,
+      "fills": 7,
+      "fillRate": 0.7777777777777778,
+      "stats": {
+        "trades": 7,
+        "hitRate": 0.5714285714285714,
+        "meanR": 0.11513491501333198,
+        "meanRStdErr": 0.30757411954369124,
+        "rStdDev": 0.8137646300322582,
+        "cvar5R": 0.8083412366602759,
+        "bestR": 1.4486210167471214,
+        "worstR": -0.8083412366602759,
+        "profitFactor": 1.431546862038188,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 1.8675710009496131,
+        "meanMaeR": 0.5290691942873835,
+        "meanMfeR": 0.5774965688073349,
+        "meanBars": 25.142857142857142
+      },
+      "lowerBoundMeanR": -0.14371946399463856,
+      "dsr": 0.6387840530923199,
+      "meanPredicted": 0.14028571428571426,
+      "predictedVsRealised": -0.43114285714285716,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "target": 1,
+        "time_stop": 5,
+        "horizon": 1
+      },
+      "partialsFired": 0
+    }
+  ],
+  "label": "wp3-regime-null",
+  "generatedAt": "2026-10-11T14:25:49.777Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --mode intraday --data synthetic:null --runs 3 --seed 1 --bars 2000 --stride 25 --strategy v4-regime --label wp3-regime-null",
+  "mode": "intraday",
+  "symbol": "EURUSD",
+  "seed": 1,
+  "contractSpec": {
+    "symbol": "EURUSD",
+    "assetClass": "forex",
+    "point": 0.00001,
+    "digits": 5,
+    "tickSize": 0.00001,
+    "tickValue": 1,
+    "contractSize": 100000,
+    "volumeMin": 0.01,
+    "volumeMax": 100,
+    "volumeStep": 0.01,
+    "stopsLevel": 0,
+    "freezeLevel": 0,
+    "marginInitial": 0,
+    "swapLong": 0,
+    "swapShort": 0,
+    "commissionPerLot": 0,
+    "spreadPoints": 12
+  },
+  "assumedSpecValues": [
+    "assetClass=forex",
+    "point=0.00001",
+    "digits=5",
+    "tickSize=0.00001",
+    "tickValue=1",
+    "contractSize=100000",
+    "volumeMin=0.01",
+    "volumeStep=0.01",
+    "spreadPoints=12",
+    "commissionPerLot=0"
+  ],
+  "dataSource": "synthetic:null",
+  "seriesKind": "driftless,driftless,driftless,block-shuffled,block-shuffled,block-shuffled,phase-randomised,phase-randomised,phase-randomised",
+  "barsPerRun": 2001,
+  "timeframe": "M1",
+  "walkForward": {
+    "splits": 7,
+    "purgeBars": 50,
+    "embargoBars": 6,
+    "clean": true
+  },
+  "gates": {
+    "null": {
+      "pass": false,
+      "gates": [
+        {
+          "gate": "null: arm rate ≤ 3%",
+          "pass": false,
+          "measured": 0.2571428571428571,
+          "threshold": 0.03,
+          "detail": "9 arms in 35 evaluations — worst of 9 structureless series (desk-v3 (phase-randomised))"
+        },
+        {
+          "gate": "null: mean realised R ≥ −(cost+0.05)",
+          "pass": false,
+          "measured": -0.4448939290626959,
+          "threshold": -0.1,
+          "detail": "8 realised trades at mean -0.445R — worst series (desk-v3 (block-shuffled))"
+        },
+        {
+          "gate": "null: DSR not significant",
+          "pass": true,
+          "measured": 0.7527376072458724,
+          "threshold": 0.95,
+          "detail": "Deflated Sharpe probability 75.3% — worst series (desk-v3 (block-shuffled))"
+        },
+        {
+          "gate": "null: ≤ 5% of runs DSR-significant",
+          "pass": true,
+          "measured": 0,
+          "threshold": 0.05,
+          "detail": "0.0% of 9 structureless runs looked profitable at DSR ≥ 0.95"
+        },
+        {
+          "gate": "null: aggregate arm rate ≤ 3%",
+          "pass": false,
+          "measured": 0.17486338797814208,
+          "threshold": 0.03,
+          "detail": "96 arms in 549 evaluations over 9 structureless series"
+        }
+      ],
+      "runs": 9
+    },
+    "null:v4-regime": {
+      "pass": false,
+      "gates": [
+        {
+          "gate": "null: arm rate ≤ 3%",
+          "pass": true,
+          "measured": 0.013513513513513514,
+          "threshold": 0.03,
+          "detail": "1 arms in 74 evaluations — worst of 9 structureless series (v4-regime (block-shuffled))"
+        },
+        {
+          "gate": "null: mean realised R ≥ −(cost+0.05)",
+          "pass": false,
+          "measured": -1,
+          "threshold": -0.1,
+          "detail": "1 realised trades at mean -1.000R — worst series (v4-regime (block-shuffled))"
+        },
+        {
+          "gate": "null: DSR not significant",
+          "pass": true,
+          "measured": 0,
+          "threshold": 0.95,
+          "detail": "Deflated Sharpe probability 0.0% — worst series (v4-regime (driftless))"
+        },
+        {
+          "gate": "null: ≤ 5% of runs DSR-significant",
+          "pass": true,
+          "measured": 0,
+          "threshold": 0.05,
+          "detail": "0.0% of 9 structureless runs looked profitable at DSR ≥ 0.95"
+        },
+        {
+          "gate": "null: aggregate arm rate ≤ 3%",
+          "pass": true,
+          "measured": 0.0018214936247723133,
+          "threshold": 0.03,
+          "detail": "1 arms in 549 evaluations over 9 structureless series"
+        }
+      ],
+      "runs": 9
+    }
+  },
+  "verdict": "fail",
+  "notes": [
+    "The harness studies the DECISION and its EXECUTION (the real position-manager state machine). Portfolio-level limits — daily loss, drawdown scalar, correlation heat — are governed live by risk.ts and portfolio-risk.ts and are not re-simulated here beyond the consecutive-loss state carried across trades.",
+    "Calibration is reported on trades whose decision fell in the last two thirds of each series (quasi-held-out). A fitted model's calibration (WP5) is reported from the walk-forward test windows instead."
+  ],
+  "calibration": null,
+  "regime": {
+    "accuracy": [],
+    "tallies": [
+      {
+        "strategy": "v4-regime (driftless)",
+        "series": "driftless#1",
+        "tally": {
+          "asked": 13,
+          "permits": 0,
+          "vetoes": 13,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 13,
+            "DWELL_TOO_SHORT": 13
+          },
+          "byState": {
+            "volatile": 4,
+            "range": 9
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (driftless)",
+        "series": "driftless#1",
+        "tally": {
+          "asked": 13,
+          "permits": 0,
+          "vetoes": 13,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 13,
+            "DWELL_TOO_SHORT": 13
+          },
+          "byState": {
+            "volatile": 4,
+            "range": 9
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (driftless)",
+        "series": "driftless#2",
+        "tally": {
+          "asked": 17,
+          "permits": 0,
+          "vetoes": 17,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 17,
+            "DWELL_TOO_SHORT": 17
+          },
+          "byState": {
+            "range": 13,
+            "volatile": 4
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (driftless)",
+        "series": "driftless#2",
+        "tally": {
+          "asked": 14,
+          "permits": 0,
+          "vetoes": 14,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 14,
+            "DWELL_TOO_SHORT": 14
+          },
+          "byState": {
+            "range": 12,
+            "volatile": 2
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (driftless)",
+        "series": "driftless#3",
+        "tally": {
+          "asked": 25,
+          "permits": 0,
+          "vetoes": 25,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 25,
+            "DWELL_TOO_SHORT": 25
+          },
+          "byState": {
+            "range": 18,
+            "volatile": 7
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (driftless)",
+        "series": "driftless#3",
+        "tally": {
+          "asked": 6,
+          "permits": 0,
+          "vetoes": 6,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 6,
+            "DWELL_TOO_SHORT": 6
+          },
+          "byState": {
+            "range": 5,
+            "volatile": 1
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (block-shuffled)",
+        "series": "block-shuffled#1",
+        "tally": {
+          "asked": 20,
+          "permits": 0,
+          "vetoes": 20,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 20,
+            "DWELL_TOO_SHORT": 20
+          },
+          "byState": {
+            "volatile": 8,
+            "range": 12
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (block-shuffled)",
+        "series": "block-shuffled#1",
+        "tally": {
+          "asked": 19,
+          "permits": 0,
+          "vetoes": 19,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 19,
+            "DWELL_TOO_SHORT": 19
+          },
+          "byState": {
+            "volatile": 8,
+            "range": 11
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (block-shuffled)",
+        "series": "block-shuffled#2",
+        "tally": {
+          "asked": 16,
+          "permits": 0,
+          "vetoes": 16,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 16,
+            "DWELL_TOO_SHORT": 16
+          },
+          "byState": {
+            "range": 13,
+            "volatile": 3
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (block-shuffled)",
+        "series": "block-shuffled#2",
+        "tally": {
+          "asked": 15,
+          "permits": 0,
+          "vetoes": 15,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 15,
+            "DWELL_TOO_SHORT": 15
+          },
+          "byState": {
+            "range": 12,
+            "volatile": 3
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (block-shuffled)",
+        "series": "block-shuffled#3",
+        "tally": {
+          "asked": 15,
+          "permits": 1,
+          "vetoes": 14,
+          "unavailable": 0,
+          "byCode": {
+            "REGIME_PERMIT": 1,
+            "STATE_PROBABILITY_LOW": 14,
+            "DWELL_TOO_SHORT": 14
+          },
+          "byState": {
+            "trend_down": 1,
+            "range": 10,
+            "volatile": 4
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (block-shuffled)",
+        "series": "block-shuffled#3",
+        "tally": {
+          "asked": 12,
+          "permits": 1,
+          "vetoes": 11,
+          "unavailable": 0,
+          "byCode": {
+            "REGIME_PERMIT": 1,
+            "STATE_PROBABILITY_LOW": 11,
+            "DWELL_TOO_SHORT": 11
+          },
+          "byState": {
+            "trend_down": 1,
+            "range": 8,
+            "volatile": 3
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (phase-randomised)",
+        "series": "phase-randomised#1",
+        "tally": {
+          "asked": 5,
+          "permits": 0,
+          "vetoes": 5,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 5,
+            "DWELL_TOO_SHORT": 5
+          },
+          "byState": {
+            "range": 3,
+            "volatile": 2
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (phase-randomised)",
+        "series": "phase-randomised#1",
+        "tally": {
+          "asked": 5,
+          "permits": 0,
+          "vetoes": 5,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 5,
+            "DWELL_TOO_SHORT": 5
+          },
+          "byState": {
+            "range": 3,
+            "volatile": 2
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (phase-randomised)",
+        "series": "phase-randomised#2",
+        "tally": {
+          "asked": 8,
+          "permits": 0,
+          "vetoes": 8,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 8,
+            "DWELL_TOO_SHORT": 8
+          },
+          "byState": {
+            "range": 8
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (phase-randomised)",
+        "series": "phase-randomised#2",
+        "tally": {
+          "asked": 3,
+          "permits": 0,
+          "vetoes": 3,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 3,
+            "DWELL_TOO_SHORT": 3
+          },
+          "byState": {
+            "range": 3
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime (phase-randomised)",
+        "series": "phase-randomised#3",
+        "tally": {
+          "asked": 10,
+          "permits": 0,
+          "vetoes": 10,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 10,
+            "DWELL_TOO_SHORT": 10
+          },
+          "byState": {
+            "range": 7,
+            "volatile": 3
+          }
+        }
+      },
+      {
+        "strategy": "v4-regime-shadow (phase-randomised)",
+        "series": "phase-randomised#3",
+        "tally": {
+          "asked": 9,
+          "permits": 0,
+          "vetoes": 9,
+          "unavailable": 0,
+          "byCode": {
+            "STATE_PROBABILITY_LOW": 9,
+            "DWELL_TOO_SHORT": 9
+          },
+          "byState": {
+            "range": 6,
+            "volatile": 3
+          }
+        }
+      }
+    ]
+  }
+}

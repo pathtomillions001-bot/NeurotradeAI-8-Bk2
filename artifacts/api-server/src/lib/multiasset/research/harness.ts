@@ -44,6 +44,7 @@ import {
   type TradeStats,
 } from "./metrics";
 import type { SyntheticSeries } from "./generators";
+import { regimePermit, type RegimeHmmConfig, type RegimePermit } from "../regime-hmm";
 
 // ── A strategy the harness can run ──────────────────────────────────────────
 
@@ -303,6 +304,96 @@ export function legacyDeskStrategy(id = "desk-v3"): Strategy {
       return decision.armed ? decision.plan : null;
     },
   };
+}
+
+// ── The WP3 regime gate as a strategy ───────────────────────────────────────
+
+/**
+ * What the regime layer decided, across a run.
+ *
+ * Kept on the strategy object rather than inside `HarnessRun`: it is a property
+ * of the DECISION LAYER, not of the executed trades, and a shadow variant that
+ * changes no trade must still be able to report what it would have done.
+ */
+export interface RegimeTally {
+  /** Decisions where the inner strategy wanted to arm and the regime was asked. */
+  asked: number;
+  permits: number;
+  vetoes: number;
+  /** Refusals because the model could not be fitted at all. */
+  unavailable: number;
+  byCode: Record<string, number>;
+  byState: Record<string, number>;
+}
+
+export interface RegimeStrategyOptions {
+  /** true = the permit blocks the trade; false = shadow (observe only). */
+  veto: boolean;
+  /** Frame the regime agent reads; default: the fastest visible frame. */
+  frame?: Timeframe;
+  config?: Partial<RegimeHmmConfig>;
+  /** The strategy being gated; default: the live desk. */
+  inner?: Strategy;
+  id?: string;
+  /**
+   * Shared memo so a veto run and a shadow run over the same series pay for one
+   * EM fit instead of two. The live desk computes the permit once per
+   * evaluation, and a study should measure the same thing.
+   */
+  memo?: Map<string, RegimePermit>;
+}
+
+export interface RegimeStrategy extends Strategy {
+  tally: RegimeTally;
+}
+
+/**
+ * Wrap a strategy with the WP3 regime permission.
+ *
+ * The gate runs AFTER the inner strategy has decided: the plan carries the side,
+ * and the regime the trade needs depends on that side. A veto returns no plan at
+ * all, so the harness sees exactly what the live desk would do — nothing armed,
+ * no risk consumed, no position simulated.
+ */
+export function regimeGatedDeskStrategy(options: RegimeStrategyOptions): RegimeStrategy {
+  const inner = options.inner ?? legacyDeskStrategy("desk-v3");
+  const tally: RegimeTally = { asked: 0, permits: 0, vetoes: 0, unavailable: 0, byCode: {}, byState: {} };
+  return {
+    id: options.id ?? `${inner.id}+regime${options.veto ? "" : "-shadow"}`,
+    tally,
+    decide(ctx) {
+      const plan = inner.decide(ctx);
+      if (!plan) return null;
+      const frame = options.frame ?? fastestFrame(ctx.series);
+      // No bars at all is still a question the gate must answer — and its answer
+      // is REGIME_UNAVAILABLE, which refuses. "We could not measure the regime"
+      // is not "the regime is fine".
+      const bars = (frame ? ctx.series[frame] : undefined) ?? [];
+      tally.asked++;
+      const key = [ctx.symbol, ctx.mode, plan.side, frame, bars.length, (bars[bars.length - 1] as Bar)[0]].join("|");
+      let permit = options.memo?.get(key);
+      if (!permit) {
+        permit = regimePermit({ bars, mode: ctx.mode, side: plan.side, config: options.config });
+        options.memo?.set(key, permit);
+      }
+      for (const code of permit.codes) tally.byCode[code] = (tally.byCode[code] ?? 0) + 1;
+      tally.byState[permit.state] = (tally.byState[permit.state] ?? 0) + 1;
+      if (permit.codes.includes("REGIME_UNAVAILABLE")) tally.unavailable++;
+      if (permit.permit) {
+        tally.permits++;
+        return plan;
+      }
+      tally.vetoes++;
+      return options.veto ? null : plan;
+    },
+  };
+}
+
+function fastestFrame(series: Partial<Record<Timeframe, Bar[]>>): Timeframe | null {
+  const entries = (Object.entries(series) as [Timeframe, Bar[]][]).filter(([, bars]) => bars.length > 0);
+  if (entries.length === 0) return null;
+  entries.sort((a, b) => frameWidthMs(a[0]) - frameWidthMs(b[0]));
+  return (entries[0] as [Timeframe, Bar[]])[0];
 }
 
 function defaultAccount(): AccountSnapshot {

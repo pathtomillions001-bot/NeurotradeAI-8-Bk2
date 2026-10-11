@@ -380,6 +380,12 @@ export interface PlanRationale {
   winProbability: number;
   expectancyR: number;
   rewardRisk: number;
+  /**
+   * Reward:risk measured at the EXPECTED FILL (trigger ± spread/slippage), not
+   * from the quote. OPTIONAL so older consumers keep working. This is the number
+   * the 1:2 floor is enforced on, because it is the one the trade actually gets.
+   */
+  rewardRiskAtFill?: number;
   markovPersistence: number;
   factors: { label: string; detail: string; weight: number; aligned: boolean }[];
   warnings: string[];

@@ -1,0 +1,1382 @@
+{
+  "runs": [
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 225,
+      "arms": 18,
+      "armRate": 0.08,
+      "fills": 13,
+      "fillRate": 0.7222222222222222,
+      "stats": {
+        "trades": 13,
+        "hitRate": 0.46153846153846156,
+        "meanR": -0.19827852793828907,
+        "meanRStdErr": 0.13842282222576485,
+        "rStdDev": 0.49909058322943145,
+        "cvar5R": 1,
+        "bestR": 0.41168396390073225,
+        "worstR": -1,
+        "profitFactor": 0.3116884389329087,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 3.3280297460267487,
+        "meanMaeR": 0.6366233254171999,
+        "meanMfeR": 0.5019720205393196,
+        "meanBars": 21.692307692307693
+      },
+      "lowerBoundMeanR": -0.3147751751234928,
+      "dsr": 0.05877550164548673,
+      "meanPredicted": 0.19430769230769232,
+      "predictedVsRealised": -0.26723076923076927,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 3
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 4
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 10,
+        "stop": 3
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 225,
+      "arms": 16,
+      "armRate": 0.07111111111111111,
+      "fills": 14,
+      "fillRate": 0.875,
+      "stats": {
+        "trades": 14,
+        "hitRate": 0.5,
+        "meanR": -0.022102751780409106,
+        "meanRStdErr": 0.09153334303590958,
+        "rStdDev": 0.3424864091064242,
+        "cvar5R": 0.6121383224146691,
+        "bestR": 0.6005143240246494,
+        "worstR": -0.6121383224146691,
+        "profitFactor": 0.8530229861727973,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 1.3422792794679554,
+        "meanMaeR": 0.5087242919008869,
+        "meanMfeR": 0.4758096806675151,
+        "meanBars": 24.428571428571427
+      },
+      "lowerBoundMeanR": -0.0991372132794306,
+      "dsr": 0.4082299834273244,
+      "meanPredicted": 0.12485714285714286,
+      "predictedVsRealised": -0.3751428571428571,
+      "rHistogram": [
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 3
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.00R",
+          "count": 5
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.50R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "horizon": 1,
+        "time_stop": 13
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 225,
+      "arms": 9,
+      "armRate": 0.04,
+      "fills": 8,
+      "fillRate": 0.8888888888888888,
+      "stats": {
+        "trades": 8,
+        "hitRate": 0.5,
+        "meanR": 0.030073052581121903,
+        "meanRStdErr": 0.41106837889262116,
+        "rStdDev": 1.162676952985334,
+        "cvar5R": 1,
+        "bestR": 2.5829661479819492,
+        "worstR": -1,
+        "profitFactor": 1.0801494922931012,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 3.0016961276457605,
+        "meanMaeR": 0.7578887258333383,
+        "meanMfeR": 0.7066605865400155,
+        "meanBars": 20.875
+      },
+      "lowerBoundMeanR": -0.31588209509490806,
+      "dsr": 0.5276808984315529,
+      "meanPredicted": 0.1915,
+      "predictedVsRealised": -0.3085,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "2.50R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 5,
+        "target": 1,
+        "stop": 2
+      },
+      "partialsFired": 1
+    },
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 225,
+      "arms": 39,
+      "armRate": 0.17333333333333334,
+      "fills": 29,
+      "fillRate": 0.7435897435897436,
+      "stats": {
+        "trades": 29,
+        "hitRate": 0.3793103448275862,
+        "meanR": -0.25566101096336963,
+        "meanRStdErr": 0.10807263873800395,
+        "rStdDev": 0.5819889707460599,
+        "cvar5R": 1,
+        "bestR": 1.3584390352125377,
+        "worstR": -1,
+        "profitFactor": 0.30686184186766147,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 7.41416931793772,
+        "meanMaeR": 0.6779352471491279,
+        "meanMfeR": 0.46602985477722864,
+        "meanBars": 21.379310344827587
+      },
+      "lowerBoundMeanR": -0.34661494372527374,
+      "dsr": 0.019883717999518602,
+      "meanPredicted": 0.17193103448275854,
+      "predictedVsRealised": -0.20737931034482765,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 8
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 4
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 5
+        },
+        {
+          "bucket": "0.00R",
+          "count": 7
+        },
+        {
+          "bucket": "0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "1.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "stop": 7,
+        "time_stop": 21,
+        "horizon": 1
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 225,
+      "arms": 22,
+      "armRate": 0.09777777777777778,
+      "fills": 19,
+      "fillRate": 0.8636363636363636,
+      "stats": {
+        "trades": 19,
+        "hitRate": 0.5263157894736842,
+        "meanR": -0.0371466373413046,
+        "meanRStdErr": 0.1639851539469694,
+        "rStdDev": 0.7147947142957997,
+        "cvar5R": 1,
+        "bestR": 1.2384718653105,
+        "worstR": -1,
+        "profitFactor": 0.8792423256503473,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 3.135120252740762,
+        "meanMaeR": 0.6061880873820806,
+        "meanMfeR": 0.5931884861771747,
+        "meanBars": 23
+      },
+      "lowerBoundMeanR": -0.17515654290307403,
+      "dsr": 0.4131188071046401,
+      "meanPredicted": 0.20052631578947372,
+      "predictedVsRealised": -0.32578947368421046,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 4
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 4
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.00R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "stop": 4,
+        "time_stop": 11,
+        "horizon": 4
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (driftless)",
+      "evaluations": 225,
+      "arms": 8,
+      "armRate": 0.035555555555555556,
+      "fills": 8,
+      "fillRate": 1,
+      "stats": {
+        "trades": 8,
+        "hitRate": 0.5,
+        "meanR": 0.18899621950836668,
+        "meanRStdErr": 0.24648327172374956,
+        "rStdDev": 0.6971599715396389,
+        "cvar5R": 0.7424496658777147,
+        "bestR": 1.1287316988070117,
+        "worstR": -0.7424496658777147,
+        "profitFactor": 1.9348370830363646,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 1.6173617665615423,
+        "meanMaeR": 0.4649787801602634,
+        "meanMfeR": 0.6718874645872314,
+        "meanBars": 26.375
+      },
+      "lowerBoundMeanR": -0.01844410197434096,
+      "dsr": 0.7661236861810103,
+      "meanPredicted": 0.09825000000000002,
+      "predictedVsRealised": -0.40175,
+      "rHistogram": [
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "1.00R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "horizon": 3,
+        "time_stop": 5
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 225,
+      "arms": 20,
+      "armRate": 0.08888888888888889,
+      "fills": 19,
+      "fillRate": 0.95,
+      "stats": {
+        "trades": 19,
+        "hitRate": 0.631578947368421,
+        "meanR": 0.16778176346203266,
+        "meanRStdErr": 0.1933297129064219,
+        "rStdDev": 0.8427046813428242,
+        "cvar5R": 1,
+        "bestR": 2.033653714838956,
+        "worstR": -1,
+        "profitFactor": 1.654854760433119,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 2.6321185313300357,
+        "meanMaeR": 0.5913320118007745,
+        "meanMfeR": 0.7268211908259915,
+        "meanBars": 24.105263157894736
+      },
+      "lowerBoundMeanR": 0.005075477079987983,
+      "dsr": 0.8059313452793329,
+      "meanPredicted": 0.204,
+      "predictedVsRealised": -0.42757894736842106,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 4
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 3
+        },
+        {
+          "bucket": "0.25R",
+          "count": 5
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "1.25R",
+          "count": 1
+        },
+        {
+          "bucket": "2.00R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "stop": 3,
+        "time_stop": 12,
+        "horizon": 4
+      },
+      "partialsFired": 1
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 225,
+      "arms": 8,
+      "armRate": 0.035555555555555556,
+      "fills": 6,
+      "fillRate": 0.75,
+      "stats": {
+        "trades": 6,
+        "hitRate": 0.16666666666666666,
+        "meanR": -0.31614297736743274,
+        "meanRStdErr": 0.28254278309605735,
+        "rStdDev": 0.6920856490912047,
+        "cvar5R": 1,
+        "bestR": 1.0176525272014945,
+        "worstR": -1,
+        "profitFactor": 0.34916757552219024,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 1.914510391406091,
+        "meanMaeR": 0.6990393697374303,
+        "meanMfeR": 0.5209775741533337,
+        "meanBars": 23.166666666666668
+      },
+      "lowerBoundMeanR": -0.5539309836210746,
+      "dsr": 0.20516695142453156,
+      "meanPredicted": 0.22366666666666665,
+      "predictedVsRealised": 0.056999999999999995,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "1.00R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "stop": 1,
+        "horizon": 1,
+        "time_stop": 4
+      },
+      "partialsFired": 1
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 225,
+      "arms": 36,
+      "armRate": 0.16,
+      "fills": 26,
+      "fillRate": 0.7222222222222222,
+      "stats": {
+        "trades": 26,
+        "hitRate": 0.5,
+        "meanR": -0.0675306465987488,
+        "meanRStdErr": 0.1350405066854509,
+        "rStdDev": 0.688574178714571,
+        "cvar5R": 1,
+        "bestR": 1.3690611197237421,
+        "worstR": -1,
+        "profitFactor": 0.7855747615550087,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 5.335058542801246,
+        "meanMaeR": 0.6290482491840077,
+        "meanMfeR": 0.6201234852359986,
+        "meanBars": 22.846153846153847
+      },
+      "lowerBoundMeanR": -0.18118073702522428,
+      "dsr": 0.314741679714721,
+      "meanPredicted": 0.21203846153846154,
+      "predictedVsRealised": -0.2879615384615385,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 5
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 4
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 6
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "1.00R",
+          "count": 1
+        },
+        {
+          "bucket": "1.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 17,
+        "horizon": 5,
+        "stop": 4
+      },
+      "partialsFired": 1
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 225,
+      "arms": 10,
+      "armRate": 0.044444444444444446,
+      "fills": 8,
+      "fillRate": 0.8,
+      "stats": {
+        "trades": 8,
+        "hitRate": 0.5,
+        "meanR": -0.14909443466440225,
+        "meanRStdErr": 0.18210735061397554,
+        "rStdDev": 0.5150773700922332,
+        "cvar5R": 1,
+        "bestR": 0.40792458110801844,
+        "worstR": -1,
+        "profitFactor": 0.4601188697129518,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 2.2092927690972353,
+        "meanMaeR": 0.5854845095721724,
+        "meanMfeR": 0.6474056950151941,
+        "meanBars": 21.25
+      },
+      "lowerBoundMeanR": -0.30235598094112404,
+      "dsr": 0.20762412416989973,
+      "meanPredicted": 0.18475,
+      "predictedVsRealised": -0.31525000000000003,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 6,
+        "stop": 2
+      },
+      "partialsFired": 1
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 225,
+      "arms": 14,
+      "armRate": 0.06222222222222222,
+      "fills": 10,
+      "fillRate": 0.7142857142857143,
+      "stats": {
+        "trades": 10,
+        "hitRate": 0.5,
+        "meanR": 0.26281869020668835,
+        "meanRStdErr": 0.34002880762223353,
+        "rStdDev": 1.0752655021574806,
+        "cvar5R": 1,
+        "bestR": 1.946950237900542,
+        "worstR": -1,
+        "profitFactor": 1.7926038685147083,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 3.0812125131657426,
+        "meanMaeR": 0.5601812103698479,
+        "meanMfeR": 1.0742074228497611,
+        "meanBars": 25
+      },
+      "lowerBoundMeanR": -0.023349554288183416,
+      "dsr": 0.7726378762055114,
+      "meanPredicted": 0.22399999999999998,
+      "predictedVsRealised": -0.276,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 3
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "1.25R",
+          "count": 2
+        },
+        {
+          "bucket": "1.75R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 3,
+        "horizon": 4,
+        "target": 1,
+        "stop": 2
+      },
+      "partialsFired": 1
+    },
+    {
+      "strategy": "desk-v3 (block-shuffled)",
+      "evaluations": 225,
+      "arms": 6,
+      "armRate": 0.02666666666666667,
+      "fills": 6,
+      "fillRate": 1,
+      "stats": {
+        "trades": 6,
+        "hitRate": 0.3333333333333333,
+        "meanR": -0.14545163100291778,
+        "meanRStdErr": 0.4181932357408883,
+        "rStdDev": 1.0243600414486134,
+        "cvar5R": 1,
+        "bestR": 1.7741351731049306,
+        "worstR": -1,
+        "profitFactor": 0.6715164259585782,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 2.656783641508534,
+        "meanMaeR": 0.6380131585612278,
+        "meanMfeR": 0.6559185653109013,
+        "meanBars": 20.333333333333332
+      },
+      "lowerBoundMeanR": -0.49740305820244934,
+      "dsr": 0.38279593497469677,
+      "meanPredicted": 0.16233333333333336,
+      "predictedVsRealised": -0.17099999999999996,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "0.00R",
+          "count": 1
+        },
+        {
+          "bucket": "1.75R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "target": 1,
+        "time_stop": 3,
+        "stop": 2
+      },
+      "partialsFired": 1
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 190,
+      "arms": 10,
+      "armRate": 0.05263157894736842,
+      "fills": 8,
+      "fillRate": 0.8,
+      "stats": {
+        "trades": 8,
+        "hitRate": 0.375,
+        "meanR": -0.08144542267793904,
+        "meanRStdErr": 0.22815359063509186,
+        "rStdDev": 0.6453158043605322,
+        "cvar5R": 1,
+        "bestR": 0.8300094592116993,
+        "worstR": -1,
+        "profitFactor": 0.7035001069148634,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 2.0511542213683716,
+        "meanMaeR": 0.5543390855419358,
+        "meanMfeR": 0.4458773404570133,
+        "meanBars": 21.875
+      },
+      "lowerBoundMeanR": -0.2734594845564324,
+      "dsr": 0.3670054228209575,
+      "meanPredicted": 0.15037499999999998,
+      "predictedVsRealised": -0.22462500000000002,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 3
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.75R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 5,
+        "horizon": 1,
+        "stop": 2
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 190,
+      "arms": 35,
+      "armRate": 0.18421052631578946,
+      "fills": 29,
+      "fillRate": 0.8285714285714286,
+      "stats": {
+        "trades": 29,
+        "hitRate": 0.4827586206896552,
+        "meanR": -0.17290382806501714,
+        "meanRStdErr": 0.12843198775741183,
+        "rStdDev": 0.6916274205815436,
+        "cvar5R": 1,
+        "bestR": 1.6999213813031717,
+        "worstR": -1,
+        "profitFactor": 0.5312758671663104,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 5.095317743032825,
+        "meanMaeR": 0.5944465373652977,
+        "meanMfeR": 0.49966886622067475,
+        "meanBars": 21.75862068965517
+      },
+      "lowerBoundMeanR": -0.28099218896165495,
+      "dsr": 0.11129140073980937,
+      "meanPredicted": 0.12862068965517243,
+      "predictedVsRealised": -0.35413793103448277,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 7
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 4
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 3
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 7
+        },
+        {
+          "bucket": "0.25R",
+          "count": 4
+        },
+        {
+          "bucket": "0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "1.50R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "stop": 7,
+        "horizon": 3,
+        "time_stop": 19
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 190,
+      "arms": 22,
+      "armRate": 0.11578947368421053,
+      "fills": 16,
+      "fillRate": 0.7272727272727273,
+      "stats": {
+        "trades": 16,
+        "hitRate": 0.5,
+        "meanR": 0.0057321716736414285,
+        "meanRStdErr": 0.157644714148154,
+        "rStdDev": 0.630578856592616,
+        "cvar5R": 1,
+        "bestR": 1.5424489626434608,
+        "worstR": -1,
+        "profitFactor": 1.025963507193471,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 3.0560418514223207,
+        "meanMaeR": 0.6011665280765744,
+        "meanMfeR": 0.5367939106280034,
+        "meanBars": 23.25
+      },
+      "lowerBoundMeanR": -0.12694161975344498,
+      "dsr": 0.5140703650063083,
+      "meanPredicted": 0.15425,
+      "predictedVsRealised": -0.34575,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 4
+        },
+        {
+          "bucket": "0.00R",
+          "count": 4
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "1.50R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 11,
+        "horizon": 3,
+        "stop": 2
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 190,
+      "arms": 12,
+      "armRate": 0.06315789473684211,
+      "fills": 10,
+      "fillRate": 0.8333333333333334,
+      "stats": {
+        "trades": 10,
+        "hitRate": 0.3,
+        "meanR": -0.48127828857858235,
+        "meanRStdErr": 0.19590349281309474,
+        "rStdDev": 0.6195012388718062,
+        "cvar5R": 1,
+        "bestR": 0.4976318322540077,
+        "worstR": -1,
+        "profitFactor": 0.15303226111127938,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 5.499911045354119,
+        "meanMaeR": 0.7074274362316829,
+        "meanMfeR": 0.4206944053602816,
+        "meanBars": 19.7
+      },
+      "lowerBoundMeanR": -0.6461506681300828,
+      "dsr": 0.021687202843624465,
+      "meanPredicted": 0.1705,
+      "predictedVsRealised": -0.12949999999999998,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 5
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 1
+        },
+        {
+          "bucket": "0.00R",
+          "count": 2
+        },
+        {
+          "bucket": "0.25R",
+          "count": 1
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 5,
+        "stop": 5
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 190,
+      "arms": 27,
+      "armRate": 0.14210526315789473,
+      "fills": 24,
+      "fillRate": 0.8888888888888888,
+      "stats": {
+        "trades": 24,
+        "hitRate": 0.5416666666666666,
+        "meanR": 0.14131068869370986,
+        "meanRStdErr": 0.11737868081179251,
+        "rStdDev": 0.5750357493398127,
+        "cvar5R": 1,
+        "bestR": 1.1762396733588338,
+        "worstR": -1,
+        "profitFactor": 1.9231122413952302,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 1.6887869887347589,
+        "meanMaeR": 0.4320528239880879,
+        "meanMfeR": 0.619814778922333,
+        "meanBars": 24.833333333333332
+      },
+      "lowerBoundMeanR": 0.04252479092250529,
+      "dsr": 0.8797628120883072,
+      "meanPredicted": 0.16908333333333334,
+      "predictedVsRealised": -0.37258333333333327,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 1
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 3
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 5
+        },
+        {
+          "bucket": "0.00R",
+          "count": 4
+        },
+        {
+          "bucket": "0.25R",
+          "count": 2
+        },
+        {
+          "bucket": "0.50R",
+          "count": 3
+        },
+        {
+          "bucket": "0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "1.00R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "horizon": 7,
+        "time_stop": 16,
+        "stop": 1
+      },
+      "partialsFired": 2
+    },
+    {
+      "strategy": "desk-v3 (phase-randomised)",
+      "evaluations": 190,
+      "arms": 4,
+      "armRate": 0.021052631578947368,
+      "fills": 4,
+      "fillRate": 1,
+      "stats": {
+        "trades": 4,
+        "hitRate": 0,
+        "meanR": -0.4333634476930269,
+        "meanRStdErr": 0.08486469430368664,
+        "rStdDev": 0.16972938860737327,
+        "cvar5R": 0.6139192697130437,
+        "bestR": -0.2540333250905251,
+        "worstR": -0.6139192697130437,
+        "profitFactor": 0,
+        "longestLosingStreak": 4,
+        "maxDrawdownR": 1.7334537907721077,
+        "meanMaeR": 0.6961197958432256,
+        "meanMfeR": 0.29243287992981076,
+        "meanBars": 24
+      },
+      "lowerBoundMeanR": -0.5047855744190096,
+      "dsr": 0,
+      "meanPredicted": 0.1825,
+      "predictedVsRealised": 0.1825,
+      "rHistogram": [
+        {
+          "bucket": "-0.75R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 4
+      },
+      "partialsFired": 0
+    },
+    {
+      "strategy": "desk-v3 (positive-control)",
+      "evaluations": 225,
+      "arms": 195,
+      "armRate": 0.8666666666666667,
+      "fills": 178,
+      "fillRate": 0.9128205128205128,
+      "stats": {
+        "trades": 178,
+        "hitRate": 0.8539325842696629,
+        "meanR": 1.0549685033320582,
+        "meanRStdErr": 0.07000163464191801,
+        "rStdDev": 0.9339382933321786,
+        "cvar5R": 1,
+        "bestR": 2.7286683235507163,
+        "worstR": -1,
+        "profitFactor": 13.386561024338818,
+        "longestLosingStreak": 3,
+        "maxDrawdownR": 2.7423526734215358,
+        "meanMaeR": 0.36272602635252377,
+        "meanMfeR": 1.4902233896942882,
+        "meanBars": 27.084269662921347
+      },
+      "lowerBoundMeanR": 0.99605512761742,
+      "dsr": 1,
+      "meanPredicted": 0.5059044943820225,
+      "predictedVsRealised": -0.34802808988764045,
+      "rHistogram": [
+        {
+          "bucket": "-1.00R",
+          "count": 10
+        },
+        {
+          "bucket": "-0.75R",
+          "count": 7
+        },
+        {
+          "bucket": "-0.50R",
+          "count": 2
+        },
+        {
+          "bucket": "-0.25R",
+          "count": 7
+        },
+        {
+          "bucket": "0.00R",
+          "count": 7
+        },
+        {
+          "bucket": "0.25R",
+          "count": 21
+        },
+        {
+          "bucket": "0.50R",
+          "count": 4
+        },
+        {
+          "bucket": "0.75R",
+          "count": 20
+        },
+        {
+          "bucket": "1.00R",
+          "count": 18
+        },
+        {
+          "bucket": "1.25R",
+          "count": 9
+        },
+        {
+          "bucket": "1.50R",
+          "count": 24
+        },
+        {
+          "bucket": "1.75R",
+          "count": 24
+        },
+        {
+          "bucket": "2.00R",
+          "count": 13
+        },
+        {
+          "bucket": "2.25R",
+          "count": 6
+        },
+        {
+          "bucket": "2.50R",
+          "count": 6
+        }
+      ],
+      "exitReasons": {
+        "time_stop": 41,
+        "horizon": 106,
+        "stop": 14,
+        "target": 17
+      },
+      "partialsFired": 71
+    }
+  ],
+  "label": "baseline-synthetic",
+  "generatedAt": "2026-10-11T13:53:14.568Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts -- --mode intraday --data synthetic:all --seed 1 --stride 10 --bars 2400 --runs 6 --label baseline-synthetic --out research-reports/baseline-synthetic-intraday.json",
+  "mode": "intraday",
+  "symbol": "EURUSD",
+  "seed": 1,
+  "contractSpec": {
+    "symbol": "EURUSD",
+    "assetClass": "forex",
+    "point": 0.00001,
+    "digits": 5,
+    "tickSize": 0.00001,
+    "tickValue": 1,
+    "contractSize": 100000,
+    "volumeMin": 0.01,
+    "volumeMax": 100,
+    "volumeStep": 0.01,
+    "stopsLevel": 0,
+    "freezeLevel": 0,
+    "marginInitial": 0,
+    "swapLong": 0,
+    "swapShort": 0,
+    "commissionPerLot": 0,
+    "spreadPoints": 12
+  },
+  "assumedSpecValues": [
+    "assetClass=forex",
+    "point=0.00001",
+    "digits=5",
+    "tickSize=0.00001",
+    "tickValue=1",
+    "contractSize=100000",
+    "volumeMin=0.01",
+    "volumeStep=0.01",
+    "spreadPoints=12",
+    "commissionPerLot=0"
+  ],
+  "dataSource": "synthetic:all",
+  "seriesKind": "driftless,driftless,driftless,driftless,driftless,driftless,block-shuffled,block-shuffled,block-shuffled,block-shuffled,block-shuffled,block-shuffled,phase-randomised,phase-randomised,phase-randomised,phase-randomised,phase-randomised,phase-randomised,positive-control",
+  "barsPerRun": 2400,
+  "timeframe": "M1",
+  "walkForward": {
+    "splits": 9,
+    "purgeBars": 50,
+    "embargoBars": 6,
+    "clean": true
+  },
+  "gates": {
+    "null": {
+      "pass": false,
+      "gates": [
+        {
+          "gate": "null: arm rate ≤ 3%",
+          "pass": false,
+          "measured": 0.08,
+          "threshold": 0.03,
+          "detail": "18 arms in 225 evaluations on structureless data"
+        },
+        {
+          "gate": "null: mean realised R ≥ −(cost+0.05)",
+          "pass": false,
+          "measured": -0.19827852793828907,
+          "threshold": -0.1,
+          "detail": "13 realised trades, mean -0.198R"
+        },
+        {
+          "gate": "null: DSR not significant",
+          "pass": true,
+          "measured": 0.05877550164548673,
+          "threshold": 0.95,
+          "detail": "Deflated Sharpe probability 5.9% on noise"
+        },
+        {
+          "gate": "null: ≤ 5% of runs DSR-significant",
+          "pass": true,
+          "measured": 0,
+          "threshold": 0.05,
+          "detail": "0.0% of 18 structureless runs looked profitable at DSR ≥ 0.95"
+        }
+      ],
+      "runs": 18
+    },
+    "control": {
+      "pass": false,
+      "gates": [
+        {
+          "gate": "control: arm rate ≥ 10%",
+          "pass": true,
+          "measured": 0.8666666666666667,
+          "threshold": 0.1,
+          "detail": "195 arms in 225 evaluations on a series with a known edge"
+        },
+        {
+          "gate": "control: mean realised R ≥ +0.30",
+          "pass": true,
+          "measured": 1.0549685033320582,
+          "threshold": 0.3,
+          "detail": "178 trades, mean 1.055R, hit rate 85%"
+        },
+        {
+          "gate": "control: |predicted − realised| ≤ 0.15R",
+          "pass": false,
+          "measured": 0.34802808988764045,
+          "threshold": 0.15,
+          "detail": "predicted 50.6% vs realised 85.4%"
+        }
+      ],
+      "runs": 1
+    },
+    "calibration": {
+      "pass": false,
+      "gates": [
+        {
+          "gate": "calibration: reliability slope ∈ [0.8, 1.2]",
+          "pass": false,
+          "measured": -0.24079542203450294,
+          "threshold": 1,
+          "detail": "130 labelled samples, slope -0.241"
+        },
+        {
+          "gate": "calibration: Brier skill ≥ 0",
+          "pass": false,
+          "measured": -1.7038829714912334,
+          "threshold": 0,
+          "detail": "Brier skill -1.7039 vs the base rate"
+        }
+      ]
+    }
+  },
+  "verdict": "fail",
+  "notes": [
+    "The harness studies the DECISION and its EXECUTION (the real position-manager state machine). Portfolio-level limits — daily loss, drawdown scalar, correlation heat — are governed live by risk.ts and portfolio-risk.ts and are not re-simulated here beyond the consecutive-loss state carried across trades.",
+    "Calibration is reported on trades whose decision fell in the last two thirds of each series (quasi-held-out). A fitted model's calibration (WP5) is reported from the walk-forward test windows instead."
+  ],
+  "calibration": {
+    "samples": 130,
+    "brier": 0.2918273692307693,
+    "brierSkill": -1.7038829714912334,
+    "reliabilitySlope": -0.24079542203450294,
+    "reliabilityIntercept": 2.110304202523507,
+    "bins": [
+      [
+        0.05,
+        0.8888888888888888,
+        9
+      ],
+      [
+        0.15000000000000002,
+        0.9,
+        10
+      ],
+      [
+        0.25,
+        1,
+        7
+      ],
+      [
+        0.35,
+        0.9230769230769231,
+        13
+      ],
+      [
+        0.45,
+        1,
+        10
+      ],
+      [
+        0.55,
+        0.7857142857142857,
+        14
+      ],
+      [
+        0.6499999999999999,
+        0.8333333333333334,
+        6
+      ],
+      [
+        0.75,
+        0.8333333333333334,
+        12
+      ],
+      [
+        0.8500000000000001,
+        0.9210526315789473,
+        38
+      ],
+      [
+        0.95,
+        0.6363636363636364,
+        11
+      ]
+    ],
+    "slopeIdentifiable": true,
+    "logitStdDev": 1.5018835159574178
+  }
+}

@@ -294,8 +294,41 @@ export function positiveControl(spec: GeneratorSpec): SyntheticSeries {
   };
 }
 
-/** Build any generator by name. Real data is loaded by loader.ts instead. */
-export function generate(kind: GeneratorKind, spec: GeneratorSpec): SyntheticSeries {
+/**
+ * Build any generator by name. Real data is loaded by loader.ts instead.
+ *
+ * The spec is merged over `DEFAULT_GENERATOR_SPEC` and then VALIDATED: a spec
+ * missing `startPrice` (or `volatility`) produced a series of NaN bars, which
+ * is the most dangerous possible study input — every statistic comes out
+ * finite-looking or silently zero, and the run "passes". A generator that
+ * cannot produce a usable series must throw, not shrug.
+ */
+export function generate(kind: GeneratorKind, spec: Partial<GeneratorSpec> & { seed: number }): SyntheticSeries {
+  const full: GeneratorSpec = { ...DEFAULT_GENERATOR_SPEC, ...spec };
+  if (!Number.isFinite(full.startPrice) || full.startPrice <= 0) {
+    throw new Error(`generate(${kind}): startPrice must be a positive number (got ${String(full.startPrice)})`);
+  }
+  if (!Number.isFinite(full.volatility) || full.volatility <= 0) {
+    throw new Error(`generate(${kind}): volatility must be a positive number (got ${String(full.volatility)})`);
+  }
+  if (!Number.isFinite(full.startMs)) throw new Error(`generate(${kind}): startMs must be an epoch ms number`);
+  if (!Number.isFinite(full.timeframeMs) || full.timeframeMs <= 0) {
+    throw new Error(`generate(${kind}): timeframeMs must be positive (got ${String(full.timeframeMs)})`);
+  }
+  if (!Number.isFinite(full.bars) || full.bars < 2) {
+    throw new Error(`generate(${kind}): bars must be at least 2 (got ${String(full.bars)})`);
+  }
+  const series = generateUnchecked(kind, full);
+  for (const bar of series.bars) {
+    if (!Number.isFinite(bar[4]) || !Number.isFinite(bar[1]) || (bar[4] as number) <= 0) {
+      throw new Error(`generate(${kind}): produced a non-finite bar — refusing to return a series that cannot be studied`);
+    }
+  }
+  return series;
+}
+
+function generateUnchecked(kind: GeneratorKind, full: GeneratorSpec): SyntheticSeries {
+  const spec = full;
   switch (kind) {
     case "driftless":
       return driftlessWalk(spec);

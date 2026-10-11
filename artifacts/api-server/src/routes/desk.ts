@@ -68,6 +68,9 @@ import {
   recordShadowDecision,
 } from "../lib/multiasset/governance-runtime";
 import { E_DISABLE, E_HALVE, resumeAgent, weekWindow } from "../lib/multiasset/governance";
+import { REGIME_STATE_TTL_MS, deskRegimeState } from "../lib/multiasset/regime-state";
+import { listJournal } from "../lib/multiasset/governance-store";
+import { deskAlertNow } from "../lib/multiasset/alerts";
 import { GOVERNED_AGENTS } from "../lib/multiasset/governance-runtime";
 import type { AgentDecision } from "../lib/multiasset/agent";
 import type { AlphaId } from "../lib/multiasset/alpha/types";
@@ -608,6 +611,86 @@ router.get("/governance", (_req, res) => {
   });
 });
 
+/**
+ * The desk's TIMEFRAME STATE (WP10.2), read from the same model the live permit
+ * uses.
+ *
+ * A dashboard polls this; it is memoised for two seconds and keyed on the last
+ * closed bar, so a new bar always recomputes and a second poll inside the window
+ * costs nothing. It is absent — a 404 — while the regime subsystem is off.
+ */
+router.get("/regime", (req, res) => {
+  const v4 = deskV4();
+  if (!v4On(v4.regimeHmm)) {
+    return res.status(404).json({ error: "The v4 regime layer is switched off." });
+  }
+  const desk = getDesk(getBrowserSessionId());
+  const mode = (String(req.query.mode ?? desk.mode) as TradeMode) || desk.mode;
+  if (!VALID_MODES.includes(mode)) return res.status(400).json({ error: `mode must be one of ${VALID_MODES.join(", ")}` });
+  const frame = MODE_ANALYSIS_TIMEFRAMES[mode][0];
+  const requested = String(req.query.symbol ?? "").trim();
+  const symbols = requested ? [requested] : desk.watchlist;
+  const now = Date.now();
+  const states = symbols.map((symbol) => {
+    const series = desk.candles.get(`${symbol}|${frame}`)?.bars ?? [];
+    return {
+      ...deskRegimeState({
+        sessionId: desk.sessionId,
+        symbol,
+        frame,
+        mode,
+        bars: series,
+        nowMs: now,
+      }),
+      bars: series.length,
+      lastBarAtMs: series.length > 0 ? (series[series.length - 1]?.[0] as number) : null,
+    };
+  });
+  return res.json({ source: "desk", mode, frame, ttlMs: REGIME_STATE_TTL_MS, asOfMs: now, states });
+});
+
+/**
+ * The durable journal (WP10).
+ *
+ * The in-process journal is what `/state` streams; this is the same record after a
+ * deploy, filtered and bounded. It is the endpoint the learning page reads, and it
+ * 404s while the governance layer is off — because with the layer off nothing is
+ * being written.
+ */
+router.get("/learning/journal", async (req, res) => {
+  const v4 = deskV4();
+  if (!v4On(v4.governance)) {
+    return res.status(404).json({ error: "The v4 governance layer is switched off." });
+  }
+  const desk = getDesk(getBrowserSessionId());
+  const kind = typeof req.query.kind === "string" && req.query.kind.length > 0 ? req.query.kind : null;
+  const limit = Number(req.query.limit ?? 200);
+  const rows = await listJournal({
+    sessionId: desk.sessionId,
+    limit: Number.isFinite(limit) ? limit : 200,
+    kind,
+  });
+  // `DESK_V4_UI` governs the EXPLANATORY payloads a dashboard reads, never the
+  // numbers: with it off the entries keep their message and lose the structured
+  // detail blob, so a reader still sees what happened without the desk shipping
+  // internals to a surface nobody has switched on.
+  const withDetail = v4On(v4.ui);
+  return res.json({
+    source: "desk",
+    sessionId: desk.sessionId,
+    kind,
+    detailIncluded: withDetail,
+    entries: rows.map((row) => ({
+      id: row.entryId,
+      ts: row.tsMs,
+      kind: row.kind,
+      symbol: row.symbol,
+      message: row.message,
+      detail: withDetail ? (row.detail ?? null) : null,
+    })),
+  });
+});
+
 router.get("/learning/weekly", async (req, res) => {
   const v4 = deskV4();
   if (!v4On(v4.governance)) {
@@ -643,6 +726,13 @@ router.post("/governance/resume", (req, res) => {
   const next = resumeAgent(governanceRegistry(desk.sessionId), agentId as AlphaId, now, note);
   const entry = next.find((candidate) => candidate.agentId === agentId);
   journal(desk, "risk", null, `Agent ${agentId} resumed by the operator: ${note}`);
+  deskAlertNow({
+    kind: "governance",
+    title: `Agent ${agentId} resumed by the operator`,
+    body: [note, `status ${entry?.status ?? "unknown"}, e ${(entry?.eValue ?? 0).toFixed(2)}`],
+    dedupeKey: `resume:${agentId}:${note.slice(0, 40)}`,
+    sessionId: desk.sessionId,
+  });
   return res.json({ ok: true, agent: entry ?? null });
 });
 

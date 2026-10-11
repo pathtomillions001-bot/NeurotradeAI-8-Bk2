@@ -94,6 +94,8 @@ export interface DeskV4Config {
   governance: DeskV4Feature;
   /** Extra UI payloads (regime posteriors, gate reasons, management state) (WP10). */
   ui: DeskV4Feature;
+  /** Outbound alerts (WP10). Off by default, and inert without credentials. */
+  alerts: DeskV4Feature;
   /** Research harness only — never consulted by the live path. */
   research: { paths: number; seed: number };
 }
@@ -232,6 +234,10 @@ export function resolveDeskV4Config(env: Env = process.env): DeskV4Config {
     execution: gate(feature(env, `${V4_ENV_PREFIX}EXECUTION`, false)),
     portfolio: gate(feature(env, `${V4_ENV_PREFIX}PORTFOLIO`, false)),
     governance: gate(feature(env, `${V4_ENV_PREFIX}GOVERNANCE`, false)),
+    // WP10's outbound channel. Off unless asked for, and inert without credentials
+    // even when on (see alerts.ts): watching a desk is never allowed to be a
+    // condition of trading it.
+    alerts: gate(feature(env, `${V4_ENV_PREFIX}ALERTS`, false)),
     ui: gate(feature(env, `${V4_ENV_PREFIX}UI`, false)),
     research: {
       paths: clampInt(env[`${V4_ENV_PREFIX}RESEARCH_PATHS`], 200, 1_000_000, 4000),

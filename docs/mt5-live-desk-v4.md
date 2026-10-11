@@ -949,7 +949,7 @@ the gatekeeper refuses.
 
 ### 8.4 What the study caught: the first MC gate was unsatisfiable
 
-The WP6 study (`--gatekeeper`, §14) re-reads the WP5 corpora through the gate and
+The WP6 study (`--gatekeeper`, §16) re-reads the WP5 corpora through the gate and
 measures three policies side by side: WP5's own `EV_LCB > 0`, the mode's **floor**,
 and the floor **plus** BH at q = 0.10. It also samples the Monte Carlo.
 
@@ -1028,7 +1028,7 @@ The gates that decide the verdict:
   absent, the gatekeeper refuses with `GK_REGIME`. The MC runs only under
   `DESK_V4_MONTE_CARLO_V2`; absent, `GK_MC_UNAVAILABLE`. Both are fail-closed by
   design, and both are asserted in `wp6-gatekeeper-wiring.test.ts`.
-* **`shadow` does not soften a veto** (§11, assumption 32).
+* **`shadow` does not soften a veto** (§13, assumption 32).
 * **The study does not re-measure WP3 or the live MC.** The permit is measured in
   the WP3 study; the composition is measured by the wiring tests; the MC here is
   sampled (every 60th bar), and the report says so. **Scalp is not in the meta
@@ -1066,7 +1066,7 @@ cancel-at-0.5R-unfilled rule. Breakout plans keep the legacy stop trigger.
 
 ### 9.2 The study
 
-`--execution` (§14) simulates **the same plan twice on every decision bar** of the
+`--execution` (§16) simulates **the same plan twice on every decision bar** of the
 WP5 corpora: identical geometry, identical stop **level**, identical target rule,
 identical management policy — one entry at the legacy breakout trigger, one
 resting at the pullback level. Each trade is measured in its own R, and the
@@ -1180,7 +1180,7 @@ else. An unmeasurable book is a reason to take less risk, not more.
 
 ### 10.2 The study
 
-`--portfolio` (§14) builds a book whose structure is **known**: a companion
+`--portfolio` (§16) builds a book whose structure is **known**: a companion
 instrument is constructed from the primary's own returns as
 `r_c = 0.85·r_p + √(1 − 0.85²)·ε`, with a **separate** noise stream for an
 instrument built to be uncorrelated, so the estimator can be checked against the
@@ -1280,7 +1280,7 @@ risk is never above the 0.35% cap — holds at exactly 1.0000×.
   printed number. The heat ceiling (a correlation-weighted bound) and the cluster
   ceiling (a hard sum) are the layers that do not assume a distribution.
 
-## 15. WP9 — learning and governance, and the difference between a counter and an e-value
+## 11. WP9 — learning and governance, and the difference between a counter and an e-value
 
 ### 15.1 The question the layer answers
 
@@ -1318,7 +1318,7 @@ w(x) = (1/|β|) Σ_β (1 − β·x)        β ∈ {1/3, 1/6, 1/12, 1/24, 1/48, 1
   retiring an agent that has not actually been tested.
 * The β grid is a **uniform mixture of martingales**, which is itself a martingale.
   No single β is best for every alternative; the mixture costs 1.6 trades of speed
-  at full strength and buys coverage of the slow bleed (measured §15.8).
+  at full strength and buys coverage of the slow bleed (measured §11.8).
 * The running value is floored at `1e-9`. A long winning streak drives it toward
   zero, and a float that has reached exactly 0 can never grow again; the floor makes
   the test *slower* to alarm by nine orders of magnitude, never faster.
@@ -1356,7 +1356,7 @@ Every outcome's contribution on the ±1R scale:
 Measured by iterating (W9.3, and the study repeats it): **16 consecutive −1R trades**
 reach the halve bar (e = 5.263) and **29** reach the disable bar (e = 20.290).
 A mixed stream takes as long as its mean drift deserves, which is the point of a
-sequential test — the study's power table (§15.8) is the honest version of "how
+sequential test — the study's power table (§11.8) is the honest version of "how
 long does it take".
 
 ### 15.4 The change detector, and a degenerate statistic caught by measurement
@@ -1374,7 +1374,7 @@ guarantee, so a crossing earns a journal sentence and a field in the report, not
 budget change.
 
 Its pair of constants is the only threshold in the desk chosen from a stored grid
-(§15.8). The rule is stated so it cannot be bent:
+(§11.8). The rule is stated so it cannot be bent:
 
 > **the shipped cell is the fastest-detecting cell whose measured null rate is ≤ 5%
 > AND whose detection of a −0.35R stream is ≥ 90%.**
@@ -1488,11 +1488,130 @@ simulator measured with positive expectancy are left untouched.
   measured; the market's are not.
 * **The durable round-trip is not in the study** (the study opens no database). It is
   verified by `wp9-governance.test.ts` (W9.10, W9.14) against PGlite, which is what
-  §14's command list runs.
+  §16's command list runs.
 * **No forecast.** The rollout's kill rule (`e ≥ 20`) is now a wired, observable
   number; what the desk will do about it is a human decision, recorded in the journal.
 
-## 11. Documented assumptions and conservative choices
+## 12. WP10 — the learning surface: what the desk shows about itself
+
+### 16.1 What WP10 is, and what it deliberately is not
+
+WP10 adds no trading behaviour. It adds the three things that make everything
+before it *checkable by a human*:
+
+* a **desk-timeframe state** a dashboard can poll without touching a decision;
+* a **learning page** that reads the durable record WP9 writes — the per-agent
+  e-values, the weekly report, the journal — and offers the one operator action the
+  governance layer allows;
+* an **outbound alert channel** for the two events nobody should have to go looking
+  for: an agent taking itself out of service, and the desk halting.
+
+The page is a reader. The only write it performs is `POST /desk/governance/resume`,
+which is exactly the operator handshake §11.2 describes — with a note, with the
+evidence kept, and with a journal line and an alert.
+
+### 16.2 The desk-timeframe state (`GET /desk/regime`)
+
+`GET /desk/analysis` is the wrong call to poll twice a second: it fits a regime
+model, prices a plan and samples a Monte Carlo. The dashboard needs the *read* —
+which state, how sure, how long it usually lasts, and what each side would be
+permitted to do — and it must be the same answer the gatekeeper is about to act on.
+
+`regime-state.ts` therefore builds the read from the permit's own parts
+(`featuresFromBars` → `fitHmm` → `filterPosterior` → `expectedDwellOfLabel` →
+`changeProbabilities`) and then asks `regimePermit` itself what each side would be
+allowed, handing it the model that was just fitted. The dashboard cannot disagree
+with the desk, and W10.1 asserts it by running both paths on the same bars and
+comparing the permits, the required states and the refusal codes.
+
+| property | value | why |
+| --- | --- | --- |
+| memo TTL | **2,000 ms** (`REGIME_STATE_TTL_MS`) | the brief's ceiling on desk-timeframe staleness |
+| cache key | session · symbol · frame · mode · fit bars · states · window length · **last bar's open time** | a new closed bar always recomputes, whatever the clock says |
+| fields | state, posterior, expected dwell, P(change), per-side required state / probability / permit / codes, `fit.{bars,iterations,reused,adequate}`, `ageMs`, `cached`, `available` | the reader is told how old its answer is and whether it came from the memo |
+| when history is short | `available: false`, both sides refused with `REGIME_UNAVAILABLE`, and a sentence saying how many bars were missing | a state read must never invent a state |
+| bound | 200 entries, oldest evicted | every memo in the desk is bounded |
+| absent when | `DESK_V4_REGIME_HMM` is off — a 404 | the shipped API surface is unchanged |
+
+W10.2 pins the staleness rules: inside the TTL the second read is served from the
+memo and reports its `ageMs`; past it the read recomputes; and a **new bar**
+invalidates the memo immediately even inside the TTL.
+
+### 16.3 The learning page (`/learning`, nav "Learning")
+
+Four panels, each of which says so plainly when its subsystem is off rather than
+rendering zeros that would look like measurements:
+
+1. **Per-agent governance** — every shipped agent, its status, its e-value drawn on
+   a **logarithmic** bar with the halve threshold marked, its outcome count, its
+   total R and the change detector's statistic, plus the sentence saying why. A
+   non-active agent can be resumed, which opens a field for the required reason.
+2. **This week** — the Monday-to-Monday recount: closed / measured / unmeasured,
+   hit rate, mean R, the calibration gap judged against the brief's **8-point** bar
+   (and named as over- or under-confident), the Brier score judged against the
+   **0.25 coin-flip** reference, mean slippage, the refusal histogram with shares,
+   and the report's own flags.
+3. **Rollout kill rules** — the brief's rules the page can actually see (drawdown,
+   the worst agent e-value, mean slippage), each rendered `inside` / `breached` /
+   **`not measurable`**. An unknown is never shown as fine.
+4. **Desk journal** — the durable record, filtered by kind, newest first, with the
+   structured detail withheld unless `DESK_V4_UI` is on.
+
+The page's arithmetic lives in `src/lib/learning.ts` as pure functions and is
+tested (L1–L7). Two of those tests are about honesty rather than maths: the e-value
+bar must be logarithmic (a linear bar would show a *halved* agent at e = 5.3 as a
+quarter of the way to trouble when it is already past the half mark), and the Brier
+score is never printed without its coin-flip reference.
+
+### 16.4 The alert channel
+
+`alerts.ts` is small on purpose, and every constraint on it exists to keep it from
+becoming a trading dependency:
+
+| rule | implementation |
+| --- | --- |
+| never on the decision path | `deskAlertNow()` returns void; the send happens after, and nothing awaits it |
+| never throws | the transport call is wrapped; a throwing, hanging or 500-ing channel is reported as a result, never as an exception |
+| off unless asked for | `DESK_V4_ALERTS` (default OFF) |
+| inert without credentials | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`, or the module answers `no_transport` |
+| no storms | one message per key per **10 minutes**; at most **12 sends per minute** across every kind |
+| no leaks | the token is never printed, and the session id is abbreviated in the message |
+| a failed send is not a duplicate | on failure the de-dupe key is released, so a real event afterwards is not swallowed |
+
+It fires on: an agent being **halved or disabled** (with the e-value and the
+reason), the desk **halting**, and an operator **resuming** an agent. W10.4 and
+W10.5 measure the flag-off path, the unconfigured path, de-duplication, the rate
+bucket, a 429, and a transport that throws.
+
+### 16.5 Wiring and absence
+
+| endpoint | flag it hangs on | with the flag off |
+| --- | --- | --- |
+| `GET /desk/regime` | `DESK_V4_REGIME_HMM` | 404 |
+| `GET /desk/governance`, `GET /desk/learning/weekly`, `POST /desk/governance/resume`, `GET /desk/learning/journal` | `DESK_V4_GOVERNANCE` | 404 |
+| journal `detail` payloads | `DESK_V4_UI` | the message survives, the structured detail is withheld |
+| outbound alerts | `DESK_V4_ALERTS` | nothing is sent |
+
+`routes/desk-learning.test.ts` drives the real Express router and asserts that
+absence: every one of those paths must answer **404 — not an empty 200** — while its
+flag is off, because a route that returns `{agents: []}` is still part of the public
+API, and a desk that has never switched a layer on must have exactly the API it had
+before. It then switches the layers on and reads the state, the registry, the
+weekly report and the journal back out.
+
+### 16.6 What WP10 does not do
+
+* **It adds no independent verification of the desk's performance.** The equity
+  curve on the terminal is still the one the API serves from the terminal's own
+  closed trades; this page reads the ledger, and both are only as good as the EA's
+  reports.
+* **It does not make the kill rules automatic.** They are displayed because the
+  brief's rollout makes them human decisions; `e ≥ 20` is the one that is also wired
+  (as the disable), and the rest are shown so the operator can act.
+* **It does not re-measure the calibrator.** The weekly report's gap and Brier are
+  the *live* checks; the WP5/WP6 studies remain the evidence for the model itself.
+
+## 13. Documented assumptions and conservative choices
 
 Each of these was a fork in the road where the conservative option was taken and
 the reasoning recorded.
@@ -1631,7 +1750,7 @@ the reasoning recorded.
    swing. The WP6 study prints armed counts and realised mean R under three
    policies (EV_LCB > 0, the floor, the floor + BH) so a reader can see the price
    of the margin. A later work package may RAISE the floor per cohort; nothing may
-   lower it (§12, gate ledger).
+   lower it (§14, gate ledger).
 29. **The executed-policy Monte Carlo is a *geometry* check, not an alpha claim.**
    It resamples the market's own paths at the fill with no alpha view, so its
    expectation is the random-entry expectation — measured on the WP6 corpora as a
@@ -1709,7 +1828,7 @@ the reasoning recorded.
    bracket before bisecting; and no size of a new trade can fix a book that is
    already too big, so the honest answer there is zero risk and a named refusal.
 
-## 12. Changelog — every behavioural change, and the gate ledger
+## 14. Changelog — every behavioural change, and the gate ledger
 
 ### Behavioural changes
 
@@ -1772,6 +1891,12 @@ the reasoning recorded.
 | 55 | The fitted HMM is persisted and reused by window identity | **performance only** — a matching version is the model the call would have fitted; a moved window re-fits (W9.10) |
 | 56 | `GET /governance`, `GET /learning/weekly`, `POST /governance/resume` | added, 404 while `DESK_V4_GOVERNANCE` is off — the shipped API surface is unchanged |
 | 57 | The WP9 study, its two stored reports and `wp9-governance.test.ts` joined the harness and the standing test script | coverage only |
+| 58 | `GET /desk/regime` — the desk-timeframe state, built from the live permit's own model and memoised for 2 s on the window's identity | added, 404 while `DESK_V4_REGIME_HMM` is off |
+| 59 | `GET /desk/learning/journal` — the durable audit trail, filtered and bounded | added, 404 while `DESK_V4_GOVERNANCE` is off; its `detail` payload needs `DESK_V4_UI` |
+| 60 | `DESK_V4_ALERTS` and the outbound channel (agent halved/disabled, desk halted, operator resume) | added, **off by default and inert without credentials**; fire-and-forget, never throws, de-duplicated and rate-limited |
+| 61 | The `/learning` page and its seven-panel transport (`deskApi.governance/weeklyReport/journal/regime/resumeAgent`) | presentation only — the sole write is the operator resume |
+| 62 | The e-value bar is logarithmic and the Brier score is printed with its 0.5 coin reference | presentation honesty — a linear bar would understate a halved agent by half |
+| 63 | The WP10 unit and route tests joined both standing test scripts (api-server and trading-platform) | coverage only |
 | 47 | The e-process grows on LOSSES: `1 − βx` with `β ≤ 1/|lower bound|`, not `1 + λx` | **correctness** — the first form grows on wins and would have disabled the desk's best agents; the derivation, not a preference, is what fixes the sign |
 | 48 | Realised R is clipped to **[−1R, +3R]** for the e-process only; the raw R is what the ledger and the weekly report carry | **required for validity** — `1 − βx ≥ 0` needs β ≤ 1/|lower bound|, and a bounded outcome is what makes the running product a supermartingale |
 | 49 | The running e-value is floored at `1e-9` | **correctness, conservative** — a float at exactly 0 can never grow again; the floor makes the test slower to alarm by nine orders of magnitude, never faster |
@@ -1783,6 +1908,11 @@ the reasoning recorded.
 | 55 | Ledger writes are fire-and-forget and reads fall back to a bounded in-process mirror | **availability** — a database outage must not stop the desk trading, and a ledger write must not delay an arm |
 | 56 | The stored HMM is reused only when its version keys the CURRENT window exactly | **safety** — reuse must be identical to re-fitting, or it is a stale model changing a permit |
 | 57 | `realised_r` is NULL when the EA stamped no `initialRiskMoney`, and such a trade is counted as unmeasured | **honest reporting** — a trade the desk cannot measure must be visible as unmeasured, not dropped and not fabricated |
+| 58 | The desk-timeframe state is memoised for 2,000 ms and keyed on the last closed bar as well as the clock | **the brief's staleness ceiling** — a new bar always recomputes, so a poll can never serve a reading from a window that has moved on |
+| 59 | The regime read is built from the permit's own functions and then asks `regimePermit` what each side may do, handing it the model it just fitted | **no second implementation** — the dashboard's answer and the gatekeeper's are the same computation, asserted by W10.1 |
+| 60 | The journal's structured `detail` is withheld unless `DESK_V4_UI` is on | **scope** — `ui` governs explanatory payloads, never the numbers |
+| 61 | Alerts are de-duplicated per key for 10 minutes and rate-limited to 12 per minute, with no credentials meaning no channel | **operator discipline** — a channel that storms or half-exists gets muted or trusted wrongly; a failed send releases its de-dupe key so the next real event is delivered |
+| 62 | The rollout's kill rules are DISPLAYED, not enforced (except `e ≥ 20`, which is the wired disable) | **the brief makes them human decisions**; a page that silently halted the desk on a number the operator cannot see would be worse than one that shows the number |
 
 ### Gate ledger
 
@@ -1846,12 +1976,12 @@ the reasoning recorded.
   disable at e ≥ 20) and its overlay on the desk's decisions; the one-way rule with
   an operator-only resume that requires a note; the removal of a disabled agent's
   reading before the gatekeeper; the 0.5× budget factor, applied after the portfolio
-  composition; and the study's ten gates (§15.8), including the selection rule that
+  composition; and the study's ten gates (§11.8), including the selection rule that
   picks the change detector's constants out of a stored grid.
 * **Fixed (WP9)**: two statistics that were wrong in the direction a report would
   not have revealed. The e-process grew on wins; the change detector's
   recursive-mean form degenerated into `+0.05R` per trade on a constant stream.
-  Both were caught by measurement and are recorded in §15.2 and §15.4 rather than
+  Both were caught by measurement and are recorded in §11.2 and §11.4 rather than
   changed quietly.
 * **Removed**: **none.** No safety gate was removed in WP0–WP9. Everything in
   §1's constraint list (fail-closed news gate, quote integrity, clock
@@ -1861,7 +1991,7 @@ the reasoning recorded.
   loosened, and no agent can place a trade — the alpha layer has no order path at
   all.
 
-## 13. Open risks and unverifiable items
+## 15. Open risks and unverifiable items
 
 1. **The EA has never been compiled** (no MetaEditor here). Compile
    `NeurotradeBridge.mq5` in MetaEditor before any live or demo use; the
@@ -2048,7 +2178,25 @@ the reasoning recorded.
    let a stale model be reused. W9.10 pins the current key; any change to
    `regime-hmm.ts`'s inputs must visit it.
 
-## 14. Tests and commands
+49. **The learning page can only be as complete as the EA's reports.** Both the
+   weekly report and the terminal's equity curve are built from what the bridge
+   sends back; a terminal that stops reporting closed positions makes the page look
+   calm rather than making it complain. The journal's own `[GOV]` and halt lines are
+   the check: if they stop while trades continue, the ledger is not being fed.
+50. **The alert channel is a convenience, not a safety mechanism.** It is off by
+   default, inert without credentials, rate-limited and de-duplicated — all of which
+   mean an event can be missed (a muted chat, a full bucket, a wrong token). Nothing
+   in the desk's risk path depends on an alert having been seen.
+51. **The desk-timeframe state is memoised for up to two seconds, and that is a real
+   staleness bound.** A regime can change inside it; the reading is for display, and
+   the live decision path always refits or reuses a model keyed to the exact current
+   window (§11.7).
+52. **The kill rules are displayed, and the one that is wired acts on evidence that
+   arrives only from real trades.** With the flags off (the shipped state) the page
+   has nothing to show, and with them on the numbers are as sparse as the shadow
+   phase is young — an empty panel is not a clean bill of health.
+
+## 16. Tests and commands
 
 ```bash
 # the standing regression — every api-server test, including the desk suites
@@ -2067,6 +2215,10 @@ cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset
 # the same run with a different calibration form (both are measured by the gates)
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
   --meta --mode intraday --meta-calibrator isotonic|platt|platt-shrunk
+
+# the trading-platform tests (Vite/React, node:test) — the EA-download parity check
+# and the learning page's pure arithmetic are both in here
+cd artifacts/trading-platform && pnpm run test
 
 # the WP9 governance study (writes research-reports/2026-10-11-wp9-governance-<mode>-study.json)
 # the durable half of WP9 is NOT in this study — it opens no database; W9.10/W9.14
@@ -2146,10 +2298,11 @@ Stored reports (`artifacts/api-server/research-reports/`):
 | `2026-10-11-wp8-portfolio-swing-study.json` | the same, H1 | **PASS** — ρ̂ 0.818, composed CVaR on its 1.5% ceiling, mirrored DD 10.07% vs 193% flat |
 | `2026-10-11-wp9-governance-intraday-study.json` | WP9: the e-process's null bound and power, the change detector's 18-cell grid, the overlay's 7,533-combination sweep, the layer over the desk's own corpus | **PASS** — 0.700% false alarm vs a 5% bound, 100% catch of −0.35R in a median 59 trades, 1 of 18 grid cells qualifying |
 | `2026-10-11-wp9-governance-swing-study.json` | the same, H1 | **PASS** — same thresholds; 3 of 3 degraded streams disabled and 0 of 3 positive ones touched |
+| (no new report) | WP10 adds no measurement: it is a reader, and its evidence is the route tests (absence, then presence) and the page's pure-function tests | — |
 
-Current state: **1,203/1,203** api-server tests (**146** suites) and **551/551** desk
+Current state: **1,220/1,220** api-server tests (**149** suites) and **568/568** desk
 tests (multiasset + research + alpha + meta; the counts wander by a handful between
-runs because a few pre-existing suites build their cases from data), **37/37**
+runs because a few pre-existing suites build their cases from data), **44/44**
 trading-platform tests (including the 6/6 EA-download parity check that keeps
 `public/downloads/NeurotradeBridge.mq5` byte-identical to the source), typecheck
 clean across all packages. WP5 added 31 unit tests (`meta/meta.test.ts` — labels,
@@ -2165,7 +2318,15 @@ thresholds at the 16th and 29th consecutive loss, the one-way rule and the resum
 that keeps the evidence, the change detector's statefulness and its measured
 operating point, the weekly recount, the refusal histogram's once-per-decision rule,
 the overlay's reduce-only vocabulary, plan/ticket attribution, and the durable
-round-trip of all five tables). WP7 added 13 (`wp7-execution.test.ts` — the spread
+round-trip of all five tables). WP10 added 9 on the API side
+(`wp10-learning-surface.test.ts` — the regime read agreeing with the live permit,
+the 2 s memo, the new-bar invalidation, the short-window refusal, and the alert
+channel's flag-off / unconfigured / duplicate / rate-limited / failing /
+throwing paths; `routes/desk-learning.test.ts` — every new endpoint absent while
+its flag is off, then present with the desk's own numbers) and 7 on the platform
+side (`learning.test.ts` — the logarithmic e-value bar, the calibration and Brier
+bars, the refusal histogram, the kill rules' not-measurable state, and the
+formatting of a signed R). WP7 added 13 (`wp7-execution.test.ts` — the spread
 z with its sample floor, the timing ledger's shrinkage and refusal, the slippage
 EWMA and the 0.15R pause, the measured allowance's one-way rule, the pending
 expiry, and the plan projection's flag-off invariance). WP8 added 17

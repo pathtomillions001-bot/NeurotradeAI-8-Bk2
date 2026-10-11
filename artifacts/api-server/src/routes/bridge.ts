@@ -33,6 +33,7 @@ import { getSlippageLedger, getSpreadHistory, getTimingLedger } from "../lib/mul
 import { recordSlippage, recordSpread, recordTimingOutcome, signedSlippageR } from "../lib/multiasset/execution";
 import { deskV4, v4On } from "../lib/multiasset/desk-v4-config";
 import { bindTicket, recordClosedTrade } from "../lib/multiasset/governance-runtime";
+import { deskAlertNow } from "../lib/multiasset/alerts";
 import {
   computeHistoryNeeded,
   parseBarsAvailable,
@@ -1008,18 +1009,37 @@ router.post("/sync", async (req, res) => {
           .then(({ actions }) => {
             for (const action of actions) {
               if (action.action === "none") continue;
+              const verb = action.action === "disable" ? "DISABLED" : "halved";
               journal(
                 desk,
                 "risk",
                 position.symbol,
-                `Agent ${action.agentId} ${action.action === "disable" ? "DISABLED" : "halved"} by the WP9 e-process (e=${action.eValue.toFixed(1)}): ${action.reason}`,
+                `Agent ${action.agentId} ${verb} by the WP9 e-process (e=${action.eValue.toFixed(1)}): ${action.reason}`,
               );
+              // The one event in this layer a human must not have to go looking
+              // for: an agent has just taken itself out of service.
+              deskAlertNow({
+                kind: "governance",
+                title: `Agent ${action.agentId} ${verb} (e=${action.eValue.toFixed(1)})`,
+                body: [action.reason, `${position.symbol} · ticket #${position.ticket}`],
+                dedupeKey: `governance:${action.agentId}:${action.action}`,
+                sessionId: desk.sessionId,
+              });
             }
           })
           .catch(() => {});
       }
       if (desk.riskState.haltedUntilNextSession) {
         journal(desk, "risk", null, desk.riskState.haltReason ?? "Desk halted.");
+        // A halt is the loudest thing the desk does. De-duped on the reason, so a
+        // long halt is one message however many positions close inside it.
+        deskAlertNow({
+          kind: "risk",
+          title: "Desk halted",
+          body: [desk.riskState.haltReason ?? "Desk halted.", `consecutive losses ${desk.riskState.consecutiveLosses}`],
+          dedupeKey: `halt:${desk.riskState.haltReason ?? "unknown"}`,
+          sessionId: desk.sessionId,
+        });
       }
     }
   }

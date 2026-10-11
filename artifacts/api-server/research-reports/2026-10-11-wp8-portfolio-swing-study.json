@@ -1,0 +1,2215 @@
+{
+  "tool": "MT5 Desk v4 — WP8 portfolio study",
+  "mode": "swing",
+  "generatedAt": "2026-10-11T18:08:58.824Z",
+  "command": "/usr/local/bin/node /home/user/NeurotradeAI-8-Bk2/artifacts/api-server/src/lib/multiasset/research/cli.ts --portfolio --mode swing",
+  "contractSpec": {
+    "symbol": "EURUSD",
+    "assetClass": "forex",
+    "point": 0.00001,
+    "digits": 5,
+    "tickSize": 0.00001,
+    "tickValue": 1,
+    "contractSize": 100000,
+    "volumeMin": 0.01,
+    "volumeMax": 100,
+    "volumeStep": 0.01,
+    "stopsLevel": 0,
+    "freezeLevel": 0,
+    "marginInitial": 0,
+    "swapLong": 0,
+    "swapShort": 0,
+    "commissionPerLot": 0,
+    "spreadPoints": 12
+  },
+  "thresholds": {
+    "correlationTarget": 0.85,
+    "covarianceBars": 120,
+    "maxTradeRiskPct": 0.35,
+    "heatCeilingPct": 1.5,
+    "cvarCeilingPct": 1.5,
+    "ddFloorScalar": 0.25
+  },
+  "fixtures": [
+    {
+      "name": "positive-control",
+      "kind": "positive-control",
+      "home": true,
+      "note": "regime-switching drift + AR(1) residual: the desk's own positive control, where the trend structure is real",
+      "pooled": {
+        "decisions": 1407,
+        "estimatedRho": 0.8176855560813193,
+        "independentRho": -0.04771343866486067,
+        "clusterCapturesNeighbour": 1,
+        "clusterExcludesIndependent": 1,
+        "refusedCandidates": 4221,
+        "candidateOffers": 8442,
+        "composedPositions": 3,
+        "cappedRiskPctMean": 0.1287174343667694,
+        "maxHeatCappedPct": 0.7271976932788029,
+        "maxHeatNaivePct": 1.8853565773036902,
+        "maxCvarCappedPct": 1.500000000001,
+        "maxCvarNaivePct": 3.8889491703505312,
+        "maxDrawdownScaledPct": 4.7749545707062575,
+        "maxDrawdownFlatPct": 4.744214164586229,
+        "maxDrawdownMirrorScaledPct": 10.072583813906984,
+        "maxDrawdownMirrorFlatPct": 193.10084012187428,
+        "maxRiskRatio": 1,
+        "codes": {
+          "PF_OK": 5628,
+          "PF_CLUSTER": 5628,
+          "PF_CVAR": 5628,
+          "PF_NO_BUDGET": 4221
+        },
+        "gates": [
+          {
+            "code": "W8_COVARIANCE",
+            "label": "the estimator recovers a known correlation",
+            "pass": true,
+            "value": 0.8176855560813193,
+            "threshold": 0.85,
+            "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8177 (tolerance ±0.15); the instrument built to be independent measures -0.0477"
+          },
+          {
+            "code": "W8_CLUSTER",
+            "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+            "pass": true,
+            "value": 1,
+            "threshold": 1,
+            "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+          },
+          {
+            "code": "W8_HEAT_CEILING",
+            "label": "the ceilings bind exactly when the uncapped book would breach them",
+            "pass": true,
+            "value": 0.7271976932788029,
+            "threshold": 1.5,
+            "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8854% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+          },
+          {
+            "code": "W8_CVAR_REPORTED",
+            "label": "the CVaR ceiling is never breached silently",
+            "pass": true,
+            "value": 1.500000000001,
+            "threshold": 1.5,
+            "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8889% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+          },
+          {
+            "code": "W8_DRAWDOWN",
+            "label": "the scalar never raises the risk, and cuts the worst-case loss",
+            "pass": true,
+            "value": 10.072583813906984,
+            "threshold": 193.10084012187428,
+            "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.07% with the scalar vs 193.10% flat"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "positive-control",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.7799522875429256,
+            "independentRho": -0.04546651658123867,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.858525518340418,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8336044012225234,
+            "cappedRiskPctMean": 0.13034521602858717,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 2.7499374478922762,
+            "maxDrawdownFlatPct": 2.7499374478922762,
+            "floorScalar": 1,
+            "maxDrawdownMirrorScaledPct": 10.072583813906984,
+            "maxDrawdownMirrorFlatPct": 193.10084012187428,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.7799522875429256,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7800 (tolerance ±0.15); the instrument built to be independent measures -0.0455"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8585% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8336% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.072583813906984,
+              "threshold": 193.10084012187428,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.07% with the scalar vs 193.10% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "positive-control",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.843711371269004,
+            "independentRho": -0.08496502333239966,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8853565773036902,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8889491703505312,
+            "cappedRiskPctMean": 0.1277091142304513,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 4.7749545707062575,
+            "maxDrawdownFlatPct": 4.744214164586229,
+            "floorScalar": 0.8547,
+            "maxDrawdownMirrorScaledPct": 10.014931343393965,
+            "maxDrawdownMirrorFlatPct": 157.48035298546242,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.843711371269004,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8437 (tolerance ±0.15); the instrument built to be independent measures -0.0850"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8854% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8889% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.014931343393965,
+              "threshold": 157.48035298546242,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.01% with the scalar vs 157.48% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "positive-control",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.8293930094320288,
+            "independentRho": -0.012708776080943698,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8803917210296393,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8787080976959922,
+            "cappedRiskPctMean": 0.12809797284126975,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 3.115875321215801,
+            "maxDrawdownFlatPct": 3.115875321215801,
+            "floorScalar": 1,
+            "maxDrawdownMirrorScaledPct": 10.026525365855232,
+            "maxDrawdownMirrorFlatPct": 182.2545726715072,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.8293930094320288,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8294 (tolerance ±0.15); the instrument built to be independent measures -0.0127"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8804% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8787% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.026525365855232,
+              "threshold": 182.2545726715072,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.03% with the scalar vs 182.25% flat"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "seasonal",
+      "kind": "seasonal",
+      "home": false,
+      "note": "hour-of-day drift: the fixture where the hour feature carries information (report-only; see the calibration caveat in the report notes)",
+      "pooled": {
+        "decisions": 1407,
+        "estimatedRho": 0.7969561058336864,
+        "independentRho": -0.026790073031637034,
+        "clusterCapturesNeighbour": 1,
+        "clusterExcludesIndependent": 1,
+        "refusedCandidates": 4221,
+        "candidateOffers": 8442,
+        "composedPositions": 3,
+        "cappedRiskPctMean": 0.1295615108949174,
+        "maxHeatCappedPct": 0.7271976932788029,
+        "maxHeatNaivePct": 1.86863144148947,
+        "maxCvarCappedPct": 1.500000000001,
+        "maxCvarNaivePct": 3.854450018396087,
+        "maxDrawdownScaledPct": 10.083489803171961,
+        "maxDrawdownFlatPct": 23.37229272171225,
+        "maxDrawdownMirrorScaledPct": 10.081436699933292,
+        "maxDrawdownMirrorFlatPct": 141.41259150997269,
+        "maxRiskRatio": 1,
+        "codes": {
+          "PF_OK": 5628,
+          "PF_CLUSTER": 5628,
+          "PF_CVAR": 5628,
+          "PF_NO_BUDGET": 4221
+        },
+        "gates": [
+          {
+            "code": "W8_COVARIANCE",
+            "label": "the estimator recovers a known correlation",
+            "pass": true,
+            "value": 0.7969561058336864,
+            "threshold": 0.85,
+            "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7970 (tolerance ±0.15); the instrument built to be independent measures -0.0268"
+          },
+          {
+            "code": "W8_CLUSTER",
+            "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+            "pass": true,
+            "value": 1,
+            "threshold": 1,
+            "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+          },
+          {
+            "code": "W8_HEAT_CEILING",
+            "label": "the ceilings bind exactly when the uncapped book would breach them",
+            "pass": true,
+            "value": 0.7271976932788029,
+            "threshold": 1.5,
+            "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8686% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+          },
+          {
+            "code": "W8_CVAR_REPORTED",
+            "label": "the CVaR ceiling is never breached silently",
+            "pass": true,
+            "value": 1.500000000001,
+            "threshold": 1.5,
+            "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8545% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+          },
+          {
+            "code": "W8_DRAWDOWN",
+            "label": "the scalar never raises the risk, and cuts the worst-case loss",
+            "pass": true,
+            "value": 10.081436699933292,
+            "threshold": 141.41259150997269,
+            "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.08% with the scalar vs 141.41% flat"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "seasonal",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.8192533592565705,
+            "independentRho": -0.007782405856005227,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.86863144148947,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.854450018396087,
+            "cappedRiskPctMean": 0.128446941897913,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.043700363878905,
+            "maxDrawdownFlatPct": 23.37229272171225,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.02939340165558,
+            "maxDrawdownMirrorFlatPct": 126.15387950721646,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.8192533592565705,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8193 (tolerance ±0.15); the instrument built to be independent measures -0.0078"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8686% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8545% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.02939340165558,
+              "threshold": 126.15387950721646,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.03% with the scalar vs 126.15% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "seasonal",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.7903090414996495,
+            "independentRho": -0.0703170639784428,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8594329689366371,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8354762111951217,
+            "cappedRiskPctMean": 0.1296149665522291,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.083489803171961,
+            "maxDrawdownFlatPct": 19.565137388315925,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.081436699933292,
+            "maxDrawdownMirrorFlatPct": 138.1808500044523,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.7903090414996495,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7903 (tolerance ±0.15); the instrument built to be independent measures -0.0703"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8594% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8355% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.081436699933292,
+              "threshold": 138.1808500044523,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.08% with the scalar vs 138.18% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "seasonal",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.7813059167448388,
+            "independentRho": -0.002270749260463071,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8229966624958034,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.7603185750166297,
+            "cappedRiskPctMean": 0.13062262423461013,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 8.960988984510946,
+            "maxDrawdownFlatPct": 12.668541470283632,
+            "floorScalar": 0.25,
+            "maxDrawdownMirrorScaledPct": 10.081142643642451,
+            "maxDrawdownMirrorFlatPct": 141.41259150997269,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.7813059167448388,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7813 (tolerance ±0.15); the instrument built to be independent measures -0.0023"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8230% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.7603% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.081142643642451,
+              "threshold": 141.41259150997269,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.08% with the scalar vs 141.41% flat"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "mean-reverting",
+      "kind": "mean-reverting",
+      "home": false,
+      "note": "OU around a level: the structure a meta-model should be able to rank",
+      "pooled": {
+        "decisions": 1407,
+        "estimatedRho": 0.7988845746994827,
+        "independentRho": -0.02990504136377646,
+        "clusterCapturesNeighbour": 1,
+        "clusterExcludesIndependent": 1,
+        "refusedCandidates": 4221,
+        "candidateOffers": 8442,
+        "composedPositions": 3,
+        "cappedRiskPctMean": 0.1294753323578675,
+        "maxHeatCappedPct": 0.7271976932788029,
+        "maxHeatNaivePct": 1.865290071100698,
+        "maxCvarCappedPct": 1.500000000001,
+        "maxCvarNaivePct": 3.8475577308799336,
+        "maxDrawdownScaledPct": 10.081769443728918,
+        "maxDrawdownFlatPct": 36.41180941949628,
+        "maxDrawdownMirrorScaledPct": 10.051180505589437,
+        "maxDrawdownMirrorFlatPct": 115.19856211147686,
+        "maxRiskRatio": 1,
+        "codes": {
+          "PF_OK": 5628,
+          "PF_CLUSTER": 5628,
+          "PF_CVAR": 5628,
+          "PF_NO_BUDGET": 4221
+        },
+        "gates": [
+          {
+            "code": "W8_COVARIANCE",
+            "label": "the estimator recovers a known correlation",
+            "pass": true,
+            "value": 0.7988845746994827,
+            "threshold": 0.85,
+            "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7989 (tolerance ±0.15); the instrument built to be independent measures -0.0299"
+          },
+          {
+            "code": "W8_CLUSTER",
+            "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+            "pass": true,
+            "value": 1,
+            "threshold": 1,
+            "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+          },
+          {
+            "code": "W8_HEAT_CEILING",
+            "label": "the ceilings bind exactly when the uncapped book would breach them",
+            "pass": true,
+            "value": 0.7271976932788029,
+            "threshold": 1.5,
+            "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8653% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+          },
+          {
+            "code": "W8_CVAR_REPORTED",
+            "label": "the CVaR ceiling is never breached silently",
+            "pass": true,
+            "value": 1.500000000001,
+            "threshold": 1.5,
+            "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8476% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+          },
+          {
+            "code": "W8_DRAWDOWN",
+            "label": "the scalar never raises the risk, and cuts the worst-case loss",
+            "pass": true,
+            "value": 10.051180505589437,
+            "threshold": 115.19856211147686,
+            "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.05% with the scalar vs 115.20% flat"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "mean-reverting",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.8158492685942372,
+            "independentRho": -0.014557507950989649,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.865290071100698,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8475577308799336,
+            "cappedRiskPctMean": 0.12857151718452225,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.04096714758889,
+            "maxDrawdownFlatPct": 36.41180941949628,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.039976949181947,
+            "maxDrawdownMirrorFlatPct": 112.16281284262362,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.8158492685942372,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8158 (tolerance ±0.15); the instrument built to be independent measures -0.0146"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8653% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8476% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.039976949181947,
+              "threshold": 112.16281284262362,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.04% with the scalar vs 112.16% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "mean-reverting",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.8003313634990864,
+            "independentRho": -0.061935855011782316,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788028,
+            "maxNaiveBookHeatPct": 1.8615840325481616,
+            "maxComposedBookCvarPct": 1.5000000000009996,
+            "maxNaiveBookCvarPct": 3.839913237669643,
+            "cappedRiskPctMean": 0.1292365074260272,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.081769443728918,
+            "maxDrawdownFlatPct": 23.775002594033413,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.051180505589437,
+            "maxDrawdownMirrorFlatPct": 114.90722247497536,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.8003313634990864,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8003 (tolerance ±0.15); the instrument built to be independent measures -0.0619"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788028,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8616% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.5000000000009996,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8399% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.051180505589437,
+              "threshold": 114.90722247497536,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.05% with the scalar vs 114.91% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "mean-reverting",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.7804730920051244,
+            "independentRho": -0.013221761128557418,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8288235694728199,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.772337810702213,
+            "cappedRiskPctMean": 0.13061797246305318,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.001305891750599,
+            "maxDrawdownFlatPct": 34.16955232550399,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.029908511178201,
+            "maxDrawdownMirrorFlatPct": 115.19856211147686,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.7804730920051244,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7805 (tolerance ±0.15); the instrument built to be independent measures -0.0132"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8288% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.7723% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.029908511178201,
+              "threshold": 115.19856211147686,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.03% with the scalar vs 115.20% flat"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "null-driftless",
+      "kind": "driftless",
+      "home": false,
+      "note": "driftless random walk: nothing to learn, so the fitted policy must not claim an edge",
+      "pooled": {
+        "decisions": 1407,
+        "estimatedRho": 0.7948373845829374,
+        "independentRho": -0.023843485207448206,
+        "clusterCapturesNeighbour": 1,
+        "clusterExcludesIndependent": 1,
+        "refusedCandidates": 4221,
+        "candidateOffers": 8442,
+        "composedPositions": 3,
+        "cappedRiskPctMean": 0.1296342230422547,
+        "maxHeatCappedPct": 0.7271976932788029,
+        "maxHeatNaivePct": 1.8676071158378718,
+        "maxCvarCappedPct": 1.500000000001,
+        "maxCvarNaivePct": 3.8523371287491592,
+        "maxDrawdownScaledPct": 10.036983829866896,
+        "maxDrawdownFlatPct": 25.19875976432388,
+        "maxDrawdownMirrorScaledPct": 10.063696534507963,
+        "maxDrawdownMirrorFlatPct": 138.87496247299472,
+        "maxRiskRatio": 1,
+        "codes": {
+          "PF_OK": 5628,
+          "PF_CLUSTER": 5628,
+          "PF_CVAR": 5628,
+          "PF_NO_BUDGET": 4221
+        },
+        "gates": [
+          {
+            "code": "W8_COVARIANCE",
+            "label": "the estimator recovers a known correlation",
+            "pass": true,
+            "value": 0.7948373845829374,
+            "threshold": 0.85,
+            "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7948 (tolerance ±0.15); the instrument built to be independent measures -0.0238"
+          },
+          {
+            "code": "W8_CLUSTER",
+            "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+            "pass": true,
+            "value": 1,
+            "threshold": 1,
+            "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+          },
+          {
+            "code": "W8_HEAT_CEILING",
+            "label": "the ceilings bind exactly when the uncapped book would breach them",
+            "pass": true,
+            "value": 0.7271976932788029,
+            "threshold": 1.5,
+            "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8676% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+          },
+          {
+            "code": "W8_CVAR_REPORTED",
+            "label": "the CVaR ceiling is never breached silently",
+            "pass": true,
+            "value": 1.500000000001,
+            "threshold": 1.5,
+            "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8523% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+          },
+          {
+            "code": "W8_DRAWDOWN",
+            "label": "the scalar never raises the risk, and cuts the worst-case loss",
+            "pass": true,
+            "value": 10.063696534507963,
+            "threshold": 138.87496247299472,
+            "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.06% with the scalar vs 138.87% flat"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "null-driftless",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.8118465590341102,
+            "independentRho": -0.0034067601141886416,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8676071158378718,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8523371287491592,
+            "cappedRiskPctMean": 0.1287136249806148,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.00272705738568,
+            "maxDrawdownFlatPct": 25.19875976432388,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.049484295027487,
+            "maxDrawdownMirrorFlatPct": 122.7373956813098,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.8118465590341102,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8118 (tolerance ±0.15); the instrument built to be independent measures -0.0034"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8676% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8523% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.049484295027487,
+              "threshold": 122.7373956813098,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.05% with the scalar vs 122.74% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "null-driftless",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.7954666435767248,
+            "independentRho": -0.05407031864068687,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8610334636478412,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8387775721441413,
+            "cappedRiskPctMean": 0.1293841006358439,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 9.233908575743396,
+            "maxDrawdownFlatPct": 13.534844021614449,
+            "floorScalar": 0.25,
+            "maxDrawdownMirrorScaledPct": 10.063696534507963,
+            "maxDrawdownMirrorFlatPct": 138.87496247299472,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.7954666435767248,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7955 (tolerance ±0.15); the instrument built to be independent measures -0.0541"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8610% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8388% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.063696534507963,
+              "threshold": 138.87496247299472,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.06% with the scalar vs 138.87% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "null-driftless",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.7771989511379772,
+            "independentRho": -0.0140533768674691,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8266501523962033,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.7678546754488162,
+            "cappedRiskPctMean": 0.13080494351030528,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.036983829866896,
+            "maxDrawdownFlatPct": 20.558327862685633,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.001975550359912,
+            "maxDrawdownMirrorFlatPct": 136.6413847801971,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.7771989511379772,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7772 (tolerance ±0.15); the instrument built to be independent measures -0.0141"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8267% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.7679% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.001975550359912,
+              "threshold": 136.6413847801971,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.00% with the scalar vs 136.64% flat"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "null-shuffled",
+      "kind": "block-shuffled",
+      "home": false,
+      "note": "block-shuffled returns: marginals kept, temporal structure destroyed",
+      "pooled": {
+        "decisions": 1407,
+        "estimatedRho": 0.7965508332052741,
+        "independentRho": 0.02545210919830782,
+        "clusterCapturesNeighbour": 1,
+        "clusterExcludesIndependent": 1,
+        "refusedCandidates": 4221,
+        "candidateOffers": 8442,
+        "composedPositions": 3,
+        "cappedRiskPctMean": 0.12986354459133848,
+        "maxHeatCappedPct": 0.7271976932788029,
+        "maxHeatNaivePct": 1.8916168574743828,
+        "maxCvarCappedPct": 1.500000000001,
+        "maxCvarNaivePct": 3.9018623304758138,
+        "maxDrawdownScaledPct": 10.084992115164987,
+        "maxDrawdownFlatPct": 26.639871176111168,
+        "maxDrawdownMirrorScaledPct": 10.076634726095344,
+        "maxDrawdownMirrorFlatPct": 136.36680290854696,
+        "maxRiskRatio": 1,
+        "codes": {
+          "PF_OK": 5628,
+          "PF_CLUSTER": 5628,
+          "PF_CVAR": 5628,
+          "PF_NO_BUDGET": 4221
+        },
+        "gates": [
+          {
+            "code": "W8_COVARIANCE",
+            "label": "the estimator recovers a known correlation",
+            "pass": true,
+            "value": 0.7965508332052741,
+            "threshold": 0.85,
+            "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7966 (tolerance ±0.15); the instrument built to be independent measures 0.0255"
+          },
+          {
+            "code": "W8_CLUSTER",
+            "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+            "pass": true,
+            "value": 1,
+            "threshold": 1,
+            "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+          },
+          {
+            "code": "W8_HEAT_CEILING",
+            "label": "the ceilings bind exactly when the uncapped book would breach them",
+            "pass": true,
+            "value": 0.7271976932788029,
+            "threshold": 1.5,
+            "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8916% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+          },
+          {
+            "code": "W8_CVAR_REPORTED",
+            "label": "the CVaR ceiling is never breached silently",
+            "pass": true,
+            "value": 1.500000000001,
+            "threshold": 1.5,
+            "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.9019% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+          },
+          {
+            "code": "W8_DRAWDOWN",
+            "label": "the scalar never raises the risk, and cuts the worst-case loss",
+            "pass": true,
+            "value": 10.076634726095344,
+            "threshold": 136.36680290854696,
+            "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.08% with the scalar vs 136.37% flat"
+          }
+        ]
+      },
+      "series": [
+        {
+          "fixture": "null-shuffled",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.7181705613909402,
+            "independentRho": 0.05116648782748593,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.78447981766443,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.6808693856406287,
+            "cappedRiskPctMean": 0.13359249550465352,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.043832846068156,
+            "maxDrawdownFlatPct": 26.639871176111168,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.076634726095344,
+            "maxDrawdownMirrorFlatPct": 124.6889026351929,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.7181705613909402,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7182 (tolerance ±0.15); the instrument built to be independent measures 0.0512"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.7845% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.6809% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.076634726095344,
+              "threshold": 124.6889026351929,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.08% with the scalar vs 124.69% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "null-shuffled",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.8602068583308128,
+            "independentRho": 0.05037955501875718,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8916168574743828,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.9018623304758138,
+            "cappedRiskPctMean": 0.12724742785560328,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 9.851693849255485,
+            "maxDrawdownFlatPct": 16.572479115693646,
+            "floorScalar": 0.25,
+            "maxDrawdownMirrorScaledPct": 10.032130279926479,
+            "maxDrawdownMirrorFlatPct": 132.37996303402454,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.8602068583308128,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8602 (tolerance ±0.15); the instrument built to be independent measures 0.0504"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8916% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.9019% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.032130279926479,
+              "threshold": 132.37996303402454,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.03% with the scalar vs 132.38% flat"
+            }
+          ]
+        },
+        {
+          "fixture": "null-shuffled",
+          "mode": "swing",
+          "bars": 2501,
+          "measurements": {
+            "estimatedRho": 0.8112750798940691,
+            "independentRho": -0.02518971525131965,
+            "targetRho": 0.85,
+            "clusters": [
+              [
+                "EURUSD",
+                "EURUSD-C1",
+                "EURUSD-C2",
+                "EURUSD-C3",
+                "EURUSD-C4",
+                "EURUSD-C5"
+              ],
+              [
+                "EURUSD-I"
+              ]
+            ],
+            "clusterCapturesNeighbour": 1,
+            "clusterExcludesIndependent": 1,
+            "neighbourCluster": [
+              "EURUSD",
+              "EURUSD-C1",
+              "EURUSD-C2",
+              "EURUSD-C3",
+              "EURUSD-C4",
+              "EURUSD-C5"
+            ],
+            "independentCluster": [
+              "EURUSD-I"
+            ]
+          },
+          "book": {
+            "decisions": 469,
+            "naivePositions": 6,
+            "composedPositions": 3,
+            "refusedCandidates": 1407,
+            "candidateOffers": 2814,
+            "cappedCandidates": 469,
+            "maxComposedBookHeatPct": 0.7271976932788029,
+            "maxNaiveBookHeatPct": 1.8767220005797858,
+            "maxComposedBookCvarPct": 1.500000000001,
+            "maxNaiveBookCvarPct": 3.8711385183014753,
+            "cappedRiskPctMean": 0.12875071041375863,
+            "codes": {
+              "PF_OK": 1876,
+              "PF_CLUSTER": 1876,
+              "PF_CVAR": 1876,
+              "PF_NO_BUDGET": 1407
+            }
+          },
+          "drawdown": {
+            "maxDrawdownScaledPct": 10.084992115164987,
+            "maxDrawdownFlatPct": 18.203813302936307,
+            "floorScalar": 0,
+            "maxDrawdownMirrorScaledPct": 10.026641405114933,
+            "maxDrawdownMirrorFlatPct": 136.36680290854696,
+            "maxRiskRatio": 1,
+            "trades": 459
+          },
+          "gates": [
+            {
+              "code": "W8_COVARIANCE",
+              "label": "the estimator recovers a known correlation",
+              "pass": true,
+              "value": 0.8112750798940691,
+              "threshold": 0.85,
+              "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8113 (tolerance ±0.15); the instrument built to be independent measures -0.0252"
+            },
+            {
+              "code": "W8_CLUSTER",
+              "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+              "pass": true,
+              "value": 1,
+              "threshold": 1,
+              "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+            },
+            {
+              "code": "W8_HEAT_CEILING",
+              "label": "the ceilings bind exactly when the uncapped book would breach them",
+              "pass": true,
+              "value": 0.7271976932788029,
+              "threshold": 1.5,
+              "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8767% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+            },
+            {
+              "code": "W8_CVAR_REPORTED",
+              "label": "the CVaR ceiling is never breached silently",
+              "pass": true,
+              "value": 1.500000000001,
+              "threshold": 1.5,
+              "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8711% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 1407 of 2814 candidate offers"
+            },
+            {
+              "code": "W8_DRAWDOWN",
+              "label": "the scalar never raises the risk, and cuts the worst-case loss",
+              "pass": true,
+              "value": 10.026641405114933,
+              "threshold": 136.36680290854696,
+              "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.03% with the scalar vs 136.37% flat"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "gates": [
+    {
+      "code": "W8_COVARIANCE",
+      "label": "the estimator recovers a known correlation",
+      "pass": true,
+      "value": 0.8176855560813193,
+      "threshold": 0.85,
+      "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.8177 (tolerance ±0.15); the instrument built to be independent measures -0.0477"
+    },
+    {
+      "code": "W8_CLUSTER",
+      "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+      "pass": true,
+      "value": 1,
+      "threshold": 1,
+      "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+    },
+    {
+      "code": "W8_HEAT_CEILING",
+      "label": "the ceilings bind exactly when the uncapped book would breach them",
+      "pass": true,
+      "value": 0.7271976932788029,
+      "threshold": 1.5,
+      "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8854% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+    },
+    {
+      "code": "W8_CVAR_REPORTED",
+      "label": "the CVaR ceiling is never breached silently",
+      "pass": true,
+      "value": 1.500000000001,
+      "threshold": 1.5,
+      "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8889% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+    },
+    {
+      "code": "W8_DRAWDOWN",
+      "label": "the scalar never raises the risk, and cuts the worst-case loss",
+      "pass": true,
+      "value": 10.072583813906984,
+      "threshold": 193.10084012187428,
+      "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.07% with the scalar vs 193.10% flat"
+    },
+    {
+      "code": "W8_COVARIANCE",
+      "label": "the estimator recovers a known correlation",
+      "pass": true,
+      "value": 0.7969561058336864,
+      "threshold": 0.85,
+      "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7970 (tolerance ±0.15); the instrument built to be independent measures -0.0268"
+    },
+    {
+      "code": "W8_CLUSTER",
+      "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+      "pass": true,
+      "value": 1,
+      "threshold": 1,
+      "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+    },
+    {
+      "code": "W8_HEAT_CEILING",
+      "label": "the ceilings bind exactly when the uncapped book would breach them",
+      "pass": true,
+      "value": 0.7271976932788029,
+      "threshold": 1.5,
+      "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8686% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+    },
+    {
+      "code": "W8_CVAR_REPORTED",
+      "label": "the CVaR ceiling is never breached silently",
+      "pass": true,
+      "value": 1.500000000001,
+      "threshold": 1.5,
+      "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8545% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+    },
+    {
+      "code": "W8_DRAWDOWN",
+      "label": "the scalar never raises the risk, and cuts the worst-case loss",
+      "pass": true,
+      "value": 10.081436699933292,
+      "threshold": 141.41259150997269,
+      "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.08% with the scalar vs 141.41% flat"
+    },
+    {
+      "code": "W8_COVARIANCE",
+      "label": "the estimator recovers a known correlation",
+      "pass": true,
+      "value": 0.7988845746994827,
+      "threshold": 0.85,
+      "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7989 (tolerance ±0.15); the instrument built to be independent measures -0.0299"
+    },
+    {
+      "code": "W8_CLUSTER",
+      "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+      "pass": true,
+      "value": 1,
+      "threshold": 1,
+      "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+    },
+    {
+      "code": "W8_HEAT_CEILING",
+      "label": "the ceilings bind exactly when the uncapped book would breach them",
+      "pass": true,
+      "value": 0.7271976932788029,
+      "threshold": 1.5,
+      "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8653% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+    },
+    {
+      "code": "W8_CVAR_REPORTED",
+      "label": "the CVaR ceiling is never breached silently",
+      "pass": true,
+      "value": 1.500000000001,
+      "threshold": 1.5,
+      "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8476% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+    },
+    {
+      "code": "W8_DRAWDOWN",
+      "label": "the scalar never raises the risk, and cuts the worst-case loss",
+      "pass": true,
+      "value": 10.051180505589437,
+      "threshold": 115.19856211147686,
+      "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.05% with the scalar vs 115.20% flat"
+    },
+    {
+      "code": "W8_COVARIANCE",
+      "label": "the estimator recovers a known correlation",
+      "pass": true,
+      "value": 0.7948373845829374,
+      "threshold": 0.85,
+      "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7948 (tolerance ±0.15); the instrument built to be independent measures -0.0238"
+    },
+    {
+      "code": "W8_CLUSTER",
+      "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+      "pass": true,
+      "value": 1,
+      "threshold": 1,
+      "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+    },
+    {
+      "code": "W8_HEAT_CEILING",
+      "label": "the ceilings bind exactly when the uncapped book would breach them",
+      "pass": true,
+      "value": 0.7271976932788029,
+      "threshold": 1.5,
+      "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8676% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+    },
+    {
+      "code": "W8_CVAR_REPORTED",
+      "label": "the CVaR ceiling is never breached silently",
+      "pass": true,
+      "value": 1.500000000001,
+      "threshold": 1.5,
+      "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.8523% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+    },
+    {
+      "code": "W8_DRAWDOWN",
+      "label": "the scalar never raises the risk, and cuts the worst-case loss",
+      "pass": true,
+      "value": 10.063696534507963,
+      "threshold": 138.87496247299472,
+      "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.06% with the scalar vs 138.87% flat"
+    },
+    {
+      "code": "W8_COVARIANCE",
+      "label": "the estimator recovers a known correlation",
+      "pass": true,
+      "value": 0.7965508332052741,
+      "threshold": 0.85,
+      "detail": "constructed ρ = 0.85, estimated ρ̂ = 0.7966 (tolerance ±0.15); the instrument built to be independent measures 0.0255"
+    },
+    {
+      "code": "W8_CLUSTER",
+      "label": "a correlated neighbour is one bet, an uncorrelated one is not",
+      "pass": true,
+      "value": 1,
+      "threshold": 1,
+      "detail": "clusters [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5] [EURUSD-I]: the correlated candidate's cluster [EURUSD EURUSD-C1 EURUSD-C2 EURUSD-C3 EURUSD-C4 EURUSD-C5], the independent candidate's cluster [EURUSD-I]"
+    },
+    {
+      "code": "W8_HEAT_CEILING",
+      "label": "the ceilings bind exactly when the uncapped book would breach them",
+      "pass": true,
+      "value": 0.7271976932788029,
+      "threshold": 1.5,
+      "detail": "the modelled 7-instrument book at a flat 0.35% reaches heat 1.8916% (ceiling 1.5%, BINDS); the composed book peaks at 0.7272%"
+    },
+    {
+      "code": "W8_CVAR_REPORTED",
+      "label": "the CVaR ceiling is never breached silently",
+      "pass": true,
+      "value": 1.500000000001,
+      "threshold": 1.5,
+      "detail": "the same 7-instrument book reaches parametric 95% CVaR 3.9019% (ceiling 1.5%, BINDS); the composed book peaks at 1.5000% (the trade is CUT to the largest size that fits, so the ceiling is reached rather than exceeded), refused 4221 of 8442 candidate offers"
+    },
+    {
+      "code": "W8_DRAWDOWN",
+      "label": "the scalar never raises the risk, and cuts the worst-case loss",
+      "pass": true,
+      "value": 10.076634726095344,
+      "threshold": 136.36680290854696,
+      "detail": "risk ratio peaked at 1.0000× the 0.35% cap (never above 1); on the mirrored all-losses sequence of 459 trades the worst drawdown is 10.08% with the scalar vs 136.37% flat"
+    }
+  ],
+  "verdict": "PASS",
+  "notes": [
+    "the Kelly term is NOT measured here: it consumes the WP5 model's p_LCB and this study does not fit a model, so the composition runs with probabilityLowerBound = null and the 0.35% per-trade cap is the binding constraint. The wiring test wp8-portfolio.test.ts covers the Kelly branch",
+    "the companion instrument is built as r_c = 0.85·r_p + √(1−0.85²)·ε from the primary's own returns, with a separate noise stream for the independent instrument, so the estimator is checked against a correlation it was GIVEN",
+    "the drawdown comparison walks the WP7 simulator's realised R sequence at a fixed 0.35% per trade with and without the drawdown scalar; it is a measurement of the scalar's effect on THAT path, not a forecast of anyone's equity",
+    "the parametric CVaR is a normal-tail LOWER bound on a fat-tailed number (see portfolio-risk.ts). The composed book's CVaR therefore lands ON its 1.5% ceiling rather than under it: the layer cuts the candidate to the largest size that fits, and a trade that cannot be cut small enough is refused with PF_NO_BUDGET. The 1.5% is only a floor on the true tail risk, which is why the kurtosis caveat is repeated here",
+    "the drawdown comparison walks the SAME realised R sequence twice, with and without the scalar, and then walks it once more mirrored to all-losses. The mirror is the only version a safety gate can hold: on a profitable path a risk scalar can leave a LARGER percentage drawdown behind, because the percentage is measured against an equity curve that also grew more slowly. The mirrored flat path reaches ruin (197% of the initial equity) while the scalar halts the desk at ~10% — that is the mechanism the gate measures, together with the invariant that the layer's risk is never above the cap"
+  ]
+}

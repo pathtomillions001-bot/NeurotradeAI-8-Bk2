@@ -949,7 +949,7 @@ the gatekeeper refuses.
 
 ### 8.4 What the study caught: the first MC gate was unsatisfiable
 
-The WP6 study (`--gatekeeper`, §12) re-reads the WP5 corpora through the gate and
+The WP6 study (`--gatekeeper`, §14) re-reads the WP5 corpora through the gate and
 measures three policies side by side: WP5's own `EV_LCB > 0`, the mode's **floor**,
 and the floor **plus** BH at q = 0.10. It also samples the Monte Carlo.
 
@@ -1028,7 +1028,7 @@ The gates that decide the verdict:
   absent, the gatekeeper refuses with `GK_REGIME`. The MC runs only under
   `DESK_V4_MONTE_CARLO_V2`; absent, `GK_MC_UNAVAILABLE`. Both are fail-closed by
   design, and both are asserted in `wp6-gatekeeper-wiring.test.ts`.
-* **`shadow` does not soften a veto** (§9, assumption 32).
+* **`shadow` does not soften a veto** (§11, assumption 32).
 * **The study does not re-measure WP3 or the live MC.** The permit is measured in
   the WP3 study; the composition is measured by the wiring tests; the MC here is
   sampled (every 60th bar), and the report says so. **Scalp is not in the meta
@@ -1037,7 +1037,250 @@ The gates that decide the verdict:
 * **The gatekeeper is not an alpha source.** It cannot make a bad plan good; it
   can only refuse one. Every number it prints is a bound, a cost, or a count.
 
-## 9. Documented assumptions and conservative choices
+## 9. WP7 — execution, timing, and what an entry is worth
+
+### 9.1 What it is
+
+`src/lib/multiasset/execution.ts` adds the four things the desk could not do before
+the order is placed, each of which is a **refusal or a correction**, never a
+promise:
+
+| layer | rule | code |
+| --- | --- | --- |
+| spread stress | skip when the current spread is more than 1σ above its own trailing mean (240-quote window, ≥ 60 samples before it speaks) | `EXEC_SPREAD_Z` |
+| timing | shrink each minute-of-week bucket's mean R toward the pooled mean (8 pseudo-observations) and refuse a bucket whose shrunk mean is negative once it holds ≥ 20 outcomes | `EXEC_TIMING` |
+| slippage ledger | EWMA (λ = 0.97) of signed slippage in R; refuse new entries once the mean exceeds **0.15R** (≥ 20 measured fills) | `EXEC_SLIPPAGE_PAUSE` |
+| measured allowance (D7) | the plan's cost uses `min(3 × modelled, max(modelled, measured))` once ≥ 20 fills exist — it can only ever **raise** the modelled allowance | — |
+
+All four are per-agent permits: with the measurement absent they **permit**, and
+the reason is that a refusal needs a measurement whereas a permission does not
+need one. That is the opposite of the fail-closed rule used for the gatekeeper's
+own layers, and deliberately so: the gatekeeper is refusing a trade, this module
+is refusing a *moment*.
+
+The entry style is the fifth piece. When the alpha view contains a `sweep` or a
+`pullback` reading the desk rests a **limit** at the desk's own offset below
+(in a buy) the decision price — `0.08 × ATR` scalp, `0.12 × ATR` otherwise — and
+hands the EA a pending order with an expiry (3 / 6 / 12 bars by mode) and a
+cancel-at-0.5R-unfilled rule. Breakout plans keep the legacy stop trigger.
+
+### 9.2 The study
+
+`--execution` (§14) simulates **the same plan twice on every decision bar** of the
+WP5 corpora: identical geometry, identical stop **level**, identical target rule,
+identical management policy — one entry at the legacy breakout trigger, one
+resting at the pullback level. Each trade is measured in its own R, and the
+resting fill is additionally re-expressed in the **legacy plan's risk unit**
+(`ΔR = R_resting × risk_resting / risk_legacy − R_legacy`), because a fill closer to
+the same stop is not the same unit of risk. Directions alternate
+deterministically (buy, sell, …): the question is entry-style-symmetric, and
+always going long on a drifting generator would answer a different one.
+
+Both plans are killed by the desk's own invalidation rule (0.6 ATR beyond the
+decision price), so a pullback that goes too deep kills the plan rather than
+filling it. Nothing at or before the decision bar is ever read for a price — the
+scan starts at `decisionIndex + 1`, which is `executed-policy.ts`'s no-lookahead
+guarantee, asserted by its own test.
+
+### 9.3 The result (stored in `research-reports/2026-10-11-wp7-execution-*-study.json`)
+
+Both modes **PASS**. Legacy and resting means are per fill; ΔR is the paired
+difference in the legacy risk unit.
+
+| fixture (intraday) | decisions | legacy R | resting R | fill rate | paired ΔR | better | timing refuses |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| positive-control | 1392 | +0.0673 | **+0.2271** | 100.0% | **+0.1127** | 75.7% | 0.0% |
+| seasonal | 1392 | −0.0459 | +0.1167 | 100.0% | +0.1421 | 81.7% | 0.0% |
+| mean-reverting | 1392 | −0.2312 | −0.0737 | 100.0% | +0.1697 | 87.9% | 0.0% |
+| null-driftless | 1392 | −0.1755 | −0.0078 | 100.0% | +0.1691 | 87.1% | 0.0% |
+| null-shuffled | 1392 | −0.1638 | −0.0035 | 100.0% | +0.1609 | 85.9% | 0.0% |
+
+| fixture (swing) | decisions | legacy R | resting R | fill rate | paired ΔR | better | timing refuses |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| positive-control | 1377 | +0.1362 | **+0.2503** | 100.0% | **+0.0810** | 68.7% | 0.0% |
+| seasonal | 1377 | −0.1028 | +0.0231 | 100.0% | +0.1217 | 79.8% | 0.0% |
+| mean-reverting | 1377 | −0.1903 | −0.0709 | 100.0% | +0.1277 | 83.7% | 0.0% |
+| null-driftless | 1377 | −0.1134 | +0.0007 | 100.0% | +0.1141 | 79.1% | 0.0% |
+| null-shuffled | 1377 | −0.1229 | −0.0103 | 100.0% | +0.1138 | 79.4% | 0.0% |
+
+Gates: the resting level fills at least half the corpus (measured 100%); resting
+does not cost the trade its edge (paired ΔR ≥ −0.05R, measured +0.081 … +0.170);
+the timing rule is a filter and not a blanket ban (refusals ≤ 50%, measured 0%).
+
+### 9.4 What this proves — and what it does not
+
+**What it does not prove.** Every fill in the study happened on the **first bar**
+after the decision (median wait 1 bar, 100% of fills), because the desk's offset
+(0.08–0.12 ATR) is small next to a bar's own range: on these corpora the market
+essentially always comes back that far. So the measured advantage is a **geometry**
+effect and not a timing edge — same stop level, better fill, therefore a smaller
+risk unit and a nearer target in price terms. The case a resting entry actually
+has to survive, a market that runs away and never fills, has **0 occurrences**
+here, and the study reports that rather than hiding it behind a fill model. The
+demo phase's own fills are the measurement for that.
+
+**What is not measured at all.** The synthetic corpora carry no spread column, no
+order fills and no calendar, so the **spread z-score, the slippage ledger, the
+measured allowance and the timing buckets are not exercised by this study**. The
+timing ledger is the sharpest case: on these corpora **0 of 464** minute-of-week
+buckets (intraday) and **0 of 168** (swing) reach the 20-outcome minimum, so the
+evidence is *insufficient* and the filter refuses nothing — which the report
+prints in those words (`timing.evidence: "insufficient"`). What the study can say
+is that the rule is a filter and not a blanket ban, and that the buckets it will
+judge are the desk's own clock (`minuteOfWeek`, Sunday-anchored, UTC). The live
+desk's quotes and fills are these layers' measurement: every accepted quote feeds
+`recordSpread`, every closed position with an EA-stamped `initialRiskMoney` feeds
+one outcome in R, and every filled `arm_plan` feeds one signed slippage in R —
+readable at `GET /execution`.
+
+### 9.5 What is wired
+
+* Spread samples are recorded at the desk's quote ingestion (one flag check per
+  heartbeat, not per quote) and read at all three `evaluate()` sites.
+* The in-flight command is read **before** the result is acknowledged: the
+  acknowledgement clears it, and an `arm_plan` command carries the plan's side,
+  trigger and risk unit — the numbers a slippage measurement needs.
+* The timing outcome uses the position's own open time. The terminal does not
+  report which plan produced the fill, so this is exact for immediate entries and
+  a **documented approximation** for a resting one (assumption 37).
+* Flags: `DESK_V4_EXECUTION` default **off**; with it off, `decision.execution` is
+  `null` and the legacy plan projection is byte-identical. Adoption of a resting
+  entry is live-only (`live`), so shadow mode measures without moving the order.
+* D7 is implemented as *"the slippage allowance stops being an assumption"*:
+  with the flag on and ≥ 20 measured fills, the allowance becomes
+  `min(3 × modelled, max(modelled, measured))`, recomputing `costPrice` and
+  therefore the EV the gatekeeper prices. **No file in this repository defines
+  D7** — the interpretation is recorded as assumption 37 and raised with the owner.
+
+## 10. WP8 — the portfolio and the risk composition
+
+### 10.1 What it is
+
+`src/lib/multiasset/portfolio-risk.ts` is the layer that decides **how much** may be
+risked once the gatekeeper has decided *whether*:
+
+```
+riskPct = min(0.35% , ¼-Kelly(p_LCB) )      ← the cap and the model, never above 0.35%
+        × drawdownScalar                     ← 1.0 → 0.25 between 4% and 8%, halt at 10%
+```
+
+and then three portfolio ceilings, each of which can only **reduce** what is left:
+
+| ceiling | rule | code |
+| --- | --- | --- |
+| correlation cluster | positions above ρ = 0.6 are one bet (transitive closure); the cluster may carry ≤ 1.0% of equity | `PF_CLUSTER` |
+| heat | `√(r'Cr) ≤ 1.5%` for the book **as it would be** after this trade | `PF_HEAT` |
+| one-day 95% CVaR | ≤ 1.5% of equity, parametric normal | `PF_CVAR` |
+
+The covariance is EWMA-weighted (λ = 0.97) over the desk's own 120-bar returns and
+Ledoit–Wolf shrunk toward a diagonal target, with a **40-bar floor**: below it the
+layer says it cannot measure the book (`PF_NO_COVARIANCE`) and keeps the per-trade
+ceiling rather than assuming the missing asset is uncorrelated with everything
+else. An unmeasurable book is a reason to take less risk, not more.
+
+### 10.2 The study
+
+`--portfolio` (§14) builds a book whose structure is **known**: a companion
+instrument is constructed from the primary's own returns as
+`r_c = 0.85·r_p + √(1 − 0.85²)·ε`, with a **separate** noise stream for an
+instrument built to be uncorrelated, so the estimator can be checked against the
+correlation it was given instead of against a market correlation nobody knows.
+`ε` is a sum-of-four-uniforms draw, so its fourth moment is finite and no single
+draw can dominate a covariance estimate.
+
+Two compositions are measured, because the layer does two different jobs:
+
+* **the neighbour** — a one-position book taking the correlated instrument: the
+  doubling-the-same-bet case, which must land in the same cluster;
+* **the accumulation** — six instruments offered one at a time, in matrix order,
+  each sized by the layer against the book the *layer itself* has accumulated,
+  against the same six instruments taken at a flat 0.35% with no ceilings.
+
+The accumulation is the design the first version of this study got wrong: a book
+that is opened **all at once** is already over its ceilings before the first
+decision, so the only thing such a fixture can measure is the book's own heat and
+an eternal refusal. Measuring the ceilings requires letting the layer build the
+book.
+
+### 10.3 The defect the study caught: a remedy that could not reach its own ceiling
+
+The first run failed the CVaR gate in both modes — and it was right to. The CVaR
+remedy was `riskPct *= ceiling / cvar`, and that cannot work: CVaR is
+`heat × factor` and heat is a square root of a quadratic, so it is **concave** in
+this trade's own risk. Scaling the trade by `s < 1` shrinks the book's CVaR by
+**less** than `s`, leaving it above the ceiling the code had just named. Measured
+on the study's own book, the linear remedy cut the trade to 0.2455% and left the
+book at **1.93% against a 1.5% ceiling**.
+
+The remedy is now a **solve**: `affordableRiskForCvar` finds the largest trade size
+that puts the book on the ceiling (scan for the bracket, then bisect — heat is not
+monotone in this trade's risk when the candidate is negatively correlated, so a
+bare bisection could walk into a hole), and returns 0 when the book is already over
+the ceiling without this trade, which is the honest answer: no size of this trade
+can fix a book that is already too big. `wp8-portfolio.test.ts` (W8.17) pins both
+halves — that the composed book lands on the ceiling, and that the linear rescale
+demonstrably would not have.
+
+### 10.4 The result (stored in `research-reports/2026-10-11-wp8-portfolio-*-study.json`)
+
+Both modes **PASS**. Heat and CVaR are peaks over the accumulation; the flat
+column is the same six instruments at 0.35% each with no ceilings.
+
+| fixture (intraday) |  ρ̂ | heat composed / flat | CVaR composed / flat | refused | risk taken | mirrored DD scalar / flat |
+| --- | --- | --- | --- | --- | --- | --- |
+| positive-control | 0.8177 | **0.7272%** / 1.8854% | **1.5000%** / 3.8889% | 4221 / 8442 | 0.129% | **10.10%** / 197.21% |
+| seasonal | 0.8036 | 0.7272% / 1.8697% | 1.5000% / 3.8567% | 4221 / 8442 | 0.129% | 10.09% / 180.44% |
+| mean-reverting | 0.7989 | 0.7272% / 1.8653% | 1.5000% / 3.8476% | 4221 / 8442 | 0.130% | 10.09% / 150.05% |
+| null-driftless | 0.7948 | 0.7272% / 1.8676% | 1.5000% / 3.8523% | 4221 / 8442 | 0.130% | 10.08% / 162.02% |
+| null-shuffled | 0.7966 | 0.7272% / 1.8916% | 1.5000% / 3.9019% | 4221 / 8442 | 0.130% | 10.10% / 158.63% |
+
+The swing mode reproduces the same structure (ρ̂ 0.7948 … 0.8177, composed heat
+0.7272%, composed CVaR 1.5000%, mirrored DD 10.05–10.08% against 115–193%).
+
+Gates: the estimator recovers the constructed correlation (measured 0.795 … 0.818
+against 0.85, tolerance ±0.15, while the instrument built to be independent
+measures −0.048 … +0.026); a correlated candidate lands in the same cluster and an
+uncorrelated one does not; the composed book stays inside the ceilings *exactly
+when* the same instruments uncapped would breach them (heat 1.885–1.892% flat vs
+1.5%, CVaR 3.85–3.90% flat vs 1.5%); the scalar never raises the risk
+(ratio 1.0000) and cuts the worst-case loss (mirrored path 10.05–10.10% against
+115–197%).
+
+### 10.5 Why the drawdown gate is measured on the mirrored path
+
+On the **realised** path the scalar can leave a *larger* percentage drawdown
+behind — measured 7.73% against 7.64% (intraday positive control) and 4.77%
+against 4.74% (swing) — because the percentage is measured against an equity curve
+that also grew more slowly. That is arithmetic, not protection, and the study
+reports it instead of gating it. The property a safety gate can hold is measured on
+the same R sequence **mirrored to all losses**, which is the scalar's worst case:
+the flat book is destroyed (115–197% of the initial equity) while the scalar halts
+the desk at its 10% halt level, and the invariant that always matters — the layer's
+risk is never above the 0.35% cap — holds at exactly 1.0000×.
+
+### 10.6 What is wired, and what this does not claim
+
+* **Wiring.** `desk.ts` passes the desk's own cross-asset covariance (built from the
+  analysis frames it already holds, 120 returns) and the open book with the risk
+  each position was stamped with (`initialRiskMoney`); the decision result carries
+  the risk, the caps, the cluster, the heat, the CVaR and the codes the journal
+  records. A read-only `GET /execution` exposes the WP7 ledgers as well.
+* **Kelly is not measured in this study.** It needs the WP5 model's `p_LCB` and the
+  study does not fit a model there, so it runs with `probabilityLowerBound: null`
+  and the cap is what binds. The Kelly branch is covered by
+  `wp8-portfolio.test.ts`, and its live value arrives with the model.
+* **The book is synthetic and stationary.** A live book's correlations move, so
+  these ceilings hold at approval time, not forever; the layer cannot un-risk
+  positions already open, and when the book has drifted over its ceilings the
+  honest outcome is a refusal with no budget — which is what the layer does and
+  what the study's refusal count (50% of offers) is.
+* **The parametric CVaR is a lower bound.** It is a normal-tail number on a
+  fat-tailed quantity; the composed book sits **exactly on** 1.5% because the trade
+  is cut to the largest size that fits, so the true tail risk is larger than the
+  printed number. The heat ceiling (a correlation-weighted bound) and the cluster
+  ceiling (a hard sum) are the layers that do not assume a distribution.
+
+## 11. Documented assumptions and conservative choices
 
 Each of these was a fork in the road where the conservative option was taken and
 the reasoning recorded.
@@ -1176,7 +1419,7 @@ the reasoning recorded.
    swing. The WP6 study prints armed counts and realised mean R under three
    policies (EV_LCB > 0, the floor, the floor + BH) so a reader can see the price
    of the margin. A later work package may RAISE the floor per cohort; nothing may
-   lower it (§10, gate ledger).
+   lower it (§12, gate ledger).
 29. **The executed-policy Monte Carlo is a *geometry* check, not an alpha claim.**
    It resamples the market's own paths at the fill with no alpha view, so its
    expectation is the random-entry expectation — measured on the WP6 corpora as a
@@ -1201,8 +1444,60 @@ the reasoning recorded.
 33. **The WP3 permit is composed, never inferred.** With `DESK_V4_REGIME_HMM` off
    the permit is absent and the gate refuses with `GK_REGIME`; a flag being off
    must never read as permission. Same for the MC under `DESK_V4_MONTE_CARLO_V2`.
+34. **WP7's resting entry uses the desk's own offset, not a nicer one.** The limit
+   rests 0.08 × ATR (scalp) or 0.12 × ATR from the decision price, because that is
+   the offset the desk's own trigger uses; a study that invented a deeper pullback
+   would be measuring a different strategy.
+35. **The entry-style comparison is geometric and is reported as such.** Same stop
+   **level**, target rule and management policy; each fill measured in its own R
+   and re-expressed in the legacy plan's risk unit. The measured +0.08 … +0.17R is
+   a better fill against the same stop — not a timing edge, and §9.4 says so.
+36. **The study cannot measure WP7's spread, slippage and calendar layers.** The
+   synthetic corpora carry no spread column, no order fills and no clock structure.
+   Those layers therefore **permit** until a measurement exists (a refusal needs
+   evidence; a permission does not), and their measurement is the live desk's own
+   quote and fill stream, exposed at `GET /execution`. An invented fixture that
+   synthesised spreads and fills would be measuring the fixture, not the desk.
+37. **D7 is implemented as "the slippage allowance stops being an assumption".**
+   With the flag on and ≥ 20 measured fills the plan's allowance becomes
+   `min(3 × modelled, max(modelled, measured))` — it can only ever raise the cost,
+   never lower it, so it can only ever make a plan harder to arm. **No file in this
+   repository defines D7**; this reading is recorded here and has been raised with
+   the owner rather than presented as a spec.
+38. **The timing ledger judges minute-of-week buckets with shrinkage.** Each
+   bucket's mean R is shrunk toward the pooled mean by `8/(8+n)` and a bucket with
+   fewer than 20 outcomes permits regardless of its mean. On the study corpora
+   **no bucket reaches 20 outcomes**, so the filter's own value is unmeasured and
+   its gate only asserts that it is a filter rather than a blanket ban.
+39. **The portfolio study's correlation is constructed, not observed.** The
+   companion is `0.85·r_primary + √(1−0.85²)·ε` with a separate noise stream for
+   the instrument built to be independent, so the estimator is judged against the
+   correlation it was **given**. The alternative — measuring an estimator on a
+   synthetic market's own coincidental correlation — would have no ground truth.
+40. **The portfolio study runs with `probabilityLowerBound: null`,** because it
+   does not fit a WP5 model. The per-trade 0.35% cap is therefore what binds in
+   the study; the Kelly branch is covered by `wp8-portfolio.test.ts` and its live
+   value arrives with the model.
+41. **The drawdown scalar is gated on the mirrored all-losses path.** On a
+   profitable path the scalar can leave a *larger* percentage drawdown (measured
+   7.73% vs 7.64%) because the percentage is measured against a slower-growing
+   equity curve; that is reported, not gated. The gate holds the two properties a
+   safety layer must have: the risk is never above the cap (measured ratio
+   1.0000×) and the worst-case loss is reduced (mirrored 10.05–10.10% against
+   115–197%).
+42. **The parametric CVaR is a normal-tail lower bound**, and the composed book
+   sits **exactly on** its 1.5% ceiling because the trade is cut to the largest size
+   that fits; a trade that cannot be cut small enough takes no risk
+   (`PF_NO_BUDGET`). The true tail of a fat-tailed book is larger than the printed
+   number, which is why the heat and cluster ceilings — the ones that do not assume
+   a distribution — are the layers that carry the hard bound.
+43. **`affordableRiskForCvar` solves rather than scales, and returns 0 when the
+   book is already over.** Heat is not monotone in the candidate's own risk when
+   the candidate is negatively correlated with the book, so the solve scans for its
+   bracket before bisecting; and no size of a new trade can fix a book that is
+   already too big, so the honest answer there is zero risk and a named refusal.
 
-## 10. Changelog — every behavioural change, and the gate ledger
+## 12. Changelog — every behavioural change, and the gate ledger
 
 ### Behavioural changes
 
@@ -1246,6 +1541,14 @@ the reasoning recorded.
 | 36 | `bestProbability` in `meta/view.ts` restored to the zero floor, and the regime streak restored to consecutive DECISION bars | **correctness**: a 0.5 floor turned every equal-heads tie into a LONG (directional bias in a helper), and the streak change re-fitted the WP5 corpus. Re-run #3 reproduces the stored WP5 numbers exactly |
 | 37 | `riskPrice` is carried through `MetaDataset` → `MetaOosRow` instead of a study re-deriving the stop from RR geometry | **correctness**: the cost/σ_h comparison is between two PRICE distances and must use the desk's own `riskPriceAt` |
 | 38 | `meta/gatekeeper.test.ts` and `wp6-gatekeeper-wiring.test.ts` joined the standing `package.json` test script | coverage only |
+| 39 | The WP7 execution agent (`execution.ts`): spread z-score gate, minute-of-week timing ledger with shrinkage, measured slippage allowance, auto-pause at mean slippage > 0.15R, resting-limit adoption at the desk's own offset, pending expiry (3/6/12 bars) and cancel-at-0.5R-unfilled handed to the EA | **added, off by default** — with `DESK_V4_EXECUTION` off `decision.execution` is `null` and the plan projection is byte-identical; entry adoption is live-only, so shadow mode measures without moving the order |
+| 40 | `minuteOfWeek()` anchored to Sunday 00:00 UTC (`MINUTES_PER_WEEK`, `EPOCH_DAY_OFFSET_MINUTES` = 4 days; UTC 2024-01-01 (a Monday) 00:00 = minute 1440) | **correctness** — a wrong anchor files every trade in the wrong seasonality bucket, and the ledger's whole output is bucket means |
+| 41 | D7: the slippage allowance becomes measured (`min(3 × modelled, max(modelled, measured))` once ≥ 20 fills exist) | **tighter** — the allowance can only rise, so the EV the gatekeeper prices can only fall; the interpretation is recorded as assumption 37 because no repo source defines D7 |
+| 42 | `inverseNormal` in `portfolio-risk.ts` rewritten with named intermediates (Acklam) | **correctness** — the previous single expression had a precedence bug that made z(0.5) = 1 and every CVaR/drawdown-adjacent number wrong |
+| 43 | `PF_KELLY` compares Kelly against the **ceiling** instead of against the number Kelly itself defines | **correctness** — the code existed but was unreachable, so the journal could not say which of the two sized the trade |
+| 44 | The CVaR remedy replaced by a solve (`affordableRiskForCvar`), and 0 when the book is already over the ceiling | **tighter, and now actually enforced** — the old `riskPct *= ceiling / cvar` left the book at 1.93% against a 1.5% ceiling (concavity of heat); pinned by W8.17 |
+| 45 | WP7/WP8 wiring: spread samples at all three `evaluate()` sites, the desk's own cross-asset covariance in the decision, slippage at fill (in-flight command read BEFORE the ack), one timing outcome per closed position, read-only `GET /execution` | **added, off by default** — both layers are behind their flags and every one of their effects is a reduction or a refusal |
+| 46 | The WP7/WP8 studies and their two test files joined the harness and the standing `package.json` test script | coverage only |
 
 ### Gate ledger
 
@@ -1288,7 +1591,24 @@ the reasoning recorded.
   which lie below the whole measured range. Recorded here rather than changed
   quietly: a gate that can never pass is a stopped desk, and a gate relaxed
   without a stored measurement is a removed one.
-* **Removed**: **none.** No safety gate was removed in WP0–WP6. Everything in
+* **Added (WP7)**: the spread z-score ceiling (1σ above the desk's own trailing
+  mean, ≥ 60 samples before it speaks); the slippage pause at a mean of 0.15R
+  (EWMA λ = 0.97, ≥ 20 fills); the measured allowance
+  `min(3 × modelled, max(modelled, measured))`; the resting entry's expiry
+  (3/6/12 bars) and its cancel-at-0.5R-unfilled rule; and the study's three gates
+  (fill rate ≥ 50%, paired ΔR ≥ −0.05R, timing refusals ≤ 50%).
+* **Added (WP8)**: the whole reduce-only composition — the 0.35% per-trade ceiling,
+  quarter-Kelly on `p_LCB`, the drawdown scalar (knee 4%, floor 0.25 at 8%, halt
+  10%), the transitive correlation-cluster ceiling (1.0% at ρ > 0.6), the heat
+  ceiling (√(r'Cr) ≤ 1.5%) and the one-day 95% CVaR ceiling (1.5%); `PF_NO_COVARIANCE`
+  for an unmeasurable book (the conservative path is the per-trade cap, not a
+  guessed zero correlation); the rule that a caller may only lower
+  `maxTradeRiskPct`; and the study's five gates.
+* **Fixed (WP8)**: the CVaR remedy. It read as a ceiling but could not reach it —
+  the linear rescale left the book at 1.93% against 1.5% (measured, §10.3). Replaced
+  by a solve that lands on the ceiling, with the old behaviour pinned as
+  demonstrably insufficient in W8.17.
+* **Removed**: **none.** No safety gate was removed in WP0–WP8. Everything in
   §1's constraint list (fail-closed news gate, quote integrity, clock
   normalisation, one-account-one-desk, live-off default, daily-loss and drawdown
   limits) is intact, and the position-manager tests assert the ones that touch
@@ -1296,7 +1616,7 @@ the reasoning recorded.
   loosened, and no agent can place a trade — the alpha layer has no order path at
   all.
 
-## 11. Open risks and unverifiable items
+## 13. Open risks and unverifiable items
 
 1. **The EA has never been compiled** (no MetaEditor here). Compile
    `NeurotradeBridge.mq5` in MetaEditor before any live or demo use; the
@@ -1305,15 +1625,24 @@ the reasoning recorded.
 2. **No real broker data has been studied yet.** The baseline above is on
    synthetic data. The command in §4.3 must be run on the owner's own export
    before any threshold is treated as final.
-3. **The baseline fails its null gates.** Until WP6's gatekeeper is in place,
-   the desk arms on structureless data at 4–17% and loses on it. Nothing in v4
-   should be switched on for live trading before that gate exists.
+3. **The baseline still fails its null gates, and the gate that fixes that is
+   still OFF.** WP6's gatekeeper exists and its null study PASSes (§8.5: 37 armed
+   of 3510 intraday with a 95% lower bound of −0.689), but every v4 flag ships off
+   and the rollout's shadow phase is what turns them on. Nothing in v4 may be
+   traded before that phase has run in shadow.
 4. **Calibration is unproven.** The current probability output is not
    calibrated (slope −0.24, Brier skill negative). WP5 must fix it and show the
    slope inside [0.8, 1.2] on held-out data.
-5. **Slippage is modelled, not measured.** The ledger (WP7) replaces the
-   allowance with observed slippage by symbol, session and order type.
-6. **Portfolio effects are not yet simulated** (see §9.5); WP8 owns them.
+5. **Slippage is now measured by the ledger, but the ledger is empty until the
+   desk has run.** WP7 replaces the modelled allowance with
+   `min(3 × modelled, max(modelled, measured))` after 20 fills, and pauses entries
+   at a mean above 0.15R. Until those fills exist the modelled allowance is what
+   the desk prices, and the synthetic study cannot supply them (assumption 36).
+6. **Portfolio effects are now simulated on a constructed book** (§10), and the
+   live correlation estimator still runs on the desk's own trailing window: the
+   ceilings hold at approval time, and a book whose correlations rise afterwards
+   cannot be un-risked — the layer refuses the next trade instead (a documented
+   outcome, not a repaired one).
 7. **The harness's own blind spots**: uniform spread when the file has no SPREAD
    column, no queue position at the trigger, no partial fills at the entry,
    intrabar ambiguity resolved pessimistically (stop first), and a decision
@@ -1390,10 +1719,12 @@ the reasoning recorded.
     the test of that bound), and the operational answer is WP9's online
     calibration fitted on the account's own accumulated history — with the
     rollout's slope ∈ [0.8, 1.2] window as the live monitor.
-18. **Benjamini–Hochberg at q = 0.10 is designed but not yet applied.** The agent
-    probabilities entering the meta-model are five families' own self-measured
-    estimates; the multiplicity control belongs to the composition layer and is
-    WP6's, alongside the cost and EV tests.
+18. **Benjamini–Hochberg q = 0.10 is applied at the composition point now, and it
+    is the layer that does the most work there** (§8.5: 67% of the intraday and
+    77% of the swing family rejected while the survivors still beat the corpus).
+    Its bar is a *family* bar, so the family's size is part of the decision: the
+    gatekeeper takes `familySize` from the scan, and a scan that evaluates a
+    different number of hypotheses is a different bar.
 19. **The meta-model has never seen a real bar.** Every number in §7.5 comes from
     synthetic corpora whose structure the desk's geometry happens to suit. The
     owner's M1/M5 export is still the gate between this work and any live use of
@@ -1414,8 +1745,38 @@ the reasoning recorded.
     would start refusing trades, and WP9's weekly report is where that would show
     up first. The readings stored in every WP6 report are what make that
     detectable.
+22. **The resting entry's hard case is not in the study.** Every fill in the WP7
+    study happened on the first bar after the decision (median wait 1 bar, 100% of
+    fills), because the desk's own offset is small next to a bar's range. The
+    market that runs away and never fills — the reason a limit is cheaper and the
+    reason it misses trades — has **0 occurrences** there, and the EA's expiry and
+    0.5R cancel rules are covered by tests rather than by measurement. The demo
+    phase's own fills are the first real sample of both.
+23. **The timing filter has no measured value yet.** No minute-of-week bucket on
+    any study corpus reaches the ledger's 20-outcome minimum, so on synthetic data
+    it refuses nothing at all; its gate can only assert that it is not a blanket
+    ban. It becomes a filter only when the account's own fills have accumulated
+    enough buckets, and WP9's weekly report is where that shows up.
+24. **WP8's book is synthetic and stationary, and its ceilings hold at approval
+    time rather than forever.** Correlations move: a book approved at 1.4% heat can
+    drift over its ceilings, and the layer cannot un-risk what is open — it refuses
+    the next trade (`PF_NO_BUDGET`). The study's refusal rate (50% of offers) is
+    measured on a fixed matrix, so a live book whose correlations *rise* would
+    refuse more, not less.
+25. **The parametric CVaR is a lower bound on a fat-tailed quantity.** The composed
+    book sits exactly on 1.5% because each trade is cut to the largest size that
+    fits, so the number that is enforced is smaller than the true tail. The heat
+    and cluster ceilings do not assume a distribution, and the daily-loss and
+    drawdown limits from v3.05 remain in force underneath them.
+26. **The drawdown scalar's gate is measured on a mirrored path, and that is a
+    modelling choice.** It answers "does the scalar cut the worst case", which is
+    what a risk layer is for, but it does not answer "what drawdown will a live
+    account see": that depends on the R sequence, and the realised-path comparison
+    (7.73% vs 7.64%) shows the scalar alone is not a drawdown guarantee. The
+    daily-loss limit, the drawdown halt and the rollout's 6% ceiling are the
+    operational answers.
 
-## 12. Tests and commands
+## 14. Tests and commands
 
 ```bash
 # the standing regression — every api-server test, including the desk suites
@@ -1444,6 +1805,21 @@ pnpm run typecheck
 # and the sampled executed-policy Monte Carlo (every 60th decision bar)
 cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
   --gatekeeper --mode intraday|swing
+
+# the WP7 execution study, per mode (≈ 2 s; writes
+# research-reports/2026-10-11-wp7-execution-<mode>-study.json)
+# the legacy trigger against a resting limit on the SAME geometry, over the WP5
+# corpora, plus the timing ledger's premise on the same decision bars
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --execution --mode intraday|swing
+
+# the WP8 portfolio study, per mode (≈ 6 s; writes
+# research-reports/2026-10-11-wp8-portfolio-<mode>-study.json)
+# a book with a CONSTRUCTED correlation, the estimator's recovery of it, the
+# layer's ceilings on the accumulated book, and the drawdown scalar on an equity
+# path driven by the WP7 simulator's realised R sequence
+cd artifacts/api-server && DATABASE_URL=pglite:memory npx tsx src/lib/multiasset/research/cli.ts \
+  --portfolio --mode intraday|swing
 
 # the harness
 pnpm --filter @workspace/api-server run research:run -- --help
@@ -1483,17 +1859,32 @@ Stored reports (`artifacts/api-server/research-reports/`):
 | `2026-10-11-wp4-alpha-swing-agent-study.json` | the same, H1 | **FAIL** — allowlist empty (§6.6) |
 | `2026-10-11-wp5-meta-intraday-meta-study.json` | WP5 meta-model, five fixtures, 3 series each, stride 1 | **PASS** — home slope 0.816, Brier skill +0.218, coverage 1/10, CPCV 45/45 |
 | `2026-10-11-wp5-meta-swing-meta-study.json` | the same, H1 | **PASS** — home slope 0.926, Brier skill +0.354, coverage 0/10, CPCV 45/45 |
+| `2026-10-11-wp6-gatekeeper-intraday-study.json` | WP6: the WP5 corpora through the gate (EV floor, BH q=0.10, cost/σ_h, sampled MC) | **PASS** — 977/490 armed at the floor+BH; survivors 1.118 vs corpus 0.576 |
+| `2026-10-11-wp6-gatekeeper-swing-study.json` | the same, H1 | **PASS** — survivors 1.324 vs corpus 0.702; nulls refuse |
+| `2026-10-11-wp7-execution-intraday-study.json` | WP7: the legacy trigger against a resting limit on the same geometry, over the WP5 corpora | **PASS** — paired ΔR +0.113 (better in 75.7%), 100% fill, timing evidence insufficient |
+| `2026-10-11-wp7-execution-swing-study.json` | the same, H1 | **PASS** — paired ΔR +0.081 (better in 68.7%) |
+| `2026-10-11-wp8-portfolio-intraday-study.json` | WP8: a constructed book, the estimator's recovery of it, the ceilings on the accumulated book | **PASS** — ρ̂ 0.818 vs 0.85, heat 0.727% vs 1.885% flat, CVaR 1.5000% vs 3.889% flat |
+| `2026-10-11-wp8-portfolio-swing-study.json` | the same, H1 | **PASS** — ρ̂ 0.818, composed CVaR on its 1.5% ceiling, mirrored DD 10.07% vs 193% flat |
 
-Current state: **1,128/1,128** api-server tests (139 suites) and
-**477/477** desk tests (multiasset + research + alpha + meta; was 416 before WP4; the
-counts wander by a handful between runs because a few pre-existing suites build
-their cases from data), **37/37** trading-platform tests (including the 6/6
-EA-download parity check that keeps `public/downloads/NeurotradeBridge.mq5`
-byte-identical to the source), typecheck clean across all packages. WP5 added 31
-unit tests (`meta/meta.test.ts` — labels, uniqueness, folds, the logistic fit, the
-isotonic pooling rules, `p_LCB`) and 8 gate tests (`research/meta-eval.test.ts` —
-a well-calibrated model passes, an overconfident one fails, a broken `p_LCB`
-promise is caught by decile, and refusing to trade on a null is a pass).
+Current state: **1,201/1,201** api-server tests (151 suites) and **542/542** desk
+tests (multiasset + research + alpha + meta; the counts wander by a handful between
+runs because a few pre-existing suites build their cases from data), **37/37**
+trading-platform tests (including the 6/6 EA-download parity check that keeps
+`public/downloads/NeurotradeBridge.mq5` byte-identical to the source), typecheck
+clean across all packages. WP5 added 31 unit tests (`meta/meta.test.ts` — labels,
+uniqueness, folds, the logistic fit, the isotonic pooling rules, `p_LCB`) and 8 gate
+tests (`research/meta-eval.test.ts` — a well-calibrated model passes, an
+overconfident one fails, a broken `p_LCB` promise is caught by decile, and refusing
+to trade on a null is a pass). WP6 added 32 (`meta/gatekeeper.test.ts` — the
+step-up BH bar, the fail-closed codes, the MC geometry, and the demeaned-GARCH
+regression) and 7 wiring tests. WP7 added 13 (`wp7-execution.test.ts` — the spread
+z with its sample floor, the timing ledger's shrinkage and refusal, the slippage
+EWMA and the 0.15R pause, the measured allowance's one-way rule, the pending
+expiry, and the plan projection's flag-off invariance). WP8 added 17
+(`wp8-portfolio.test.ts` — EWMA covariance, Ledoit–Wolf shrinkage, transitive
+clusters, √(r'Cr), the drawdown scalar's knee/floor/halt, the reduce-only
+composition, and W8.17's proof that the CVaR remedy lands on its ceiling where the
+linear rescale demonstrably would not).
 
 The alpha tests deliberately do **not** assert the study's outcome. A unit test
 small enough to run in the standing regression cannot support an edge claim, and

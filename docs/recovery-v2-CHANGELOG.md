@@ -210,3 +210,26 @@ i.i.d. runs × 5000 ticks, seed-offset per run):
 - Planted edge p(Even) = 0.55 vs p0 = 0.5: detected in 94 % of runs, median
   734 trades to activation.
 - Battery cost ≈ 1.2 ms per market (runs every 500 new ticks, not per scan).
+
+## WP7 — Execution & ledger verification + shadow logger
+
+No new trading behaviour — WP7 pins down the execution guarantees the earlier
+packages depend on, and builds the rollout's side-by-side evidence stream.
+
+1. `shadow-log.ts`: bounded in-memory ring (1 000) plus per-session counters
+   recording legacy-vs-v2 decisions on every recovery tick while
+   `recoveryV2Mode = "shadow"`. The cycle emits `recovery_shadow_decision`
+   with both reasons and the running agreement rate. Recording is a pure side
+   effect — it never influences what trades, and live/off modes record nothing.
+2. `executeRebase` is now exported with an injectable flush (production keeps
+   the durable `flushRecoveryState`) so the atomicity guarantee is testable:
+   failed flush ⇒ state rolled back, no REBASE row, no event; successful
+   flush ⇒ exactly one REBASE row realising the exact debt.
+3. Verified by tests (wp7-execution.test.ts): re-base atomicity (3 cases),
+   shadow logger agreement/bounds/no-execution-power, and the double-fire
+   guard (six coalesced cycles against one unsettled exposure insert zero
+   extra rows). Already-covered guarantees re-asserted by existing suites:
+   claim-unique settlement + durable-before-claim (ledger.test.ts), no
+   stale-quote sizing ≤ 3 s TTL + re-size on > 1 % drift (recovery-payout
+   .test.ts), actual buy price / cost driving the ledger debt (ledger.test.ts),
+   TradeOutcomeUnknownError reconciliation (ledger.test.ts + cycle path).

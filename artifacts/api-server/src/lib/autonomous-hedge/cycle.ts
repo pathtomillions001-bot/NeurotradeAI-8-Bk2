@@ -60,6 +60,7 @@ import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { HonestyMonitor, fairP0ForContractKey } from "./honesty-monitor";
+import { shadowLog } from "./shadow-log";
 import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
 import {
@@ -792,11 +793,43 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   if (mode === "RECOVERY" && v2Mode !== "off" && rows.length > 0) {
     const v2Decision = decideRecoveryV2(rows, tapes, ctx, lossRun, escalation, s.honesty);
     if (v2Mode === "shadow") {
-      logger.info(
+      // WP7 shadow logger: the old and the new decision, side by side, on
+      // every recovery tick — the rollout's evidence base. Pure recording;
+      // the legacy decision below is what trades.
+      const entry = shadowLog.record({
+        sessionId: host.sessionId,
+        mode,
+        lossRun,
+        legacy: decision
+          ? {
+              contract: decision.best ? `${decision.best.contract}:${decision.best.barrier}` : null,
+              symbol: decision.best?.symbol ?? null,
+              eligible: decision.eligible,
+              reason: decision.reason,
+            }
+          : null,
+        v2: v2Decision
+          ? {
+              contract: v2Decision.best ? `${v2Decision.best.contract}:${v2Decision.best.barrier}` : null,
+              symbol: v2Decision.best?.symbol ?? null,
+              eligible: v2Decision.eligible,
+              reason: v2Decision.reason,
+            }
+          : null,
+      });
+      host.emit("recovery_shadow_decision", {
+        sessionId: host.sessionId,
+        agreesOnAction: entry.agreesOnAction,
+        legacy: entry.legacy?.reason ?? null,
+        v2: entry.v2?.reason ?? null,
+        summary: shadowLog.summary(host.sessionId),
+      });
+      logger.debug(
         {
           sessionId: host.sessionId,
-          legacy: decision ? { eligible: decision.eligible, reason: decision.reason } : null,
-          v2: v2Decision ? { reason: v2Decision.reason } : null,
+          legacy: entry.legacy,
+          v2: entry.v2,
+          agreesOnAction: entry.agreesOnAction,
         },
         "Recovery v2 shadow decision (RCI beside legacy)",
       );
@@ -1154,11 +1187,13 @@ function recordLedger(
  * base stake — no pause, no gate, nothing hidden: the loss stays visible in
  * the true counters and the daily stats.
  */
-async function executeRebase(
+export async function executeRebase(
   host: HedgeHost,
   symbol: string,
   ctx: HedgeContext,
   why: "budget" | "headroom",
+  /** Test seam — production always uses the durable recovery-state flush. */
+  flush: () => Promise<boolean> = () => recoveryEngine.flushRecoveryState(),
 ): Promise<void> {
   const sessionId = host.sessionId;
   const snapshot = { ...recoveryEngine.getState() };
@@ -1168,7 +1203,7 @@ async function executeRebase(
   });
   if (realised <= 0) return;
 
-  const durable = await recoveryEngine.flushRecoveryState();
+  const durable = await flush();
   if (!durable) {
     recoveryEngine.restoreStateSnapshot(snapshot);
     logger.warn(

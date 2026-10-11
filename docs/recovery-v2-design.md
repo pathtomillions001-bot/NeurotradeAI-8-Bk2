@@ -144,7 +144,10 @@ and payout are recorded on the ledger row.
 ## 9. Rollout
 
 - Phase 1 — shadow ≥ 2 weeks: `recoveryV2Mode = "shadow"` logs the v2 decision
-  beside the legacy one, no behaviour change.
+  beside the legacy one, no behaviour change. WP7's `shadow-log.ts` keeps a
+  bounded ring plus per-session agreement counters and the cycle emits
+  `recovery_shadow_decision` each recovery tick, so the side-by-side record is
+  the rollout's evidence base.
 - Phase 2 — opt-in `adaptive` on demo/virtual ≥ 300 recovery episodes.
 - Phase 3 — default for NEW users only; legacy users keep their setting.
 - Kill switches: flag off restores legacy exactly; any ledger inconsistency

@@ -60,3 +60,6 @@ cookie*.txt
 .local/
 .data/
 **/.data/
+
+# Research harness scratch output (stored reports live in docs/research/)
+research-reports/

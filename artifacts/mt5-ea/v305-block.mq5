@@ -1,4 +1,29 @@
 //+------------------------------------------------------------------+
+//| HISTORICAL SPLICE ARTIFACT — NOT THE EA, AND NOT COMPILED.       |
+//|                                                                  |
+//| This is the v3.05 position-management block as it was pasted     |
+//| into NeurotradeBridge.mq5. It is kept only as a record of what   |
+//| that change contained — pasting it back verbatim reproduces the  |
+//| defect that shipped:                                             |
+//|                                                                  |
+//|   The block carries its own #defines, its PositionState struct   |
+//|   and the state arrays, and it was appended AFTER                |
+//|   ArmPlanFromJson() and the command handlers, which already      |
+//|   used PositionState and the PM_* constants. MQL5 resolves       |
+//|   names in TEXT ORDER, so the published EA did not compile:      |
+//|   "declaration without type", "undeclared identifier             |
+//|   'PM_TRAIL_MULT_SCALP'", "cannot convert parameter              |
+//|   'PositionState' to 'int'".                                     |
+//|                                                                  |
+//| Those declarations now live in the SHARED STATE section near the |
+//| top of NeurotradeBridge.mq5 (banner: "v3.05 position-manager     |
+//| SHARED STATE"); only the machine's functions follow the          |
+//| "POSITION MANAGEMENT STATE MACHINE" banner. The ordering is      |
+//| pinned by src/lib/ea-source-integrity.test.ts. Compile the real  |
+//| EA in MetaEditor — never this file.                              |
+//+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
 //| v3.05 — POSITION MANAGEMENT STATE MACHINE                        |
 //|                                                                  |
 //| WHY THIS REPLACES THE OLD ManageOpenPositions()                  |

@@ -2450,6 +2450,36 @@ const JOURNAL_FETCH_LIMIT = 500;
  */
 const JOURNAL_DB_ROW_LIMIT = 5_000;
 
+// ── Real-time settled-transaction fan-out ────────────────────────────────────
+//
+// The journal is the FIRST place a settled contract shows up: Deriv pushes a
+// `transaction` (sell) event, the journal's quick refresh lands the settled
+// profit_table row within a second or two, and the batch is already flowing
+// through this process. Settle listeners (the trade reconciler) can therefore
+// complete an unsettled row from data we ALREADY have — no extra profit_table
+// request, no rate-limit pressure, no minutes-long wait for the next sweep.
+export type JournalTransactionsHandler = (accountId: string, transactions: any[]) => void;
+const journalTransactionsHandlers = new Set<JournalTransactionsHandler>();
+
+/** Register a listener for every profit_table batch the journal merges. Returns an unsubscribe. */
+export function onJournalTransactions(handler: JournalTransactionsHandler): () => void {
+  journalTransactionsHandlers.add(handler);
+  return () => {
+    journalTransactionsHandlers.delete(handler);
+  };
+}
+
+function fanOutJournalTransactions(accountId: string | null, transactions: any[]): void {
+  if (!accountId || transactions.length === 0 || journalTransactionsHandlers.size === 0) return;
+  for (const handler of journalTransactionsHandlers) {
+    try {
+      handler(accountId, transactions);
+    } catch {
+      /* one listener must never break the journal */
+    }
+  }
+}
+
 class DerivJournalManager extends EventEmitter {
   private sock: PooledSocket | null = null;
   private bearerToken: string | null = null;
@@ -2883,6 +2913,9 @@ class DerivJournalManager extends EventEmitter {
               Number(b.transaction_id ?? 0) - Number(a.transaction_id ?? 0));
             this.lastFetchMs = Date.now();
             this.persistTransactions(this.sessionId, batch);
+            // Real-time settle fan-out: this batch is exactly what a
+            // just-closed contract looks like on the broker's books.
+            fanOutJournalTransactions(this.accountId, batch);
             logger.info({ newInBatch: batch.length, total: this.cachedTransactions.length }, "JournalManager: refresh merged — live trades updated");
             this.emit("refreshed", this.cachedTransactions);
           }
@@ -2906,6 +2939,7 @@ class DerivJournalManager extends EventEmitter {
         // Full paginated refresh (our own chain — marker verified)
         this.fetchAccumulator.push(...batch);
         this.persistTransactions(this.sessionId, batch);
+        fanOutJournalTransactions(this.accountId, batch);
         // Track the highest transaction_id for future incremental refreshes
         for (const t of batch) {
           const tid = Number(t.transaction_id ?? 0);
@@ -3371,18 +3405,26 @@ async function pollSettlementSnapshot(
   if (conn.isRateLimitPaused()) return state.last;
 
   const send = (async () => {
-    let profitTxs: any[] = [];
     try {
       const prof = await accountRequest(
         bearerToken, accountId,
         { profit_table: 1, description: 1, sort: "DESC", limit: JOURNAL_FETCH_LIMIT },
         12_000,
       );
-      if (prof && !prof.error) profitTxs = prof.profit_table?.transactions ?? [];
+      if (prof && !prof.error) {
+        state.last = { portfolioMsg: null, profitTxs: prof.profit_table?.transactions ?? [] };
+        state.lastDoneMs = Date.now();
+        return state.last;
+      }
     } catch {
       /* transient socket problem — the caller's loop retries on its next tick */
     }
-    state.last = { portfolioMsg: null, profitTxs };
+    // A FAILED fetch must never overwrite the previous snapshot with an empty
+    // one marked fresh: during a rate-limit pause every poll inside the next
+    // window then read "authoritatively empty" and a settled contract went
+    // unseen. Keep the last real snapshot (stale is strictly better than
+    // empty) and still stamp the attempt time so we back off instead of
+    // hammering the paused socket.
     state.lastDoneMs = Date.now();
     return state.last;
   })();

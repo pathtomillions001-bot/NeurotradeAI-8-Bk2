@@ -76,32 +76,21 @@ function NavContent({ location, onNavigate }: { location: string; onNavigate?: (
         {/* Account switcher — shown when 2+ accounts are linked */}
         <AccountSwitcher />
 
-        {/* Always rendered. The panel used to be gated on the status query
-            having succeeded, so a single failed/slow /engine/status poll made
-            the only sidebar Start control vanish. Until the first answer
-            arrives it simply reads as MANUAL / stopped, and the switch keeps
-            working (the server decides, and refusals surface as a toast). */}
-        {(() => {
-          const autonomous = engineStatus?.mode === "autonomous";
-          const cooling = Boolean((engineStatus as any)?.cooldownUntil) && !engineStatus?.isRunning;
-          return (
-            <div className={`p-3 rounded-lg border ${autonomous ? "bg-primary/5 border-primary/30" : "bg-secondary border-border"}`}>
-              <div className="flex items-center justify-between mb-2">
-                <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Engine Mode</Label>
-                <div className={`w-2 h-2 rounded-full ${engineStatus?.isRunning ? "bg-green-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]" : cooling ? "bg-amber-400" : "bg-red-500"}`} />
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="font-mono text-sm font-medium">{autonomous ? "AUTONOMOUS" : cooling ? "COOLDOWN" : "MANUAL"}</span>
-                <Switch
-                  checked={autonomous}
-                  disabled={toggleEngine.isPending}
-                  onCheckedChange={(checked) => handleToggle(checked)}
-                  aria-label={autonomous ? "Stop autonomous engine" : "Start autonomous engine"}
-                />
-              </div>
+        {engineStatus && (
+          <div className={`p-3 rounded-lg border ${engineStatus.mode === "autonomous" ? "bg-primary/5 border-primary/30" : "bg-secondary border-border"}`}>
+            <div className="flex items-center justify-between mb-2">
+              <Label className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Engine Mode</Label>
+              <div className={`w-2 h-2 rounded-full ${engineStatus.isRunning ? "bg-green-500 shadow-[0_0_8px_rgba(16,185,129,0.8)]" : "bg-red-500"}`} />
             </div>
-          );
-        })()}
+            <div className="flex items-center justify-between">
+              <span className="font-mono text-sm font-medium">{engineStatus.mode === "autonomous" ? "AUTONOMOUS" : "MANUAL"}</span>
+              <Switch
+                checked={engineStatus.mode === "autonomous"}
+                onCheckedChange={(checked) => handleToggle(checked)}
+              />
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

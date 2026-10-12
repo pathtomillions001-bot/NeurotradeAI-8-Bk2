@@ -688,15 +688,19 @@ export const deskApi = {
   /**
    * The session's pairing code.
    *
-   * Issuing is idempotent: the same code comes back until the user unlinks the
-   * terminal or explicitly rotates it, so re-opening the setup dialog can never
-   * invalidate the code the EA is currently retrying with.
+   * The code connects ONE terminal session. Re-opening the dialog hands back
+   * the code a live terminal is already using rather than minting a second one,
+   * so reading it out loud cannot invalidate the terminal that is connected —
+   * and once that terminal goes away the code goes with it, which is why a new
+   * session starts from a new code.
    */
   pairingCode: (rotate = false) =>
     request<{
       pairingCode: string;
       expiresInMs: number;
       reused?: boolean;
+      /** True once a terminal has redeemed this code. */
+      redeemed?: boolean;
       /**
        * Whether the store holding this code survives a server restart. A code
        * minted into a process-local store is not the credential this dialog
@@ -739,11 +743,18 @@ export const deskApi = {
     lastBeatRttMs?: number | null;
     avgBeatRttMs?: number | null;
     /**
-     * The link is durable BY PROTOCOL: it survives closing MT5, closing the
-     * browser and a server redeploy. Only "unlink" ends it. Whether this
-     * deployment can actually keep that promise is `store.durable`.
+     * The link lives only as long as the terminal (EA v3.08+). Closing MT5 ends
+     * it, its pairing code is spent, and reconnecting starts from a new code.
+     * `durable` is always false now — kept so an older Desk reading this key is
+     * never told a link outlives the terminal that owns it.
      */
     durable?: boolean;
+    /** The link contract the API implements. */
+    linkModel?: "terminal-session";
+    /** True: MT5 closing ends the connection. */
+    linkEndsWithTerminal?: boolean;
+    /** Heartbeat silence, in ms, after which the server releases the link. */
+    leaseMs?: number;
     /** Where the link is stored, and whether that store survives a restart. */
     store?: BridgeStoreReport;
     /** Version the terminal reported, or null before the first heartbeat. */
@@ -766,11 +777,13 @@ export const deskApi = {
 /**
  * The bridge's link store, as the API reports it.
  *
- * Without a `postgres://` DATABASE_URL the API falls back to embedded PGlite —
- * a file inside the container — so the "durable" pairing code and bearer token
- * die on every restart, replica and cold start. That is the root cause of a
- * terminal losing its link by itself, and it is invisible from the browser
- * unless the API says which store it is using.
+ * A link is remembered for exactly as long as the terminal that made it is
+ * open, so the store has to survive a deploy inside that window. Without a
+ * `postgres://` DATABASE_URL the API falls back to embedded PGlite — a file
+ * inside the container — and a running terminal is dropped on every restart,
+ * replica and cold start, which from the Desk is indistinguishable from the
+ * terminal itself closing. Invisible from the browser unless the API says which
+ * store it is using.
  */
 export interface BridgeStoreReport {
   /** "postgres" or "pglite". */

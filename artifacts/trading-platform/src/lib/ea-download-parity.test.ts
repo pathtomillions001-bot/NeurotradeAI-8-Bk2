@@ -70,13 +70,36 @@ test("the downloadable EA is byte-identical to the EA source", () => {
   );
 });
 
-test("EA link writes pass the required file handle to FileWriteString", () => {
+/**
+ * The EA writes exactly one kind of record to disk — and it is not the link.
+ *
+ * v3.08 moved the bearer token into memory: closing MT5 must end the
+ * connection, so nothing about a session may survive the process. What the EA
+ * still persists is the POSITION-MANAGER state (v3.05), which has to survive a
+ * restart or an open position would be left unmanaged. These assertions keep
+ * the two apart: the file writes must be the manager's, with a real handle, and
+ * none of them may carry the token.
+ */
+test("the only file writes are the position manager's, and never the token", () => {
   const source_body = fs.readFileSync(source, "utf8");
   const writes = [...source_body.matchAll(/\bFileWriteString\s*\(([^;]*?)\)\s*;/g)];
 
-  assert.ok(writes.length > 0, "the EA should persist its link data");
+  assert.ok(writes.length > 0, "the position manager must still persist its records (v3.05)");
   for (const [, args] of writes) {
     assert.match(args, /^\s*handle\s*,/, `FileWriteString must receive its open handle: ${args}`);
+    assert.doesNotMatch(args, /g_token/, `the link token must never be written to disk: ${args}`);
+  }
+  // And no link FILE is touched anywhere except the routine that deletes the
+  // one an older build left behind.
+  assert.doesNotMatch(source_body, /SaveLink\s*\(/, "the EA must not write a link file");
+  const removalStart = source_body.indexOf("void RemoveLegacyLinkFile");
+  const removalEnd = source_body.indexOf("\n}", removalStart);
+  for (const match of source_body.matchAll(/"\.link"/g)) {
+    const at = match.index ?? 0;
+    assert.ok(
+      removalStart >= 0 && at > removalStart && at < removalEnd,
+      "the only code that may name a link file is RemoveLegacyLinkFile()",
+    );
   }
 });
 
@@ -89,7 +112,16 @@ test("the published EA is a build that reports its own version and link", () => 
     expectedEaVersion(),
     "the published EA's version and the API's EXPECTED_EA_VERSION must agree",
   );
-  for (const marker of ["instanceId", "windowFromMs", "rawCount", "durable"]) {
+  for (const marker of [
+    "instanceId",
+    "windowFromMs",
+    "rawCount",
+    // v3.08: the terminal half of the session-scoped link.
+    "RemoveLegacyLinkFile",
+    "DisconnectBridge",
+    "LinkEndsWithThisRun",
+    "pairing_code_spent",
+  ]) {
     assert.match(
       published_body,
       new RegExp(marker, "i"),

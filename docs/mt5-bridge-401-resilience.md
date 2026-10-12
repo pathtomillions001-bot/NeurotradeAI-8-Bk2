@@ -1,5 +1,12 @@
 # A 401 the server could not verify ended the MT5 link permanently
 
+> **Partly superseded.** v3.08 removed link persistence altogether
+> (`docs/mt5-bridge-session-link.md`): there is no saved link in the terminal
+> and no remembered pairing code on the server, so the "one chart's unverified
+> 401 disarms every chart" path in §2 no longer exists. The diagnosis below —
+> an unverified refusal must never be read as a verdict — is unchanged and still
+> the contract the EA and the API implement.
+
 ## What the user reported
 
 > I attach my MT5 to any chart and after some time it detaches itself without me
@@ -69,11 +76,12 @@ The third case is not rare, and none of it is the terminal's fault:
 
 ## 2. Why the terminal never came back
 
-The server's 401 was final, and the EA honoured that contract at the *lowest*
-level it had — inside `HttpPost()`, which cannot possibly know whether a refusal
-was verified:
+The server's 401 was final, and the EA (v3.05, which is where this log came
+from) honoured that contract at the *lowest* level it had — inside `HttpPost()`,
+which cannot possibly know whether a refusal was verified:
 
 ```mql5
+// v3.05 — removed in v3.08
 if(status == 401 && authenticated)
 {
    g_token = "";
@@ -83,15 +91,20 @@ if(status == 401 && authenticated)
 }
 ```
 
-`SaveLink()` writes `NeurotradeBridge_<login>_<server>.link` into the terminal's
+`SaveLink()` wrote `NeurotradeBridge_<login>_<server>.link` into the terminal's
 **common** folder — deliberately, so a second chart adopts the existing link
-instead of pairing again. The same sharing means one chart's unverified 401
+instead of pairing again. The same sharing meant one chart's unverified 401
 disarmed *every* chart of that account. That is the second half of the log:
 `AAPL.m` attached fourteen seconds after `US100.std` was refused, restored a link
 file whose token had just been emptied by the other chart, and went straight to
 `/api/bridge/pair` with the saved code — which was unreadable for the same
 reason the token was, so it too came back 401, and the EA backed off to a
 sixty-second loop it would never win.
+
+v3.08 deletes that whole mechanism rather than repairing it: no link file, no
+remembered code, no shared credential for one chart to wipe on another chart's
+behalf. The lesson kept from this report is the one that made the wipe possible
+in the first place — **an unverified refusal is not a verdict**.
 
 **One transient server fault became a permanent disconnection that only a human
 pasting a fresh code could undo.** And if the Desk was reopened in a new tab in
@@ -179,7 +192,8 @@ and logs a warning when it is not.
 `artifacts/mt5-ea/NeurotradeBridge.mq5` **v3.06** (published copy republished by
 `scripts/copy-mt5-ea.mjs`, parity-tested)
 
-* `HttpPost()` **no longer touches the saved link.** It publishes the status,
+* `HttpPost()` **no longer touches the credential.** (In v3.08 that means
+  `HttpPost()` does not even have a saved link to touch.) It publishes the status,
   the server's `error` and the server's `code`, and returns. Deciding what a
   refusal means belongs to the caller, which is the only place that knows
   whether the server verified anything.
@@ -201,7 +215,9 @@ and logs a warning when it is not.
   own retries and its own single journal line.
 * `OnDeinit()` names the reason (`DeinitReasonText`) and, for the six causes
   that come from the terminal rather than from a person, says plainly that
-  nobody unlinked anything and that the saved link resumes on the next start.
+  nobody unlinked anything. (In v3.08 those reasons *end* the link on purpose —
+  closing MT5 disconnects the terminal, by design. See
+  `docs/mt5-bridge-session-link.md` §3.)
 
 ### Config
 
@@ -214,9 +230,11 @@ Railway the equivalent is the Postgres service and
 ## What a user has to do
 
 1. **Re-download and recompile the EA** (Desk → bridge dialog → download), then
-   re-attach it. The saved link resumes by itself; no new pairing code is
-   needed. Until then the Desk shows *"this terminal is running an older EA"*,
-   because a v3.05 terminal still wipes its link on the first unverified 401.
+   re-attach it. A v3.08 terminal needs a **new** pairing code — the old one is
+   retired when the session that used it ends, and the dialog hands out a fresh
+   one when you reload it. Until then the Desk shows *"this terminal is running
+   an older EA"*, because an older terminal still wipes its link on the first
+   unverified 401.
 2. **Check the store is durable.** Open `/api/healthz` on the API service, or
    the bridge dialog: if it says the link store is not durable, set a
    `postgres://` `DATABASE_URL`. Without it the link still dies on every deploy
@@ -227,7 +245,7 @@ Railway the equivalent is the Postgres service and
 
 | Test | What it pins |
 |---|---|
-| `artifacts/api-server/src/routes/mt5-bridge-durability.test.ts` | a store outage answers **503 and revokes nothing**, and the *same* token and the *same* code work again the moment the store can be read; `bridge_link_revoked` is returned only for a real revocation; an unissued token is `bridge_token_unknown`; a rotated code is still refused outright, not blamed on the store; `/status` reports the store |
+| `artifacts/api-server/src/routes/mt5-bridge-session.test.ts` | (supersedes `mt5-bridge-durability.test.ts`) a store outage answers **503 and revokes nothing**, and the *same* token works again the moment the store can be read; `bridge_link_revoked` is returned only for a real revocation; an unissued token is `bridge_token_unknown`; a rotated code is still refused outright, not blamed on the store; `/status` reports the store and the session-scoped contract |
 | `artifacts/trading-platform/src/lib/ea-bridge-resilience.test.ts` | `HttpPost` cannot clear the token or rewrite the link file; every `g_token = ""` in `Sync()` sits under a final verdict; the refusal budget and its spacing exist and `OnTimer` honours them; a 5xx cannot reach the "your code is dead" branch; all ten MQL5 `REASON_*` reasons are translated **by name and by value** (they are 0–9, they are not the MQL4 numbers, and there is no `DEINIT_*` family — an earlier draft of this change used it and would not have compiled); the EA still never calls `ExpertRemove()` and still returns `INIT_SUCCEEDED` |
 | `artifacts/trading-platform/src/lib/ea-download-parity.test.ts` | the published download is byte-identical, and its version equals the API's `EXPECTED_EA_VERSION` (read, not pinned) |
 
@@ -236,11 +254,11 @@ Railway the equivalent is the Postgres service and
 | Path | Role |
 |---|---|
 | `artifacts/api-server/src/lib/multiasset/bridge-links.ts` | lookups that report *why* they failed; bounded negative cache; store report |
-| `artifacts/api-server/src/routes/bridge.ts` | 503 for "could not verify", machine-readable 401 verdicts, store in `/status`, `EXPECTED_EA_VERSION` 3.06 |
+| `artifacts/api-server/src/routes/bridge.ts` | 503 for "could not verify", machine-readable 401 verdicts (`bridge_link_revoked` / `bridge_token_unknown` / `pairing_code_unknown` / `pairing_code_spent`), store in `/status`, `EXPECTED_EA_VERSION` 3.08 |
 | `artifacts/api-server/src/routes/health.ts` | bridge tables in the missing-table check; backend/durability in `/api/healthz` |
 | `lib/db/src/index.ts` | `databaseBackend`, `databaseIsDurable`, `databaseDetail`, `schemaApplied()` |
-| `artifacts/mt5-ea/NeurotradeBridge.mq5` | v3.06: refusal budget, 5xx handling, revocation-only clearing, named deinit reasons |
+| `artifacts/mt5-ea/NeurotradeBridge.mq5` | v3.08: refusal budget, 5xx handling, revocation-only clearing, named deinit reasons, and a link that ends with the terminal |
 | `artifacts/trading-platform/public/downloads/NeurotradeBridge.mq5` | the same file, republished |
 | `artifacts/trading-platform/src/lib/desk.ts` | `BridgeStoreReport` and the new fields |
-| `artifacts/trading-platform/src/components/terminal/bridge-dialog.tsx` | says when the link store is not durable or unreachable |
+| `artifacts/trading-platform/src/components/terminal/bridge-dialog.tsx` | says when the link store is unreachable, and that the code lives only as long as the terminal |
 | `.replit` | provisions `postgresql-16`, as documented |

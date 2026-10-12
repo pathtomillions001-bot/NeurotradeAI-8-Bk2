@@ -79,6 +79,13 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <dt>Selected markets</dt><dd className="text-zinc-200">{status.data.selectedCount}</dd>
                   <dt>Economic calendar</dt><dd className={status.data.calendarAvailable ? "text-emerald-300" : "text-amber-300"}>{status.data.calendarAvailable ? "Available" : "Unavailable — entries paused"}</dd>
                 </dl>
+                <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
+                  This link is held by the running MT5 terminal. Closing MT5 ends it, and the next session starts
+                  from a new code — nothing is saved in the terminal. An EA reload inside the same running terminal
+                  (recompile, input change, timeframe change) continues this link without a new code. If MT5 is
+                  force-closed and cannot say goodbye, the server notices within{" "}
+                  {Math.round((status.data.leaseMs ?? 120_000) / 1000)}s and releases the link then.
+                </p>
               </div>
               {(() => {
                 const machineSkew = status.data.computerClockSkewMs ?? status.data.clockSkewMs ?? 0;
@@ -97,8 +104,9 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p className="font-medium text-amber-300">This terminal is running an older EA{status.data.eaVersion ? ` (v${status.data.eaVersion})` : ""}.</p>
                   <p className="mt-1.5">
                     Older builds read a much shorter economic-calendar window and report broker-server times, so the news pane can
-                    show "no red-folder events" while MT5's own Calendar tab lists releases for the day. Download the EA below,
-                    recompile it in MetaEditor and re-attach it to the chart — the link is restored automatically, no new code needed.
+                    show "no red-folder events" while MT5's own Calendar tab lists releases for the day. Download the EA below and
+                    recompile it in MetaEditor: if MT5 is still running, the same terminal session continues on the code already in
+                    the EA's PairingCode input. If MT5 was closed, copy a new code from here into PairingCode.
                   </p>
                   <a href={downloadUrl} download className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-amber-500/50 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-200 transition-colors hover:bg-amber-500/20"><Download className="h-3.5 w-3.5" />Download EA v{status.data.expectedEaVersion}</a>
                 </div>
@@ -133,9 +141,9 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this code into <code className="text-zinc-200">PairingCode</code>:</p>
                   <CopyValue value={pairing.isPending || rotate.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
                   <p className="mt-2 text-[10px] text-zinc-500">
-                    This code stays valid until you unlink the terminal here. The EA saves it — together with the link itself — inside
-                    your MT5 installation, so closing MT5, restarting the computer or a platform update reconnects automatically.
-                    Only "Unlink terminal" ends the connection.
+                    This code connects one MT5 terminal session, and it is active only while that terminal is open.
+                    Nothing is saved in the terminal: when MT5 closes, the link and this code are released, and
+                    reconnecting needs a new code from this dialog. Have the terminal running when you paste it.
                   </p>
                   <div className="mt-2 flex items-center gap-2">
                     <button type="button" onClick={() => rotate.mutate()} disabled={rotate.isPending} className="rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50">
@@ -158,7 +166,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p className="flex items-center gap-1.5 font-medium text-red-300"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />Pairing refused</p>
                   <p className="mt-1.5">{status.data.lastPairingError}</p>
                   <p className="mt-2 text-[10px] text-red-300/70">
-                    The terminal will keep retrying with the code above, so it connects by itself as soon as the account is free — or generate a new code after unlinking it elsewhere.
+                    The terminal keeps retrying with the code above, so it connects by itself as soon as the account is free — or unlink it elsewhere and generate a new code. If the code was already used by a terminal that has since closed, generate a new one here.
                   </p>
                 </div>
               ) : (
@@ -177,23 +185,23 @@ function CopyValue({ value, copied, onCopy, disabled, large = false }: { value: 
 }
 
 /**
- * "Your link will not survive a restart" — said out loud.
+ * "A restart of the API will drop a running terminal" — said out loud.
  *
- * The dialog promises that only "Unlink terminal" ends the connection. That is
- * true of the protocol, and false of a deployment whose API has no
- * `postgres://` DATABASE_URL: the pairing code and the bearer token then live
- * in embedded PGlite, a file inside the container, so the next deploy, replica
- * or cold start forgets them and the terminal is left printing
+ * A link lives as long as the terminal that made it, which means the server has
+ * to remember it for that long: closing MT5 ends it, but a `git push` must not.
+ * A deployment whose API has no `postgres://` DATABASE_URL keeps its rows in
+ * embedded PGlite, a file inside the container, so the next deploy, replica or
+ * cold start forgets them — and the terminal, still open, is left printing
  * `HTTP 401 … Unknown or expired pairing code` at a code that was never
- * expired. Users reported exactly that as "the EA detached itself". The store
- * now reports which of the two it is, so the promise is either kept or
- * qualified on screen.
+ * expired, exactly the symptom users reported as "the EA detached itself". The
+ * store reports which of the two it is, so the limitation is on screen instead
+ * of being discovered as a dropped connection.
  */
 function StoreWarning({ store, warning }: { store?: BridgeStoreReport | null; warning?: string | null }) {
   const detail = warning ?? (store && !store.durable
-    ? `This Desk's link store is ${store.detail}. Pairing codes and terminal links written there do not survive a restart, so the terminal will need a new code after the next deploy. Set a postgres:// DATABASE_URL on the api service to make MT5 links durable.`
+    ? `This Desk's link store is ${store.detail}. A link is remembered only for as long as the terminal that made it is open, and that memory lives in a store that does not survive a restart — so a deploy, cold start or second replica will drop a RUNNING terminal, and it will need a new code. Closing MT5 still ends the link by itself, as designed. Set a postgres:// DATABASE_URL on the api service to keep a running terminal connected across restarts.`
     : store && !store.reachable
-      ? "The link store could not be read just now. Nothing is revoked — the terminal keeps its saved link and retries on its own. If this persists, check the api service's database connection."
+      ? "The link store could not be read just now. Nothing is revoked — a terminal that is already linked keeps streaming and retries on its own. If this persists, check the api service's database connection."
       : null);
   if (!detail) return null;
   const unreachable = Boolean(store && !store.reachable);
@@ -201,7 +209,7 @@ function StoreWarning({ store, warning }: { store?: BridgeStoreReport | null; wa
     <div className={`rounded-lg border p-3 text-[11px] leading-relaxed ${unreachable ? "border-sky-500/40 bg-sky-500/10 text-sky-200" : "border-amber-500/40 bg-amber-500/10 text-amber-200"}`}>
       <p className={`flex items-center gap-1.5 font-medium ${unreachable ? "text-sky-300" : "text-amber-300"}`}>
         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-        {unreachable ? "Link store unreachable" : "Link store is not durable"}
+        {unreachable ? "Link store unreachable" : "Restarts will drop a running terminal"}
       </p>
       <p className="mt-1.5">{detail}</p>
     </div>

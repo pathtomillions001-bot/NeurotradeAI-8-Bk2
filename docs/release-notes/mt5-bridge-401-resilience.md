@@ -1,5 +1,12 @@
 # Fix: the MT5 terminal lost its Desk link by itself (401 on sync, then 401 on pair)
 
+> **Superseded in part.** The refusal handling described here is still the
+> contract. The *persistence* it assumes — a link saved in the terminal and
+> re-adopted by the server across restarts — was removed deliberately in v3.08:
+> a code now connects one MT5 terminal session and nothing survives it. Where
+> this note says the saved link resumes by itself, read
+> `docs/release-notes/mt5-link-lives-with-the-terminal.md` instead.
+
 ## Problem
 
 A paired terminal stopped feeding the Desk with nobody having pressed **Unlink

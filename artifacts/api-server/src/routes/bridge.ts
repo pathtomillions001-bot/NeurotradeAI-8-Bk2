@@ -50,6 +50,7 @@ import {
   acknowledgeResult,
   adoptBridgeToken,
   applyAccount,
+  bridgeTokensFor,
   clearTerminalData,
   drainOutbox,
   expirePlans,
@@ -60,6 +61,7 @@ import {
   rememberBridgeToken,
   requeueStaleCommands,
   resendArmedPlans,
+  revokeBridgeToken,
   revokeBridgeTokens,
   sessionForToken,
   ticksFor,
@@ -68,20 +70,31 @@ import {
   type DeskState,
 } from "../lib/multiasset/store";
 import {
+  BRIDGE_LINK_LEASE_MS,
   PAIRING_CODE_TTL_MS,
   bridgeStoreReport,
-  deletePairingCodesForSession,
+  deleteBridgeLink,
+  deleteBridgeLinkByHash,
+  deleteBridgeLinksForSession,
+  hashBridgeToken,
+  linkByCode,
   lookupBridgeLink,
   lookupPairingCode,
+  lookupSpentPairingCode,
+  retirePairingCode,
   markPairingCodeRedeemed,
   pairingCodesForSession,
   prunePairingCodes,
+  pruneRevokedLinks,
   revokeBridgeLink,
   revokeBridgeLinksForSession,
   saveBridgeLink,
   savePairingCode,
+  sessionHasLiveLink,
+  staleLinks,
   touchBridgeLink,
   type StoreHealth,
+  type StoredBridgeLink,
 } from "../lib/multiasset/bridge-links";
 import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
 import {
@@ -123,13 +136,37 @@ const router: IRouter = Router();
  * against this server's clock (`serverTime`) instead of the machine clock.
  *
  * v3.06 adds the terminal half of the 401 fix: a 401 that does not carry
- * `code: "bridge_link_revoked"` is treated as UNVERIFIED, so the saved link is
- * kept and retried (four attempts, fifteen seconds apart) instead of being
- * wiped on sight; 503 is transient and never touches the saved credentials; and
+ * `code: "bridge_link_revoked"` is treated as UNVERIFIED, so the token is kept
+ * and retried (four attempts, fifteen seconds apart) instead of being wiped on
+ * sight; 503 is transient and never touches the credentials in memory; and
  * `OnDeinit` names the reason MT5 stopped the expert, so "it detached itself"
  * is answered in the journal instead of guessed at.
+ *
+ * v3.08 reverses the persistence contract: the link now lives only as long as
+ * the terminal. The EA keeps its bearer token in MEMORY (nothing is written to
+ * the terminal's common folder any more, and any file an older build left
+ * behind is deleted on sight), the pairing code in its input is spent when the
+ * terminal that redeemed it goes away, and `OnDeinit` calls
+ * `/api/bridge/disconnect` when MT5 closes the chart or the terminal — so the
+ * next session starts from a fresh code instead of resuming a link the user
+ * never agreed to keep. `BRIDGE_LINK_LEASE_MS` (120 s of heartbeat silence) is
+ * the backstop for the cases where no deinit ever runs.
  */
-export const EXPECTED_EA_VERSION = "3.07";
+export const EXPECTED_EA_VERSION = "3.08";
+
+/**
+ * What a terminal is told when its code no longer works.
+ *
+ * Two things end a code: the terminal session that redeemed it (closed MT5, a
+ * swept lease, the Desk replacing it), or the user generating a new one in the
+ * dialog. Both mean the same thing to whoever is reading the journal — fetch the
+ * current code and paste it in — so both answer with this, and the EA prints a
+ * single actionable line instead of retrying a dead value forever.
+ */
+const SPENT_CODE_MESSAGE =
+  "This pairing code is no longer active: the MT5 terminal session that used it has ended, or a newer " +
+  "code replaced it. A code is valid only while the terminal it paired with is running — generate a NEW " +
+  "code in the Desk (Link MT5) and paste it into the EA's PairingCode input.";
 
 /**
  * Answer "I could not check", never "your credential is dead".
@@ -141,7 +178,7 @@ export const EXPECTED_EA_VERSION = "3.07";
  * failover, the bootstrap DDL still being applied, a second replica that has
  * not seen the row), answering 401 turned a few seconds of unreadable database
  * into a terminal that never came back on its own. 503 is retryable, revokes
- * nothing, and the EA keeps its saved link and tries again.
+ * nothing, and the EA keeps the token it holds and tries again.
  */
 function storeUnavailable(
   res: ExpressResponse,
@@ -210,13 +247,23 @@ function makePairingCode(): string {
 /**
  * Issue the browser a pairing code — or hand back the one it already has.
  *
- * WHY IDEMPOTENT: this used to delete every other code the session owned and
- * mint a new one on every call, and the setup dialog calls it whenever it is
- * reopened. So opening the dialog a second time to read the code out loud
- * invalidated the code the EA was already retrying with, and the MT5 journal
- * filled with `HTTP 401 … Unknown or expired pairing code` every five seconds,
- * forever. A code now lives until the user unlinks the terminal (`unpair`),
- * rotates it explicitly (`{ rotate: true }`), or the sliding 30-day TTL lapses.
+ * THE CODE IS USED ONCE, FOR ONE TERMINAL SESSION. It exists to move a
+ * credential from the Desk into a running MT5 terminal by hand: it is minted
+ * here, typed into the EA's `PairingCode` input, redeemed by `/pair`, and from
+ * that moment it is bound to the link it created. Nothing about it is meant to
+ * survive the terminal that used it — when that link ends (MT5 closes, the EA
+ * is disconnected, its heartbeats stop) the code is deleted, so reconnecting
+ * means generating a new one here.
+ *
+ * WHY THE REUSE IS STILL NEEDED WHILE A TERMINAL IS LIVE: the desk holds one
+ * link per (browser session, account). An EA reload, a second chart on the same
+ * account, or an API redeploy the terminal survived all re-present the SAME
+ * code — and must be able to, or a deploy would demand a code the user has no
+ * reason to expect. Reuse is therefore scoped to this session, and the redeemed
+ * code only ever re-pairs the account its link already holds (see `/pair`).
+ *
+ * Rotation retires the previous codes outright: leaving alive a value the user
+ * believes they have replaced would be a credential they no longer control.
  */
 router.post("/pairing-code", async (req, res) => {
   const sessionId = getBrowserSessionId();
@@ -224,19 +271,24 @@ router.post("/pairing-code", async (req, res) => {
   const now = Date.now();
   prunePairings(now);
 
-  // Reported with the code, because a code that only exists in this process's
-  // memory is not the credential the dialog promises. The Desk shows the
-  // warning instead of handing the user a value that dies on the next restart.
+  // Reported with the code, because the Desk must be able to say whether the
+  // store that tracks live links is readable at this moment: a code issued
+  // while it is not is still usable by this process, but a second replica will
+  // not see it.
   const store = await bridgeStoreReport();
 
   if (!rotate) {
     const stored = await pairingCodesForSession(sessionId, now);
-    const live = stored.find((record) => record.expiresAt > now);
+    // Prefer the code a terminal has already redeemed: that is the value in its
+    // PairingCode input, so reopening the dialog shows the code that is actually
+    // in use. A fresh unused code is shown only when there is no live link.
+    const live = stored.find((record) => record.redeemedAt !== null) ?? stored[0];
     if (live) {
       rememberPendingPairing(live);
       return res.json({
         pairingCode: live.code,
-        expiresInMs: Math.max(0, live.expiresAt - now),
+        expiresInMs: live.expiresAt === 0 ? null : Math.max(0, live.expiresAt - now),
+        redeemed: live.redeemedAt !== null,
         reused: true,
         durable: store.durable,
         storeReachable: store.reachable,
@@ -244,8 +296,12 @@ router.post("/pairing-code", async (req, res) => {
     }
   } else {
     // An explicit rotation retires the previous codes: leaving them alive would
-    // mean a value the user believes they have replaced still pairs.
-    await deletePairingCodesForSession(sessionId);
+    // mean a value the user believes they have replaced still pairs. They are
+    // retired rather than deleted, so a terminal still using the old value is
+    // told what happened instead of being answered "unknown code".
+    for (const stale of await pairingCodesForSession(sessionId, now)) {
+      await retirePairingCode(stale.code, now);
+    }
     forgetPendingPairings(sessionId);
   }
 
@@ -262,17 +318,18 @@ router.post("/pairing-code", async (req, res) => {
   return res.json({
     pairingCode: code,
     expiresInMs: PAIRING_CODE_TTL_MS,
+    redeemed: false,
     reused: false,
     durable: store.durable,
     storeReachable: store.reachable,
-    ...(store.durable && store.reachable
+    ...(store.reachable
       ? {}
       : {
           warning:
-            "The link store is not durable right now (" +
+            "The link store could not be read (" +
             store.detail +
-            "). This code and the link it creates live only in this process, so a restart will disconnect the terminal. " +
-            "Set a postgres:// DATABASE_URL on the api service to make MT5 links survive deploys.",
+            "). The EA can still pair through this process, but if the api restarts before its first " +
+            "heartbeat lands, the terminal will need a new code. Check the api service's database connection.",
         }),
   });
 });
@@ -286,42 +343,83 @@ router.post("/pairing-code", async (req, res) => {
  * two independent sets of risk limits. The claim is taken here, atomically,
  * before any token exists.
  *
- * Re-pairing the SAME account on the SAME Desk (an EA restart, a redeploy, a
- * second chart) adds a token to the existing link instead of rotating it: two
- * instances invalidating each other is what made the connection flap.
+ * Re-pairing the SAME account on the SAME Desk (an EA reload, a redeploy the
+ * terminal survived, a second chart) adds a token to the existing link instead
+ * of rotating it: two instances invalidating each other is what made the
+ * connection flap.
+ *
+ * A CODE THAT HAS ALREADY PAIRED is only accepted back from the terminal it
+ * paired: the link it created must still be alive, and this call must be
+ * presenting the same account. Anything else is refused with
+ * `pairing_code_spent`, because the alternative — a spent code that still mints
+ * tokens — is a credential the user believes they have used up.
  */
 router.post("/pair", async (req, res) => {
   prunePairings();
   const code = String(req.body?.pairingCode ?? "").trim().toUpperCase();
   const terminal = req.body?.terminal ?? {};
-  let pairing = pendingPairings.get(code);
-  let codeChecked = true;
-  let codeHealth: StoreHealth = "ok";
-  let codeDetail: string | undefined;
-  if (!pairing) {
-    // Not in this process — a restart may have happened since the code was
-    // issued. The durable record is the authority now.
-    const lookup = await lookupPairingCode(code);
-    if (lookup.record) {
-      pairing = lookup.record;
-      rememberPendingPairing(lookup.record);
-    } else {
-      codeChecked = lookup.checked;
-      codeHealth = lookup.health;
-      codeDetail = lookup.detail;
-    }
-  }
-  if (!pairing) {
-    if (!codeChecked) return storeUnavailable(res, codeHealth, codeDetail, "this pairing code");
-    return res
-      .status(401)
-      .json({ error: "Unknown or expired pairing code.", code: "pairing_code_unknown" });
-  }
 
   const login = Number(terminal.login ?? 0);
   const server = String(terminal.server ?? "unknown");
   if (!Number.isFinite(login) || login <= 0) {
     return res.status(400).json({ error: "terminal.login is required." });
+  }
+
+  /**
+   * The record is read through `lookupPairingCode` on EVERY call, never from a
+   * map this route keeps.
+   *
+   * A local copy goes stale the moment the code is redeemed: the mark that says
+   * "this code already belongs to a terminal" would be missing, and a spent code
+   * would pair again. The call is still cheap — the store module keeps its own
+   * in-process mirror, so the hot path never touches the database.
+   */
+  const lookup = await lookupPairingCode(code);
+  const pairing = lookup.record;
+  if (!pairing) {
+    if (!lookup.checked) return storeUnavailable(res, lookup.health, lookup.detail, "this pairing code");
+    // The code is not usable. Say WHY, because the two reasons need different
+    // actions from the user: a code that was used by a terminal session that
+    // has since ended means "the terminal you closed is gone — take a new
+    // code", while an unknown code means the one in the EA is the wrong value
+    // (rotated, or typed with a character missing).
+    const spent = await lookupSpentPairingCode(code);
+    if (spent.record?.redeemedAt !== null && spent.record?.redeemedAt !== undefined) {
+      return res.status(401).json({ error: SPENT_CODE_MESSAGE, code: "pairing_code_spent" });
+    }
+    return res
+      .status(401)
+      .json({ error: "Unknown or expired pairing code.", code: "pairing_code_unknown" });
+  }
+  rememberPendingPairing(pairing);
+
+  /**
+   * ── Has this code already been used by a terminal? ────────────────────────
+   *
+   * A code is spent at first use. It may only be presented again by the SAME
+   * terminal session, which is the one whose link is still alive and whose
+   * account matches: an EA reload, a second chart, or an API redeploy the
+   * terminal survived all land here. Once that link ends the code is deleted
+   * with it, so this branch cannot resurrect a closed terminal — that path is
+   * the whole point of the change, and the message says so plainly.
+   */
+  if (pairing.redeemedAt !== null) {
+    const known = await linkByCode(code);
+    if (!known.checked) return storeUnavailable(res, known.health, known.detail, "this pairing code");
+    const live = known.record;
+    if (!live) {
+      return res.status(401).json({ error: SPENT_CODE_MESSAGE, code: "pairing_code_spent" });
+    }
+    const sameAccount =
+      Math.trunc(login) === live.login && accountKeyFor(live.login, live.server) === accountKeyFor(login, server);
+    if (!sameAccount) {
+      return res.status(401).json({
+        error:
+          "This pairing code is already connected to another account. Use the code for the terminal you " +
+          "are starting, or generate a new code in the Desk.",
+        code: "pairing_code_spent",
+      });
+    }
   }
 
   const desk = getDesk(pairing.sessionId);
@@ -352,16 +450,24 @@ router.post("/pair", async (req, res) => {
       accountKeyFor(desk.terminal.login, desk.terminal.server) === accountKey,
   );
 
-  // The code stays valid (and is marked as used) — that is what lets the same
-  // terminal re-pair after a restart without the user fetching a new one.
+  // The code is marked as used and bound to the link it just created. It has no
+  // timer of its own from here (`expiresAt = 0`): it lives exactly as long as
+  // this link, and is deleted with it.
   await markPairingCodeRedeemed(code);
 
   if (!sameLink) {
     // A different terminal (or the same Desk linking another account): the
     // previous link's tokens must die, or a superseded terminal could keep
-    // streaming and trading this Desk.
+    // streaming and trading this Desk. Revoking tells that terminal it was
+    // replaced — the one refusal an EA may treat as final — and the pairing
+    // code it used is destroyed with the link, so the terminal it belonged to
+    // can never come back on it.
     const revoked = revokeBridgeTokens(desk);
-    for (const token of revoked) await revokeBridgeLink(token);
+    for (const token of revoked) {
+      const record = (await lookupBridgeLink(token)).record;
+      await revokeBridgeLink(token);
+      if (record?.code && record.code !== code) await retirePairingCode(record.code);
+    }
     clearTerminalData(desk);
   }
   // Same account, same Desk: the existing tokens stay valid. That is the whole
@@ -397,6 +503,10 @@ router.post("/pair", async (req, res) => {
     login,
     server,
     company: String(terminal.company ?? ""),
+    // The link carries the code that created it, so ending the link can delete
+    // that code without touching one the user has just generated for another
+    // terminal.
+    code,
     pairedAt: desk.terminal.pairedAt,
   });
 
@@ -417,7 +527,7 @@ router.post("/pair", async (req, res) => {
     null,
     sameLink
       ? `MetaTrader 5 terminal reconnected on account ${login}@${server}. The existing link was kept, so no re-linking is needed.`
-      : `MetaTrader 5 terminal paired: ${login}@${server}. ${catalogCount} broker markets discovered. This account is now reserved for this Desk.`,
+      : `MetaTrader 5 terminal paired: ${login}@${server}. ${catalogCount} broker markets discovered. This account is now reserved for this Desk. The code is spent and this link ends when the terminal does.`,
   );
   logger.info({ login, server, catalogCount, sameLink }, "MT5 bridge paired");
 
@@ -425,21 +535,39 @@ router.post("/pair", async (req, res) => {
     bridgeToken,
     accountId: desk.terminal.accountId,
     syncIntervalMs: 1000,
-    // The EA keeps its link across restarts; `durable` tells a newer EA that
-    // the token it saved is expected to keep working.
-    durableLink: true,
+    /**
+     * The link contract, told to the terminal.
+     *
+     * `linkEndsWithTerminal` replaces the old `durableLink: true`. It is not a
+     * promise about storage — it is the rule the EA implements: hold the token
+     * in memory, send `POST /api/bridge/disconnect` when MT5 closes this chart
+     * or the terminal, and expect to need a NEW code next time. `leaseMs` is
+     * how long the server will keep this link alive without hearing from it,
+     * so a terminal that is slow to start beating knows it is not forgotten.
+     */
+    linkModel: "terminal-session",
+    linkEndsWithTerminal: true,
+    durableLink: false,
+    leaseMs: BRIDGE_LINK_LEASE_MS,
     subscriptions: { symbols: desk.watchlist, timeframes: TIMEFRAMES },
   });
 });
 
 /**
- * Revoke every token, release the global account claim, drop the pairing codes
- * and remove every terminal-derived value.
+ * The user's deliberate unlink: revoke every token, release the global account
+ * claim, drop the pairing codes and remove every terminal-derived value.
  *
- * This is the ONLY action that ends a link. Closing MT5, closing the browser or
- * redeploying the API all leave it intact — the terminal reconnects with the
- * token it saved. Releasing the claim is what lets the same account be
- * connected somewhere else afterwards.
+ * Revoking (rather than deleting) is what makes this the ONE answer the EA may
+ * treat as final: it is told `bridge_link_revoked`, stops retrying that token
+ * and asks for a new code. Every other way a link ends deletes the rows
+ * instead, so nothing is left for a later process to re-adopt.
+ *
+ * The pairing codes are retired, not deleted: the user is standing in front of
+ * the dialog that just unlinked, and a terminal still holding the old code gets
+ * "take a new one" rather than "unknown code".
+ *
+ * Releasing the claim is what lets the same account be connected somewhere
+ * else afterwards.
  */
 router.post("/unpair", async (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
@@ -449,7 +577,9 @@ router.post("/unpair", async (_req, res) => {
   const tokens = revokeBridgeTokens(desk);
   for (const token of tokens) await revokeBridgeLink(token);
   await revokeBridgeLinksForSession(desk.sessionId);
-  await deletePairingCodesForSession(desk.sessionId);
+  for (const stale of await pairingCodesForSession(desk.sessionId)) {
+    await retirePairingCode(stale.code);
+  }
   forgetPendingPairings(desk.sessionId);
   await releaseClaimsForSession(desk.sessionId);
   desk.terminal = null;
@@ -459,10 +589,148 @@ router.post("/unpair", async (_req, res) => {
     desk,
     "bridge",
     null,
-    `MetaTrader 5 terminal unlinked: ${login}@${server} released. The saved link was revoked, so a fresh pairing code is required to connect again.`,
+    `MetaTrader 5 terminal unlinked: ${login}@${server} released. The link was revoked, so a fresh pairing code is required to connect again.`,
   );
   return res.json({ ok: true, revoked: tokens.length });
 });
+
+/**
+ * The terminal is going away — end its link, now.
+ *
+ * Called by the EA from `OnDeinit` for the reasons that mean the operator is
+ * finished with this chart (MT5 closing the terminal or the chart, the EA being
+ * removed, initialisation failing, the account changing). It is best effort by
+ * design: MT5 does not wait for an EA's shutdown, so the call may not arrive at
+ * all — the lease in `sweepExpiredLinks()` is what guarantees the link still
+ * ends, just later.
+ *
+ * Several charts of one terminal share ONE link, each holding its own token, so
+ * this drops the token that asked and only ends the link when it was the last
+ * one beating. That is what stops one chart's removal from disconnecting
+ * another chart that is still streaming.
+ *
+ * NEVER answers 4xx/5xx for a terminal that simply wants to leave: it is
+ * leaving either way. A store that cannot be read costs the durable row, not
+ * the in-process one.
+ */
+router.post("/disconnect", async (req, res) => {
+  const token = bearerToken(req);
+  if (!token) return res.status(400).json({ error: "A bearer token is required to disconnect." });
+
+  // Resolve what we can WITHOUT turning this into a verification problem: an
+  // unreadable store must not leave a terminal's own token mapped in memory.
+  const lookup = await lookupBridgeLink(token);
+  const record: StoredBridgeLink | null = lookup.record;
+  const sessionId = record?.sessionId ?? sessionForToken(token) ?? null;
+  if (!sessionId) {
+    return res.json({ ok: true, ended: false, reason: "unknown_token" });
+  }
+
+  const desk = getDesk(sessionId);
+  revokeBridgeToken(token);
+  await deleteBridgeLink(token);
+
+  const siblingsLive = await sessionHasLiveLink(sessionId, hashBridgeToken(token), Date.now());
+  const remaining = (desk.terminal ? bridgeTokensFor(desk) : []).length;
+  if (siblingsLive || remaining > 0) {
+    journal(
+      desk,
+      "bridge",
+      null,
+      "One terminal instance disconnected. Other terminal instances on this Desk are still streaming, so the link stays open.",
+    );
+    return res.json({ ok: true, ended: false, remaining, reason: "one_instance_left" });
+  }
+
+  await endSessionLink(
+    sessionId,
+    `MetaTrader 5 terminal disconnected: ${record ? `${record.login}@${record.server}` : "the terminal"} closed. ` +
+      `The link and its pairing code have been released — open Desk → Link MT5 for a new code when you reconnect.`,
+  );
+  return res.json({ ok: true, ended: true });
+});
+
+/**
+ * End a Desk's link: revoke the tokens it holds, delete the durable rows and
+ * the code that created them, release the account claim, and clear every
+ * terminal-derived value from the Desk.
+ *
+ * Shared by the terminal's own `disconnect`, the heartbeat-lease sweeper and an
+ * account handover, so "the link is over" means exactly one thing wherever it
+ * is decided. The in-process Desk is cleared as well as the store, because the
+ * next thing the user sees is the Desk UI: leaving a stale terminal record
+ * there would show a connected account that no longer exists.
+ */
+async function endSessionLink(sessionId: string, journalMessage: string): Promise<void> {
+  const desk = getDesk(sessionId);
+  // In-process tokens first, so the desk's own list is emptied even if the
+  // durable row for one of them was already gone.
+  const tokens = desk.terminal ? revokeBridgeTokens(desk) : [];
+  for (const token of tokens) await deleteBridgeLink(token);
+  // Then everything the store still knows for this session — including rows
+  // written by another replica — together with the pairing code each link
+  // carries. A link that is over must leave no credential behind.
+  await deleteBridgeLinksForSession(sessionId);
+  forgetPendingPairings(sessionId);
+  await releaseClaimsForSession(sessionId);
+  desk.terminal = null;
+  desk.lastPairingError = null;
+  clearTerminalData(desk);
+  journal(desk, "bridge", null, journalMessage);
+}
+
+/**
+ * End every link whose terminal has stopped heartbeating.
+ *
+ * THE RULE THIS ENFORCES: a pairing code is active only while the MT5 terminal
+ * it paired with is running. A clean shutdown says so through `/disconnect`, but
+ * a power cut, a killed process or a VPS reboot says nothing at all — so a link
+ * that has been silent for longer than `BRIDGE_LINK_LEASE_MS` is ended here:
+ * tokens deleted, claim released, code deleted, Desk cleared. The terminal
+ * cannot come back on its own after that, which is the point: the user gets a
+ * fresh code when they next open MT5.
+ */
+export async function sweepExpiredLinks(now = Date.now()): Promise<number> {
+  const expired = await staleLinks(now);
+  let ended = 0;
+  for (const link of expired) {
+    // Another chart of the same terminal still beating? Then the link is alive
+    // and only THIS token is gone — drop the one row and leave the link alone.
+    const siblingsLive = await sessionHasLiveLink(link.sessionId, link.tokenHash, now);
+    if (siblingsLive) {
+      await deleteBridgeLinkByHash(link.tokenHash);
+      continue;
+    }
+    await endSessionLink(
+      link.sessionId,
+      `MetaTrader 5 terminal ${link.login}@${link.server} stopped syncing for over ` +
+        `${Math.round(BRIDGE_LINK_LEASE_MS / 1000)}s, so its link was released. ` +
+        `Open Desk → Link MT5 for a new pairing code when the terminal is running again.`,
+    );
+    ended++;
+  }
+  // Revoked rows are kept only long enough for the EA's spaced retries to see
+  // the final answer; past that they are deleted rather than accumulated.
+  await pruneRevokedLinks(now);
+  return ended;
+}
+
+/**
+ * Start the lease sweeper.
+ *
+ * Called once from the server entry point, not from the router, so importing
+ * the routes (tests, tooling) never leaves a timer running. `unref()` keeps it
+ * from holding the process open on a shutdown.
+ */
+export function startBridgeLinkSweeper(intervalMs = 15_000): NodeJS.Timeout {
+  const timer = setInterval(() => {
+    void sweepExpiredLinks().catch((err) => {
+      logger.warn({ err: err instanceof Error ? err.message : String(err) }, "MT5 bridge lease sweep failed");
+    });
+  }, intervalMs);
+  timer.unref?.();
+  return timer;
+}
 
 // ── Authentication ───────────────────────────────────────────────────────────
 
@@ -569,7 +837,7 @@ async function rehydrateFromDurableLink(req: Request): Promise<LinkAttempt> {
       desk,
       "bridge",
       null,
-      `Desk restored after a server restart: ${link.login}@${link.server} reconnected with its saved link, so no re-pairing was needed.`,
+      `Desk restored after a server restart: ${link.login}@${link.server} reconnected on the link its open terminal still holds, so no re-pairing was needed.`,
     );
   } else {
     rememberBridgeToken(desk, token);
@@ -825,10 +1093,10 @@ router.post("/sync", async (req, res) => {
     } else if (!attempt.checked) {
       // Could not be verified ≠ invalid. The EA keeps its saved token and
       // retries; nothing here is revoked.
-      return storeUnavailable(res, attempt.health, attempt.detail, "this terminal's saved link");
+      return storeUnavailable(res, attempt.health, attempt.detail, "this terminal's link");
     } else if (attempt.revoked) {
       // The one final answer: the user pressed "Unlink terminal" in the Desk.
-      // The EA is allowed to destroy its saved link for this and only this.
+      // The EA is allowed to clear the token it holds for this and only this.
       return res.status(401).json({
         error: "This link was revoked — the terminal was unlinked from the Desk.",
         code: "bridge_link_revoked",
@@ -1297,7 +1565,18 @@ router.get("/status", async (_req, res) => {
   // log quietly explains that the account is already connected elsewhere.
   const lastPairingError = desk.lastPairingError?.message ?? null;
   if (!desk.terminal) {
-    return res.json({ linked: false, catalogCount: 0, selectedCount: 0, lastPairingError, store });
+    return res.json({
+      linked: false,
+      catalogCount: 0,
+      selectedCount: 0,
+      lastPairingError,
+      store,
+      // The contract, stated even with nothing connected: a code works for one
+      // terminal session, and the dialog says so next to the code itself.
+      linkModel: "terminal-session",
+      linkEndsWithTerminal: true,
+      leaseMs: BRIDGE_LINK_LEASE_MS,
+    });
   }
 
   /**
@@ -1331,17 +1610,22 @@ router.get("/status", async (_req, res) => {
     staleAfterMs: terminalStaleWindowMs(desk),
     syncIntervalMs: desk.terminal.syncIntervalMs || null,
     /**
-     * The link is durable **by protocol**: the EA saved its token in the
-     * terminal, the server persisted the link, and neither MT5 being closed nor
-     * a redeploy ends it. Only "Unlink terminal" does. Surfaced so the dialog
-     * can say so plainly instead of warning the user about a ten-minute code
-     * that no longer exists.
+     * The link lives exactly as long as this terminal session.
      *
-     * Whether that promise holds on THIS deployment is `store.durable` below —
-     * a process-local PGlite store forgets the row on restart, and the dialog
-     * says so rather than repeating a guarantee the infrastructure cannot keep.
+     * `linkEndsWithTerminal` is the rule the dialog states to the user: MT5
+     * closing ends the connection, the code that made it is spent, and
+     * reconnecting starts from a NEW code. `leaseMs` is the server's own
+     * deadline — the terminal is given this long between heartbeats before the
+     * link is released — so the UI can explain the gap between "I closed MT5"
+     * and "the Desk shows it as gone" without inventing a second number.
+     *
+     * `durable: false` is deliberately kept: older Desks read that key, and it
+     * must never again claim a link outlives the terminal that owns it.
      */
-    durable: true,
+    durable: false,
+    linkModel: "terminal-session" as const,
+    linkEndsWithTerminal: true,
+    leaseMs: BRIDGE_LINK_LEASE_MS,
     store,
     eaVersion: desk.terminal.eaVersion,
     expectedEaVersion: EXPECTED_EA_VERSION,
@@ -1371,4 +1655,8 @@ router.get("/status", async (_req, res) => {
 
 export default router;
 export { makePairingCode, pendingPairings };
-export const __testing = { randomCommandId: randomUUID };
+export const __testing = {
+  randomCommandId: randomUUID,
+  /** Drive the heartbeat-lease sweep by hand, as the interval would. */
+  sweepExpiredLinks,
+};

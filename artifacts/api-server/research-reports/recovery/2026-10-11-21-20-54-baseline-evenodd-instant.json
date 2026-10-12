@@ -1,0 +1,93 @@
+{
+  "kind": "ladder",
+  "options": {
+    "method": "instant",
+    "set": "DIGITEVEN:-1,DIGITODD:-1",
+    "capital": 200,
+    "base": 1,
+    "maxStake": 500,
+    "episodes": 200000,
+    "seed": 1,
+    "maxTrades": 3000,
+    "mode": "ladder",
+    "selector": "engine",
+    "cooldownTicks": 60,
+    "lossLimit": 4,
+    "maxTicks": 3000,
+    "name": "baseline-evenodd-instant"
+  },
+  "contracts": {
+    "Even": {
+      "p0": 0.5,
+      "payout": 1.95,
+      "margin": 0.025,
+      "splitDriftAt10xBase": -0.002255077738239783,
+      "splitDriftAt20xBase": 0.00006249609413175664,
+      "metrics": {
+        "episodes": 200000,
+        "clearRate": 0.988325,
+        "ruinRate": 0.011675,
+        "unresolvedRate": 0,
+        "tradesToClear": {
+          "p50": 1,
+          "p90": 4,
+          "p95": 5,
+          "p99": 6
+        },
+        "peakDebt": {
+          "p50": 3.06,
+          "p90": 15.97,
+          "p95": 33.79,
+          "p99": 199.99
+        },
+        "meanFinalCash": -1.3889722550006658,
+        "cvar99FinalCash": -199.99967124999733,
+        "trueLossRun": {
+          "mean": 1.994185,
+          "max": 8,
+          "pGe6": 0.030875,
+          "pGe8": 0.007885,
+          "pGe10": 0
+        },
+        "capTrapRate": 0.007575,
+        "meanDecisionLatencyTicks": 0
+      }
+    },
+    "Odd": {
+      "p0": 0.5,
+      "payout": 1.95,
+      "margin": 0.025,
+      "splitDriftAt10xBase": -0.002255077738239783,
+      "splitDriftAt20xBase": 0.00006249609413175664,
+      "metrics": {
+        "episodes": 200000,
+        "clearRate": 0.98841,
+        "ruinRate": 0.01159,
+        "unresolvedRate": 0,
+        "tradesToClear": {
+          "p50": 1,
+          "p90": 4,
+          "p95": 5,
+          "p99": 6
+        },
+        "peakDebt": {
+          "p50": 1,
+          "p90": 15.97,
+          "p95": 33.79,
+          "p99": 199.99
+        },
+        "meanFinalCash": -1.3718904875007571,
+        "cvar99FinalCash": -199.99964499999732,
+        "trueLossRun": {
+          "mean": 1.99045,
+          "max": 8,
+          "pGe6": 0.03075,
+          "pGe8": 0.007945,
+          "pGe10": 0
+        },
+        "capTrapRate": 0.007755,
+        "meanDecisionLatencyTicks": 0
+      }
+    }
+  }
+}

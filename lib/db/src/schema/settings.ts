@@ -31,12 +31,29 @@ export const settingsTable = pgTable("settings", {
   // When false the engine trades straight through a consecutive-loss streak:
   // it still stops at the loss limit, but no cooldown pause is scheduled.
   cooldownEnabled: boolean("cooldown_enabled").notNull().default(true),
+  // WP1 (recovery v2): reaction to the consecutive-loss limit. "pause" is the
+  // legacy behaviour (stop + cooldown timer). "sizedown" never pauses; the
+  // stake halves for every loss beyond the limit while daily-loss/drawdown
+  // hard stops stay authoritative.
+  cooldownBehavior: text("cooldown_behavior").notNull().default("pause"),
   normalOverDigit: integer("normal_over_digit").notNull().default(1),
   normalUnderDigit: integer("normal_under_digit").notNull().default(8),
   recoveryOverDigit: integer("recovery_over_digit").notNull().default(3),
   recoveryUnderDigit: integer("recovery_under_digit").notNull().default(6),
   recoveryMethod: text("recovery_method").notNull().default("split"),
   recoveryAutoMode: boolean("recovery_auto_mode").notNull().default(true),
+  // Recovery v2 rollout gate (WP2+): "off" = byte-for-byte legacy behaviour;
+  // "shadow" = compute and log the v2 decision next to the legacy one without
+  // trading it; "live" = the v2 path trades. Kill switch: back to "off".
+  recoveryV2Mode: text("recovery_v2_mode").notNull().default("off"),
+  // WP4 adaptive ladder settings (recoveryMethod = "adaptive").
+  recoveryBudgetBase: numeric("recovery_budget_base", { precision: 20, scale: 2 }).notNull().default("25"),
+  recoveryLambda: text("recovery_lambda").notNull().default("auto"),
+  recoveryHeadroomPct: numeric("recovery_headroom_pct", { precision: 20, scale: 2 }).notNull().default("5"),
+  recoveryMarginPreference: numeric("recovery_margin_preference", { precision: 20, scale: 4 }).notNull().default("1"),
+  // WP6 honesty tilt kill switch (default off). When on, the e-process/tape
+  // battery may reduce the RCI margin weight (floor 0.5) — stakes never grow.
+  recoveryTiltEnabled: boolean("recovery_tilt_enabled").notNull().default(false),
   recoveryStateJson: text("recovery_state_json"),
   riskAmountType: text("risk_amount_type").notNull().default("fixed"),
   riskAmountValue: numeric("risk_amount_value", { precision: 20, scale: 2 }).notNull().default("1.00"),

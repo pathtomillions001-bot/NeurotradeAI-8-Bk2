@@ -1,0 +1,55 @@
+{
+  "kind": "episode",
+  "options": {
+    "method": "adaptive",
+    "set": "DIGITEVEN:-1,DIGITODD:-1",
+    "capital": 200,
+    "base": 1,
+    "maxStake": 500,
+    "episodes": 20000,
+    "seed": 1,
+    "maxTrades": 3000,
+    "mode": "episode",
+    "selector": "rci",
+    "cooldownTicks": 60,
+    "lossLimit": 4,
+    "maxTicks": 3000,
+    "lambda": 0.5,
+    "budgetBase": 25,
+    "headroomPct": 5,
+    "maxDrawdownPct": 10,
+    "name": "wp4-pilot-adaptive-rci"
+  },
+  "hitRate": 0,
+  "totalRecoveryTrades": 0,
+  "metrics": {
+    "episodes": 20000,
+    "clearRate": 0,
+    "ruinRate": 0,
+    "unresolvedRate": 0,
+    "rebaseRate": 1,
+    "tradesToClear": {
+      "p50": 0,
+      "p90": 0,
+      "p95": 0,
+      "p99": 0
+    },
+    "peakDebt": {
+      "p50": 1,
+      "p90": 1,
+      "p95": 1,
+      "p99": 1
+    },
+    "meanFinalCash": -1,
+    "cvar99FinalCash": -1,
+    "trueLossRun": {
+      "mean": 1,
+      "max": 1,
+      "pGe6": 0,
+      "pGe8": 0,
+      "pGe10": 0
+    },
+    "capTrapRate": 0,
+    "meanDecisionLatencyTicks": 0
+  }
+}

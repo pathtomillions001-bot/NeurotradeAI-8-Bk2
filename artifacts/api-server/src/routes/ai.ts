@@ -17,6 +17,7 @@ import { getStatus as getDynamicConfidenceStatus, loadFromDb as loadDynamicConfi
 import { broadcastSSE, addSSEClient, removeSSEClient } from "../lib/sse";
 import { runWithSession } from "../lib/session";
 import { getTodayStart } from "./trades";
+import { sanitizeRecoveryLambda } from "./settings";
 import { setTzOffset } from "../lib/tz";
 import {
   acquireTradingOwnership,
@@ -236,11 +237,20 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     normalUnderDigit:       Math.min(9, Math.max(1, s?.normalUnderDigit ?? 7)),
     recoveryOverDigit:      Math.min(8, Math.max(0, s?.recoveryOverDigit ?? 4)),
     recoveryUnderDigit:     Math.min(9, Math.max(1, s?.recoveryUnderDigit ?? 5)),
-    recoveryMethod:         (s?.recoveryMethod === "instant" ? "instant" : "split") as "split" | "instant",
+    recoveryMethod:         (["split", "instant", "adaptive"].includes(s?.recoveryMethod) ? s.recoveryMethod : "split") as "split" | "instant" | "adaptive",
     // Manual mode owns this value; Auto mode ignores it completely.
     recoveryMultiplier:     s ? Number(s.recoveryMultiplier ?? 1.5) : 1.5,
     recoveryAutoMode:       s?.recoveryAutoMode ?? true,
     maxRecoverySteps:       s?.maxRecoverySteps ?? 3,
+    // Recovery v2 (WP4–WP8): rollout gate + adaptive ladder + honesty tilt.
+    // Same sanitisation as the settings route so the engine sees exactly what
+    // the operator saved.
+    recoveryV2Mode:         (["off", "shadow", "live"].includes(s?.recoveryV2Mode) ? s.recoveryV2Mode : "off") as "off" | "shadow" | "live",
+    recoveryBudgetBase:     Math.min(1000, Math.max(1, Number(s?.recoveryBudgetBase) || 25)),
+    recoveryLambda:         sanitizeRecoveryLambda(s?.recoveryLambda),
+    recoveryHeadroomPct:    Math.min(100, Math.max(0, Number(s?.recoveryHeadroomPct) || 5)),
+    recoveryMarginPreference: Math.min(10, Math.max(0, Number(s?.recoveryMarginPreference) || 1)),
+    recoveryTiltEnabled:    Boolean(s?.recoveryTiltEnabled ?? false),
   };
 }
 
@@ -408,6 +418,12 @@ function startEngineFor(sessionId: string, settingsRow?: typeof settingsTable.$i
  * reset point outside of a fully-covering win. It clears the counter that gates
  * cooldown (recoveryEngine streakLossCount), NOT the recovery debt itself
  * (unrecoveredAmount persists until a win fully covers the debt).
+ *
+ * WP1: only `streakLossCount` is zeroed. `trueLossRun` (reset only by a win)
+ * and `recoveryDepth` (uncapped episode depth) ride through the spread, so a
+ * pause can never hide how long the run actually is. A time pause changes
+ * nothing statistically about i.i.d. outcomes — the truthful counters make
+ * that visible instead of pretending the streak ended.
  */
 function resumeAfterCooldown(engine: EngineInstance, reasonLabel: string): void {
   engine.cooldownUntil = null;
@@ -604,6 +620,9 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
     consecutiveLossLimit: tradingSettings.consecutiveLossLimit,
     cooldownMinutes: settings?.cooldownMinutes ?? 30,
     cooldownEnabled: (settings as any)?.cooldownEnabled ?? true,
+    // WP1: default "pause" keeps the legacy behaviour exactly; "sizedown"
+    // trades through the limit at halved exposure instead of pausing.
+    cooldownBehavior: (settings as any)?.cooldownBehavior === "sizedown" ? "sizedown" : "pause",
     allowedMarketSymbols,
     paperTradeMode: tradingSettings.paperTradeMode,
     daily,
@@ -834,12 +853,18 @@ function buildRecoveryPayload(visible = true) {
     totalStreakLosses: state.streakLossCount,
     totalStreakAmount: Math.round(state.streakStartAmount * 100) / 100,
     highestStep: state.inRecovery ? state.recoveryStep : 0,
+    // WP1 truthful counters: the run no cooldown can hide, and the UNCAPPED
+    // episode depth (recoveryStep saturates at maxRecoverySteps for legacy
+    // staking; the dashboard deserves the real number).
+    trueLossRun: Number.isFinite(state.trueLossRun) ? state.trueLossRun : 0,
+    recoveryDepth: Number.isFinite(state.recoveryDepth) ? state.recoveryDepth : 0,
   };
 }
 
 router.get("/engine/status", async (req, res): Promise<void> => {
   const settings = await db.select().from(settingsTable)
     .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
+  const s0 = settings[0] as any;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const todayTrades = await db.select().from(tradesTable).where(and(
     eq(tradesTable.sessionId, req.sessionId),
@@ -847,6 +872,27 @@ router.get("/engine/status", async (req, res): Promise<void> => {
   ));
   // This account's OWN independent engine instance — never another session's.
   const engine = getEngine(req.sessionId);
+  // WP8: recovery v2 status for the dashboard card — which method the ladder
+  // runs, the rollout gate, the λ in force, and how much of the re-base
+  // budget the current debt has consumed.
+  const v2 = {
+    method: ["split", "instant", "adaptive"].includes(s0?.recoveryMethod) ? s0.recoveryMethod : "split",
+    mode: ["off", "shadow", "live"].includes(s0?.recoveryV2Mode) ? s0.recoveryV2Mode : "off",
+    lambda: String(s0?.recoveryLambda ?? "auto"),
+    budgetBase: Math.min(1000, Math.max(1, Number(s0?.recoveryBudgetBase) || 25)),
+    tiltEnabled: Boolean(s0?.recoveryTiltEnabled ?? false),
+  };
+  const recoveryPayload = buildRecoveryPayload(true);
+  const baseForBudget = recoveryPayload.baseStake > 0 ? recoveryPayload.baseStake : 1;
+  const budgetAmount = v2.budgetBase * baseForBudget;
+  const recovery = {
+    ...recoveryPayload,
+    v2,
+    budgetAmount: Math.round(budgetAmount * 100) / 100,
+    budgetUsedPct: budgetAmount > 0
+      ? Math.min(999, Math.round((recoveryPayload.unrecoveredAmount / budgetAmount) * 100))
+      : 0,
+  };
 
   res.json({
     isRunning: engine.running, mode: engine.running ? engine.mode : "manual",
@@ -865,7 +911,7 @@ router.get("/engine/status", async (req, res): Promise<void> => {
     sessionLossCount: engine.sessionLossCount,
     consecutiveLossLimit: settings.length > 0 ? (settings[0].consecutiveLossLimit ?? 3) : 3,
     marketsScanned: AUTOMATED_DERIV_MARKETS.length,
-    recovery: buildRecoveryPayload(true),
+    recovery,
   });
 });
 

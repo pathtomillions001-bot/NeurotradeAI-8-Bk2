@@ -477,6 +477,9 @@ export const ExecuteTradeBody = zod.object({
   "duration": zod.number().optional(),
   "durationUnit": zod.enum(['t', 's', 'm', 'h', 'd']).optional()
 }).strict().describe('One contract per request. Quantity and order arrays are not supported.')
+// NOTE (regen hazard): the .strict() above is hand-restored after every orval
+// regen — the manual-trade route relies on it to reject unknown fields
+// (count/quantity/orders). See the NOTE beside TradeInput in openapi.yaml.
 
 
 /**
@@ -851,6 +854,7 @@ export const ToggleAutonomousEngineResponse = zod.object({
 /**
  * @summary Get user risk profile and trading settings
  */
+export const getSettingsResponseRecoveryTiltEnabledDefault = false;
 export const getSettingsResponseAutonomousNormalContractsMax = 8;
 
 export const getSettingsResponseAutonomousRecoveryContractsMax = 8;
@@ -884,12 +888,19 @@ export const GetSettingsResponse = zod.object({
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
   "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
   "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
+  "cooldownBehavior": zod.enum(['pause', 'sizedown']).optional().describe('What the autonomous engine does when the consecutive-loss limit is reached. \"pause\" (default, legacy) stops and runs the cooldown timer; \"sizedown\" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes.'),
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
   "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
+  "recoveryMethod": zod.enum(['split', 'instant', 'adaptive']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)'),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
+  "recoveryV2Mode": zod.enum(['off', 'shadow', 'live']).optional().describe('Recovery v2 rollout gate. \"off\" (default) keeps byte-for-byte legacy behaviour; \"shadow\" computes and logs the v2 decision next to the legacy one without trading it; \"live\" lets the v2 path trade. Turning it off restores legacy exactly.'),
+  "recoveryBudgetBase": zod.number().optional().describe('Recovery budget in multiples of the base stake (adaptive method, default 25). When the debt reaches the budget the ladder re-bases (realises the debt) and restarts at base stake'),
+  "recoveryLambda": zod.string().optional().describe('Adaptive ladder lambda. \"auto\" lets the Markov-DP optimizer choose (falls back to 0.5 until WP5), or a fixed number in (0,1]'),
+  "recoveryHeadroomPct": zod.number().optional().describe('phi — the percent of remaining drawdown headroom one recovery stake may consume (default 5)'),
+  "recoveryMarginPreference": zod.number().optional().describe('RCI margin weight w1 — preference for cheaper recovery contracts (default 1)'),
+  "recoveryTiltEnabled": zod.boolean().default(getSettingsResponseRecoveryTiltEnabledDefault).describe('Kill switch for the WP6 honesty tilt. Off (default) forces the RCI margin weight factor to 1 for every contract. On, an anytime-valid e-process plus the tape battery may reduce the margin weight (never below half) for a contract whose realised hit rate persistently beats its fair probability. It can only reorder selection — stakes never increase.'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "autonomousNormalContracts": zod.array(zod.string()).max(getSettingsResponseAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
   "autonomousRecoveryContracts": zod.array(zod.string()).max(getSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),
@@ -902,6 +913,7 @@ export const GetSettingsResponse = zod.object({
 /**
  * @summary Update risk profile and trading settings
  */
+export const updateSettingsBodyRecoveryTiltEnabledDefault = false;
 export const updateSettingsBodyAutonomousNormalContractsMax = 8;
 
 export const updateSettingsBodyAutonomousRecoveryContractsMax = 8;
@@ -934,12 +946,19 @@ export const UpdateSettingsBody = zod.object({
   "requirePositiveEv": zod.boolean().optional(),
   "cooldownMinutes": zod.number().optional(),
   "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
+  "cooldownBehavior": zod.enum(['pause', 'sizedown']).optional().describe('\"pause\" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; \"sizedown\" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply.'),
   "normalOverDigit": zod.number().optional(),
   "normalUnderDigit": zod.number().optional(),
   "recoveryOverDigit": zod.number().optional(),
   "recoveryUnderDigit": zod.number().optional(),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional(),
+  "recoveryMethod": zod.enum(['split', 'instant', 'adaptive']).optional(),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
+  "recoveryV2Mode": zod.enum(['off', 'shadow', 'live']).optional().describe('Recovery v2 rollout gate (\"off\" default = legacy; \"shadow\" logs v2 decisions without trading; \"live\" trades them).'),
+  "recoveryBudgetBase": zod.number().optional().describe('Recovery budget in multiples of the base stake (adaptive method, default 25)'),
+  "recoveryLambda": zod.string().optional().describe('Adaptive ladder lambda. \"auto\" or a fixed number in (0,1]'),
+  "recoveryHeadroomPct": zod.number().optional().describe('phi — percent of remaining drawdown headroom one recovery stake may consume (default 5)'),
+  "recoveryMarginPreference": zod.number().optional().describe('RCI margin weight w1 (default 1)'),
+  "recoveryTiltEnabled": zod.boolean().default(updateSettingsBodyRecoveryTiltEnabledDefault).describe('WP6 honesty-tilt kill switch (default false). On lets the e-process\/battery reduce the RCI margin weight (floor 0.5); stakes never increase.'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "autonomousNormalContracts": zod.array(zod.string()).max(updateSettingsBodyAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
   "autonomousRecoveryContracts": zod.array(zod.string()).max(updateSettingsBodyAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),
@@ -948,6 +967,7 @@ export const UpdateSettingsBody = zod.object({
   "botRecoveryMarkup": zod.number().min(updateSettingsBodyBotRecoveryMarkupMin).max(updateSettingsBodyBotRecoveryMarkupMax).optional().describe('Profit markup (%) on accumulated loss debt applied ONLY by the AI Bot section bots (the five specialist bots, the Dual-Lock Range Sentinel and the Apex One-Shot Sniper) when sizing recovery stakes. Default 10. Ignored by the shared engine recovery.')
 })
 
+export const updateSettingsResponseRecoveryTiltEnabledDefault = false;
 export const updateSettingsResponseAutonomousNormalContractsMax = 8;
 
 export const updateSettingsResponseAutonomousRecoveryContractsMax = 8;
@@ -981,12 +1001,19 @@ export const UpdateSettingsResponse = zod.object({
   "requirePositiveEv": zod.boolean().optional().describe('Only execute when expected value is positive'),
   "cooldownMinutes": zod.number().optional().describe('Minutes to wait before auto-resuming after consecutive loss stop'),
   "cooldownEnabled": zod.boolean().optional().describe('Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak.'),
+  "cooldownBehavior": zod.enum(['pause', 'sizedown']).optional().describe('What the autonomous engine does when the consecutive-loss limit is reached. \"pause\" (default, legacy) stops and runs the cooldown timer; \"sizedown\" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes.'),
   "normalOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades in normal (non-recovery) mode'),
   "normalUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode'),
   "recoveryOverDigit": zod.number().optional().describe('Digit barrier used for DIGITOVER trades while in recovery mode'),
   "recoveryUnderDigit": zod.number().optional().describe('Digit barrier used for DIGITUNDER trades while in recovery mode'),
-  "recoveryMethod": zod.enum(['split', 'instant']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery'),
+  "recoveryMethod": zod.enum(['split', 'instant', 'adaptive']).optional().describe('Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)'),
   "recoveryAutoMode": zod.boolean().optional().describe('Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit'),
+  "recoveryV2Mode": zod.enum(['off', 'shadow', 'live']).optional().describe('Recovery v2 rollout gate. \"off\" (default) keeps byte-for-byte legacy behaviour; \"shadow\" computes and logs the v2 decision next to the legacy one without trading it; \"live\" lets the v2 path trade. Turning it off restores legacy exactly.'),
+  "recoveryBudgetBase": zod.number().optional().describe('Recovery budget in multiples of the base stake (adaptive method, default 25). When the debt reaches the budget the ladder re-bases (realises the debt) and restarts at base stake'),
+  "recoveryLambda": zod.string().optional().describe('Adaptive ladder lambda. \"auto\" lets the Markov-DP optimizer choose (falls back to 0.5 until WP5), or a fixed number in (0,1]'),
+  "recoveryHeadroomPct": zod.number().optional().describe('phi — the percent of remaining drawdown headroom one recovery stake may consume (default 5)'),
+  "recoveryMarginPreference": zod.number().optional().describe('RCI margin weight w1 — preference for cheaper recovery contracts (default 1)'),
+  "recoveryTiltEnabled": zod.boolean().default(updateSettingsResponseRecoveryTiltEnabledDefault).describe('Kill switch for the WP6 honesty tilt. Off (default) forces the RCI margin weight factor to 1 for every contract. On, an anytime-valid e-process plus the tape battery may reduce the margin weight (never below half) for a contract whose realised hit rate persistently beats its fair probability. It can only reorder selection — stakes never increase.'),
   "allowedMarkets": zod.array(zod.string()).optional(),
   "autonomousNormalContracts": zod.array(zod.string()).max(updateSettingsResponseAutonomousNormalContractsMax).optional().describe('Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even\/Odd\/Rise\/Fall and auto for Matches\/Differs.'),
   "autonomousRecoveryContracts": zod.array(zod.string()).max(updateSettingsResponseAutonomousRecoveryContractsMax).optional().describe('Contracts the autonomous engine may trade while recovering, in the same TYPE:digit format as autonomousNormalContracts.'),

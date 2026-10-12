@@ -56,6 +56,23 @@ export interface RecoveryState {
   targetProfit:             number;       // original expected net profit of the normal trade that started recovery (sizing only)
   remainingTargetProfit:    number;       // leftover optional sizing target — never a completion condition
   originPayoutMultiplier:   number;       // total-return multiplier of that original normal trade
+  /**
+   * TRUE consecutive-loss run (recovery v2, WP1). Increments on every settled
+   * loss and is reset ONLY by a win — never by a cooldown auto-resume, a
+   * manual restart, or any other counter hygiene. `streakLossCount` above is
+   * kept untouched for every existing consumer (it is the number that gates
+   * the loss-limit stop), but it is reset by resumeAfterCooldown and therefore
+   * UNDER-reports long runs; this field never does.
+   */
+  trueLossRun:              number;
+  /**
+   * UNCAPPED depth of the current recovery episode (WP1). recoveryStep is
+   * capped at maxRecoverySteps because legacy staking compounds a manual
+   * multiplier by it and that cap is pinned by the staking-invariant tests;
+   * escalation reporting and the v2 preview use this uncapped counter instead
+   * so a 10-loss run is reported as depth 10, not 3.
+   */
+  recoveryDepth:            number;
   resetDate:                string;       // local YYYY-MM-DD this state belongs to — drives the daily auto-reset
   /**
    * Epoch ms when the CURRENT recovery episode began (0 = not in recovery).
@@ -88,6 +105,8 @@ function freshState(): RecoveryState {
     targetProfit:             0,
     remainingTargetProfit:    0,
     originPayoutMultiplier:   1,
+    trueLossRun:              0,
+    recoveryDepth:            0,
     resetDate:                todayKey(),
     recoveryStartedAt:        0,
   };
@@ -161,6 +180,8 @@ function applyNewDay(): void {
   const prevTargetProfit     = state.targetProfit;
   const prevRemainingTarget  = state.remainingTargetProfit;
   const prevOriginPayout     = state.originPayoutMultiplier;
+  const prevTrueLossRun      = Number.isFinite(state.trueLossRun) ? state.trueLossRun : 0;
+  const prevRecoveryDepth    = Number.isFinite(state.recoveryDepth) ? state.recoveryDepth : 0;
   const hadCarryOver         = state.inRecovery || prevDebt > 0 || state.streakLossCount > 0;
 
   replaceState(freshState(), initializedSessions.has(activeSessionId()));
@@ -178,6 +199,12 @@ function applyNewDay(): void {
       state.streakLossCount         = 1;
       state.streakStartAmount       = carryDebt;
       state.recoveryStartedAt       = Date.now();
+      // WP1: a calendar rollover never breaks a loss run or hides recovery
+      // depth. The true run and uncapped depth carry over so the dashboard
+      // keeps reporting the real episode, while the legacy step/streak
+      // counters restart at 1 exactly as before.
+      state.trueLossRun             = prevTrueLossRun;
+      state.recoveryDepth           = Math.max(1, prevRecoveryDepth);
       // Carry the aspirational target but re-apply the one-base-stake cap so a
       // pre-cap target can never survive the daily rollover into a bigger stake.
       state.targetProfit            = capTargetProfit(prevTargetProfit, prevBaseStake);
@@ -451,6 +478,10 @@ export function reduceRecoveryOutcome(
   let next = { ...current };
 
   if (won) {
+    // A win is the ONLY thing that resets the true loss run (WP1). It applies
+    // even outside recovery so a run that survives into normal mode is still
+    // broken honestly by the first win.
+    next.trueLossRun = 0;
     if (next.inRecovery) {
       const settlement = settleRecoveryWin({
         unrecoveredAmount: next.unrecoveredAmount,
@@ -472,9 +503,12 @@ export function reduceRecoveryOutcome(
       }
     }
   } else {
+    // The true run counts across cooldown resumes and mode changes (WP1).
+    next.trueLossRun = (Number.isFinite(current.trueLossRun) ? current.trueLossRun : 0) + 1;
     if (!next.inRecovery) {
       next.inRecovery               = true;
       next.recoveryStep             = 1;
+      next.recoveryDepth            = 1;
       // Start (or restart) the recovery clock that ages the admission threshold.
       next.recoveryStartedAt        = Date.now();
       next.baseStake                = next.baseStake > 0 ? next.baseStake : stakeUsed;
@@ -495,7 +529,11 @@ export function reduceRecoveryOutcome(
       next.remainingTargetProfit    = next.targetProfit;
     } else {
       const cap                = maxRecoverySteps > 0 ? maxRecoverySteps : 3;
+      // recoveryStep stays CAPPED (legacy manual staking compounds by it and
+      // the staking-invariant tests pin that). recoveryDepth is the uncapped
+      // episode depth used for truthful escalation reporting.
       next.recoveryStep       = Math.min(next.recoveryStep + 1, cap);
+      next.recoveryDepth      = (Number.isFinite(next.recoveryDepth) ? next.recoveryDepth : next.recoveryStep) + 1;
       next.unrecoveredAmount  = addMoney(next.unrecoveredAmount, stakeUsed);
       next.streakLossCount++;
       next.streakStartAmount  = addMoney(next.streakStartAmount, stakeUsed);
@@ -508,6 +546,48 @@ export function reduceRecoveryOutcome(
 /** A separate paper ledger may use the same policy without touching account debt. */
 export function createRecoveryState(): RecoveryState {
   return freshState();
+}
+
+/**
+ * WP4 — RE-BASE (pure form).
+ *
+ * The adaptive ladder's budget rule: when the outstanding debt reaches the
+ * recovery budget (or the headroom cap can no longer fund even a base stake),
+ * the debt is REALISED as a logged loss and recovery restarts at base stake.
+ * A re-base never waits and never hides the loss — the caller writes the
+ * ledger row for the realised amount; this function only moves the state.
+ *
+ * Alongside reduceRecoveryOutcome this is the ONLY other transition allowed to
+ * write recovery state, and it can only REDUCE obligations (debt → 0). It
+ * preserves baseStake (the ladder restarts at the normal stake) and the true
+ * loss run (a re-base is a loss, not a win — the run keeps counting).
+ */
+export function reduceRecoveryRebase(current: RecoveryState): RecoveryState {
+  const next = freshState();
+  next.resetDate = current.resetDate;
+  next.baseStake = current.baseStake;
+  next.trueLossRun = Number.isFinite(current.trueLossRun) ? current.trueLossRun : 0;
+  return next;
+}
+
+/**
+ * Session writer for a re-base. Returns the debt that was realised (0 when
+ * there was nothing to re-base). The caller makes the state durable
+ * (flushRecoveryState) BEFORE writing the ledger row — the same
+ * durable-before-claimed order as settleAutonomousRow — and rolls back via
+ * restoreStateSnapshot if the flush fails.
+ */
+export function applyRebaseToState(): number {
+  ensureFreshDay();
+  const debt = state.unrecoveredAmount;
+  if (!state.inRecovery && debt <= 0) return 0;
+  replaceState(reduceRecoveryRebase({ ...state }));
+  return debt;
+}
+
+/** WP4 — rollback support: restores a snapshot after a failed durable flush. */
+export function restoreStateSnapshot(snapshot: RecoveryState): void {
+  replaceState({ ...snapshot });
 }
 
 export function recordOutcome(
@@ -579,6 +659,9 @@ export function loadState(json: string): void {
         targetProfit:             0,
         remainingTargetProfit:    0,
         originPayoutMultiplier:   1,
+        // Pre-v2 rows: the counters start counting from the next settlement.
+        trueLossRun:              0,
+        recoveryDepth:            0,
         // Legacy per-family rows predate this feature — always treat as "not today".
         resetDate:                "",
         recoveryStartedAt:        0,
@@ -608,6 +691,9 @@ export function loadState(json: string): void {
       targetProfit:             loadedTargetProfit,
       remainingTargetProfit:    loadedRemainingTarget,
       originPayoutMultiplier:   Math.max(1, Number(parsed.originPayoutMultiplier) || 1),
+      // Rows persisted before WP1 have no truthful counters; they start fresh.
+      trueLossRun:              Number(parsed.trueLossRun)  || 0,
+      recoveryDepth:            Number(parsed.recoveryDepth) || 0,
       // Older/legacy saved rows never had resetDate — treat as "not today" so a
       // pre-existing carry-over debt from before this feature existed is cleared
       // immediately on load rather than silently resurrected.
@@ -637,6 +723,10 @@ export function getLossStreakSummary(): {
   totalStreakLosses: number;
   totalStreakAmount: number;
   remainingTargetProfit: number;
+  /** WP1: consecutive settled losses, reset only by a win. */
+  trueLossRun: number;
+  /** WP1: uncapped depth of the current recovery episode. */
+  recoveryDepth: number;
 } {
   ensureFreshDay();
   return {
@@ -645,5 +735,7 @@ export function getLossStreakSummary(): {
     totalStreakLosses: state.streakLossCount,
     totalStreakAmount: state.streakStartAmount,
     remainingTargetProfit: state.remainingTargetProfit,
+    trueLossRun:       Number.isFinite(state.trueLossRun) ? state.trueLossRun : 0,
+    recoveryDepth:     Number.isFinite(state.recoveryDepth) ? state.recoveryDepth : 0,
   };
 }

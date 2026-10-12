@@ -5,7 +5,9 @@
  * AI Trading Platform API
  * OpenAPI spec version: 0.1.0
  */
+import type { TradingSettingsInputCooldownBehavior } from './tradingSettingsInputCooldownBehavior';
 import type { TradingSettingsInputRecoveryMethod } from './tradingSettingsInputRecoveryMethod';
+import type { TradingSettingsInputRecoveryV2Mode } from './tradingSettingsInputRecoveryV2Mode';
 import type { TradingSettingsInputRiskAmountType } from './tradingSettingsInputRiskAmountType';
 import type { TradingSettingsInputRiskProfile } from './tradingSettingsInputRiskProfile';
 
@@ -33,6 +35,8 @@ export interface TradingSettingsInput {
   cooldownMinutes?: number;
   /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
   cooldownEnabled?: boolean;
+  /** "pause" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; "sizedown" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply. */
+  cooldownBehavior?: TradingSettingsInputCooldownBehavior;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;
@@ -40,6 +44,18 @@ export interface TradingSettingsInput {
   recoveryMethod?: TradingSettingsInputRecoveryMethod;
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
+  /** Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them). */
+  recoveryV2Mode?: TradingSettingsInputRecoveryV2Mode;
+  /** Recovery budget in multiples of the base stake (adaptive method, default 25) */
+  recoveryBudgetBase?: number;
+  /** Adaptive ladder lambda. "auto" or a fixed number in (0,1] */
+  recoveryLambda?: string;
+  /** phi — percent of remaining drawdown headroom one recovery stake may consume (default 5) */
+  recoveryHeadroomPct?: number;
+  /** RCI margin weight w1 (default 1) */
+  recoveryMarginPreference?: number;
+  /** WP6 honesty-tilt kill switch (default false). On lets the e-process/battery reduce the RCI margin weight (floor 0.5); stakes never increase. */
+  recoveryTiltEnabled?: boolean;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

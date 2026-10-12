@@ -377,7 +377,12 @@ function broadcastEngineSSE(engine: EngineInstance, event: string, data: unknown
  * Shared by the /engine/toggle "on" path and startup auto-resume so both set up
  * exactly the same per-account state. Never touches any other session.
  */
-function startEngineFor(sessionId: string, settingsRow?: typeof settingsTable.$inferSelect): void {
+function startEngineFor(
+  sessionId: string,
+  settingsRow?: typeof settingsTable.$inferSelect,
+  /** Operator pressed Start / Resume: an explicit decision that ends a loss-limit pause. */
+  manualStart = false,
+): void {
   const engine = getEngine(sessionId);
   if (engine.running) return;
 
@@ -393,6 +398,14 @@ function startEngineFor(sessionId: string, settingsRow?: typeof settingsTable.$i
     } else {
       recoveryEngine.resetAll();
     }
+    // A manual Start / "Resume now" is the operator overriding the loss-limit
+    // pause, exactly as the cooldown expiry does. Without this the consecutive-
+    // loss counter is still >= the limit, the very first cycle trips the same
+    // hard stop and the engine bounces straight back into a fresh cooldown —
+    // the button appears to do nothing. Only the streak counter is cleared:
+    // the recovery DEBT, trueLossRun and recoveryDepth are untouched, and the
+    // limit still applies to every loss from here on.
+    if (manualStart) clearLossStreakCounter();
   });
 
   if (settingsRow?.loopIntervalSec) engine.loopIntervalSec = settingsRow.loopIntervalSec;
@@ -413,6 +426,15 @@ function startEngineFor(sessionId: string, settingsRow?: typeof settingsTable.$i
 }
 
 /**
+ * Zero ONLY the consecutive-loss counter that gates the cooldown. Must run
+ * inside the session's ALS scope. Debt, trueLossRun and recoveryDepth ride
+ * through untouched (WP1).
+ */
+function clearLossStreakCounter(): void {
+  recoveryEngine.seedState({ ...recoveryEngine.getState(), streakLossCount: 0 });
+}
+
+/**
  * Everything a cooldown expiry does, factored out so the "cooldown disabled"
  * path can run it immediately. The loss-streak counter is reset here — the ONLY
  * reset point outside of a fully-covering win. It clears the counter that gates
@@ -430,7 +452,7 @@ function resumeAfterCooldown(engine: EngineInstance, reasonLabel: string): void 
   engine.cooldownResumeTimer = null;
   runWithSession(engine.sessionId, () => {
     recoveryEngine.setPersistenceSession(engine.sessionId);
-    recoveryEngine.seedState({ ...recoveryEngine.getState(), streakLossCount: 0 });
+    clearLossStreakCounter();
   });
   engine.sessionLossCount = 0;
   // Auto-resume engine
@@ -949,7 +971,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     if (engine.cooldownResumeTimer) { clearTimeout(engine.cooldownResumeTimer); engine.cooldownResumeTimer = null; }
     engine.cooldownUntil = null;
 
-    startEngineFor(req.sessionId, settings[0]);
+    startEngineFor(req.sessionId, settings[0], true);
     engine.sessionLossCount = runWithSession(req.sessionId, () => {
       recoveryEngine.setPersistenceSession(req.sessionId);
       return recoveryEngine.getState().streakLossCount;

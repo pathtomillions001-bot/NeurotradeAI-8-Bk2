@@ -171,6 +171,39 @@
 //|     off by default because it is bytes on every beat) the chart    |
 //|     symbol's tick tape rides the heartbeat so a flow agent can     |
 //|     measure something other than one quote per 500 ms.             |
+//| WHAT CHANGED IN v3.06                                             |
+//| 24. A 401 NO LONGER DESTROYS THE SAVED LINK ON SIGHT.            |
+//|     The Desk answers 401 for two different things: "this link was |
+//|     revoked" (the user pressed Unlink terminal — final) and "I    |
+//|     could not verify this token" (a deploy in progress, a         |
+//|     database failover, the bootstrap DDL still being applied      |
+//|     while the HTTP port was already open, a second replica that   |
+//|     has not seen the row). v3.05 treated both as final: it emptied|
+//|     the token, wrote that empty token over the link file in the   |
+//|     COMMON folder — which every chart of the account shares, so   |
+//|     one chart's bad answer disarmed all of them — disabled        |
+//|     trading and fell back to the pairing code, which was stored   |
+//|     in the same place and failed for the same reason. A few       |
+//|     seconds of unreadable database therefore ended the link       |
+//|     permanently, and the journal said "Unknown or expired pairing |
+//|     code" over a code that was never expired. The server now      |
+//|     answers 503 for "could not check" and sends a machine-readable|
+//|     `code`; this EA keeps the saved link through four spaced      |
+//|     retries before abandoning it, treats 5xx as transient, and    |
+//|     discards the token ONLY for an explicit revocation.           |
+//| 25. "IT DETACHED ITSELF" IS ANSWERED, NOT GUESSED.               |
+//|     OnDeinit printed a bare reason number. This program never     |
+//|     removes itself — there is no ExpertRemove() call and OnInit() |
+//|     always returns INIT_SUCCEEDED — so every removal comes from   |
+//|     the terminal, and the terminal says which one it was. The     |
+//|     reason is now named (recompiled, chart symbol or timeframe    |
+//|     changed, inputs changed, another account activated, template  |
+//|     applied, chart or terminal closed), and the terminal-caused   |
+//|     ones say plainly that nobody unlinked anything and that the   |
+//|     saved link resumes on the next start.                         |
+//| 26. SERVER PROBLEMS ARE PRINTED ONCE EVERY FIVE MINUTES.         |
+//|     A 5xx on a 500 ms heartbeat would otherwise reproduce the     |
+//|     journal flooding the 401 backoff was written to stop.         |
 //| 23. THE v3.05 SECTION COMPILES.                                  |
 //|     MQL5 resolves names in TEXT ORDER, and v3.05 was spliced in  |
 //|     at the position its FUNCTIONS belong — after the plan and    |
@@ -198,7 +231,7 @@
 //| transient WebRequest failure from making the EA appear to "not     |
 //| attach" to a chart.                                                |
 #property copyright "NeuroTrade AI"
-#property version   "3.05"
+#property version   "3.06"
 #property strict
 
 // The version this EA reports on the wire.
@@ -209,7 +242,7 @@
 // the heartbeat is the one the Desk stores (`desk.terminal.eaVersion`), so the
 // Desk's "this terminal is running an older EA" check could never tell a v3.05
 // terminal from a v3.04 one.
-#define EA_VERSION "3.05"
+#define EA_VERSION "3.06"
 
 #include <Trade/Trade.mqh>
 
@@ -347,6 +380,36 @@ string    g_results = "";
 // from an ordinary network failure, which must keep retrying quickly.
 int       g_lastHttpStatus = 0;
 string    g_lastHttpError = "";
+// Server-supplied machine-readable `code` of the most recent HTTP call.
+// v3.06: this is what lets the EA tell a FINAL refusal from an unverified one.
+//   "bridge_link_revoked"     the user pressed "Unlink terminal" — the saved
+//                             link is dead and may be discarded;
+//   "bridge_token_unknown"    no such link — unverified, so it is retried;
+//   "bridge_store_unavailable" the server could not read its own link store
+//                             (503) — nothing was revoked, retry soon;
+//   ""                        an older server that only sent a bare 401.
+string    g_lastHttpCode = "";
+
+// ── v3.06: a 401 no longer destroys the saved link on sight ─────────────────
+// v3.05 treated EVERY 401 as final: it emptied g_token, wrote that empty token
+// over the link file in the common folder — which every chart of this account
+// shares, so one chart's bad response disarmed all of them — disabled trading
+// and fell back to the pairing code. But a 401 is also what the server answered
+// when it simply could not READ its link store: a deploy in progress, a
+// database failover, the bootstrap DDL still being applied while the HTTP port
+// was already open, or a second replica that had not seen the row. The code was
+// stored in the same place, so it failed for the same reason, and the terminal
+// ended up permanently disconnected by a few seconds of unreadable database.
+//
+// The server now says which of the two happened (`code`, and 503 for "could not
+// check"). This is the terminal's half: an unverified refusal is retried a few
+// times, spaced out, before the credential is abandoned — and only an explicit
+// revocation clears it immediately.
+#define TOKEN_REFUSAL_GRACE   4     // unverified 401s tolerated before the token is dropped
+#define TOKEN_RETRY_SECONDS   15    // spacing between those retries (quiet, not a hammer)
+int       g_tokenRefusals = 0;      // consecutive unverified refusals of the current token
+datetime  g_nextTokenRetry = 0;     // earliest moment the token may be presented again
+datetime  g_lastStoreWarnAt = 0;    // rate limit for "the server could not verify" lines
 
 // Dynamically sized: users may select any number of instruments. Data is sent
 // in rotating batches so an enormous selection does not create a giant request
@@ -531,6 +594,87 @@ string        g_mgmtEvents[MAX_MGMT_EVENTS];
 int           g_mgmtEventCount = 0;
 
 //+------------------------------------------------------------------+
+//| v3.06: diagnostics for a link the server could not verify        |
+//+------------------------------------------------------------------+
+/**
+ * Print a store/server problem at most once per five minutes.
+ *
+ * A 503 (or an unverified 401) is retried every few seconds by design, so an
+ * unguarded Print here would fill the Experts journal the same way the old
+ * five-second 401 loop did — thousands of identical lines burying the reason.
+ * The first occurrence is always printed; later ones are five minutes apart.
+ */
+void WarnServerOnce(const string message)
+{
+   datetime now = NowServer();
+   if(g_lastStoreWarnAt != 0 && now - g_lastStoreWarnAt < 300) return;
+   g_lastStoreWarnAt = now;
+   Print("NeurotradeBridge: ", message);
+}
+
+/**
+ * Name the reason MT5 stopped this expert.
+ *
+ * WHY: "the EA detached itself from the chart and I did not remove it" is
+ * unanswerable from a bare `stopped (reason 4)`. The EA never removes itself —
+ * it has no ExpertRemove() call and OnInit() always returns INIT_SUCCEEDED, so
+ * it cannot fail to attach — which means every removal comes from the terminal,
+ * and the terminal always says which of them it was. Translating the code turns
+ * a mystery into a one-line answer in the journal.
+ *
+ * The constants are MQL5's `REASON_*` (ENUM_DEINIT_REASON), and their VALUES are
+ * the ones in the MQL5 reference — they are not the MQL4 numbers, and they do
+ * not start at 1:
+ *
+ *   0 REASON_PROGRAM      ExpertRemove() was called — this EA never calls it
+ *   1 REASON_REMOVE       removed from the chart
+ *   2 REASON_RECOMPILE    MetaEditor rebuilt the .ex5 under a running chart;
+ *                         MT5 re-attaches the EA immediately and the saved link
+ *                         resumes with no new pairing code
+ *   3 REASON_CHARTCHANGE  the chart symbol or timeframe changed, so MT5
+ *                         restarts the expert
+ *   4 REASON_CHARTCLOSE   the chart was closed
+ *   5 REASON_PARAMETERS   the inputs were changed in the properties dialog
+ *   6 REASON_ACCOUNT      another account was activated, or the terminal
+ *                         reconnected after an account-settings change; the
+ *                         link file is per account, so a different account has
+ *                         no token and must pair again
+ *   7 REASON_TEMPLATE     a different chart template was applied
+ *   8 REASON_INITFAILED   OnInit() returned non-zero — not reachable in this
+ *                         build, which always returns INIT_SUCCEEDED
+ *   9 REASON_CLOSE        the terminal was closed
+ *
+ * KNOWN MT5 QUIRK: a symbol or timeframe change is sometimes reported as
+ * REASON_REMOVE instead of REASON_CHARTCHANGE, so neither of those two means a
+ * person acted. Both are spelled out below rather than blamed on the user.
+ *
+ * None of these ends the link: the token and the pairing code are in the
+ * terminal's common folder, so the next OnInit resumes without a new code.
+ */
+string DeinitReasonText(const int reason)
+{
+   if(reason == REASON_PROGRAM)     return "the program ended by itself (an ExpertRemove call — this EA never makes one)";
+   if(reason == REASON_REMOVE)      return "the EA was removed from the chart — by hand, or by MT5, which also reports some symbol/timeframe changes this way";
+   if(reason == REASON_RECOMPILE)   return "MetaEditor recompiled the EA, so MT5 restarted it on this chart";
+   if(reason == REASON_CHARTCHANGE) return "the chart symbol or timeframe changed, so MT5 restarted the EA";
+   if(reason == REASON_CHARTCLOSE)  return "the chart was closed";
+   if(reason == REASON_PARAMETERS)  return "the EA inputs were changed in the properties dialog";
+   if(reason == REASON_ACCOUNT)     return "another trading account was activated, or the terminal reconnected after an account-settings change";
+   if(reason == REASON_TEMPLATE)    return "a different chart template was applied";
+   if(reason == REASON_INITFAILED)  return "initialisation failed (OnInit returned a non-zero value)";
+   if(reason == REASON_CLOSE)       return "the terminal was closed";
+   return "an unrecognised reason (" + IntegerToString(reason) + ")";
+}
+
+/** True when MT5 — not the user, and not this program — restarted the expert. */
+bool DeinitWasTerminalRestart(const int reason)
+{
+   return (reason == REASON_RECOMPILE || reason == REASON_CHARTCHANGE ||
+           reason == REASON_PARAMETERS || reason == REASON_ACCOUNT ||
+           reason == REASON_TEMPLATE || reason == REASON_CLOSE);
+}
+
+//+------------------------------------------------------------------+
 //| Lifecycle                                                         |
 //+------------------------------------------------------------------+
 int OnInit()
@@ -565,7 +709,13 @@ int OnInit()
    // leaving open positions unmanaged.
    PsRestoreAll();
 
-   Print("NeurotradeBridge v3.05 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   // v3.06: a fresh instance starts with no opinion about the token it is
+   // about to restore — the refusal counter belongs to the previous instance.
+   g_tokenRefusals = 0;
+   g_nextTokenRetry = 0;
+   g_lastStoreWarnAt = 0;
+
+   Print("NeurotradeBridge v3.06 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -589,7 +739,13 @@ void OnDeinit(const int reason)
    for(int i = 0; i < g_psCount; i++)
       if(PositionSelectByTicket(g_ps[i].ticket)) PsSave(g_ps[i]);
    ReleaseAtrHandles();
-   Print("NeurotradeBridge: stopped (reason ", reason, ").");
+   // v3.06: name the reason. "It detached itself" is otherwise unanswerable —
+   // this program never removes itself, so whatever happened came from the
+   // terminal, and the terminal says which thing it was.
+   Print("NeurotradeBridge: stopped — ", DeinitReasonText(reason), ".");
+   if(DeinitWasTerminalRestart(reason))
+      Print("NeurotradeBridge: MT5 restarted this expert on its own; nobody unlinked it. The saved link is in the ",
+            "terminal's common folder, so the next start resumes the connection with no new pairing code.");
 }
 
 // The chart tick is the fastest path for the chart's symbol; OnTimer below
@@ -629,9 +785,15 @@ void OnTimer()
    // type conversion from 'ulong' to 'long'", and a tick counter that wrapped
    // would read as a huge negative duration. The elapsed time is unsigned.
    ulong beatStart = GetTickCount64();
+   // v3.06: while an unverified refusal or a 5xx is being waited out, do not
+   // present the token on every beat. The saved link is kept, but a 500 ms
+   // heartbeat must not become a 500 ms 401 loop — that flooding is exactly
+   // what the original backoff was written to stop — and a struggling server
+   // must not be handed a full payload twice a second.
+   bool waitingForLinkRetry = (NowServer() < g_nextTokenRetry);
    if(g_token == "")
       TryPair();
-   else
+   else if(!waitingForLinkRetry)
       Sync();
    ulong beatMs = GetTickCount64() - beatStart;
    if(beatMs > (ulong)1500)
@@ -778,18 +940,24 @@ void TryPair()
       else if(g_lastHttpStatus == 401)
       {
          // The code itself is unknown or was retired (the user unlinked the
-         // terminal, or rotated the code). Retrying it five times a second
+         // terminal, rotated the code, or the store that held it was not
+         // durable and the server restarted). Retrying it five times a second
          // produced thousands of identical 401 lines and hid the real reason.
          // Say it once, back off, and let the user paste a fresh code.
+         //
+         // v3.06: a 503 never reaches this branch. "The server could not read
+         // its own link store" is a transport problem, not a verdict on the
+         // code, and is retried every five seconds by the branch below without
+         // telling the user their code is dead.
          g_pairAttemptDelaySeconds = 60;
          g_nextPairAttempt = now + 60;
          if(!g_refusalPrinted)
          {
             g_refusalPrinted = true;
-            Print("NeurotradeBridge: this pairing code is not valid any more — it was either replaced ",
-                  "or the terminal was unlinked in the Desk. Open the Desk, copy the current code into this ",
-                  "EA's PairingCode input (or unlink and re-link), and the terminal will connect again. ",
-                  "Still trying in the background every 60s.");
+            Print("NeurotradeBridge: this pairing code is not valid any more — it was replaced, the terminal was ",
+                  "unlinked in the Desk, or the server restarted without a durable link store. Open the Desk, copy ",
+                  "the CURRENT code into this EA's PairingCode input (or unlink and re-link), and the terminal will ",
+                  "connect again. Still trying in the background every 60s.");
          }
       }
       else
@@ -813,6 +981,10 @@ void TryPair()
    g_savedCode = code;
    g_pairAttemptDelaySeconds = 5;
    g_refusalPrinted = false;
+   // v3.06: a fresh token starts with a clean refusal budget.
+   g_tokenRefusals = 0;
+   g_nextTokenRetry = 0;
+   g_lastStoreWarnAt = 0;
    // Persist immediately: from here on, a restart of MT5 or of the server
    // reconnects with this token instead of asking the user for a code again.
    SaveLink();
@@ -830,6 +1002,7 @@ bool HttpPost(const string path, const string body, string &response, const bool
    // previous call's status behind and be mistaken for a fresh refusal.
    g_lastHttpStatus = 0;
    g_lastHttpError = "";
+   g_lastHttpCode = "";
 
    string headers = "Content-Type: application/json\r\nAccept: application/json\r\n";
    if(authenticated && g_token != "") headers += "Authorization: Bearer " + g_token + "\r\n";
@@ -863,20 +1036,31 @@ bool HttpPost(const string path, const string body, string &response, const bool
    // so this is the clean way to hand the status back to TryPair().
    g_lastHttpStatus = status;
    g_lastHttpError = JsonString(response, "error");
+   // v3.06: the server's machine-readable verdict — "bridge_link_revoked"
+   // (final), "bridge_token_unknown" (unverified), "bridge_store_unavailable"
+   // (the server could not read its own link store and revoked nothing).
+   g_lastHttpCode = JsonString(response, "code");
    if(status < 200 || status >= 300)
    {
-      Print("NeurotradeBridge: HTTP ", status, " from ", path, " — ", response);
-      if(status == 401 && authenticated)
+      if(status >= 500)
       {
-         // Token may have been unpaired/replaced. Remain attached and let the
-         // user enter a fresh code rather than doing any blind work. The saved
-         // copy is cleared too — otherwise the next restart would restore the
-         // very token the server just refused and the loop would never end.
-         g_token = "";
-         g_tradingEnabled = false;
-         g_savedCode = EffectivePairingCode();
-         SaveLink();
+         // The server answered but could not do the work. Nothing is revoked,
+         // so the saved link stays exactly as it was and the next beat retries.
+         // Rate-limited: a rolling deploy or a database failover answers 503 on
+         // every beat for a while, and an unguarded Print here would reproduce
+         // the journal-flooding the 401 backoff was written to stop.
+         WarnServerOnce(StringFormat("HTTP %d from %s — %s. Nothing was revoked; the saved link is kept and will be retried.",
+                                     status, path,
+                                     (g_lastHttpError == "" ? "the server could not complete the request" : g_lastHttpError)));
+         return false;
       }
+      Print("NeurotradeBridge: HTTP ", status, " from ", path, " — ", response);
+      // v3.06: NOTHING is discarded here any more. This function is the lowest
+      // level and cannot know whether a 401 was a verified verdict or a server
+      // that could not check; wiping the saved token here is what turned one
+      // unreadable database row into a permanently disconnected terminal (and,
+      // because the link file lives in the COMMON folder, disconnected every
+      // other chart of the same account with it). Sync() and TryPair() decide.
       return false;
    }
    return true;
@@ -1019,29 +1203,97 @@ void Sync()
       }
       else if(g_lastHttpStatus == 401)
       {
-         // The Desk no longer recognises this token. It backs off to a slow
-         // re-pair attempt rather than a five-second loop; the saved code is
-         // still tried (it may simply have been a transient server restart) and
-         // the reason is printed once.
-         if(!g_refusalPrinted)
+         // v3.06: two very different refusals arrive as a 401, and only one of
+         // them is final. The server says which in `code`.
+         if(g_lastHttpCode == "bridge_link_revoked")
          {
-            g_refusalPrinted = true;
-            Print("NeurotradeBridge: the Desk no longer accepts this terminal's link (401). It was most ",
-                  "likely unlinked from the Desk. Open Desk -> Link MT5, copy the current pairing code into ",
-                  "this EA's PairingCode input, and it will reconnect. Retrying slowly in the background.");
+            // FINAL. The user pressed "Unlink terminal" in the Desk, the row is
+            // marked revoked, and no retry will ever succeed — so the saved
+            // token is discarded now and a restart cannot resurrect it.
+            if(!g_refusalPrinted)
+            {
+               g_refusalPrinted = true;
+               Print("NeurotradeBridge: the Desk REVOKED this terminal's link — it was unlinked. The saved link has ",
+                     "been discarded. Open Desk -> Link MT5, copy the current pairing code into this EA's PairingCode ",
+                     "input, and it will reconnect. Retrying slowly in the background.");
+            }
+            g_token = "";
+            g_tokenRefusals = 0;
+            g_tradingEnabled = false;
+            g_savedCode = EffectivePairingCode();
+            SaveLink();
+            g_pairAttemptDelaySeconds = 60;
+            g_nextPairAttempt = NowServer() + 60;
          }
-         g_pairAttemptDelaySeconds = 60;
-         g_nextPairAttempt = NowServer() + 60;
-         g_tradingEnabled = false;
+         else
+         {
+            // UNVERIFIED — "no such link" from a store that has just been
+            // emptied (a redeploy, a second replica, a database restored
+            // without its rows), or an older server that could not read its own
+            // link store and answered 401 for it. v3.05 wiped the saved token
+            // here on the FIRST such answer, which is how a few seconds of
+            // unreadable database became a permanently disconnected terminal —
+            // and, because the link file is shared through the common folder,
+            // disconnected every other chart of this account too. The token is
+            // now kept and retried a few times, spaced out, before it is
+            // abandoned in favour of the pairing code.
+            g_tokenRefusals++;
+            g_tradingEnabled = false;
+            if(g_tokenRefusals >= TOKEN_REFUSAL_GRACE)
+            {
+               if(!g_refusalPrinted)
+               {
+                  g_refusalPrinted = true;
+                  Print("NeurotradeBridge: the Desk refused this terminal's link ", IntegerToString(g_tokenRefusals),
+                        " times in a row, so the saved token is being abandoned and the pairing code will be tried ",
+                        "instead. If that is refused too, open Desk -> Link MT5 and paste the current code into ",
+                        "PairingCode. The EA stays on this chart.");
+               }
+               g_token = "";
+               g_tokenRefusals = 0;
+               g_savedCode = EffectivePairingCode();
+               SaveLink();
+               g_pairAttemptDelaySeconds = 60;
+               g_nextPairAttempt = NowServer() + 60;
+            }
+            else
+            {
+               WarnServerOnce(StringFormat(
+                  "the Desk could not verify this terminal's link (refusal %d of %d). NOTHING was unlinked: the saved link is kept and retried in %d s.",
+                  g_tokenRefusals, TOKEN_REFUSAL_GRACE, TOKEN_RETRY_SECONDS));
+               g_nextTokenRetry = NowServer() + TOKEN_RETRY_SECONDS;
+            }
+         }
       }
+      // v3.06: a 5xx means the server is UP and could not do the work — most
+      // often `bridge_store_unavailable`, i.e. it could not read its own link
+      // store and has revoked NOTHING. Space the next attempt by the server's
+      // own `retryAfterMs` hint rather than sending a full payload (quotes,
+      // candles, positions) twice a second at a service that is already
+      // struggling. The token and the saved link are untouched.
+      if(g_lastHttpStatus >= 500)
+      {
+         long retryMs = (long)JsonNumber(response, "retryAfterMs");
+         int waitSeconds = retryMs > 0 ? (int)MathMin(60, MathMax(1, retryMs / 1000)) : 5;
+         g_nextTokenRetry = NowServer() + waitSeconds;
+      }
+
       // Bounded by the SERVER-silence budget, not the tick-freshness one: the
       // desk keeps a link alive for its own (adaptive) window, and the EA must
       // not stop executing plans while the desk still considers the link live.
-      else if(NowServer() - g_lastOk > ServerSilenceSec) g_tradingEnabled = false;
+      // This runs for EVERY failed beat — a 5xx, a transport failure, anything
+      // else — so a long outage still pauses new entries on schedule. (A 409 or
+      // a revocation has already paused them above.)
+      if(NowServer() - g_lastOk > ServerSilenceSec) g_tradingEnabled = false;
       return;
    }
 
    g_lastOk = NowServer();
+   // The link is confirmed: forget the refusal budget and the retry spacing, so
+   // a LATER outage gets its own retries and its own single journal line.
+   g_tokenRefusals = 0;
+   g_nextTokenRetry = 0;
+   g_refusalPrinted = false;
    g_results = "";
    for(int i = 0; i < g_mgmtEventCount; i++) g_mgmtEvents[i] = "";
    g_mgmtEventCount = 0;

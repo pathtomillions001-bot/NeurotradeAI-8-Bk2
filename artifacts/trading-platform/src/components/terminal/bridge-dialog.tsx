@@ -9,7 +9,7 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { AlertTriangle, Check, Copy, Download, ShieldCheck, X } from "lucide-react";
-import { deskApi } from "@/lib/desk";
+import { deskApi, type BridgeStoreReport } from "@/lib/desk";
 
 interface BridgeDialogProps {
   open: boolean;
@@ -90,6 +90,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   </p>
                 ) : null;
               })()}
+              <StoreWarning store={status.data.store} />
               {status.data.lastPairingError && <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">{status.data.lastPairingError}</p>}
               {status.data.eaUpdateAvailable && (
                 <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-[11px] leading-relaxed text-amber-200">
@@ -145,6 +146,12 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   {status.data?.eaUpdateAvailable && <p className="mt-2 text-[10px] text-amber-300">The connected terminal is running an older EA — the download below is the current build ({status.data.expectedEaVersion}).</p>}
                 </Step>
               </ol>
+              <StoreWarning store={status.data?.store} warning={pairing.data?.warning ?? rotate.data?.warning} />
+              {pairing.error instanceof Error && (
+                <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">
+                  Could not issue a pairing code: {pairing.error.message}
+                </p>
+              )}
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">One account, one Desk.</span> An MT5 account can only be linked to a single Desk at a time. If it is already connected in another browser or device, pairing here is refused until that Desk unlinks it — two Desks on one account would trade the same balance against separate risk limits.</p><p className="mt-2"><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>
               {status.data?.lastPairingError ? (
                 <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">
@@ -167,6 +174,38 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
 
 function CopyValue({ value, copied, onCopy, disabled, large = false }: { value: string; copied: boolean; onCopy: () => void; disabled?: boolean; large?: boolean }) {
   return <div className="mt-2 flex items-stretch gap-2"><code className={`min-w-0 flex-1 break-all rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-emerald-300 ${large ? "text-center text-sm tracking-[0.18em]" : "text-[11px]"}`}>{value}</code><button type="button" disabled={disabled} onClick={onCopy} className="shrink-0 rounded-md border border-zinc-700 px-2 text-zinc-400 transition-colors hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40" aria-label="Copy value">{copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}</button></div>;
+}
+
+/**
+ * "Your link will not survive a restart" — said out loud.
+ *
+ * The dialog promises that only "Unlink terminal" ends the connection. That is
+ * true of the protocol, and false of a deployment whose API has no
+ * `postgres://` DATABASE_URL: the pairing code and the bearer token then live
+ * in embedded PGlite, a file inside the container, so the next deploy, replica
+ * or cold start forgets them and the terminal is left printing
+ * `HTTP 401 … Unknown or expired pairing code` at a code that was never
+ * expired. Users reported exactly that as "the EA detached itself". The store
+ * now reports which of the two it is, so the promise is either kept or
+ * qualified on screen.
+ */
+function StoreWarning({ store, warning }: { store?: BridgeStoreReport | null; warning?: string | null }) {
+  const detail = warning ?? (store && !store.durable
+    ? `This Desk's link store is ${store.detail}. Pairing codes and terminal links written there do not survive a restart, so the terminal will need a new code after the next deploy. Set a postgres:// DATABASE_URL on the api service to make MT5 links durable.`
+    : store && !store.reachable
+      ? "The link store could not be read just now. Nothing is revoked — the terminal keeps its saved link and retries on its own. If this persists, check the api service's database connection."
+      : null);
+  if (!detail) return null;
+  const unreachable = Boolean(store && !store.reachable);
+  return (
+    <div className={`rounded-lg border p-3 text-[11px] leading-relaxed ${unreachable ? "border-sky-500/40 bg-sky-500/10 text-sky-200" : "border-amber-500/40 bg-amber-500/10 text-amber-200"}`}>
+      <p className={`flex items-center gap-1.5 font-medium ${unreachable ? "text-sky-300" : "text-amber-300"}`}>
+        <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+        {unreachable ? "Link store unreachable" : "Link store is not durable"}
+      </p>
+      <p className="mt-1.5">{detail}</p>
+    </div>
+  );
 }
 
 function Step({ n, title, children }: { n: number; title: string; children: React.ReactNode }) {

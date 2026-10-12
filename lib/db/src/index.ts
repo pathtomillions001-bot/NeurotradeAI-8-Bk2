@@ -582,6 +582,54 @@ void ddlRetryLoop().catch((err) => {
   resolveSchemaReady();
 });
 
+/**
+ * Which store this process is actually talking to — and whether a link written
+ * to it now will still be there after the next restart.
+ *
+ * WHY THIS IS EXPORTED: the MT5 bridge persists its pairing codes and bearer
+ * tokens here so that a deploy, a crash or a cold start cannot disconnect a
+ * paired terminal. That guarantee is only as strong as this store. Without a
+ * `postgres://` DATABASE_URL the process falls back to embedded PGlite, and
+ * `pglite:memory` is per-process — so a deployment that believes its links are
+ * durable can be writing them to a database that disappears on restart (or that
+ * a second replica behind the router has never seen). Callers that make a
+ * keep/discard decision on the strength of a stored row need to know which of
+ * those worlds they are in, instead of discovering it as a 401 loop in a
+ * customer's MT5 journal.
+ */
+export type DatabaseBackend = "postgres" | "pglite";
+
+export const databaseBackend: DatabaseBackend = useExternalPostgres ? "postgres" : "pglite";
+
+/** True only when a row written now survives this process ending. */
+export const databaseIsDurable: boolean =
+  useExternalPostgres || process.env.DATABASE_URL !== "pglite:memory";
+
+export const pgliteDirectory: string | null = useExternalPostgres
+  ? null
+  : process.env.DATABASE_URL === "pglite:memory"
+    ? null
+    : path.resolve(process.cwd(), ".data/pglite");
+
+export const databaseDetail: string = useExternalPostgres
+  ? "external Postgres (DATABASE_URL)"
+  : pgliteDirectory
+    ? `embedded PGlite at ${pgliteDirectory}`
+    : "embedded PGlite, in-memory (this process only)";
+
+/**
+ * Whether the bootstrap DDL has actually been APPLIED.
+ *
+ * `schemaReady` deliberately resolves even when the first DDL attempt failed, so
+ * that routes are not blocked behind a dead database. That makes it the wrong
+ * signal for "do the tables exist": a caller that must not answer
+ * "your credential is invalid" while the schema is still being created needs
+ * this instead.
+ */
+export function schemaApplied(): boolean {
+  return ddlSucceeded;
+}
+
 export const pool = poolInstance;
 export const db = dbInstance;
 

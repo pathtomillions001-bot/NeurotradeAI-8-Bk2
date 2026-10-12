@@ -1,4 +1,10 @@
-modules = ["nodejs-20", "web", "bash"]
+# postgresql-16 supplies DATABASE_URL. Without it the API falls back to embedded
+# PGlite — a file inside the container — and everything documented as durable is
+# not: MT5 pairing codes and bridge tokens die on every restart, replica and
+# cold start, which is how a paired terminal came to lose its link by itself
+# (see docs/mt5-bridge-401-resilience.md). replit.md has always described this
+# module as provisioned; the config now agrees with it.
+modules = ["nodejs-20", "web", "bash", "postgresql-16"]
 
 [deployment]
 router = "application"

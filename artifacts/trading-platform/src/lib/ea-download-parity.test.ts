@@ -43,6 +43,23 @@ function declaredVersion(file: string): string {
   return match[1];
 }
 
+/**
+ * The version the API says it expects, read from the API's own source.
+ *
+ * Pinned as a literal here, this check drifted: the EA moved to 3.05 while the
+ * route still said `EXPECTED_EA_VERSION = "3.04"`, so the comparison was against
+ * a number nobody maintained. Reading it means the two sides are asserted
+ * against EACH OTHER, which is the property that actually matters — a terminal
+ * running the EA this repository ships must never be told it is out of date.
+ */
+const apiBridgeRoute = path.join(repoRoot, "artifacts", "api-server", "src", "routes", "bridge.ts");
+
+function expectedEaVersion(): string {
+  const match = fs.readFileSync(apiBridgeRoute, "utf8").match(/EXPECTED_EA_VERSION\s*=\s*"([^"]+)"/);
+  assert.ok(match, `${apiBridgeRoute} must declare EXPECTED_EA_VERSION`);
+  return match[1];
+}
+
 test("the downloadable EA is byte-identical to the EA source", () => {
   assert.ok(fs.existsSync(source), `EA source missing: ${source}`);
   assert.ok(fs.existsSync(published), `published EA missing: ${published}`);
@@ -67,7 +84,11 @@ test("the published EA is a build that reports its own version and link", () => 
   const published_body = fs.readFileSync(published, "utf8");
   // The version reported to the Desk must be the one the API expects, or the
   // "your EA is out of date" banner would fire on a current terminal.
-  assert.equal(declaredVersion(published), "3.05");
+  assert.equal(
+    declaredVersion(published),
+    expectedEaVersion(),
+    "the published EA's version and the API's EXPECTED_EA_VERSION must agree",
+  );
   for (const marker of ["instanceId", "windowFromMs", "rawCount", "durable"]) {
     assert.match(
       published_body,

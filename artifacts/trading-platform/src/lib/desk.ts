@@ -693,7 +693,20 @@ export const deskApi = {
    * invalidate the code the EA is currently retrying with.
    */
   pairingCode: (rotate = false) =>
-    request<{ pairingCode: string; expiresInMs: number; reused?: boolean }>("/bridge/pairing-code", {
+    request<{
+      pairingCode: string;
+      expiresInMs: number;
+      reused?: boolean;
+      /**
+       * Whether the store holding this code survives a server restart. A code
+       * minted into a process-local store is not the credential this dialog
+       * promises, so the dialog says so instead of handing over a value that
+       * dies on the next deploy.
+       */
+      durable?: boolean;
+      storeReachable?: boolean;
+      warning?: string;
+    }>("/bridge/pairing-code", {
       method: "POST",
       body: JSON.stringify({ rotate }),
     }),
@@ -726,10 +739,13 @@ export const deskApi = {
     lastBeatRttMs?: number | null;
     avgBeatRttMs?: number | null;
     /**
-     * The link is durable: it survives closing MT5, closing the browser and a
-     * server redeploy. Only "unlink" ends it.
+     * The link is durable BY PROTOCOL: it survives closing MT5, closing the
+     * browser and a server redeploy. Only "unlink" ends it. Whether this
+     * deployment can actually keep that promise is `store.durable`.
      */
     durable?: boolean;
+    /** Where the link is stored, and whether that store survives a restart. */
+    store?: BridgeStoreReport;
     /** Version the terminal reported, or null before the first heartbeat. */
     eaVersion?: string | null;
     expectedEaVersion?: string;
@@ -746,6 +762,29 @@ export const deskApi = {
   }>("/bridge/status"),
   unpair: () => request<{ ok: true }>("/bridge/unpair", { method: "POST" }),
 };
+
+/**
+ * The bridge's link store, as the API reports it.
+ *
+ * Without a `postgres://` DATABASE_URL the API falls back to embedded PGlite —
+ * a file inside the container — so the "durable" pairing code and bearer token
+ * die on every restart, replica and cold start. That is the root cause of a
+ * terminal losing its link by itself, and it is invisible from the browser
+ * unless the API says which store it is using.
+ */
+export interface BridgeStoreReport {
+  /** "postgres" or "pglite". */
+  backend: string;
+  /** True only when a row written now survives the process ending. */
+  durable: boolean;
+  /** Human-readable description, including the PGlite path. */
+  detail: string;
+  /** Whether the bootstrap DDL has been applied. */
+  schemaApplied: boolean;
+  /** Whether the two bridge tables could actually be read just now. */
+  reachable: boolean;
+  tables?: string[];
+}
 
 export interface ProjectionResult {
   medianReturnPct: number;

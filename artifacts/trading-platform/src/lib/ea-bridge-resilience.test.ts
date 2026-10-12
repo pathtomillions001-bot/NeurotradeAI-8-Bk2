@@ -228,11 +228,11 @@ test("OnDeinit names the reason MT5 stopped the expert", () => {
   assert.match(init, /return\s*\(\s*INIT_SUCCEEDED\s*\)/, "OnInit must never fail to attach");
 });
 
-test("the shipped EA carries the v3.06 contract, and the Desk serves that same file", () => {
+test("the shipped EA carries the v3.07 contract, and the Desk serves that same file", () => {
   const version = ea.match(/#property\s+version\s+"([^"]+)"/)![1];
   const reported = ea.match(/#define\s+EA_VERSION\s+"([^"]+)"/)![1];
   assert.equal(version, reported, "the declared version and the one sent on the wire must agree");
-  assert.equal(version, "3.06");
+  assert.equal(version, "3.07");
 
   assert.equal(
     fs.readFileSync(publishedPath, "utf8"),

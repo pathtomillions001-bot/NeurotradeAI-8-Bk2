@@ -129,7 +129,7 @@ const router: IRouter = Router();
  * `OnDeinit` names the reason MT5 stopped the expert, so "it detached itself"
  * is answered in the journal instead of guessed at.
  */
-export const EXPECTED_EA_VERSION = "3.06";
+export const EXPECTED_EA_VERSION = "3.07";
 
 /**
  * Answer "I could not check", never "your credential is dead".

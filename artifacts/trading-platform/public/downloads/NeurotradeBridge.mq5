@@ -216,6 +216,21 @@
 //|     plan and link state near the top of this file, and the two   |
 //|     GetTickCount64() readings are `ulong`, as the API returns    |
 //|     them, instead of `long`.                                     |
+//| WHAT CHANGED IN v3.07                                             |
+//| 27. THE EXPERT NO LONGER DETACHES AFTER A FILL.                  |
+//|     The journal showed "array out of range in 'NeurotradeBridge'  |
+//|     .mq5 (2641,24)" 0.5 s after "FILLED". That line is            |
+//|     PsEncode() indexing TF_NAMES[] with a position state's        |
+//|     entry timeframe. The reconcile pass that adopts a fresh fill  |
+//|     (plan already inactive, so the defaults branch) never set     |
+//|     that timeframe or the mode, and PsEnsure() reused slots       |
+//|     without clearing them, so the first save read a stale index.  |
+//|     MQL5 STOPS an expert on an out-of-range error, and the chart  |
+//|     shows it as removed. Now: every state field is initialised    |
+//|     (PsInitBlank), the reconcile and defaults paths set a valid   |
+//|     mode and timeframe, a corrupt record is repaired on decode,   |
+//|     and every timeframe lookup goes through SafeTfIndex/TfNameAt. |
+//|     src/lib/ea-tf-index-safety.test.ts pins all of this.         |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -231,7 +246,7 @@
 //| transient WebRequest failure from making the EA appear to "not     |
 //| attach" to a chart.                                                |
 #property copyright "NeuroTrade AI"
-#property version   "3.06"
+#property version   "3.07"
 #property strict
 
 // The version this EA reports on the wire.
@@ -242,7 +257,7 @@
 // the heartbeat is the one the Desk stores (`desk.terminal.eaVersion`), so the
 // Desk's "this terminal is running an older EA" check could never tell a v3.05
 // terminal from a v3.04 one.
-#define EA_VERSION "3.06"
+#define EA_VERSION "3.07"
 
 #include <Trade/Trade.mqh>
 
@@ -297,6 +312,31 @@ int TfIndexFromName(const string name)
 {
    for(int i = 0; i < TF_COUNT; i++) if(TF_NAMES[i] == name) return i;
    return -1;
+}
+
+/**
+ * v3.07: every timeframe index that reaches TF_NAMES[] / TF_LIST[] goes through
+ * these helpers. An index that is negative or past TF_COUNT is an
+ * "array out of range" runtime error, and MQL5 STOPS the expert on that error —
+ * the chart shows it as removed, which is the "MT5 bot detached itself after a
+ * trade" bug. Nothing here can index out of bounds.
+ */
+#define TF_FALLBACK_INDEX 1   // M2, the scalp default (same as PmTfIndex)
+
+int SafeTfIndex(const int index)
+{
+   return (index >= 0 && index < TF_COUNT) ? index : TF_FALLBACK_INDEX;
+}
+
+string TfNameAt(const int index)
+{
+   return TF_NAMES[SafeTfIndex(index)];
+}
+
+/** The entry timeframe a position of a given mode gets when no plan supplies one. */
+int TfIndexForMode(const int mode)
+{
+   return (mode == 0 ? 1 : (mode == 1 ? 4 : 6)); // M2 / M15 / H1
 }
 
 struct ArmedPlan
@@ -715,7 +755,7 @@ int OnInit()
    g_nextTokenRetry = 0;
    g_lastStoreWarnAt = 0;
 
-   Print("NeurotradeBridge v3.06 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   Print("NeurotradeBridge v3.07 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -2594,18 +2634,76 @@ int PsIndex(const ulong ticket)
    return -1;
 }
 
+/**
+ * v3.07: a blank position state with EVERY field set. Before v3.07 only six
+ * fields were set here, and the reconcile pass (and PsApplyDefaults) never set
+ * entryTfIndex or mode. The slot kept whatever an earlier position had left in
+ * it, so PsEncode() read a stale timeframe index, indexed TF_NAMES[] out of
+ * range on the first save after a fill, and the expert was stopped.
+ */
+void PsInitBlank(PositionState &ps, const ulong ticket)
+{
+   ps.ticket = ticket;
+   ps.planId = "";
+   ps.symbol = "";
+   ps.isBuy = true;
+   ps.mode = 1;                                  // intraday until a plan says otherwise
+   ps.entryTfIndex = TfIndexForMode(1);
+   ps.entry = 0;
+   ps.initialSl = 0;
+   ps.sl = 0;
+   ps.tp = 0;
+   ps.riskPrice = 0;
+   ps.volume = 0;
+   ps.initialVolume = 0;
+   ps.openedAt = 0;
+   ps.barsSinceEntry = 0;
+   ps.progressR = 0;
+   ps.mfeR = 0;
+   ps.bestPrice = 0;
+   ps.stage = "OPEN_RISK";
+   ps.partialsDone = 0;
+   ps.beDone = false;
+   ps.trailArmed = false;
+   ps.pyramidAdds = 0;
+   ps.closedVolume = 0;
+   ps.costPrice = 0;
+   ps.atrEntry = 0;
+   ps.lastModifyAt = 0;
+   ps.lastModifyR = 0;
+   ps.retryAfter = 0;
+   ps.retryCount = 0;
+   ps.beTriggerR = 0;
+   ps.beOffsetR = 0;
+   ps.beStructure = true;
+   ps.partialCount = 0;
+   for(int i = 0; i < 4; i++)
+   {
+      ps.partialAtR[i] = 0;
+      ps.partialPct[i] = 0;
+   }
+   ps.trailEnabled = false;
+   ps.trailMult = 0;
+   ps.trailActivateR = 0;
+   ps.trailStepPoints = 0;
+   ps.trailPeriod = 14;
+   ps.timeStopEnabled = false;
+   ps.timeStopBars = 0;
+   ps.pyramidEnabled = false;
+   ps.pyramidMaxAdds = 0;
+   ps.pyramidAddAtR = 0;
+   ps.pyramidSizeRatio = 0;
+   ps.pyramidRequireBe = false;
+   ps.flatBeforeClose = false;
+}
+
 int PsEnsure(const ulong ticket)
 {
    int index = PsIndex(ticket);
    if(index >= 0) return index;
    if(g_psCount >= MAX_POS_STATES) return -1;
    PositionState blank;
-   blank.ticket = ticket;
-   blank.stage = "OPEN_RISK";
-   blank.beTriggerR = 0;
-   blank.trailMult = 0;
-   blank.beStructure = true;
-   blank.trailPeriod = 14;
+   PsInitBlank(blank, ticket);
    g_ps[g_psCount] = blank;
    return g_psCount++;
 }
@@ -2638,7 +2736,7 @@ string PsEncode(const PositionState &ps)
    f[3]  = ps.symbol;
    f[4]  = ps.isBuy ? "b" : "s";
    f[5]  = (ps.mode == 0 ? "S" : (ps.mode == 1 ? "I" : "W"));
-   f[6]  = TF_NAMES[ps.entryTfIndex];
+   f[6]  = TfNameAt(ps.entryTfIndex);
    f[7]  = DoubleToString(ps.entry, 8);
    f[8]  = DoubleToString(ps.initialSl, 8);
    f[9]  = DoubleToString(ps.sl, 8);
@@ -2677,7 +2775,9 @@ bool PsDecode(const string text, PositionState &ps)
    ps.symbol         = f[3];
    ps.isBuy          = (f[4] == "b");
    ps.mode           = (f[5] == "S" ? 0 : (f[5] == "I" ? 1 : 2));
-   ps.entryTfIndex   = TfIndexFromName(f[6]);
+   // v3.07: a record with an unknown timeframe name is repaired, not stored as -1.
+   int decodedTf = TfIndexFromName(f[6]);
+   ps.entryTfIndex   = (decodedTf >= 0 ? decodedTf : TfIndexForMode(ps.mode));
    ps.entry          = StringToDouble(f[7]);
    ps.initialSl      = StringToDouble(f[8]);
    ps.sl             = StringToDouble(f[9]);
@@ -3035,7 +3135,7 @@ void ManageOnePosition(const int index)
       ps.riskPrice = MathAbs(entry - currentSl);
    if(ps.riskPrice <= 0) return;
    if(ps.entryTfIndex < 0 || ps.entryTfIndex >= TF_COUNT) ps.entryTfIndex = 1;
-   ENUM_TIMEFRAMES tf = TF_LIST[ps.entryTfIndex];
+   ENUM_TIMEFRAMES tf = TF_LIST[SafeTfIndex(ps.entryTfIndex)];
 
    double exitPrice = isBuy ? tick.bid : tick.ask;
    double movePrice = isBuy ? (exitPrice - ps.entry) : (ps.entry - exitPrice);
@@ -3073,7 +3173,7 @@ void ManageOnePosition(const int index)
          if(trade.PositionClose(ticket))
          {
             string detail = StringFormat("%d %s bars with no progress (%.2fR, MFE %.2fR) — time stop",
-                                         ps.barsSinceEntry, TF_NAMES[ps.entryTfIndex], ps.progressR, ps.mfeR);
+                                         ps.barsSinceEntry, TfNameAt(ps.entryTfIndex), ps.progressR, ps.mfeR);
             PmEvent(ticket, "time_stop", detail);
             ps.stage = "TIME_STOP";
             g_ps[index] = ps;
@@ -3230,7 +3330,7 @@ void ManageOnePosition(const int index)
                if(ps.beDone && ps.partialsDone > 0) ps.stage = "RUNNER";
                PmEvent(ticket, "trail",
                        StringFormat("chandelier: best %.5f − %.1fxATR(%d,%s) = %.5f",
-                                    best, mult, ps.trailPeriod, TF_NAMES[ps.entryTfIndex], candidate));
+                                    best, mult, ps.trailPeriod, TfNameAt(ps.entryTfIndex), candidate));
                g_ps[index] = ps;
                PsSave(ps);
             }
@@ -3334,6 +3434,11 @@ void ReconcileFilledPositions()
       ps.riskPrice = (sl > 0 ? MathAbs(entry - sl) : 0);
       ps.bestPrice = entry;
       ps.stage = "OPEN_RISK";
+      // v3.07: the reconcile path never knew the mode or timeframe. Set both
+      // explicitly here (intraday until a plan says otherwise) instead of
+      // inheriting whatever the slot held.
+      ps.mode = 1;
+      ps.entryTfIndex = TfIndexForMode(ps.mode);
       // Recover the plan's policy if the plan is still armed.
       bool found = false;
       for(int p = 0; p < MAX_PLANS; p++)
@@ -3354,6 +3459,9 @@ void ReconcileFilledPositions()
 /** Conservative defaults for a position with no plan (EA restarted, plan gone). */
 void PsApplyDefaults(PositionState &ps)
 {
+   // v3.07: a defaulted position must still carry a valid mode and timeframe.
+   if(ps.mode < 0 || ps.mode > 2) ps.mode = 1;
+   ps.entryTfIndex = TfIndexForMode(ps.mode);
    ps.beTriggerR = 1.0;
    ps.beOffsetR = PM_BREAKEVEN_PROFIT_R;
    ps.beStructure = true;
@@ -3455,7 +3563,7 @@ void PsCreateFromPlanId(const ulong orderTicket, const string planId, const bool
       PsSave(ps);
       PmEvent(ticket, "opened",
               StringFormat("state created at fill: entry %.5f, stop %.5f, R %.5f, %s",
-                           ps.entry, ps.initialSl, ps.riskPrice, TF_NAMES[ps.entryTfIndex]));
+                           ps.entry, ps.initialSl, ps.riskPrice, TfNameAt(ps.entryTfIndex)));
       return;
    }
    // The order is working but not filled yet (a pending order): the reconcile

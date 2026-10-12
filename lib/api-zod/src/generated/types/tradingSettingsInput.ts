@@ -54,6 +54,8 @@ export interface TradingSettingsInput {
   recoveryHeadroomPct?: number;
   /** RCI margin weight w1 (default 1) */
   recoveryMarginPreference?: number;
+  /** WP6 honesty-tilt kill switch (default false). On lets the e-process/battery reduce the RCI margin weight (floor 0.5); stakes never increase. */
+  recoveryTiltEnabled?: boolean;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

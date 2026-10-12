@@ -1187,6 +1187,10 @@ components:
         recoveryMarginPreference:
           type: number
           description: RCI margin weight w1 — preference for cheaper recovery contracts (default 1)
+        recoveryTiltEnabled:
+          type: boolean
+          default: false
+          description: Kill switch for the WP6 honesty tilt. Off (default) forces the RCI margin weight factor to 1 for every contract. On, an anytime-valid e-process plus the tape battery may reduce the margin weight (never below half) for a contract whose realised hit rate persistently beats its fair probability. It can only reorder selection — stakes never increase.
         allowedMarkets:
           type: array
           items:
@@ -1301,6 +1305,10 @@ components:
         recoveryMarginPreference:
           type: number
           description: RCI margin weight w1 (default 1)
+        recoveryTiltEnabled:
+          type: boolean
+          default: false
+          description: WP6 honesty-tilt kill switch (default false). On lets the e-process/battery reduce the RCI margin weight (floor 0.5); stakes never increase.
         allowedMarkets:
           type: array
           items:

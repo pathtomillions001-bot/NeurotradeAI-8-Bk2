@@ -75,6 +75,8 @@ export interface TradingSettings {
   recoveryHeadroomPct?: number;
   /** RCI margin weight w1 — preference for cheaper recovery contracts (default 1) */
   recoveryMarginPreference?: number;
+  /** Kill switch for the WP6 honesty tilt. Off (default) forces the RCI margin weight factor to 1 for every contract. On, an anytime-valid e-process plus the tape battery may reduce the margin weight (never below half) for a contract whose realised hit rate persistently beats its fair probability. It can only reorder selection — stakes never increase. */
+  recoveryTiltEnabled?: boolean;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

@@ -40,7 +40,7 @@ function effectiveContractSets(s: typeof settingsTable.$inferSelect): Autonomous
 }
 
 /** WP4 — adaptive lambda is "auto" or a number clamped into (0,1]. */
-function sanitizeRecoveryLambda(raw: unknown): string {
+export function sanitizeRecoveryLambda(raw: unknown): string {
   const s = String(raw ?? "").trim().toLowerCase();
   if (s === "" || s === "auto") return "auto";
   const n = Number(s);
@@ -87,6 +87,8 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     recoveryLambda: sanitizeRecoveryLambda((s as any).recoveryLambda),
     recoveryHeadroomPct: Number((s as any).recoveryHeadroomPct ?? 5),
     recoveryMarginPreference: Number((s as any).recoveryMarginPreference ?? 1),
+    // WP6 honesty-tilt kill switch — defaults OFF.
+    recoveryTiltEnabled: Boolean((s as any).recoveryTiltEnabled ?? false),
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
     botRecoveryMarkup: Number((s as any).botRecoveryMarkup ?? 10),
@@ -168,6 +170,8 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).recoveryLambda !== undefined) (updateData as any).recoveryLambda = sanitizeRecoveryLambda((updates as any).recoveryLambda);
   if ((updates as any).recoveryHeadroomPct !== undefined) (updateData as any).recoveryHeadroomPct = String(Math.min(100, Math.max(0, Number((updates as any).recoveryHeadroomPct) || 5)));
   if ((updates as any).recoveryMarginPreference !== undefined) (updateData as any).recoveryMarginPreference = String(Math.min(10, Math.max(0, Number((updates as any).recoveryMarginPreference) || 1)));
+  // WP6 honesty-tilt kill switch — boolean, defaults OFF.
+  if ((updates as any).recoveryTiltEnabled !== undefined) (updateData as any).recoveryTiltEnabled = Boolean((updates as any).recoveryTiltEnabled);
   if ((updates as any).riskAmountType !== undefined) (updateData as any).riskAmountType = (updates as any).riskAmountType;
   if ((updates as any).riskAmountValue !== undefined) (updateData as any).riskAmountValue = String((updates as any).riskAmountValue);
   if ((updates as any).botRecoveryMarkup !== undefined) (updateData as any).botRecoveryMarkup = String((updates as any).botRecoveryMarkup);

@@ -51,6 +51,9 @@ export const settingsTable = pgTable("settings", {
   recoveryLambda: text("recovery_lambda").notNull().default("auto"),
   recoveryHeadroomPct: numeric("recovery_headroom_pct", { precision: 20, scale: 2 }).notNull().default("5"),
   recoveryMarginPreference: numeric("recovery_margin_preference", { precision: 20, scale: 4 }).notNull().default("1"),
+  // WP6 honesty tilt kill switch (default off). When on, the e-process/tape
+  // battery may reduce the RCI margin weight (floor 0.5) — stakes never grow.
+  recoveryTiltEnabled: boolean("recovery_tilt_enabled").notNull().default(false),
   recoveryStateJson: text("recovery_state_json"),
   riskAmountType: text("risk_amount_type").notNull().default("fixed"),
   riskAmountValue: numeric("risk_amount_value", { precision: 20, scale: 2 }).notNull().default("1.00"),

@@ -132,6 +132,7 @@ ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_budget_base NUMERIC(20, 2
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_lambda TEXT NOT NULL DEFAULT 'auto';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_headroom_pct NUMERIC(20, 2) NOT NULL DEFAULT '5';
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_margin_preference NUMERIC(20, 4) NOT NULL DEFAULT '1';
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS recovery_tilt_enabled BOOLEAN NOT NULL DEFAULT FALSE;
 -- Legacy global rows remain inaccessible and get distinct owners so older
 -- deployments with multiple settings rows can migrate safely.
 UPDATE settings SET session_id = 'legacy-' || id::text WHERE session_id = 'legacy';

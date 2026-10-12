@@ -397,8 +397,8 @@ function decideRecoveryV2(
   // WP4 wired the margin preference (default 1 ≡ the old default weights);
   // WP6's honesty tilt can only ever multiply it DOWN per contract, and only
   // when the kill switch is on — the factor is clamped to [0.5, 1] inside.
-  const marginPrefRaw = (ctx.settings as { recoveryMarginPreference?: unknown }).recoveryMarginPreference;
-  const marginPreference = Number.isFinite(Number(marginPrefRaw))
+  const marginPrefRaw = ctx.settings.recoveryMarginPreference;
+  const marginPreference = marginPrefRaw !== undefined && Number.isFinite(Number(marginPrefRaw))
     ? Math.min(10, Math.max(0, Number(marginPrefRaw)))
     : DEFAULT_RCI_WEIGHTS.w1;
   const decision = scoreRecoveryCandidates({
@@ -714,7 +714,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   // WP6 kill switch, re-read every cycle: the honesty tilt only exists when
   // recovery v2 is enabled at all AND the operator opts in (defaults OFF).
   s.honesty.setEnabled(
-    Boolean((ctx.settings as { recoveryTiltEnabled?: unknown }).recoveryTiltEnabled) &&
+    Boolean(ctx.settings.recoveryTiltEnabled) &&
       (ctx.settings.recoveryV2Mode ?? "off") !== "off",
   );
   const mode: HedgeMode = recoveryEngine.isInRecovery() ? "RECOVERY" : "NORMAL";

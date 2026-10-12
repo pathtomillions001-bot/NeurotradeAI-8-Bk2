@@ -103,6 +103,13 @@ export interface TradingSettings {
   /** WP4: RCI margin weight w1 (default 1). Optional. */
   recoveryMarginPreference?: number;
   /**
+   * WP6 honesty-tilt kill switch (default false). When true, the e-process /
+   * tape battery may reduce the RCI margin weight (floor 0.5) for a contract
+   * whose realised hit rate persistently beats its fair p0. It only reorders
+   * selection — stakes never increase. Optional; absent means false.
+   */
+  recoveryTiltEnabled?: boolean;
+  /**
    * WP2 (recovery v2) rollout gate: "off" = byte-for-byte legacy; "shadow" =
    * compute+log the v2 decision beside the legacy one without trading it;
    * "live" = the v2 path trades. Optional; absent means "off".

@@ -1,6 +1,7 @@
 # Recovery v2 — design and evidence log
 
-Status: **in progress** (work packages land as separate commits on this branch).
+Status: **WP0–WP8 delivered** (one commit per work package on this branch).
+Rollout starts at Phase 1 (shadow); flags default OFF.
 
 > **Plain statement.** Deriv synthetic indices are produced by a
 > cryptographically secure RNG: digits and tick directions are independent.
@@ -227,3 +228,10 @@ tail) while adaptive realises the debt and restarts instead.
   degenerates to ≈ base stake (re-base on the first loss); we implement
   min(φ·(balance−reserve), drawdownHeadroom), the only form that satisfies the
   WP4 gates. Flagged for review.
+- **Reconciler-only settlements do not feed the honesty e-process.** The two
+  main settlement paths (paper + live) record outcomes; a settlement completed
+  only by the trade reconciler is not counted. The e-process is conservative
+  under missing data (it only loses evidence, never gains false evidence).
+- **Phase-3 default flip is NOT this branch.** DB defaults stay split/off;
+  "adaptive by default for new users" happens only after ≥ 2 weeks of shadow
+  evidence from the WP7 shadow log.

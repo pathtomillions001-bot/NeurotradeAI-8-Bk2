@@ -233,3 +233,38 @@ packages depend on, and builds the rollout's side-by-side evidence stream.
    stale-quote sizing ≤ 3 s TTL + re-size on > 1 % drift (recovery-payout
    .test.ts), actual buy price / cost driving the ledger debt (ledger.test.ts),
    TradeOutcomeUnknownError reconciliation (ledger.test.ts + cycle path).
+
+## WP8 — Settings, schema, UI and dashboard for recovery v2
+
+Every v2 knob now travels the full path: settings UI → UpdateSettingsBody
+(orval zod) → route sanitisation → DB column → formatSettings → engine
+context. Nothing is silently stripped.
+
+1. Settings surface: `recoveryMethod` gains `adaptive`; new fields
+   `recoveryBudgetBase` (25), `recoveryLambda` ("auto" | number clamped to
+   (0,1]), `recoveryHeadroomPct` (φ, 5), `recoveryMarginPreference` (w1, 1)
+   and `recoveryTiltEnabled` (WP6 kill switch, default false). openapi.yaml
+   (both schemas) → orval regen → `.strict()` on the manual-trade body
+   hand-restored per the documented regen hazard.
+2. DB: `recovery_tilt_enabled BOOLEAN NOT NULL DEFAULT FALSE` added to the
+   drizzle schema and the idempotent DDL migration (alongside the existing
+   v2 columns).
+3. Fixed a latent wiring bug: `buildTradingSettings` in routes/ai.ts
+   collapsed `recoveryMethod` to split|instant, so the adaptive method and
+   the v2 fields could never reach the engine context. It now passes the
+   whole sanitised v2 block.
+4. Settings UI: Recovery Method offers Adaptive (v2); a new "Recovery v2
+   (research)" panel holds the rollout gate (off/shadow/live), λ selector
+   (auto + validated grid), budget, φ, margin preference and the honesty-tilt
+   kill switch — with the honest-expectation disclaimer inline.
+5. Dashboard: the engine-status recovery payload carries the v2 block
+   (method/mode/λ/budget/tilt) plus budget consumption; the recovery card
+   shows it.
+6. Tests (settings-v2.test.ts, 6): round-trip of every new field through the
+   real HTTP route, out-of-range clamping, zod-enum rejection of unknown
+   methods, tilt default OFF, and the lambda sanitiser. Full suite
+   1293/1293; typecheck green.
+
+Note: per the rollout plan the DB default stays `split`/`off` until the
+shadow period evidences the change — "adaptive by default for NEW users"
+is the Phase-3 flip, not this commit.

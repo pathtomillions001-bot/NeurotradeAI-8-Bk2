@@ -39,15 +39,6 @@ function effectiveContractSets(s: typeof settingsTable.$inferSelect): Autonomous
   });
 }
 
-/** WP4 — adaptive lambda is "auto" or a number clamped into (0,1]. */
-export function sanitizeRecoveryLambda(raw: unknown): string {
-  const s = String(raw ?? "").trim().toLowerCase();
-  if (s === "" || s === "auto") return "auto";
-  const n = Number(s);
-  if (!Number.isFinite(n)) return "auto";
-  return String(Math.min(1, Math.max(0.05, n)));
-}
-
 function formatSettings(s: typeof settingsTable.$inferSelect) {
   const sets = effectiveContractSets(s);
   return {
@@ -75,20 +66,12 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     requirePositiveEv: s.requirePositiveEv,
     cooldownMinutes: s.cooldownMinutes,
     cooldownEnabled: (s as any).cooldownEnabled ?? true,
-    cooldownBehavior: (s as any).cooldownBehavior === "sizedown" ? "sizedown" : "pause",
     normalOverDigit: s.normalOverDigit,
     normalUnderDigit: s.normalUnderDigit,
     recoveryOverDigit: s.recoveryOverDigit,
     recoveryUnderDigit: s.recoveryUnderDigit,
-    recoveryMethod: ["split", "instant", "adaptive"].includes((s as any).recoveryMethod) ? (s as any).recoveryMethod : "split",
+    recoveryMethod: (s as any).recoveryMethod ?? "split",
     recoveryAutoMode: (s as any).recoveryAutoMode ?? true,
-    recoveryV2Mode: ["off", "shadow", "live"].includes((s as any).recoveryV2Mode) ? (s as any).recoveryV2Mode : "off",
-    recoveryBudgetBase: Number((s as any).recoveryBudgetBase ?? 25),
-    recoveryLambda: sanitizeRecoveryLambda((s as any).recoveryLambda),
-    recoveryHeadroomPct: Number((s as any).recoveryHeadroomPct ?? 5),
-    recoveryMarginPreference: Number((s as any).recoveryMarginPreference ?? 1),
-    // WP6 honesty-tilt kill switch — defaults OFF.
-    recoveryTiltEnabled: Boolean((s as any).recoveryTiltEnabled ?? false),
     riskAmountType: (s as any).riskAmountType ?? "fixed",
     riskAmountValue: Number((s as any).riskAmountValue ?? 1),
     botRecoveryMarkup: Number((s as any).botRecoveryMarkup ?? 10),
@@ -158,20 +141,12 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).requirePositiveEv !== undefined) updateData.requirePositiveEv = (updates as any).requirePositiveEv;
   if ((updates as any).cooldownMinutes !== undefined) updateData.cooldownMinutes = (updates as any).cooldownMinutes;
   if ((updates as any).cooldownEnabled !== undefined) (updateData as any).cooldownEnabled = (updates as any).cooldownEnabled;
-  if ((updates as any).cooldownBehavior !== undefined) (updateData as any).cooldownBehavior = (updates as any).cooldownBehavior === "sizedown" ? "sizedown" : "pause";
   if ((updates as any).normalOverDigit !== undefined) updateData.normalOverDigit = (updates as any).normalOverDigit;
   if ((updates as any).normalUnderDigit !== undefined) updateData.normalUnderDigit = (updates as any).normalUnderDigit;
   if ((updates as any).recoveryOverDigit !== undefined) updateData.recoveryOverDigit = (updates as any).recoveryOverDigit;
   if ((updates as any).recoveryUnderDigit !== undefined) updateData.recoveryUnderDigit = (updates as any).recoveryUnderDigit;
-  if ((updates as any).recoveryMethod !== undefined) (updateData as any).recoveryMethod = ["split", "instant", "adaptive"].includes((updates as any).recoveryMethod) ? (updates as any).recoveryMethod : "split";
+  if ((updates as any).recoveryMethod !== undefined) (updateData as any).recoveryMethod = (updates as any).recoveryMethod;
   if ((updates as any).recoveryAutoMode !== undefined) (updateData as any).recoveryAutoMode = (updates as any).recoveryAutoMode;
-  if ((updates as any).recoveryV2Mode !== undefined) (updateData as any).recoveryV2Mode = ["off", "shadow", "live"].includes((updates as any).recoveryV2Mode) ? (updates as any).recoveryV2Mode : "off";
-  if ((updates as any).recoveryBudgetBase !== undefined) (updateData as any).recoveryBudgetBase = String(Math.min(1000, Math.max(1, Number((updates as any).recoveryBudgetBase) || 25)));
-  if ((updates as any).recoveryLambda !== undefined) (updateData as any).recoveryLambda = sanitizeRecoveryLambda((updates as any).recoveryLambda);
-  if ((updates as any).recoveryHeadroomPct !== undefined) (updateData as any).recoveryHeadroomPct = String(Math.min(100, Math.max(0, Number((updates as any).recoveryHeadroomPct) || 5)));
-  if ((updates as any).recoveryMarginPreference !== undefined) (updateData as any).recoveryMarginPreference = String(Math.min(10, Math.max(0, Number((updates as any).recoveryMarginPreference) || 1)));
-  // WP6 honesty-tilt kill switch — boolean, defaults OFF.
-  if ((updates as any).recoveryTiltEnabled !== undefined) (updateData as any).recoveryTiltEnabled = Boolean((updates as any).recoveryTiltEnabled);
   if ((updates as any).riskAmountType !== undefined) (updateData as any).riskAmountType = (updates as any).riskAmountType;
   if ((updates as any).riskAmountValue !== undefined) (updateData as any).riskAmountValue = String((updates as any).riskAmountValue);
   if ((updates as any).botRecoveryMarkup !== undefined) (updateData as any).botRecoveryMarkup = String((updates as any).botRecoveryMarkup);

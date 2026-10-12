@@ -7,7 +7,7 @@
  */
 
 /**
- * Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)
+ * Split caps recovery attempts; Instant targets one-win recovery
  */
 export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod[keyof typeof TradingSettingsRecoveryMethod];
 
@@ -15,5 +15,4 @@ export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod
 export const TradingSettingsRecoveryMethod = {
   split: 'split',
   instant: 'instant',
-  adaptive: 'adaptive',
 } as const;

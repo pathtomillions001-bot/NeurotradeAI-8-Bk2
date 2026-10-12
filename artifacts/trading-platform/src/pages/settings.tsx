@@ -211,16 +211,9 @@ export default function Settings() {
     autonomousEnabled: false,
     recoveryMode: false,
     recoveryAutoMode: true,
-    recoveryMethod: "split" as "split" | "instant" | "adaptive",
+    recoveryMethod: "split" as "split" | "instant",
     recoveryMultiplier: 1.62,
     maxRecoverySteps: 3,
-    // Recovery v2 (WP4–WP8). All defaults keep legacy behaviour until opted in.
-    recoveryV2Mode: "off" as "off" | "shadow" | "live",
-    recoveryBudgetBase: 25,
-    recoveryLambda: "auto",
-    recoveryHeadroomPct: 5,
-    recoveryMarginPreference: 1,
-    recoveryTiltEnabled: false,
     scanAllMarkets: true,
     paperTradeMode: false,
     requirePositiveEv: true,
@@ -250,15 +243,9 @@ export default function Settings() {
         autonomousEnabled: settings.autonomousEnabled,
         recoveryMode: (settings as any).recoveryMode ?? false,
         recoveryAutoMode: (settings as any).recoveryAutoMode ?? true,
-        recoveryMethod: ((settings as any).recoveryMethod ?? "split") as "split" | "instant" | "adaptive",
+        recoveryMethod: ((settings as any).recoveryMethod ?? "split") as "split" | "instant",
         recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.62,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
-        recoveryV2Mode: ((settings as any).recoveryV2Mode ?? "off") as "off" | "shadow" | "live",
-        recoveryBudgetBase: Number((settings as any).recoveryBudgetBase ?? 25),
-        recoveryLambda: String((settings as any).recoveryLambda ?? "auto"),
-        recoveryHeadroomPct: Number((settings as any).recoveryHeadroomPct ?? 5),
-        recoveryMarginPreference: Number((settings as any).recoveryMarginPreference ?? 1),
-        recoveryTiltEnabled: Boolean((settings as any).recoveryTiltEnabled ?? false),
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
         paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
@@ -522,15 +509,14 @@ export default function Settings() {
               <SettingRow
                 label="Recovery Method"
                 description={form.recoveryAutoMode
-                  ? "Split caps every attempt at one normal base stake and carries the remaining debt forward. Instant sizes one win to clear the debt plus the optional target. Adaptive (v2) sizes a fraction λ of the exact clear-stake, bounded by drawdown headroom and a recovery budget that re-bases instead of risking ruin."
+                  ? "Split caps every attempt at one normal base stake and carries the remaining debt forward. Instant sizes one win to clear the debt plus the optional target."
                   : "Split uses your compounded multiplier as a cap on the exact target. Instant stakes your compounded multiplier directly."}
               >
                 <Select value={form.recoveryMethod} onValueChange={(v) => set("recoveryMethod", v)}>
-                  <SelectTrigger className="w-40 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectTrigger className="w-36 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="split">Split</SelectItem>
                     <SelectItem value="instant">Instant</SelectItem>
-                    <SelectItem value="adaptive">Adaptive (v2)</SelectItem>
                   </SelectContent>
                 </Select>
               </SettingRow>
@@ -587,77 +573,6 @@ export default function Settings() {
                 )}
               </div>
             </Panel>
-
-            {/* Recovery v2 (WP4–WP8): rollout gate + adaptive knobs. */}
-            <div className="xl:col-span-2">
-            <Panel label="Recovery v2 (research)" accent="violet">
-              <div className="py-3 space-y-1">
-                <SettingRow
-                  label="Rollout gate"
-                  description='Off = byte-for-byte legacy. Shadow = the v2 decision is computed and logged beside the legacy one every recovery tick, without trading it. Live = the v2 path trades. Turning this off restores legacy exactly.'
-                >
-                  <Select value={form.recoveryV2Mode} onValueChange={(v) => set("recoveryV2Mode", v)}>
-                    <SelectTrigger className="w-32 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="off">Off (legacy)</SelectItem>
-                      <SelectItem value="shadow">Shadow</SelectItem>
-                      <SelectItem value="live">Live</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-                {form.recoveryV2Mode !== "off" && (
-                  <>
-                    <SettingRow
-                      label="Lambda (λ)"
-                      description='Adaptive method only. "Auto" lets the Markov-DP optimizer pick from {0.25, 0.33, 0.5, 0.67, 1.0} by minimising tail risk plus expected trades. Lower λ = gentler descent, more trades; λ = 1 stakes the exact one-win amount.'
-                    >
-                      <Select value={form.recoveryLambda} onValueChange={(v) => set("recoveryLambda", v)}>
-                        <SelectTrigger className="w-32 bg-secondary/50 text-sm"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="auto">Auto</SelectItem>
-                          <SelectItem value="0.25">0.25</SelectItem>
-                          <SelectItem value="0.33">0.33</SelectItem>
-                          <SelectItem value="0.5">0.50</SelectItem>
-                          <SelectItem value="0.67">0.67</SelectItem>
-                          <SelectItem value="1">1.00</SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </SettingRow>
-                    <SettingRow
-                      label="Recovery budget"
-                      description="Multiples of the base stake. When the loss debt reaches the budget the ladder re-bases: the debt is realised as a loss in the daily P&L and the ladder restarts at the base stake instead of risking ruin."
-                    >
-                      <NumInput value={form.recoveryBudgetBase} onChange={(v) => set("recoveryBudgetBase", v)} min={1} max={1000} suffix="×" />
-                    </SettingRow>
-                    <SettingRow
-                      label="Headroom share (φ)"
-                      description="Percent of the remaining drawdown headroom one recovery stake may consume. Keeps the ladder inside your max-drawdown stop."
-                    >
-                      <NumInput value={form.recoveryHeadroomPct} onChange={(v) => set("recoveryHeadroomPct", v)} min={0} max={100} suffix="%" />
-                    </SettingRow>
-                    <SettingRow
-                      label="Margin preference (w₁)"
-                      description="How strongly contract selection avoids the house margin (0–10). Higher prefers cheaper contracts. Selection only — it never changes the stake."
-                    >
-                      <NumInput value={form.recoveryMarginPreference} onChange={(v) => set("recoveryMarginPreference", v)} min={0} max={10} step={0.5} suffix="w₁" />
-                    </SettingRow>
-                    <SettingRow
-                      label="Honesty tilt (kill switch)"
-                      description="Off by default. If ever enabled, an anytime-valid e-process plus a 5 000-tick tape battery may reduce the margin weight (never below half) for a contract whose realised hit rate persistently beats its fair probability. It can only reorder selection — stakes never increase. On i.i.d. Deriv digits it is expected to stay inactive."
-                    >
-                      <Switch checked={form.recoveryTiltEnabled} onCheckedChange={(v) => set("recoveryTiltEnabled", v)} />
-                    </SettingRow>
-                    <p className="text-[11px] text-muted-foreground leading-relaxed pt-1">
-                      <span className="text-violet-300 font-medium">Honest expectation. </span>
-                      Deriv digits are i.i.d. and every recovery contract carries a 1.6–10.7 % margin, so recovery is
-                      negative-expectation: these settings reshape the risk of recovering a loss — they cannot create a
-                      positive edge. Shadow first, then opt in on demo before trusting any change.
-                    </p>
-                  </>
-                )}
-              </div>
-            </Panel>
-            </div>
           </div>
         )}
       </SectionCard>

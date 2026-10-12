@@ -24,8 +24,7 @@ import * as recoveryEngine from "../agents/recovery-engine";
 import { computeRiskDecision } from "../agents/risk-manager";
 import type { DailyStats, ScanContext, TradingSettings } from "../agents/types";
 import type { RiskDecision } from "../agents/risk-manager";
-import { prepareRecoveryBuy, resolveRecoveryPayout } from "../recovery-payout";
-import { applyRecoveryStakeLimits } from "../recovery-math";
+import { resolveRecoveryPayout } from "../recovery-payout";
 import {
   AUTOMATED_DERIV_MARKETS,
   executeLiveTrade,
@@ -44,23 +43,10 @@ import {
   HEDGE_GROUP_NAMES,
 } from "./constants";
 import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
-import { computeStake } from "../agents/ev-calculator";
 import { recoveryEscalation } from "./recovery-risk";
-import { scoreRecoveryCandidates, DEFAULT_RCI_WEIGHTS, type RciCandidateInput } from "./rci";
-import { computeRecoveryHeadroom } from "./recovery-headroom";
-import {
-  computeAdaptiveStake,
-  ADAPTIVE_DEFAULT_LAMBDA,
-  ADAPTIVE_DEFAULT_BUDGET_BASE,
-  ADAPTIVE_DEFAULT_HEADROOM_PCT,
-} from "./adaptive-stake";
-import { recoveryDpPreview, chooseOptimalLambda, type DpPreview } from "./markov-dp";
-
 import { decideHedge, type HedgeDecision } from "./contest";
 import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
-import { HonestyMonitor, fairP0ForContractKey } from "./honesty-monitor";
-import { shadowLog } from "./shadow-log";
 import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
 import {
@@ -90,15 +76,6 @@ export interface HedgeContext {
   cooldownMinutes: number;
   /** False = trade straight through a loss streak (no cooldown pause). */
   cooldownEnabled: boolean;
-  /**
-   * WP1: how the engine reacts when the consecutive-loss limit is reached.
-   *  - "pause"    (default, legacy): stop and run the cooldown timer.
-   *  - "sizedown": never pause; instead scale the stake down by half for every
-   *                loss beyond the limit and keep trading. A time pause changes
-   *                nothing statistically on i.i.d. outcomes, so this expresses
-   *                the same caution through exposure instead of waiting.
-   */
-  cooldownBehavior: "pause" | "sizedown";
   allowedMarketSymbols: string[] | null;
   paperTradeMode: boolean;
   daily: DailyStats;
@@ -166,8 +143,6 @@ interface HedgeSession {
   lastEmitAt: number;
   execFailures: number;
   ctx: { at: number; value: HedgeContext } | null;
-  /** WP6 honesty battery: per-market tape tests + per-contract e-processes. */
-  honesty: HonestyMonitor;
 }
 
 const CONTEXT_TTL_MS = 2_000;
@@ -214,9 +189,6 @@ function newSession(): HedgeSession {
     lastEmitAt: 0,
     execFailures: 0,
     ctx: null,
-    // WP6: kill-switch defaults OFF — the tilt can only ever reduce the RCI
-    // margin weight, and only when explicitly enabled (WP8 wires the setting).
-    honesty: new HonestyMonitor(false),
   };
 }
 
@@ -303,147 +275,8 @@ function scanContext(ctx: HedgeContext, symbol: string): ScanContext {
   };
 }
 
-/**
- * WP1 size-down multiplier: 1.0 while the consecutive-loss run is below the
- * limit; halves for every loss at or beyond it. A time pause changes nothing
- * statistically on i.i.d. outcomes — this expresses the same caution through
- * exposure instead of waiting. The daily-loss / drawdown hard stops are
- * untouched and still end the engine.
- */
-export function sizeDownMultiplier(losses: number, limit: number): number {
-  const over = Math.max(0, Math.floor(losses) - Math.max(1, Math.floor(limit)) + 1);
-  return Math.pow(0.5, over);
-}
-
 function riskFor(ctx: HedgeContext, symbol: string) {
   return computeRiskDecision(scanContext(ctx, symbol), null);
-}
-
-/**
- * Risk decision with the WP1 size-down override: when the ONLY breached hard
- * stop is the consecutive-loss limit and cooldownBehavior is "sizedown", the
- * engine keeps trading at a reduced stake instead of pausing. Every other hard
- * stop (daily loss limit, max drawdown, daily target) passes through as-is.
- */
-function riskWithSizeDown(ctx: HedgeContext, symbol: string): { risk: RiskDecision; factor: number } {
-  const risk = riskFor(ctx, symbol);
-  if (!risk.hardStop) return { risk, factor: 1 };
-  const consecutive = ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
-  if (!consecutive || ctx.cooldownBehavior !== "sizedown") return { risk, factor: 1 };
-  const factor = sizeDownMultiplier(ctx.daily.consecutiveLosses, ctx.consecutiveLossLimit);
-  const baseStake = computeStake(scanContext(ctx, symbol));
-  const reduced = Math.max(0.35, Math.min(baseStake * factor, ctx.settings.maxTradeStake));
-  return {
-    risk: {
-      ...risk,
-      hardStop: false,
-      allowTrade: true,
-      recommendedStake: Math.round(reduced * 100) / 100,
-      riskBudget: Math.max(risk.riskBudget, 0.05),
-      hardStopReason: undefined,
-    },
-    factor,
-  };
-}
-
-/**
- * WP3 — v2 recovery decision via the Recovery Cost Index.
- *
- * Returns a HedgeDecision that fires on the FIRST tick a feasible contract
- * exists: no confirmations, no rematch penalty, no Markov terms (D8). Used only
- * when settings.recoveryV2Mode is shadow/live AND the engine is in recovery;
- * normal mode keeps the legacy gate. Returns null when no market produced rows
- * or nothing is affordable (a budget fact, reported as a HOLD, not a wait).
- *
- * TODO(WP4): headroomCap currently proxies the drawdown headroom with the
- * per-trade max stake; WP4 replaces it with φ·min(balance−reserve, headroom).
- * TODO(WP5): ruin/clear-time previews are 0 until the Markov-DP preview lands.
- */
-function decideRecoveryV2(
-  rows: HedgeCandidate[],
-  tapes: HedgeTape[],
-  ctx: HedgeContext,
-  lossRun: number,
-  escalation: number,
-  honesty: HonestyMonitor,
-): HedgeDecision | null {
-  if (rows.length === 0) return null;
-  const ledger = recoveryEngine.getState();
-  const tapeAgeBySymbol = new Map(tapes.map((t) => [t.symbol, t.ageMs]));
-  const candidates: RciCandidateInput[] = rows.map((row) => ({
-    spec: { type: row.contract, digit: row.barrier },
-    symbol: row.symbol,
-    payout: row.payout,
-    quoteSource: "fallback", // live re-verification happens at buy time (WP2)
-    quoteAgeMs: 0,
-    tapeAgeMs: tapeAgeBySymbol.get(row.symbol) ?? Number.MAX_SAFE_INTEGER,
-    recentRejections: 0,
-  }));
-  const debt = ledger.unrecoveredAmount;
-  const adaptive = ctx.settings.recoveryMethod === "adaptive";
-  // D4: the adaptive ladder clears DEBT only (T′ = 0); legacy keeps the sizing target.
-  const targetProfit = adaptive ? 0 : ledger.remainingTargetProfit;
-  // WP4: feasibility is bounded by the remaining drawdown headroom, not just
-  // the per-trade cap (D3). Legacy methods keep the max-trade cap so the
-  // shadow comparison stays honest against legacy stakes.
-  const headroomCap = adaptive
-    ? computeRecoveryHeadroom({
-        balance: ctx.balance,
-        dailyProfit: ctx.daily.profit,
-        maxDrawdownPct: ctx.settings.maxDrawdown,
-        headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
-      }).headroomCap
-    : ctx.settings.maxTradeStake;
-  // WP4 wired the margin preference (default 1 ≡ the old default weights);
-  // WP6's honesty tilt can only ever multiply it DOWN per contract, and only
-  // when the kill switch is on — the factor is clamped to [0.5, 1] inside.
-  const marginPrefRaw = ctx.settings.recoveryMarginPreference;
-  const marginPreference = marginPrefRaw !== undefined && Number.isFinite(Number(marginPrefRaw))
-    ? Math.min(10, Math.max(0, Number(marginPrefRaw)))
-    : DEFAULT_RCI_WEIGHTS.w1;
-  const decision = scoreRecoveryCandidates({
-    candidates,
-    debt,
-    targetProfit,
-    headroomCap,
-    weights: { w1: marginPreference, w2: 0, w3: 0 },
-    marginWeightFactor: (spec, symbol) =>
-      symbol ? honesty.marginWeightFactor(symbol, `${spec.type}:${spec.digit}`) : 1,
-  });
-  if (!decision.chosen) return null;
-
-  // Map the RCI winner back onto the ranked row that produced it.
-  const chosenSpec = decision.chosen.spec;
-  const best = rows.find(
-    (r) => r.contract === chosenSpec.type && r.barrier === chosenSpec.digit,
-  );
-  if (!best) return null;
-
-  const barrierText = best.barrier >= 0 ? ` ${best.barrier}` : "";
-  const reason = `READY ${best.contract}${barrierText} on ${best.symbol} · RCI ${(decision.chosen.rci * 100).toFixed(2)} margin ${(decision.chosen.margin * 100).toFixed(2)}%${decision.partial ? " · partial (headroom-bound)" : ""}`;
-
-  // Group winners for the dashboard, mirroring the legacy contest's layout.
-  const rankedByScore = [...rows].sort((a, b) => b.score - a.score);
-  const groupWinners = HEDGE_GROUP_NAMES.map((_, g) => {
-    const inGroup = rankedByScore.filter((r) => r.group === g);
-    return inGroup.length > 0
-      ? { group: g, groupName: HEDGE_GROUP_NAMES[g], winner: inGroup[0], rowsInGroup: inGroup.length }
-      : null;
-  }).filter((x): x is NonNullable<typeof x> => x !== null);
-
-  return {
-    mode: "RECOVERY",
-    best,
-    eligible: true,
-    confirmations: 0,
-    requiredConfirmations: 0,
-    rescanInProgress: false,
-    escalation,
-    blockers: [],
-    reason,
-    groupWinners,
-    rowsRanked: rows.length,
-  };
 }
 
 function watchedMarkets(ctx: HedgeContext) {
@@ -662,7 +495,6 @@ function emitHoldScan(
   if (now - s.lastEmitAt < EMIT_THROTTLE_MS) return;
   s.lastEmitAt = now;
   if (input.started) host.emit("scan_started", { markets: input.started.markets, mode: input.started.mode });
-  const truthful = recoveryEngine.getState();
   host.emit("scan_complete", {
     symbol: null,
     quality: 0,
@@ -672,9 +504,6 @@ function emitHoldScan(
     shouldTrade: false,
     rejectReason: input.reason,
     sessionLossCount: input.lossRun,
-    // WP1: the dashboard also gets the run a cooldown can no longer hide.
-    trueLossRun: truthful.trueLossRun ?? 0,
-    recoveryDepth: truthful.recoveryDepth ?? 0,
     consecutiveLossLimit: input.consecutiveLossLimit,
     mode: input.mode,
     contract: null,
@@ -711,29 +540,16 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
 
   const ctx = await getContext(host, s, false);
-  // WP6 kill switch, re-read every cycle: the honesty tilt only exists when
-  // recovery v2 is enabled at all AND the operator opts in (defaults OFF).
-  s.honesty.setEnabled(
-    Boolean(ctx.settings.recoveryTiltEnabled) &&
-      (ctx.settings.recoveryV2Mode ?? "off") !== "off",
-  );
   const mode: HedgeMode = recoveryEngine.isInRecovery() ? "RECOVERY" : "NORMAL";
   const ledger = recoveryEngine.getState();
   const lossRun = ledger.streakLossCount;
-  // Depth of THIS recovery episode — the TRUTHFUL counters (WP1). trueLossRun
-  // is reset only by a win (cooldown resumes never mask it) and recoveryDepth
-  // is the uncapped episode depth, so escalation can reach the risk weight's
-  // documented cap instead of saturating at maxRecoverySteps. The ranking math
-  // (recoveryRiskWeight) clamps at its own cap, so nothing downstream moves a
-  // stake — this only keeps the recovery RANKING honest on long runs.
-  const escalation = recoveryEscalation(ledger.trueLossRun, ledger.recoveryDepth);
+  // Depth of THIS recovery episode. streakLossCount resets on any win and on a
+  // cooldown auto-resume; recoveryStep only clears when the debt is repaid, so
+  // the maximum keeps the recovery ranking honest across a cooldown.
+  const escalation = recoveryEscalation(lossRun, ledger.recoveryStep);
 
-  // 0. Hard limits first. A breached limit stops the engine before anything is
-  //    ranked — with one opt-in exception (WP1): when cooldownBehavior is
-  //    "sizedown", the CONSECUTIVE-LOSS stop is expressed as halved exposure
-  //    (riskWithSizeDown / sizeDownMultiplier) instead of a pause. Daily loss
-  //    limit, max drawdown and profit-target hard stops always apply.
-  const { risk, factor: sizeDownFactor } = riskWithSizeDown(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
+  // 0. Hard limits first. A breached limit stops the engine before anything is ranked.
+  const risk = riskFor(ctx, watchedMarkets(ctx)[0]?.symbol ?? "");
   if (risk.hardStop) {
     const consecutive = ctx.daily.consecutiveLosses >= ctx.consecutiveLossLimit;
     if (consecutive) stopForLossLimit(host, ctx, risk.hardStopReason ?? "risk limit reached");
@@ -767,10 +583,6 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     if (specs.length === 0) { feed.noSpecs += 1; continue; }
     if (tape.digits.length < HEDGE_MIN_TICKS) { feed.thin += 1; continue; }
     tapes.push(tape);
-    // WP6 honesty: accumulate this market's ticks for the statistical battery.
-    // The monitor dedupes the rolling window by tick sequence, so re-feeding
-    // the same tape each cycle costs an O(overlap) compare, not a re-append.
-    s.honesty.ingestTape(tape.symbol, tape.digits, tape.prices, tape.tickSequence);
     rows.push(...buildMarketCandidates({
       symbol: market.symbol,
       group: hedgeGroupIndex(market.symbol),
@@ -784,80 +596,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
 
   // 2. Contest and gate.
-  let decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
-
-  // 2b. Recovery v2 (WP3): when the gate is enabled and the engine is in
-  //     recovery, the RCI selector either REPLACES the legacy decision (live)
-  //     or is logged beside it (shadow). Normal mode is never touched.
-  const v2Mode = ctx.settings.recoveryV2Mode ?? "off";
-  if (mode === "RECOVERY" && v2Mode !== "off" && rows.length > 0) {
-    const v2Decision = decideRecoveryV2(rows, tapes, ctx, lossRun, escalation, s.honesty);
-    if (v2Mode === "shadow") {
-      // WP7 shadow logger: the old and the new decision, side by side, on
-      // every recovery tick — the rollout's evidence base. Pure recording;
-      // the legacy decision below is what trades.
-      const entry = shadowLog.record({
-        sessionId: host.sessionId,
-        mode,
-        lossRun,
-        legacy: decision
-          ? {
-              contract: decision.best ? `${decision.best.contract}:${decision.best.barrier}` : null,
-              symbol: decision.best?.symbol ?? null,
-              eligible: decision.eligible,
-              reason: decision.reason,
-            }
-          : null,
-        v2: v2Decision
-          ? {
-              contract: v2Decision.best ? `${v2Decision.best.contract}:${v2Decision.best.barrier}` : null,
-              symbol: v2Decision.best?.symbol ?? null,
-              eligible: v2Decision.eligible,
-              reason: v2Decision.reason,
-            }
-          : null,
-      });
-      host.emit("recovery_shadow_decision", {
-        sessionId: host.sessionId,
-        agreesOnAction: entry.agreesOnAction,
-        legacy: entry.legacy?.reason ?? null,
-        v2: entry.v2?.reason ?? null,
-        summary: shadowLog.summary(host.sessionId),
-      });
-      logger.debug(
-        {
-          sessionId: host.sessionId,
-          legacy: entry.legacy,
-          v2: entry.v2,
-          agreesOnAction: entry.agreesOnAction,
-        },
-        "Recovery v2 shadow decision (RCI beside legacy)",
-      );
-    } else if (v2Decision) {
-      decision = v2Decision;
-    } else if (ctx.settings.recoveryMethod === "adaptive") {
-      // Live adaptive with no fundable contract: either re-base (budget/headroom
-      // trigger) or hold — never fall back to legacy sizing and never wait on a
-      // contract that cannot fit the headroom.
-      const why = checkRecoveryRebase(ctx, risk.recommendedStake);
-      if (why) {
-        await executeRebase(host, decision?.best.symbol ?? rows[0].symbol, ctx, why);
-        return;
-      }
-      host.publish({ currentMarket: null, nextScanIn: null });
-      emitHoldScan(host, s, {
-        reason: "recovery headroom: no contract fits the remaining drawdown budget",
-        mode,
-        lossRun,
-        consecutiveLossLimit: ctx.consecutiveLossLimit,
-        marketsScanned: tapes.length,
-        feed,
-        started: { markets: tapes.length, mode },
-      });
-      return;
-    }
-  }
-
+  const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
   if (!decision) {
     host.publish({ currentMarket: null, nextScanIn: null });
     // Ranked nothing this tick — HOLD with the feed cause, never silence.
@@ -884,7 +623,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
 
   // 4. Trade. Re-read context on fresh data before any money moves.
   const fresh = await getContext(host, s, true);
-  const { risk: freshRisk, factor: freshSizeDown } = riskWithSizeDown(fresh, decision.best.symbol);
+  const freshRisk = riskFor(fresh, decision.best.symbol);
   if (freshRisk.hardStop) {
     const consecutive = fresh.daily.consecutiveLosses >= fresh.consecutiveLossLimit;
     if (consecutive) stopForLossLimit(host, fresh, freshRisk.hardStopReason ?? "risk limit reached");
@@ -893,11 +632,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   }
   if (!host.canExecute()) return;
   const lastPrice = tapes.find((t) => t.symbol === decision.best.symbol)?.prices.at(-1) ?? 0;
-  // The size-down factor (WP1) applies to the trade about to be placed. Use the
-  // stricter of the scan-time and fresh-context factors so exposure can only
-  // shrink as the run deepens between the scan and the buy.
-  const sizeDown = Math.min(sizeDownFactor, freshSizeDown);
-  await executeDecision(host, s, decision, fresh, mode, freshRisk, lastPrice, sizeDown);
+  await executeDecision(host, s, decision, fresh, mode, freshRisk, lastPrice);
 }
 
 function publishScan(
@@ -929,9 +664,6 @@ function publishScan(
     shouldTrade: decision.eligible,
     rejectReason: decision.eligible ? null : decision.reason,
     sessionLossCount: lossRun,
-    // WP1 truthful counters — never masked by cooldown resumes.
-    trueLossRun: recoveryEngine.getState().trueLossRun ?? 0,
-    recoveryDepth: recoveryEngine.getState().recoveryDepth ?? 0,
     consecutiveLossLimit: ctx.consecutiveLossLimit,
     mode: decision.mode,
     contract: b.contract,
@@ -946,11 +678,6 @@ function publishScan(
     lossRunRisk: Math.round(b.lossRunRisk * 1000) / 1000,
     riskWeight: Math.round(b.riskWeight * 100) / 100,
     escalation: decision.escalation,
-    // WP5 — adaptive Markov-DP preview (cached; < 5 ms on the hot path).
-    // Present only when the adaptive ladder is the recovery method and the v2
-    // gate is at least shadow, so the dashboard can show what the ladder
-    // expects before a single recovery stake is placed.
-    recoveryPreview: buildRecoveryPreview(decision, ctx),
   });
   for (const gw of decision.groupWinners) {
     const w = gw.winner;
@@ -977,42 +704,13 @@ function publishScan(
  * Normal: the risk-adjusted settings stake (computeStake plus soft reduction, no
  * Kelly). Recovery: the unchanged recovery ladder, sized from the same base
  * stake and the payout quote. The quote is used only when it is live, as before.
- *
- * WP2 (gated by settings.recoveryV2Mode): after the legacy stake is computed,
- * a buy-time proposal re-verifies the payout and re-sizes so one win clears
- * the target at the ACTUAL multiplier (D7). "shadow" logs the plan beside the
- * legacy number without trading it; "live" trades it; "off" (default) is
- * byte-for-byte legacy.
  */
-function resolveRecoveryLambda(ctx: HedgeContext, auto: {
-  debt: number; payout: number; p0: number; headroomCap: number; baseStake: number;
-}): number {
-  const raw = ctx.settings.recoveryLambda;
-  if (raw === undefined || raw === null || raw === "" || String(raw).toLowerCase() === "auto") {
-    // WP5: the Markov-DP optimizer picks λ from the validated grid, minimising
-    // U = |CVaR99|/capital + w·E[trades] s.t. P(rebase) ≤ tol. Cached per debt
-    // bucket, so this is cheap on the hot path.
-    const result = chooseOptimalLambda({
-      debt: auto.debt,
-      baseStake: auto.baseStake,
-      payout: auto.payout,
-      p0: auto.p0,
-      budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
-      headroomCap: auto.headroomCap,
-      capital: ctx.balance,
-    });
-    return result.lambda;
-  }
-  const n = Number(raw);
-  return Number.isFinite(n) ? Math.min(1, Math.max(0.05, n)) : ADAPTIVE_DEFAULT_LAMBDA;
-}
-
 async function resolveStake(
   decision: HedgeDecision,
   ctx: HedgeContext,
   mode: HedgeMode,
   risk: RiskDecision,
-): Promise<{ stake: number; payout: number; rebase?: "budget" | "headroom" }> {
+): Promise<{ stake: number; payout: number }> {
   const b = decision.best;
   const base = risk.recommendedStake;
   if (mode === "NORMAL") {
@@ -1027,43 +725,6 @@ async function resolveStake(
     currency: ctx.currency,
   });
   const payout = quote.source === "live" || !Number.isFinite(b.payout) || b.payout <= 1 ? quote.payoutMultiplier : b.payout;
-
-  // ── WP4 adaptive ladder ──────────────────────────────────────────────────
-  if (ctx.settings.recoveryMethod === "adaptive") {
-    const ledgerState = recoveryEngine.getState();
-    const headroom = computeRecoveryHeadroom({
-      balance: ctx.balance,
-      dailyProfit: ctx.daily.profit,
-      maxDrawdownPct: ctx.settings.maxDrawdown,
-      headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
-    });
-    const baseStake = base > 0 ? base : ledgerState.baseStake;
-    const lambda = resolveRecoveryLambda(ctx, {
-      debt: ledgerState.unrecoveredAmount,
-      payout,
-      p0: b.probability,
-      headroomCap: headroom.headroomCap,
-      baseStake,
-    });
-    const plan = computeAdaptiveStake({
-      debt: ledgerState.unrecoveredAmount,
-      baseStake,
-      payout,
-      lambda,
-      headroomCap: headroom.headroomCap,
-      budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
-    });
-    if (plan.rebaseBudget) return { stake: 0, payout, rebase: "budget" };
-    if (plan.rebaseHeadroom) return { stake: 0, payout, rebase: "headroom" };
-    logger.debug(
-      { debt: ledgerState.unrecoveredAmount, payout, lambdaEffective: plan.lambdaEffective, headroomCap: headroom.headroomCap, stake: plan.stake, partial: plan.partial },
-      "Adaptive recovery stake plan",
-    );
-    return { stake: plan.stake, payout };
-  }
-
-  // The adaptive method returned above; below this line the method is legacy
-  // (TS has narrowed the union accordingly).
   const stake = recoveryEngine.getDynamicRecoveryStake(
     base,
     ctx.settings.maxTradeStake,
@@ -1076,86 +737,7 @@ async function resolveStake(
     ctx.settings.maxRecoverySteps,
     ctx.settings.recoveryAutoMode,
   );
-
-  const v2Mode = ctx.settings.recoveryV2Mode ?? "off";
-  if (v2Mode === "off" || !ctx.settings.recoveryAutoMode) return { stake, payout };
-
-  // ── WP2 buy-time exactness (auto modes only) ─────────────────────────────
-  const ledger = recoveryEngine.getState();
-  // Legacy semantics: one win is promised to clear debt PLUS the remaining
-  // sizing target. (The adaptive method, WP4, drops the target — T′ = 0.)
-  const targetClearance = ledger.unrecoveredAmount + ledger.remainingTargetProfit;
-  const plan = await prepareRecoveryBuy({
-    symbol: b.symbol,
-    contractType: b.contract,
-    barrier: b.barrier >= 0 ? b.barrier : null,
-    duration: HEDGE_DURATION_TICKS,
-    durationUnit: HEDGE_DURATION_UNIT,
-    currency: ctx.currency,
-    targetClearance,
-    assumedPayout: payout,
-    candidateStake: stake,
-  });
-  // Split keeps its one-base-stake cap even after a live re-size.
-  const baseCap = ctx.settings.recoveryMethod === "split"
-    ? Math.max(0.35, ledger.baseStake > 0 ? ledger.baseStake : base)
-    : Number.POSITIVE_INFINITY;
-  const plannedStake = applyRecoveryStakeLimits(Math.min(plan.stake, baseCap), ctx.settings.maxTradeStake, ctx.balance);
-  logger.info(
-    {
-      symbol: b.symbol, contract: b.contract, v2Mode,
-      legacyStake: stake, v2Stake: plannedStake,
-      assumedPayout: payout, livePayout: plan.payoutMultiplier,
-      source: plan.source, reSized: plan.reSized, safetyMargin: plan.safetyMarginApplied,
-      targetClearance,
-    },
-    "Recovery v2 buy-time quote plan",
-  );
-  if (v2Mode === "live") {
-    return { stake: plannedStake, payout: plan.payoutMultiplier };
-  }
-  return { stake, payout }; // shadow: legacy trades, v2 only logged
-}
-
-/**
- * WP5 — build the adaptive Markov-DP preview for the scan payload. Returns
- * null unless the adaptive method is active and the v2 gate is ≥ shadow, so
- * legacy sessions pay nothing. The preview is cached per debt bucket, keeping
- * this well under the 5 ms scan-payload budget after warm-up.
- */
-function buildRecoveryPreview(decision: HedgeDecision, ctx: HedgeContext): DpPreview | null {
-  if (ctx.settings.recoveryMethod !== "adaptive") return null;
-  if ((ctx.settings.recoveryV2Mode ?? "off") === "off") return null;
-  const ledgerState = recoveryEngine.getState();
-  const debt = ledgerState.unrecoveredAmount;
-  if (debt <= 0) return null;
-  const headroom = computeRecoveryHeadroom({
-    balance: ctx.balance,
-    dailyProfit: ctx.daily.profit,
-    maxDrawdownPct: ctx.settings.maxDrawdown,
-    headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
-  });
-  const baseStake = ledgerState.baseStake > 0 ? ledgerState.baseStake : 1;
-  try {
-    const lambda = resolveRecoveryLambda(ctx, {
-      debt,
-      payout: decision.best.payout,
-      p0: decision.best.probability,
-      headroomCap: headroom.headroomCap,
-      baseStake,
-    });
-    return recoveryDpPreview({
-      debt,
-      baseStake,
-      payout: decision.best.payout,
-      p0: decision.best.probability,
-      lambda,
-      budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
-      headroomCap: headroom.headroomCap,
-    });
-  } catch {
-    return null; // a preview failure must never block the scan
-  }
+  return { stake, payout };
 }
 
 function barrierFor(row: HedgeCandidate): number | null {
@@ -1179,98 +761,6 @@ function recordLedger(
   });
 }
 
-/**
- * WP4 — RE-BASE execution. The adaptive ladder's budget rule realised the debt:
- * the recovery state is zeroed durably FIRST (durable-before-claimed, with an
- * in-memory rollback if the flush fails), then the ledger row for the realised
- * loss is written and counted in the daily P&L. Trading resumes immediately at
- * base stake — no pause, no gate, nothing hidden: the loss stays visible in
- * the true counters and the daily stats.
- */
-export async function executeRebase(
-  host: HedgeHost,
-  symbol: string,
-  ctx: HedgeContext,
-  why: "budget" | "headroom",
-  /** Test seam — production always uses the durable recovery-state flush. */
-  flush: () => Promise<boolean> = () => recoveryEngine.flushRecoveryState(),
-): Promise<void> {
-  const sessionId = host.sessionId;
-  const snapshot = { ...recoveryEngine.getState() };
-  const realised = runWithSession(sessionId, () => {
-    recoveryEngine.setPersistenceSession(sessionId);
-    return recoveryEngine.applyRebaseToState();
-  });
-  if (realised <= 0) return;
-
-  const durable = await flush();
-  if (!durable) {
-    recoveryEngine.restoreStateSnapshot(snapshot);
-    logger.warn(
-      { sessionId, realised, why },
-      "Recovery re-base: durable flush failed — rolled back, retrying next tick",
-    );
-    return;
-  }
-
-  const displayName = AUTOMATED_DERIV_MARKETS.find((m) => m.symbol === symbol)?.displayName ?? symbol;
-  const [row] = await db.insert(tradesTable).values({
-    sessionId,
-    symbol,
-    displayName,
-    contractType: "REBASE",
-    stake: "0",
-    direction: "neutral",
-    status: "lost",
-    payout: "0",
-    profit: String(Math.round(-realised * 100) / 100),
-    entryPrice: "0",
-    exitPrice: "0",
-    aiConfidence: "0",
-    aiRiskScore: "0",
-    isAutonomous: true,
-    agentReasoning: `${AUTONOMOUS_HEDGE_PREFIX}REBASE(${why}): realised $${realised.toFixed(2)} recovery debt; ladder restarts at base stake`,
-    duration: HEDGE_DURATION_TICKS,
-    durationUnit: HEDGE_DURATION_UNIT,
-    closedAt: new Date(),
-  }).returning();
-
-  host.emit("recovery_rebase", {
-    symbol,
-    debt: realised,
-    reason: why,
-    rowId: row?.id ?? null,
-    budgetBase: ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE,
-  });
-  logger.warn(
-    { sessionId, realised, why, rowId: row?.id },
-    "Recovery re-base: debt realised as loss; engine continues at base stake",
-  );
-}
-
-/**
- * WP4 — pre-selection re-base check. Both triggers are contract-independent:
- * the debt has reached the budget, or the headroom cap can no longer fund even
- * a base stake. Callers run this BEFORE the selector so a headroom-bound
- * recovery never dead-locks waiting for an affordable contract.
- */
-function checkRecoveryRebase(ctx: HedgeContext, baseStake: number): "budget" | "headroom" | null {
-  const ledgerState = recoveryEngine.getState();
-  const debt = ledgerState.unrecoveredAmount;
-  if (!ledgerState.inRecovery && debt <= 0) return null;
-  const base = baseStake > 0 ? baseStake : ledgerState.baseStake;
-  const budgetBase = ctx.settings.recoveryBudgetBase ?? ADAPTIVE_DEFAULT_BUDGET_BASE;
-  if (debt >= budgetBase * base) return "budget";
-  const headroom = computeRecoveryHeadroom({
-    balance: ctx.balance,
-    dailyProfit: ctx.daily.profit,
-    maxDrawdownPct: ctx.settings.maxDrawdown,
-    headroomPct: ctx.settings.recoveryHeadroomPct ?? ADAPTIVE_DEFAULT_HEADROOM_PCT,
-  });
-  if (base > headroom.headroomCap) return "headroom";
-  return null;
-}
-
 async function executeDecision(
   host: HedgeHost,
   s: HedgeSession,
@@ -1279,23 +769,11 @@ async function executeDecision(
   mode: HedgeMode,
   risk: RiskDecision,
   lastPrice: number,
-  sizeDown: number = 1,
 ): Promise<void> {
   const b = decision.best;
   const sessionId = host.sessionId;
   const reasoningBase = `${AUTONOMOUS_HEDGE_PREFIX}${decision.reason}`;
-  const { stake: resolvedStake, payout, rebase } = await resolveStake(decision, ctx, mode, risk);
-  if (rebase) {
-    await executeRebase(host, b.symbol, ctx, rebase);
-    return;
-  }
-  // WP1 size-down: the NORMAL stake already carries the reduction through
-  // risk.recommendedStake (riskWithSizeDown). The RECOVERY stake is debt-driven
-  // and does not, so the factor is applied here — exposure shrinks while the
-  // run is at/past the limit; the ledger still records the actual result.
-  const rawStake = mode === "RECOVERY" && sizeDown < 1
-    ? Math.max(MIN_STAKE, resolvedStake * sizeDown)
-    : resolvedStake;
+  const { stake: rawStake, payout } = await resolveStake(decision, ctx, mode, risk);
   const stake = Math.round(rawStake * 100) / 100;
   if (!Number.isFinite(stake) || stake < MIN_STAKE || stake > ctx.balance) {
     host.publish({ nextScanIn: null });
@@ -1339,8 +817,6 @@ async function executeDecision(
       closedAt: new Date(),
     }).returning();
     recordLedger(sessionId, { won, profit, cost: stake, contract: b.contract, payout, maxRecoverySteps: ctx.settings.maxRecoverySteps });
-    // WP6: this outcome feeds the contract's anytime-valid e-process.
-    s.honesty.recordOutcome(b.symbol, b.contract, fairP0ForContractKey(b.contract), won);
     applySettlement(s.memory, {
       won,
       key: b.key,
@@ -1496,9 +972,6 @@ async function executeDecision(
   if (settlement === "already") {
     logger.info({ rowId: openRow.id }, "Autonomous 1-tick: settlement already recorded by the reconciler — ledger not updated twice");
   }
-  // WP6: feed the settled outcome into the contract's e-process. Counted once
-  // per settlement regardless of which path wrote the ledger row.
-  s.honesty.recordOutcome(b.symbol, b.contract, fairP0ForContractKey(b.contract), result.won);
   clearExposure(s);
   applySettlement(s.memory, {
     won: result.won,
@@ -1583,25 +1056,13 @@ function finishTrade(
   logger.info({ symbol: t.symbol, won: t.won, profit: t.profit.toFixed(2), stake: t.stake, contract: t.contract }, "Trade executed");
   if (!t.won && streak >= t.ctx.consecutiveLossLimit) {
     const limit = t.ctx.consecutiveLossLimit;
-    if (t.ctx.cooldownBehavior === "sizedown") {
-      // WP1: express the limit through exposure, not a pause. The stake halves
-      // for every loss beyond the limit (see riskWithSizeDown); the true loss
-      // run keeps counting and the daily-loss / drawdown stops still apply.
-      host.emit("loss_limit_sizedown", {
-        sessionLossCount: streak,
-        consecutiveLossLimit: limit,
-        sizeDownMultiplier: sizeDownMultiplier(streak, limit),
-      });
-      logger.info({ sessionId: host.sessionId, streak, limit }, "Autonomous 1-tick: loss limit reached — sizedown mode keeps trading at reduced stake");
-    } else {
-      stopForLossLimit(
-        host,
-        t.ctx,
-        t.ctx.cooldownEnabled === false
-          ? `${streak} consecutive losses — limit ${limit} reached, cooldown disabled — resuming`
-          : `${streak} consecutive losses — limit ${limit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
-      );
-    }
+    stopForLossLimit(
+      host,
+      t.ctx,
+      t.ctx.cooldownEnabled === false
+        ? `${streak} consecutive losses — limit ${limit} reached, cooldown disabled — resuming`
+        : `${streak} consecutive losses — limit ${limit} reached, cooling down ${t.ctx.cooldownMinutes}m`,
+    );
   }
   void s;
 }

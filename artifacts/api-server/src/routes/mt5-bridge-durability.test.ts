@@ -9,7 +9,7 @@ import { __testing as linkTesting, resetBridgeLinks } from "../lib/multiasset/br
 import { resetClaims } from "../lib/multiasset/claims";
 import { armPlan, getDesk, resetDesk } from "../lib/multiasset/store";
 import type { ArmedPlan } from "../lib/multiasset/types";
-import router, { pendingPairings } from "./bridge";
+import router, { EXPECTED_EA_VERSION, pendingPairings } from "./bridge";
 
 /**
  * The MT5 link survives restarts — and only the user can end it.
@@ -291,14 +291,134 @@ describe("MT5 bridge — durable link", () => {
       eaUpdateAvailable: boolean;
     };
     assert.equal(status.eaVersion, "2.00");
-    assert.equal(status.expectedEaVersion, "3.04");
+    // Read from the route, not pinned here: a literal in two places is how the
+    // banner came to compare against a version nobody maintained.
+    assert.equal(status.expectedEaVersion, EXPECTED_EA_VERSION);
     assert.equal(status.eaUpdateAvailable, true);
 
     // A terminal that reports the current version is not nagged.
     const current = await connect(session, 6113);
-    await as(session, () => post("/sync", { seq: 1, version: "3.04" }, current));
+    await as(session, () => post("/sync", { seq: 1, version: EXPECTED_EA_VERSION }, current));
     const fresh = (await (await as(session, () => get("/status"))).json()) as { eaUpdateAvailable: boolean };
     assert.equal(fresh.eaUpdateAvailable, false);
+  });
+
+  /**
+   * ── "Could not check" is not "your credential is dead" ────────────────────
+   *
+   * The reported failure was a terminal that lost its link by itself:
+   *
+   *   HTTP 401 from /api/bridge/sync — {"error":"Invalid or revoked bridge token."}
+   *   HTTP 401 from /api/bridge/pair — {"error":"Unknown or expired pairing code."}
+   *
+   * with nobody having pressed "Unlink". Both rows live in the same store, so
+   * anything that made the store unreadable for a moment — a deploy in
+   * progress, a database failover, the bootstrap DDL still being applied while
+   * the HTTP port was already open, a second replica that had not seen the row
+   * — condemned BOTH credentials at once. And because a 401 is final for the
+   * EA, it wiped the token it had saved in the terminal's common folder (a file
+   * every chart of that account shares) and could never come back.
+   *
+   * These tests drive the store into that state and assert the routes answer
+   * "try again" instead, revoke nothing, and that the very same credentials
+   * work the moment the store can be read.
+   */
+  it("answers 503 — not 401 — when the link store cannot be read, and revokes nothing", async () => {
+    const session = browser("a");
+    const token = await connect(session, 6201);
+
+    // A restart, so the token is only in the database; then the database stops
+    // answering, as it does mid-failover or before the DDL has been applied.
+    restartServer();
+    linkTesting.failStore("simulated outage");
+
+    const during = await as(session, () => post("/sync", { seq: 1, instanceId: "ea-a" }, token));
+    assert.equal(during.status, 503, "an unreadable store must be retryable, never a verdict");
+    const body = (await during.json()) as { code: string; retryAfterMs: number };
+    assert.equal(body.code, "bridge_store_unavailable");
+    assert.ok(body.retryAfterMs > 0, "the terminal is told when to come back");
+
+    // The link itself is untouched: no revocation was written, so the SAME token
+    // reconnects as soon as the store can be read again.
+    linkTesting.healStore();
+    const after = await as(session, () => post("/sync", { seq: 2, instanceId: "ea-a" }, token));
+    assert.equal(after.status, 200, "a store outage must not cost the terminal its link");
+  });
+
+  it("does not condemn the pairing code when the store cannot be read", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+
+    restartServer();
+    linkTesting.failStore("simulated outage");
+
+    const during = await pair(session, pairingCode, 6202);
+    assert.equal(during.status, 503, "the code was never checked, so it must not be reported as expired");
+    assert.equal(((await during.json()) as { code: string }).code, "bridge_store_unavailable");
+
+    linkTesting.healStore();
+    const after = await pair(session, pairingCode, 6202);
+    assert.equal(after.status, 201, "the same code still pairs once the store answers");
+  });
+
+  it("says 'revoked' only for a revocation, and 'unknown' for a token it has never issued", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+    const response = await pair(session, pairingCode, 6203);
+    const token = ((await response.json()) as { bridgeToken: string }).bridgeToken;
+
+    // The one final answer: the user pressed "Unlink terminal".
+    assert.equal((await as(session, () => post("/unpair", {}))).status, 200);
+    const revoked = await as(session, () => post("/sync", { seq: 1 }, token));
+    assert.equal(revoked.status, 401);
+    assert.equal(
+      ((await revoked.json()) as { code: string }).code,
+      "bridge_link_revoked",
+      "the EA may discard its saved link for this answer and no other",
+    );
+
+    // A token nobody ever issued is a different statement, and must not claim
+    // the user unlinked anything.
+    const unknown = await as(session, () => post("/sync", { seq: 1 }, "nt_neverissued"));
+    assert.equal(unknown.status, 401);
+    assert.equal(((await unknown.json()) as { code: string }).code, "bridge_token_unknown");
+  });
+
+  it("an explicitly rotated code is still refused outright, not blamed on the store", async () => {
+    const session = browser("a");
+    const first = await requestCode(session);
+    await requestCode(session, { rotate: true });
+
+    const stale = await pair(session, first.pairingCode, 6204);
+    assert.equal(stale.status, 401);
+    assert.equal(((await stale.json()) as { code: string }).code, "pairing_code_unknown");
+  });
+
+  it("reports whether the link store survives a restart, so a fragile deployment is visible", async () => {
+    const session = browser("a");
+    await connect(session, 6205);
+
+    const status = (await (await as(session, () => get("/status"))).json()) as {
+      linked: boolean;
+      durable: boolean;
+      store: { backend: string; durable: boolean; reachable: boolean; schemaApplied: boolean; detail: string };
+    };
+    assert.equal(status.linked, true);
+    assert.equal(status.durable, true, "the protocol is durable: only Unlink ends a link");
+    assert.ok(status.store, "the dialog needs to know WHERE the link is stored");
+    assert.equal(typeof status.store.backend, "string");
+    assert.equal(typeof status.store.durable, "boolean");
+    assert.equal(status.store.reachable, true);
+    assert.equal(status.store.schemaApplied, true);
+
+    // And the same truth is available before anything is linked, which is when
+    // the user is reading the pairing code and about to trust it.
+    const unlinked = (await (await as(browser("b"), () => get("/status"))).json()) as {
+      linked: boolean;
+      store: { backend: string };
+    };
+    assert.equal(unlinked.linked, false);
+    assert.ok(unlinked.store?.backend, "the store report is not conditional on being linked");
   });
 });
 

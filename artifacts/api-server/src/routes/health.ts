@@ -1,6 +1,13 @@
 import { Router, type IRouter } from "express";
 import { HealthCheckResponse } from "@workspace/api-zod";
-import { pool, schemaReady } from "@workspace/db";
+import {
+  databaseBackend,
+  databaseDetail,
+  databaseIsDurable,
+  pool,
+  schemaApplied,
+  schemaReady,
+} from "@workspace/db";
 import { accountConnectionCount, tickManager } from "../lib/deriv";
 import { logger } from "../lib/logger";
 import { botConsoleIds } from "../lib/bot-catalog";
@@ -129,8 +136,28 @@ router.get("/healthz", async (req, res) => {
     ok: boolean;
     external: boolean;
     tablesMissing: string[];
+    /**
+     * Which store the process is really using, and whether a row written now
+     * survives a restart. Without a `postgres://` DATABASE_URL this is embedded
+     * PGlite — a file inside the container — so the MT5 bridge's "durable"
+     * pairing codes and bearer tokens die on every deploy, replica and cold
+     * start. That is the root cause of a paired terminal losing its link by
+     * itself, and it is not visible anywhere else at runtime.
+     */
+    backend: string;
+    durable: boolean;
+    detail: string;
+    schemaApplied: boolean;
     error?: string;
-  } = { ok: false, external: false, tablesMissing: [] };
+  } = {
+    ok: false,
+    external: false,
+    tablesMissing: [],
+    backend: "unknown",
+    durable: false,
+    detail: "",
+    schemaApplied: false,
+  };
   const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
     Promise.race([
       p,
@@ -147,7 +174,12 @@ router.get("/healthz", async (req, res) => {
           (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'settings') AS settings,
           (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'accounts') AS accounts,
           (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'trades')   AS trades,
-          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive`,
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'adaptive_thresholds') AS adaptive,
+          -- The MT5 bridge's durable link store. When these are missing a
+          -- paired terminal cannot be re-adopted after a restart, and its
+          -- heartbeat is refused with a 401 it treats as final.
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'mt5_bridge_links')  AS bridge_links,
+          (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'mt5_pairing_codes') AS pairing_codes`,
       ),
       3000,
       "db healthz query",
@@ -157,16 +189,26 @@ router.get("/healthz", async (req, res) => {
     if (Number(rows[0].accounts) === 0) missing.push("accounts");
     if (Number(rows[0].trades) === 0) missing.push("trades");
     if (Number(rows[0].adaptive) === 0) missing.push("adaptive_thresholds");
+    if (Number(rows[0].bridge_links) === 0) missing.push("mt5_bridge_links");
+    if (Number(rows[0].pairing_codes) === 0) missing.push("mt5_pairing_codes");
     dbDiag = {
       ok: missing.length === 0,
       external: Boolean(process.env.DATABASE_URL),
       tablesMissing: missing,
+      backend: databaseBackend,
+      durable: databaseIsDurable,
+      detail: databaseDetail,
+      schemaApplied: schemaApplied(),
     };
   } catch (err) {
     dbDiag = {
       ok: false,
       external: Boolean(process.env.DATABASE_URL),
       tablesMissing: [],
+      backend: databaseBackend,
+      durable: databaseIsDurable,
+      detail: databaseDetail,
+      schemaApplied: schemaApplied(),
       error: err instanceof Error ? err.message : String(err),
     };
   }
@@ -211,6 +253,13 @@ router.get("/healthz", async (req, res) => {
 
   if (!dbDiag.ok) {
     logger.warn({ db: dbDiag }, "Healthz reports missing DB tables — schema bootstrap did not complete");
+  }
+  if (!dbDiag.durable) {
+    logger.warn(
+      { backend: dbDiag.backend, detail: dbDiag.detail },
+      "Healthz: the link store is not durable — MT5 pairing codes and bridge tokens will not survive a restart. " +
+        "Set a postgres:// DATABASE_URL on the api service.",
+    );
   }
   if (oauthClient.status === "unregistered" || oauthClient.status === "redirect_mismatch") {
     logger.warn(

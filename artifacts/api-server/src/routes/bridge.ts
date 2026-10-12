@@ -8,7 +8,7 @@
  * snapshots from the paired terminal — there is no replay fallback.
  */
 
-import { Router, type IRouter, type Request } from "express";
+import { Router, type IRouter, type Request, type Response as ExpressResponse } from "express";
 import { randomUUID } from "node:crypto";
 import { logger } from "../lib/logger";
 import { getBrowserSessionId } from "../lib/session";
@@ -69,9 +69,10 @@ import {
 } from "../lib/multiasset/store";
 import {
   PAIRING_CODE_TTL_MS,
+  bridgeStoreReport,
   deletePairingCodesForSession,
-  loadBridgeLink,
-  loadPairingCode,
+  lookupBridgeLink,
+  lookupPairingCode,
   markPairingCodeRedeemed,
   pairingCodesForSession,
   prunePairingCodes,
@@ -80,6 +81,7 @@ import {
   saveBridgeLink,
   savePairingCode,
   touchBridgeLink,
+  type StoreHealth,
 } from "../lib/multiasset/bridge-links";
 import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
 import {
@@ -119,8 +121,43 @@ const router: IRouter = Router();
  * loop that stalled the heartbeat), targeted `history` re-seed keys, a shorter
  * WebRequest timeout, beat-duration logging, and timestamps self-corrected
  * against this server's clock (`serverTime`) instead of the machine clock.
+ *
+ * v3.06 adds the terminal half of the 401 fix: a 401 that does not carry
+ * `code: "bridge_link_revoked"` is treated as UNVERIFIED, so the saved link is
+ * kept and retried (four attempts, fifteen seconds apart) instead of being
+ * wiped on sight; 503 is transient and never touches the saved credentials; and
+ * `OnDeinit` names the reason MT5 stopped the expert, so "it detached itself"
+ * is answered in the journal instead of guessed at.
  */
-export const EXPECTED_EA_VERSION = "3.04";
+export const EXPECTED_EA_VERSION = "3.06";
+
+/**
+ * Answer "I could not check", never "your credential is dead".
+ *
+ * A 401 from this API is a permanent verdict: the EA clears the bearer token it
+ * saved in the terminal's common folder — a file every chart of that account
+ * shares — disables trading and falls back to its pairing code. If the store
+ * that holds the link could not be read (a deploy in progress, a database
+ * failover, the bootstrap DDL still being applied, a second replica that has
+ * not seen the row), answering 401 turned a few seconds of unreadable database
+ * into a terminal that never came back on its own. 503 is retryable, revokes
+ * nothing, and the EA keeps its saved link and tries again.
+ */
+function storeUnavailable(
+  res: ExpressResponse,
+  health: StoreHealth,
+  detail: string | undefined,
+  what: string,
+): ExpressResponse {
+  logger.warn({ health, detail, what }, "MT5 bridge store could not be consulted — answering 503, nothing revoked");
+  return res.status(503).json({
+    error: `The bridge link store could not be reached, so ${what} could not be verified. Nothing was revoked — the terminal should retry.`,
+    code: "bridge_store_unavailable",
+    storeHealth: health,
+    detail: detail ?? null,
+    retryAfterMs: 5_000,
+  });
+}
 
 interface PendingPairing {
   code: string;
@@ -187,6 +224,11 @@ router.post("/pairing-code", async (req, res) => {
   const now = Date.now();
   prunePairings(now);
 
+  // Reported with the code, because a code that only exists in this process's
+  // memory is not the credential the dialog promises. The Desk shows the
+  // warning instead of handing the user a value that dies on the next restart.
+  const store = await bridgeStoreReport();
+
   if (!rotate) {
     const stored = await pairingCodesForSession(sessionId, now);
     const live = stored.find((record) => record.expiresAt > now);
@@ -196,6 +238,8 @@ router.post("/pairing-code", async (req, res) => {
         pairingCode: live.code,
         expiresInMs: Math.max(0, live.expiresAt - now),
         reused: true,
+        durable: store.durable,
+        storeReachable: store.reachable,
       });
     }
   } else {
@@ -215,7 +259,22 @@ router.post("/pairing-code", async (req, res) => {
   };
   rememberPendingPairing(record);
   await savePairingCode(record);
-  return res.json({ pairingCode: code, expiresInMs: PAIRING_CODE_TTL_MS, reused: false });
+  return res.json({
+    pairingCode: code,
+    expiresInMs: PAIRING_CODE_TTL_MS,
+    reused: false,
+    durable: store.durable,
+    storeReachable: store.reachable,
+    ...(store.durable && store.reachable
+      ? {}
+      : {
+          warning:
+            "The link store is not durable right now (" +
+            store.detail +
+            "). This code and the link it creates live only in this process, so a restart will disconnect the terminal. " +
+            "Set a postgres:// DATABASE_URL on the api service to make MT5 links survive deploys.",
+        }),
+  });
 });
 
 /**
@@ -236,16 +295,28 @@ router.post("/pair", async (req, res) => {
   const code = String(req.body?.pairingCode ?? "").trim().toUpperCase();
   const terminal = req.body?.terminal ?? {};
   let pairing = pendingPairings.get(code);
+  let codeChecked = true;
+  let codeHealth: StoreHealth = "ok";
+  let codeDetail: string | undefined;
   if (!pairing) {
     // Not in this process — a restart may have happened since the code was
     // issued. The durable record is the authority now.
-    const stored = await loadPairingCode(code);
-    if (stored) {
-      pairing = stored;
-      rememberPendingPairing(stored);
+    const lookup = await lookupPairingCode(code);
+    if (lookup.record) {
+      pairing = lookup.record;
+      rememberPendingPairing(lookup.record);
+    } else {
+      codeChecked = lookup.checked;
+      codeHealth = lookup.health;
+      codeDetail = lookup.detail;
     }
   }
-  if (!pairing) return res.status(401).json({ error: "Unknown or expired pairing code." });
+  if (!pairing) {
+    if (!codeChecked) return storeUnavailable(res, codeHealth, codeDetail, "this pairing code");
+    return res
+      .status(401)
+      .json({ error: "Unknown or expired pairing code.", code: "pairing_code_unknown" });
+  }
 
   const login = Number(terminal.login ?? 0);
   const server = String(terminal.server ?? "unknown");
@@ -418,6 +489,17 @@ function deskForRequest(req: Request): DeskState | null {
   return desk.terminal ? desk : null;
 }
 
+/** What a `/sync` credential check concluded, and how much to trust it. */
+interface LinkAttempt {
+  desk: DeskState | null;
+  /** True when the durable store was consulted successfully. */
+  checked: boolean;
+  /** The link row exists and carries a revocation — the user unlinked. */
+  revoked: boolean;
+  health: StoreHealth;
+  detail?: string;
+}
+
 /**
  * Rebuild a Desk whose link survived in the database but not in this process.
  *
@@ -425,12 +507,29 @@ function deskForRequest(req: Request): DeskState | null {
  * back": the EA keeps heartbeating with the token it saved, the link row still
  * proves it was issued, so the Desk is re-attached and the account claim is
  * re-taken. The user sees a one-line journal entry, not a dead terminal.
+ *
+ * The returned `checked` flag is what separates "this token is not a link"
+ * (401, and the EA may discard it) from "the store could not be read" (503,
+ * and the EA must keep it) — see `storeUnavailable`.
  */
-async function rehydrateFromDurableLink(req: Request): Promise<DeskState | null> {
+async function rehydrateFromDurableLink(req: Request): Promise<LinkAttempt> {
+  const notFound = (extra: Partial<LinkAttempt> = {}): LinkAttempt => ({
+    desk: null,
+    checked: true,
+    revoked: false,
+    health: "ok",
+    ...extra,
+  });
+
   const token = bearerToken(req);
-  if (!token) return null;
-  const link = await loadBridgeLink(token);
-  if (!link || link.revokedAt) return null;
+  if (!token) return notFound();
+  const lookup = await lookupBridgeLink(token);
+  if (!lookup.checked) {
+    return { desk: null, checked: false, revoked: false, health: lookup.health, detail: lookup.detail };
+  }
+  const link = lookup.record;
+  if (!link) return notFound({ detail: lookup.detail });
+  if (link.revokedAt) return notFound({ revoked: true, detail: "revoked by the Desk" });
 
   const desk = getDesk(link.sessionId);
   adoptBridgeToken(token, link.sessionId);
@@ -475,7 +574,7 @@ async function rehydrateFromDurableLink(req: Request): Promise<DeskState | null>
   } else {
     rememberBridgeToken(desk, token);
   }
-  return desk.terminal ? desk : null;
+  return { desk: desk.terminal ? desk : null, checked: true, revoked: false, health: "ok" };
 }
 
 // ── Parse + validate terminal payloads ───────────────────────────────────────
@@ -719,8 +818,28 @@ function parseNewsFeed(raw: unknown): NewsFeed | null {
 router.post("/sync", async (req, res) => {
   const startedAt = Date.now();
   let desk = deskForRequest(req);
-  if (!desk) desk = await rehydrateFromDurableLink(req);
-  if (!desk || !desk.terminal) return res.status(401).json({ error: "Invalid or revoked bridge token." });
+  if (!desk) {
+    const attempt = await rehydrateFromDurableLink(req);
+    if (attempt.desk) {
+      desk = attempt.desk;
+    } else if (!attempt.checked) {
+      // Could not be verified ≠ invalid. The EA keeps its saved token and
+      // retries; nothing here is revoked.
+      return storeUnavailable(res, attempt.health, attempt.detail, "this terminal's saved link");
+    } else if (attempt.revoked) {
+      // The one final answer: the user pressed "Unlink terminal" in the Desk.
+      // The EA is allowed to destroy its saved link for this and only this.
+      return res.status(401).json({
+        error: "This link was revoked — the terminal was unlinked from the Desk.",
+        code: "bridge_link_revoked",
+      });
+    }
+  }
+  if (!desk || !desk.terminal) {
+    return res
+      .status(401)
+      .json({ error: "Invalid or revoked bridge token.", code: "bridge_token_unknown" });
+  }
 
   const presentedToken = bearerToken(req);
   touchBridgeLink(presentedToken);
@@ -1160,14 +1279,25 @@ router.post("/sync", async (req, res) => {
 });
 
 /** Browser-facing liveness / diagnostic view. */
-router.get("/status", (_req, res) => {
+router.get("/status", async (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
+  /**
+   * Where the link actually lives.
+   *
+   * A deployment without a `postgres://` DATABASE_URL falls back to embedded
+   * PGlite, which is a file inside the container — so every restart, every
+   * second replica and every cold start forgets the pairing code and the bearer
+   * token, and the terminal's link dies with it. That used to be invisible:
+   * the dialog promised "the link is durable, only Unlink ends it" while the
+   * store underneath it was not. The dialog can now say which of the two it is.
+   */
+  const store = await bridgeStoreReport();
   // Surfaced even while unlinked: the EA performs the pairing, so without this
   // the dialog would sit on "waiting for the terminal" forever while the MT5
   // log quietly explains that the account is already connected elsewhere.
   const lastPairingError = desk.lastPairingError?.message ?? null;
   if (!desk.terminal) {
-    return res.json({ linked: false, catalogCount: 0, selectedCount: 0, lastPairingError });
+    return res.json({ linked: false, catalogCount: 0, selectedCount: 0, lastPairingError, store });
   }
 
   /**
@@ -1201,12 +1331,18 @@ router.get("/status", (_req, res) => {
     staleAfterMs: terminalStaleWindowMs(desk),
     syncIntervalMs: desk.terminal.syncIntervalMs || null,
     /**
-     * The link is durable: the EA saved its token in the terminal, the server
-     * persisted the link, and neither MT5 being closed nor a redeploy ends it.
-     * Only "Unlink terminal" does. Surfaced so the dialog can say so plainly
-     * instead of warning the user about a ten-minute code that no longer exists.
+     * The link is durable **by protocol**: the EA saved its token in the
+     * terminal, the server persisted the link, and neither MT5 being closed nor
+     * a redeploy ends it. Only "Unlink terminal" does. Surfaced so the dialog
+     * can say so plainly instead of warning the user about a ten-minute code
+     * that no longer exists.
+     *
+     * Whether that promise holds on THIS deployment is `store.durable` below —
+     * a process-local PGlite store forgets the row on restart, and the dialog
+     * says so rather than repeating a guarantee the infrastructure cannot keep.
      */
     durable: true,
+    store,
     eaVersion: desk.terminal.eaVersion,
     expectedEaVersion: EXPECTED_EA_VERSION,
     eaUpdateAvailable,

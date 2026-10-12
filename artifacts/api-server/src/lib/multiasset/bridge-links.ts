@@ -89,19 +89,147 @@ const linksByTokenHash = new Map<string, StoredBridgeLink>();
  * as it was before.
  */
 const unknownTokens = new Map<string, number>();
-const UNKNOWN_TOKEN_TTL_MS = 60_000;
+const UNKNOWN_TOKEN_TTL_MS = 10_000;
 
 export function hashBridgeToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
 }
 
-async function pool(): Promise<{ query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> } | null> {
-  try {
-    const mod = await import("@workspace/db");
-    return (mod as { pool?: { query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }> } }).pool ?? null;
-  } catch {
-    return null;
+// ── Store access, with an honest answer about WHY a lookup failed ────────────
+//
+// Every read here used to collapse three very different outcomes into one
+// `null`:
+//
+//   1. the row is not there          → the credential really is unknown;
+//   2. the store could not be asked  → no pool, a query that threw, or the
+//                                      bootstrap DDL still being applied;
+//   3. the row is there but revoked  → the user unlinked the terminal.
+//
+// Only (1) and (3) may end a link. Treating (2) the same way is what turned a
+// deploy, a database failover or a second replica into a PERMANENT
+// disconnection: `/api/bridge/sync` answered `401 Invalid or revoked bridge
+// token`, the EA — for which a 401 means "this credential is dead" — wiped the
+// token it had saved in the terminal's common folder (a file every chart of
+// that account shares), fell back to its pairing code, and that row had failed
+// to load for exactly the same reason, so `/api/bridge/pair` answered
+// `401 Unknown or expired pairing code`. One unreadable row destroyed both
+// halves of a link that was, as far as the database was concerned, still live.
+//
+// So a lookup now reports whether the store was actually consulted, and the
+// routes answer 503 (retry, nothing revoked) when it was not.
+
+/** Why a lookup could not produce a row. `ok` means the answer is trustworthy. */
+export type StoreHealth = "ok" | "unavailable" | "error" | "not-ready";
+
+export interface StoreLookup<T> {
+  record: T | null;
+  /** True only when the durable store was consulted successfully. */
+  checked: boolean;
+  health: StoreHealth;
+  /** Human-readable cause, for the log line and the Desk's own diagnostics. */
+  detail?: string;
+}
+
+interface DbHandle {
+  query: (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
+}
+
+interface DbModule {
+  pool?: DbHandle;
+  schemaApplied?: () => boolean;
+  databaseBackend?: string;
+  databaseIsDurable?: boolean;
+  databaseDetail?: string;
+}
+
+let dbModulePromise: Promise<DbModule | null> | null = null;
+
+async function dbModule(): Promise<DbModule | null> {
+  if (!dbModulePromise) {
+    dbModulePromise = import("@workspace/db")
+      .then((mod) => mod as unknown as DbModule)
+      .catch(() => null);
   }
+  return dbModulePromise;
+}
+
+async function pool(): Promise<DbHandle | null> {
+  const mod = await dbModule();
+  return mod?.pool ?? null;
+}
+
+/**
+ * Set by tests to prove the outage path: a store that cannot answer must never
+ * be reported as "this credential is invalid".
+ */
+let forcedStoreFailure: Error | null = null;
+
+/**
+ * Can a read be trusted right now?
+ *
+ * `schemaApplied()` is checked rather than awaited: `schemaReady` resolves even
+ * when the DDL FAILED on its first attempt (deliberately, so routes are not
+ * blocked behind a dead database), and the HTTP server listens while that retry
+ * loop is still running. A request that lands in that window would otherwise
+ * read a table that does not exist yet and report a perfectly good token as
+ * unknown.
+ */
+async function storeConsultable(): Promise<{ ok: boolean; detail?: string }> {
+  const mod = await dbModule();
+  if (!mod?.pool) return { ok: false, detail: "no database pool" };
+  if (typeof mod.schemaApplied === "function" && !mod.schemaApplied()) {
+    return { ok: false, detail: "schema bootstrap has not been applied yet" };
+  }
+  return { ok: true };
+}
+
+/**
+ * What the Desk and `/api/healthz` report about the link store, so a
+ * deployment whose links are NOT durable says so on screen instead of
+ * discovering it as a terminal that silently dies on the next restart.
+ */
+export interface BridgeStoreReport {
+  backend: string;
+  durable: boolean;
+  detail: string;
+  schemaApplied: boolean;
+  reachable: boolean;
+  tables: string[];
+}
+
+let storeReportCache: { at: number; value: BridgeStoreReport } | null = null;
+const STORE_REPORT_TTL_MS = 10_000;
+
+export async function bridgeStoreReport(force = false): Promise<BridgeStoreReport> {
+  if (!force && storeReportCache && Date.now() - storeReportCache.at < STORE_REPORT_TTL_MS) {
+    return storeReportCache.value;
+  }
+  const mod = await dbModule();
+  const applied = typeof mod?.schemaApplied === "function" ? mod.schemaApplied() : true;
+  let reachable = false;
+  const tables: string[] = [];
+  try {
+    if (forcedStoreFailure) throw forcedStoreFailure;
+    const db = mod?.pool;
+    if (db) {
+      await db.query(`SELECT 1 FROM ${BRIDGE_LINK_TABLE} LIMIT 1`);
+      await db.query(`SELECT 1 FROM ${PAIRING_CODE_TABLE} LIMIT 1`);
+      reachable = true;
+      tables.push(BRIDGE_LINK_TABLE, PAIRING_CODE_TABLE);
+    }
+  } catch (err) {
+    warnOnce(err);
+  }
+  const value: BridgeStoreReport = {
+    backend: mod?.databaseBackend ?? "unknown",
+    durable: Boolean(mod?.databaseIsDurable),
+    detail: mod?.databaseDetail ?? "database module unavailable",
+    schemaApplied: applied,
+    reachable,
+    tables,
+  };
+  storeReportCache = { at: Date.now(), value };
+  return value;
 }
 
 let dbWarned = false;
@@ -112,6 +240,11 @@ function warnOnce(err: unknown): void {
   // eslint-disable-next-line no-console
   console.warn("[mt5-bridge-links] database unavailable; keeping the link in-process only", err);
 }
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 
 // ── Pairing codes ────────────────────────────────────────────────────────────
 
@@ -148,27 +281,46 @@ function rowToCode(row: Record<string, unknown> | undefined): StoredPairingCode 
   };
 }
 
-/** A code from this process, or from the database after a restart. */
-export async function loadPairingCode(code: string, now = Date.now()): Promise<StoredPairingCode | null> {
+/**
+ * A code from this process, or from the database after a restart — plus whether
+ * the database was actually in a position to answer.
+ */
+export async function lookupPairingCode(code: string, now = Date.now()): Promise<StoreLookup<StoredPairingCode>> {
   const cached = codes.get(code);
-  if (cached) return cached.expiresAt > now ? cached : null;
+  if (cached) {
+    return cached.expiresAt > now
+      ? { record: cached, checked: true, health: "ok" }
+      : { record: null, checked: true, health: "ok", detail: "expired" };
+  }
 
-  const db = await pool();
-  if (!db) return null;
+  const consultable = await storeConsultable();
+  if (!consultable.ok) {
+    return { record: null, checked: false, health: "not-ready", detail: consultable.detail };
+  }
   try {
+    if (forcedStoreFailure) throw forcedStoreFailure;
+    const db = await pool();
+    if (!db) return { record: null, checked: false, health: "unavailable", detail: "no database pool" };
     const result = await db.query(
       `SELECT code, session_id, created_at_ms, expires_at_ms, redeemed_at_ms
          FROM ${PAIRING_CODE_TABLE} WHERE code = $1 LIMIT 1`,
       [code],
     );
     const record = rowToCode(result?.rows?.[0] as Record<string, unknown> | undefined);
-    if (!record) return null;
+    if (!record) return { record: null, checked: true, health: "ok", detail: "no such code" };
     codes.set(record.code, record);
-    return record.expiresAt > now ? record : null;
+    return record.expiresAt > now
+      ? { record, checked: true, health: "ok" }
+      : { record: null, checked: true, health: "ok", detail: "expired" };
   } catch (err) {
     warnOnce(err);
-    return null;
+    return { record: null, checked: false, health: "error", detail: messageOf(err) };
   }
+}
+
+/** A code from this process, or from the database after a restart. */
+export async function loadPairingCode(code: string, now = Date.now()): Promise<StoredPairingCode | null> {
+  return (await lookupPairingCode(code, now)).record;
 }
 
 /** Mark a code as used. The code stays valid so a restart can re-pair with it. */
@@ -320,23 +472,35 @@ export async function saveBridgeLink(input: BridgeLinkInput): Promise<void> {
 }
 
 /**
- * Resolve a presented bearer token.
+ * Resolve a presented bearer token — and say whether the answer is trustworthy.
  *
  * Returns the stored link — including a revoked one, so callers can tell
  * "never paired" (401) apart from "the user unlinked this terminal" (401 with
- * an explanation the EA prints once instead of looping on).
+ * an explanation the EA prints once instead of looping on) apart from "the
+ * store could not be read" (503, retry, nothing revoked).
  */
-export async function loadBridgeLink(token: string): Promise<StoredBridgeLink | null> {
+export async function lookupBridgeLink(token: string): Promise<StoreLookup<StoredBridgeLink>> {
   const tokenHash = hashBridgeToken(token);
   const cached = linksByTokenHash.get(tokenHash);
-  if (cached) return cached;
+  if (cached) return { record: cached, checked: true, health: "ok" };
 
   const unknownUntil = unknownTokens.get(tokenHash);
-  if (unknownUntil && unknownUntil > Date.now()) return null;
+  if (unknownUntil && unknownUntil > Date.now()) {
+    return { record: null, checked: true, health: "ok", detail: "not a known link" };
+  }
+  // Stale entry: drop it so a row written since (by this process or another
+  // replica) is seen immediately instead of being refused for the rest of the
+  // cache window.
+  if (unknownUntil) unknownTokens.delete(tokenHash);
 
-  const db = await pool();
-  if (!db) return null;
+  const consultable = await storeConsultable();
+  if (!consultable.ok) {
+    return { record: null, checked: false, health: "not-ready", detail: consultable.detail };
+  }
   try {
+    if (forcedStoreFailure) throw forcedStoreFailure;
+    const db = await pool();
+    if (!db) return { record: null, checked: false, health: "unavailable", detail: "no database pool" };
     const result = await db.query(
       `SELECT token_hash, session_id, account_key, login, server, company, paired_at_ms, last_seen_at_ms, revoked_at_ms
          FROM ${BRIDGE_LINK_TABLE} WHERE token_hash = $1 LIMIT 1`,
@@ -345,17 +509,44 @@ export async function loadBridgeLink(token: string): Promise<StoredBridgeLink | 
     const record = rowToLink(result?.rows?.[0] as Record<string, unknown> | undefined);
     if (record) linksByTokenHash.set(record.tokenHash, record);
     else rememberUnknown(tokenHash);
-    return record;
+    return record
+      ? { record, checked: true, health: "ok" }
+      : { record: null, checked: true, health: "ok", detail: "no such link" };
   } catch (err) {
     warnOnce(err);
-    return null;
+    // Deliberately NOT negatively cached: an error says nothing about whether
+    // the row exists, and caching it would keep refusing a valid token after
+    // the store recovers.
+    return { record: null, checked: false, health: "error", detail: messageOf(err) };
   }
+}
+
+/** Resolve a presented bearer token. */
+export async function loadBridgeLink(token: string): Promise<StoredBridgeLink | null> {
+  return (await lookupBridgeLink(token)).record;
+}
+
+/**
+ * Was this token revoked on purpose (the user unlinked the terminal)?
+ *
+ * The EA may destroy its saved link for THIS answer and for no other: it is the
+ * one refusal that is final.
+ */
+export async function bridgeLinkWasRevoked(token: string): Promise<boolean> {
+  const lookup = await lookupBridgeLink(token);
+  return Boolean(lookup.record?.revokedAt);
 }
 
 function rememberUnknown(tokenHash: string): void {
   // Bounded: an attacker cannot grow this map without bound, and a real token
   // that appears later is accepted the moment its row exists (saveBridgeLink
   // clears the entry).
+  //
+  // 10 s, not 60: this cache is only ever populated by a SUCCESSFUL read that
+  // found no row, but with more than one replica behind the router a row another
+  // instance just wrote is a legitimate miss here. A minute of refusing a token
+  // that is valid cluster-wide is a minute of "reconnecting" on the Desk; ten
+  // seconds is enough to keep a random-token spray off the database.
   if (unknownTokens.size > 5_000) unknownTokens.clear();
   unknownTokens.set(tokenHash, Date.now() + UNKNOWN_TOKEN_TTL_MS);
 }
@@ -439,6 +630,8 @@ export function resetBridgeLinks(): void {
   linksByTokenHash.clear();
   unknownTokens.clear();
   dbWarned = false;
+  forcedStoreFailure = null;
+  storeReportCache = null;
 }
 
 export const __testing = {
@@ -453,5 +646,18 @@ export const __testing = {
     codes.clear();
     linksByTokenHash.clear();
     unknownTokens.clear();
+  },
+  /**
+   * Simulate a store outage: the database is there but cannot answer (a deploy
+   * mid-failover, a table that has not been created yet, a pool that timed out).
+   * Routes must answer "try again" and must NOT revoke anything.
+   */
+  failStore(message = "simulated store outage"): void {
+    forcedStoreFailure = new Error(message);
+    storeReportCache = null;
+  },
+  healStore(): void {
+    forcedStoreFailure = null;
+    storeReportCache = null;
   },
 };

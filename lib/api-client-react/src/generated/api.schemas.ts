@@ -464,18 +464,7 @@ export const TradingSettingsRiskProfile = {
 } as const;
 
 /**
- * What the autonomous engine does when the consecutive-loss limit is reached. "pause" (default, legacy) stops and runs the cooldown timer; "sizedown" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes.
- */
-export type TradingSettingsCooldownBehavior = typeof TradingSettingsCooldownBehavior[keyof typeof TradingSettingsCooldownBehavior];
-
-
-export const TradingSettingsCooldownBehavior = {
-  pause: 'pause',
-  sizedown: 'sizedown',
-} as const;
-
-/**
- * Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4)
+ * Split caps recovery attempts; Instant targets one-win recovery
  */
 export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod[keyof typeof TradingSettingsRecoveryMethod];
 
@@ -483,19 +472,6 @@ export type TradingSettingsRecoveryMethod = typeof TradingSettingsRecoveryMethod
 export const TradingSettingsRecoveryMethod = {
   split: 'split',
   instant: 'instant',
-  adaptive: 'adaptive',
-} as const;
-
-/**
- * Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly.
- */
-export type TradingSettingsRecoveryV2Mode = typeof TradingSettingsRecoveryV2Mode[keyof typeof TradingSettingsRecoveryV2Mode];
-
-
-export const TradingSettingsRecoveryV2Mode = {
-  off: 'off',
-  shadow: 'shadow',
-  live: 'live',
 } as const;
 
 export type TradingSettingsRiskAmountType = typeof TradingSettingsRiskAmountType[keyof typeof TradingSettingsRiskAmountType];
@@ -546,8 +522,6 @@ export interface TradingSettings {
   cooldownMinutes?: number;
   /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
   cooldownEnabled?: boolean;
-  /** What the autonomous engine does when the consecutive-loss limit is reached. "pause" (default, legacy) stops and runs the cooldown timer; "sizedown" never pauses and instead halves the stake for every loss beyond the limit. A time pause changes nothing statistically on i.i.d. outcomes — sizedown expresses the same caution through exposure instead of waiting. Daily loss limit and max drawdown stops always apply in both modes. */
-  cooldownBehavior?: TradingSettingsCooldownBehavior;
   /** Digit barrier used for DIGITOVER trades in normal (non-recovery) mode */
   normalOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades in normal (non-recovery) mode */
@@ -556,22 +530,10 @@ export interface TradingSettings {
   recoveryOverDigit?: number;
   /** Digit barrier used for DIGITUNDER trades while in recovery mode */
   recoveryUnderDigit?: number;
-  /** Split caps recovery attempts; Instant targets one-win recovery; Adaptive (recovery v2) runs the lambda-ladder sized to debt, drawdown headroom and a recovery budget (WP4) */
+  /** Split caps recovery attempts; Instant targets one-win recovery */
   recoveryMethod?: TradingSettingsRecoveryMethod;
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
-  /** Recovery v2 rollout gate. "off" (default) keeps byte-for-byte legacy behaviour; "shadow" computes and logs the v2 decision next to the legacy one without trading it; "live" lets the v2 path trade. Turning it off restores legacy exactly. */
-  recoveryV2Mode?: TradingSettingsRecoveryV2Mode;
-  /** Recovery budget in multiples of the base stake (adaptive method, default 25). When the debt reaches the budget the ladder re-bases (realises the debt) and restarts at base stake */
-  recoveryBudgetBase?: number;
-  /** Adaptive ladder lambda. "auto" lets the Markov-DP optimizer choose (falls back to 0.5 until WP5), or a fixed number in (0,1] */
-  recoveryLambda?: string;
-  /** phi — the percent of remaining drawdown headroom one recovery stake may consume (default 5) */
-  recoveryHeadroomPct?: number;
-  /** RCI margin weight w1 — preference for cheaper recovery contracts (default 1) */
-  recoveryMarginPreference?: number;
-  /** Kill switch for the WP6 honesty tilt. Off (default) forces the RCI margin weight factor to 1 for every contract. On, an anytime-valid e-process plus the tape battery may reduce the margin weight (never below half) for a contract whose realised hit rate persistently beats its fair probability. It can only reorder selection — stakes never increase. */
-  recoveryTiltEnabled?: boolean;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.
@@ -602,36 +564,12 @@ export const TradingSettingsInputRiskProfile = {
   aggressive: 'aggressive',
 } as const;
 
-/**
- * "pause" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; "sizedown" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply.
- */
-export type TradingSettingsInputCooldownBehavior = typeof TradingSettingsInputCooldownBehavior[keyof typeof TradingSettingsInputCooldownBehavior];
-
-
-export const TradingSettingsInputCooldownBehavior = {
-  pause: 'pause',
-  sizedown: 'sizedown',
-} as const;
-
 export type TradingSettingsInputRecoveryMethod = typeof TradingSettingsInputRecoveryMethod[keyof typeof TradingSettingsInputRecoveryMethod];
 
 
 export const TradingSettingsInputRecoveryMethod = {
   split: 'split',
   instant: 'instant',
-  adaptive: 'adaptive',
-} as const;
-
-/**
- * Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them).
- */
-export type TradingSettingsInputRecoveryV2Mode = typeof TradingSettingsInputRecoveryV2Mode[keyof typeof TradingSettingsInputRecoveryV2Mode];
-
-
-export const TradingSettingsInputRecoveryV2Mode = {
-  off: 'off',
-  shadow: 'shadow',
-  live: 'live',
 } as const;
 
 export type TradingSettingsInputRiskAmountType = typeof TradingSettingsInputRiskAmountType[keyof typeof TradingSettingsInputRiskAmountType];
@@ -666,8 +604,6 @@ export interface TradingSettingsInput {
   cooldownMinutes?: number;
   /** Enable the consecutive-loss cooldown pause. Off means the engine keeps trading straight through a loss streak. */
   cooldownEnabled?: boolean;
-  /** "pause" (default, legacy) stops on the consecutive-loss limit and runs the cooldown; "sizedown" keeps trading with the stake halved per loss beyond the limit. Daily loss and drawdown stops always apply. */
-  cooldownBehavior?: TradingSettingsInputCooldownBehavior;
   normalOverDigit?: number;
   normalUnderDigit?: number;
   recoveryOverDigit?: number;
@@ -675,18 +611,6 @@ export interface TradingSettingsInput {
   recoveryMethod?: TradingSettingsInputRecoveryMethod;
   /** Compute recovery stake from live payout, remaining loss debt, and an optional sizing-target profit */
   recoveryAutoMode?: boolean;
-  /** Recovery v2 rollout gate ("off" default = legacy; "shadow" logs v2 decisions without trading; "live" trades them). */
-  recoveryV2Mode?: TradingSettingsInputRecoveryV2Mode;
-  /** Recovery budget in multiples of the base stake (adaptive method, default 25) */
-  recoveryBudgetBase?: number;
-  /** Adaptive ladder lambda. "auto" or a fixed number in (0,1] */
-  recoveryLambda?: string;
-  /** phi — percent of remaining drawdown headroom one recovery stake may consume (default 5) */
-  recoveryHeadroomPct?: number;
-  /** RCI margin weight w1 (default 1) */
-  recoveryMarginPreference?: number;
-  /** WP6 honesty-tilt kill switch (default false). On lets the e-process/battery reduce the RCI margin weight (floor 0.5); stakes never increase. */
-  recoveryTiltEnabled?: boolean;
   allowedMarkets?: string[];
   /**
      * Contracts the autonomous engine may trade in normal markets, as TYPE:digit entries (e.g. DIGITOVER:3, DIGITEVEN:-1). Digit is -1 for Even/Odd/Rise/Fall and auto for Matches/Differs.

@@ -105,15 +105,6 @@ function RecoveryStatCard({ engine }: { engine: any }) {
                 <span>Partial win applied — debt remains until fully recovered</span>
               )}
             </div>
-            {(engine.recovery.trueLossRun > 0 || engine.recovery.recoveryDepth > 0) && (
-              <div className="text-[11px] text-muted-foreground mt-0.5 font-mono">
-                true run {engine.recovery.trueLossRun ?? 0}
-                {engine.recovery.recoveryDepth > 0 && <> · depth {engine.recovery.recoveryDepth}</>}
-                {(engine.recovery.trueLossRun ?? 0) > (engine.recovery.totalStreakLosses ?? 0) && (
-                  <span className="text-amber-400/60"> (cooldown hid {engine.recovery.trueLossRun - engine.recovery.totalStreakLosses})</span>
-                )}
-              </div>
-            )}
             <button
               onClick={() => clearDebt.mutate()}
               disabled={clearDebt.isPending}
@@ -127,26 +118,6 @@ function RecoveryStatCard({ engine }: { engine: any }) {
             <div className="text-2xl font-mono font-bold text-green-500">Normal</div>
             <div className="text-xs text-muted-foreground mt-1">no active recovery</div>
           </>
-        )}
-        {/* WP8: recovery v2 status — method, rollout gate, lambda in force, and
-            how much of the re-base budget the current debt consumes. */}
-        {engine?.recovery?.v2 && (
-          <div className="text-[10px] text-muted-foreground mt-2 pt-1.5 border-t border-border/40 font-mono flex flex-wrap items-center gap-x-2 gap-y-0.5">
-            <span className={engine.recovery.v2.mode === "live" ? "text-violet-300" : ""}>
-              v2 {engine.recovery.v2.mode}
-            </span>
-            <span>{engine.recovery.v2.method}</span>
-            {engine.recovery.v2.method === "adaptive" && (
-              <>
-                <span>λ {engine.recovery.v2.lambda}</span>
-                {active && (
-                  <span className={engine.recovery.budgetUsedPct >= 80 ? "text-amber-400" : ""}>
-                    budget {engine.recovery.budgetUsedPct}%
-                  </span>
-                )}
-              </>
-            )}
-          </div>
         )}
       </CardContent>
     </Card>

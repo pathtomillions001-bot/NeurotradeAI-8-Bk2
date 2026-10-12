@@ -82,7 +82,7 @@ function functionBody(name: string): string {
   throw new Error(`unbalanced braces in ${name}()`);
 }
 
-test("HttpPost — the lowest level — never discards the saved link", () => {
+test("HttpPost — the lowest level — never discards the token", () => {
   const body = functionBody("HttpPost");
   // This is where v3.05 did it: `if(status == 401 && authenticated) { g_token = ""; … SaveLink(); }`.
   // A function that cannot know whether the refusal was verified must not be
@@ -95,7 +95,7 @@ test("HttpPost — the lowest level — never discards the saved link", () => {
   assert.match(body, /g_lastHttpStatus\s*=\s*status/, "HttpPost must publish the status");
 });
 
-test("only an explicit revocation may clear the saved token", () => {
+test("only an explicit revocation may clear the token on sight", () => {
   const body = functionBody("Sync");
   assert.match(
     body,
@@ -228,11 +228,11 @@ test("OnDeinit names the reason MT5 stopped the expert", () => {
   assert.match(init, /return\s*\(\s*INIT_SUCCEEDED\s*\)/, "OnInit must never fail to attach");
 });
 
-test("the shipped EA carries the v3.07 contract, and the Desk serves that same file", () => {
+test("the shipped EA carries the v3.08 contract, and the Desk serves that same file", () => {
   const version = ea.match(/#property\s+version\s+"([^"]+)"/)![1];
   const reported = ea.match(/#define\s+EA_VERSION\s+"([^"]+)"/)![1];
   assert.equal(version, reported, "the declared version and the one sent on the wire must agree");
-  assert.equal(version, "3.07");
+  assert.equal(version, "3.08");
 
   assert.equal(
     fs.readFileSync(publishedPath, "utf8"),
@@ -249,4 +249,94 @@ test("the shipped EA carries the v3.07 contract, and the Desk serves that same f
   ]) {
     assert.match(ea, new RegExp(marker), `the published EA must carry the ${marker} contract`);
   }
+});
+
+/**
+ * v3.08 — the link lives only as long as the terminal.
+ *
+ * The reversal of v3.03 note 9, pinned statically because the EA is MQL5 and
+ * nothing here can run it. What must stay true of every future build:
+ *
+ *   • the bearer token is NEVER written to disk — the terminal's common folder
+ *     held a link that outlived the session nobody closed on purpose;
+ *   • a file an older build left behind is deleted, or the next MT5 start
+ *     resumes a session the server has already released;
+ *   • the pairing code comes only from the user's input — a remembered code is
+ *     what let a closed terminal reconnect on a spent credential;
+ *   • MT5 closing this chart or the terminal tells the server, so the link, its
+ *     code and the account claim are freed immediately rather than after a
+ *     timeout;
+ *   • a code the server calls SPENT produces one actionable line, not a silent
+ *     retry loop.
+ */
+test("the EA never persists its token, and removes what an older build left", () => {
+  const code = codeOnly(ea);
+  assert.doesNotMatch(code, /SaveLink\s*\(/, "the EA must not write a link file");
+  assert.doesNotMatch(code, /LoadSavedLink\s*\(/, "the EA must not restore one");
+  assert.doesNotMatch(code, /g_savedCode/, "a remembered pairing code is what v3.08 removed");
+  assert.doesNotMatch(code, /g_savedCode/, "no remembered code");
+
+  // The one place that touches the old file must DELETE it.
+  const removal = functionBody("RemoveLegacyLinkFile");
+  assert.match(removal, /FileDelete\s*\(/, "an older build's saved link must be deleted on attach");
+  assert.doesNotMatch(removal, /FileWriteString\s*\(/, "and never rewritten");
+  assert.match(code, /RemoveLegacyLinkFile\s*\(\s*\)\s*;/, "OnInit must call it");
+
+  // No file WRITE may mention the token anywhere in the file: the position
+  // manager's own records are the only thing this EA persists.
+  for (const [, args] of ea.matchAll(/\bFileWriteString\s*\(([^;]*?)\)\s*;/g)) {
+    assert.doesNotMatch(args, /g_token/, `the token must never reach a file: ${args}`);
+  }
+});
+
+test("the pairing code is the user's input, and nothing else", () => {
+  const body = functionBody("EffectivePairingCode");
+  assert.match(body, /StringTrimmed\s*\(\s*PairingCode\s*\)/, "the input is the credential");
+  // Any second source would be a remembered key by another name.
+  assert.doesNotMatch(body, /g_/, "no global may stand in for the input");
+  assert.equal(
+    (body.match(/return/g) ?? []).length,
+    1,
+    "one return: there is no fallback code to fall back TO",
+  );
+});
+
+test("closing the terminal tells the server, and only for the reasons that end a session", () => {
+  const deinit = functionBody("OnDeinit");
+  assert.match(deinit, /LinkEndsWithThisRun\s*\(\s*reason\s*\)/, "OnDeinit must ask whether the session is over");
+  assert.match(deinit, /DisconnectBridge\s*\(/, "and say so to the server");
+
+  const ends = functionBody("LinkEndsWithThisRun");
+  for (const constant of ["REASON_CHARTCLOSE", "REASON_CLOSE", "REASON_INITFAILED", "REASON_ACCOUNT"]) {
+    assert.match(ends, new RegExp(constant), `${constant} ends the link`);
+  }
+  // REASON_REMOVE is what MT5 also reports for some symbol/timeframe changes:
+  // disconnecting there would drop a live link every time a user switched
+  // timeframe, so it must stay out.
+  assert.doesNotMatch(
+    ends,
+    /REASON_REMOVE/,
+    "REASON_REMOVE must not end the link — MT5 reports symbol/timeframe changes with it",
+  );
+
+  const disconnect = functionBody("DisconnectBridge");
+  assert.match(disconnect, /\/api\/bridge\/disconnect/, "the endpoint the server exposes");
+  assert.match(disconnect, /true\s*\)/, "and it is authenticated with the token");
+  // The token stays: MT5 may re-attach the EA while the link is still live.
+  assert.doesNotMatch(disconnect, /g_token\s*=\s*""/, "a disconnect must not discard the token by itself");
+});
+
+test("a spent code is answered with something the user can act on", () => {
+  const pair = functionBody("TryPair");
+  assert.match(
+    pair,
+    /pairing_code_spent/,
+    "the server's spent-code verdict must have its own branch, or the journal says 'not valid any more' for the ordinary case",
+  );
+  const spentLine = pair.slice(pair.indexOf("pairing_code_spent"));
+  assert.match(
+    spentLine.slice(0, 600),
+    /Desk -> Link MT5/,
+    "and the line must tell the user to fetch a NEW code",
+  );
 });

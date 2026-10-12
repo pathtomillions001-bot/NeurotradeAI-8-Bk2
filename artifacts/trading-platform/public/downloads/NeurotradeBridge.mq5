@@ -2,7 +2,7 @@
 //|                                          NeurotradeBridge.mq5    |
 //|      NeuroTrade Multi-Asset Desk / resilient MetaTrader 5 EA     |
 //+------------------------------------------------------------------+
-//| Version 3.05                                                     |
+//| Version 3.08                                                     |
 //|                                                                    |
 //| WHAT CHANGED IN v3.00                                             |
 //|  1. TIMESTAMPS ARE NOW TRUE UTC.                                  |
@@ -68,21 +68,18 @@
 //|     for new entries) when the read returns nothing at all.         |
 //|                                                                    |
 //| WHAT CHANGED IN v3.03                                             |
-//|  9. THE LINK OUTLIVES EVERY RESTART.                              |
-//|     The bearer token used to live only in the EA's memory and on   |
-//|     the server's heap, so closing MT5, closing the browser or a    |
-//|     server redeploy broke the connection. The EA then retried its  |
-//|     old pairing code every 5 seconds, the server had forgotten it  |
-//|     too, and the MT5 journal filled with                       |
+//|  9. (REVERSED IN v3.08 — SEE BELOW.) The link used to be saved in  |
+//|     the terminal's common Files folder and restored at startup, so |
+//|     closing MT5, closing the browser or a server redeploy silently |
+//|     resumed the connection. v3.08 ends that: the token lives in    |
+//|     memory only, MT5 closing ends the link, and reconnecting needs |
+//|     a new pairing code. The note is kept because the failure it    |
+//|     answered — a 5-second                                    |
 //|       HTTP 401 ... Unknown or expired pairing code                 |
-//|     while the Desk showed "reconnecting" and armed plans were      |
-//|     never delivered. The token AND the pairing code are now saved  |
-//|     in the terminal's common Files folder (shared by every chart   |
-//|     of this installation) and restored at startup, and the server  |
-//|     persists the link as well. The connection now ends only when   |
-//|     the user unlinks the terminal in the Desk.                     |
+//|     loop over a code nobody had rotated — is still worth not       |
+//|     re-introducing: a refusal is printed once and spaced out.      |
 //| 10. A REFUSED TOKEN NO LONGER MEANS A BLIND RETRY LOOP.            |
-//|     A definitive 401 clears the saved token, prints ONE line       |
+//|     A definitive 401 clears this terminal's token, prints ONE line |
 //|     saying what to do, and backs off to a slow re-pair cadence     |
 //|     instead of hammering the server five times a second.           |
 //| 11. THE CALENDAR READ COVERS THE DAY THE DESK DESCRIBES.           |
@@ -188,7 +185,7 @@
 //|     permanently, and the journal said "Unknown or expired pairing |
 //|     code" over a code that was never expired. The server now      |
 //|     answers 503 for "could not check" and sends a machine-readable|
-//|     `code`; this EA keeps the saved link through four spaced      |
+//|     `code`; this EA keeps its token through four spaced            |
 //|     retries before abandoning it, treats 5xx as transient, and    |
 //|     discards the token ONLY for an explicit revocation.           |
 //| 25. "IT DETACHED ITSELF" IS ANSWERED, NOT GUESSED.               |
@@ -200,7 +197,7 @@
 //|     changed, inputs changed, another account activated, template  |
 //|     applied, chart or terminal closed), and the terminal-caused   |
 //|     ones say plainly that nobody unlinked anything and that the   |
-//|     saved link resumes on the next start.                         |
+//|     token is retried, and a fresh code (if needed) reconnects it.  |
 //| 26. SERVER PROBLEMS ARE PRINTED ONCE EVERY FIVE MINUTES.         |
 //|     A 5xx on a 500 ms heartbeat would otherwise reproduce the     |
 //|     journal flooding the 401 backoff was written to stop.         |
@@ -231,6 +228,35 @@
 //|     mode and timeframe, a corrupt record is repaired on decode,   |
 //|     and every timeframe lookup goes through SafeTfIndex/TfNameAt. |
 //|     src/lib/ea-tf-index-safety.test.ts pins all of this.         |
+//|                                                                    |
+//| WHAT CHANGED IN v3.08                                             |
+//| 28. THE LINK LIVES ONLY AS LONG AS THIS TERMINAL.                 |
+//|     v3.03 note 9 saved the token and the pairing code in the       |
+//|     terminal's common Files folder and restored them at startup,   |
+//|     so a closed terminal reconnected by itself with a key nobody   |
+//|     had to remember. That is reversed. Nothing is written to disk  |
+//|     any more: the token exists only in this process's memory, and  |
+//|     a file left behind by an older build is DELETED on sight.      |
+//|                                                                    |
+//|     Closing MT5 (or removing the EA from its last chart) ends the  |
+//|     link — OnDeinit posts /api/bridge/disconnect while the terminal|
+//|     is still alive, and the server releases the link, its pairing  |
+//|     code and the account claim. If MT5 is killed outright there is |
+//|     no deinit to run, so the server ends the link anyway after     |
+//|     120 s of silence (its heartbeat lease). Either way the         |
+//|     connection is gone, and the next session starts from a NEW     |
+//|     code in the Desk.                                              |
+//|                                                                    |
+//|     An EA reload inside the SAME running terminal (a recompile,    |
+//|     an input change, a timeframe change) does not end anything:    |
+//|     the link is still live, so the EA re-pairs with the code still |
+//|     in its PairingCode input and the Desk keeps its state.         |
+//| 29. A SPENT CODE SAYS SO.                                        |
+//|     The server answers 401 with code "pairing_code_spent" when a  |
+//|     code belongs to a terminal session that is over. The journal   |
+//|     gets one actionable line (open the Desk, copy the NEW code),   |
+//|     not a silent retry loop, and the EA keeps trying in the        |
+//|     background so pasting a fresh code connects on its own.        |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -246,7 +272,7 @@
 //| transient WebRequest failure from making the EA appear to "not     |
 //| attach" to a chart.                                                |
 #property copyright "NeuroTrade AI"
-#property version   "3.07"
+#property version   "3.08"
 #property strict
 
 // The version this EA reports on the wire.
@@ -257,7 +283,7 @@
 // the heartbeat is the one the Desk stores (`desk.terminal.eaVersion`), so the
 // Desk's "this terminal is running an older EA" check could never tell a v3.05
 // terminal from a v3.04 one.
-#define EA_VERSION "3.07"
+#define EA_VERSION "3.08"
 
 #include <Trade/Trade.mqh>
 
@@ -395,15 +421,19 @@ datetime  g_lastOk = 0;
 datetime  g_nextPairAttempt = 0;
 bool      g_tradingEnabled = false;
 bool      g_liveTradingEnabled = false;
-// ── Durable link ────────────────────────────────────────────────────────────
-// The token and the pairing code are kept in this terminal's common Files
-// folder, keyed by account + server, and restored at startup. That is what
-// makes "close MT5, reboot the VPS, redeploy the server" survive without the
-// user touching anything — the connection ends only when they unlink the
-// terminal in the Desk. The common folder is shared by every chart in this
-// installation, so a second chart reads the same link instead of pairing again.
-string    g_savedCode = "";
-bool      g_linkLoaded = false;
+// ── The link lives in MEMORY, for the life of this terminal ──────────────────
+// v3.08: NOTHING is written to disk. `g_token` exists only in this process, and
+// it dies with it — closing MT5 ends the link by design, and the next session
+// starts from a NEW pairing code in the Desk. (v3.03–v3.07 saved the token and
+// the code in the terminal's common folder and restored them at startup; any
+// such file left by an older build is deleted on attach, see
+// RemoveLegacyLinkFile().)
+//
+// Within one running terminal the link survives an EA reload: MT5 calls
+// OnDeinit/OnInit for a recompile, an input change or a symbol/timeframe
+// change, the link itself is untouched, and the EA re-pairs with the code still
+// in its PairingCode input. Only the reasons that mean "this chart is finished"
+// post /api/bridge/disconnect.
 // A definitive refusal (401) must not be retried every five seconds forever:
 // that is what buried the real reason in thousands of identical journal lines.
 int       g_pairAttemptDelaySeconds = 5;
@@ -422,19 +452,24 @@ int       g_lastHttpStatus = 0;
 string    g_lastHttpError = "";
 // Server-supplied machine-readable `code` of the most recent HTTP call.
 // v3.06: this is what lets the EA tell a FINAL refusal from an unverified one.
-//   "bridge_link_revoked"     the user pressed "Unlink terminal" — the saved
-//                             link is dead and may be discarded;
+//   "bridge_link_revoked"     the user pressed "Unlink terminal" — the link is
+//                             dead and may be discarded;
+//   "pairing_code_spent"      v3.08: this code belonged to a terminal session
+//                             that is over — the user needs a NEW code;
+//   "pairing_code_unknown"    no such code (rotated, or the terminal it paired
+//                             was closed and the code was deleted with it);
 //   "bridge_token_unknown"    no such link — unverified, so it is retried;
 //   "bridge_store_unavailable" the server could not read its own link store
 //                             (503) — nothing was revoked, retry soon;
 //   ""                        an older server that only sent a bare 401.
 string    g_lastHttpCode = "";
 
-// ── v3.06: a 401 no longer destroys the saved link on sight ─────────────────
-// v3.05 treated EVERY 401 as final: it emptied g_token, wrote that empty token
-// over the link file in the common folder — which every chart of this account
-// shares, so one chart's bad response disarmed all of them — disabled trading
-// and fell back to the pairing code. But a 401 is also what the server answered
+// ── v3.06: a 401 no longer destroys the link on sight ───────────────────────
+// v3.05 treated EVERY 401 as final: it emptied g_token (and, in that build,
+// wrote the empty token over a link file in the terminal's common folder — which every
+// chart of this account shared, so one chart's bad response disarmed all of
+// them), disabled trading and fell back to the pairing code. But a 401 is also
+// what the server answered
 // when it simply could not READ its link store: a deploy in progress, a
 // database failover, the bootstrap DDL still being applied while the HTTP port
 // was already open, or a second replica that had not seen the row. The code was
@@ -444,7 +479,8 @@ string    g_lastHttpCode = "";
 // The server now says which of the two happened (`code`, and 503 for "could not
 // check"). This is the terminal's half: an unverified refusal is retried a few
 // times, spaced out, before the credential is abandoned — and only an explicit
-// revocation clears it immediately.
+// revocation clears it immediately. (v3.08 keeps all of this: a 503 while MT5 is
+// open must never cost the terminal the link it is holding.)
 #define TOKEN_REFUSAL_GRACE   4     // unverified 401s tolerated before the token is dropped
 #define TOKEN_RETRY_SECONDS   15    // spacing between those retries (quiet, not a hammer)
 int       g_tokenRefusals = 0;      // consecutive unverified refusals of the current token
@@ -669,16 +705,18 @@ void WarnServerOnce(const string message)
  *   0 REASON_PROGRAM      ExpertRemove() was called — this EA never calls it
  *   1 REASON_REMOVE       removed from the chart
  *   2 REASON_RECOMPILE    MetaEditor rebuilt the .ex5 under a running chart;
- *                         MT5 re-attaches the EA immediately and the saved link
- *                         resumes with no new pairing code
+ *                         MT5 re-attaches the EA immediately and the link —
+ *                         which lives in the running terminal, not on disk —
+ *                         continues with no new pairing code
  *   3 REASON_CHARTCHANGE  the chart symbol or timeframe changed, so MT5
  *                         restarts the expert
  *   4 REASON_CHARTCLOSE   the chart was closed
  *   5 REASON_PARAMETERS   the inputs were changed in the properties dialog
  *   6 REASON_ACCOUNT      another account was activated, or the terminal
- *                         reconnected after an account-settings change; the
- *                         link file is per account, so a different account has
- *                         no token and must pair again
+ *                         reconnected after an account-settings change. The
+ *                         link belongs to the account it paired, so this one
+ *                         ENDS it (see LinkEndsWithThisRun) — the terminal is
+ *                         now a different account and must pair again
  *   7 REASON_TEMPLATE     a different chart template was applied
  *   8 REASON_INITFAILED   OnInit() returned non-zero — not reachable in this
  *                         build, which always returns INIT_SUCCEEDED
@@ -688,8 +726,12 @@ void WarnServerOnce(const string message)
  * REASON_REMOVE instead of REASON_CHARTCHANGE, so neither of those two means a
  * person acted. Both are spelled out below rather than blamed on the user.
  *
- * None of these ends the link: the token and the pairing code are in the
- * terminal's common folder, so the next OnInit resumes without a new code.
+ * WHICH REASONS END THE LINK (v3.08): CHARTCLOSE, CLOSE, INITFAILED and
+ * ACCOUNT — the cases where this chart, this terminal or this account is
+ * finished. NOT REASON_REMOVE, precisely because of that quirk: disconnecting
+ * on it would drop the link every time a user changed the chart's timeframe.
+ * An EA that was genuinely removed by hand leaves no heartbeats behind, so the
+ * server releases that link on its own after the heartbeat lease expires.
  */
 string DeinitReasonText(const int reason)
 {
@@ -712,6 +754,29 @@ bool DeinitWasTerminalRestart(const int reason)
    return (reason == REASON_RECOMPILE || reason == REASON_CHARTCHANGE ||
            reason == REASON_PARAMETERS || reason == REASON_ACCOUNT ||
            reason == REASON_TEMPLATE || reason == REASON_CLOSE);
+}
+
+/**
+ * Does this shutdown mean the terminal session is over?
+ *
+ * v3.08: if it does, the link is released NOW (POST /api/bridge/disconnect) so
+ * the Desk and the next session both see a clean end — the user gets a new
+ * pairing code instead of inheriting one that is already spent.
+ *
+ * REASON_REMOVE is deliberately NOT here. MT5 reports some symbol/timeframe
+ * changes with that code instead of REASON_CHARTCHANGE (see above), and ending a
+ * live link because somebody switched from H1 to M15 would be worse than the
+ * problem it solves. An EA removed by hand stops beating, and the server's
+ * heartbeat lease ends the link within BRIDGE_LINK_LEASE_MS on its own.
+ *
+ * REASON_ACCOUNT IS here: the terminal is now a different account, and this
+ * link — which is bound to one account and holds that account's claim — cannot
+ * be carried over.
+ */
+bool LinkEndsWithThisRun(const int reason)
+{
+   return (reason == REASON_CHARTCLOSE || reason == REASON_CLOSE ||
+           reason == REASON_INITFAILED || reason == REASON_ACCOUNT);
 }
 
 //+------------------------------------------------------------------+
@@ -738,10 +803,16 @@ int OnInit()
                                AccountInfoInteger(ACCOUNT_LOGIN),
                                MathRand());
 
-   // Restore the saved link BEFORE anything else: if this terminal is already
-   // paired, the very first heartbeat continues the connection and no code is
-   // ever needed again.
-   LoadSavedLink();
+   // v3.08: nothing is restored, because nothing is saved. The token lives in
+   // this process's memory, so an EA that has just attached has no link — it
+   // pairs with the code in the PairingCode input, and MT5 keeps calling this
+   // OnInit for a recompile, an input change or a timeframe change, so a
+   // running terminal re-pairs itself without the user touching anything.
+   //
+   // A file written by v3.03-v3.07 is deleted here, before anything can read
+   // it: that file is a link nobody asked to keep, and leaving it on disk would
+   // mean the next MT5 start resumed a session the user believes they closed.
+   RemoveLegacyLinkFile();
 
    // v3.05: rebuild management state for every position this terminal already
    // manages. The record lives in the terminal's common folder, so a restart,
@@ -755,16 +826,16 @@ int OnInit()
    g_nextTokenRetry = 0;
    g_lastStoreWarnAt = 0;
 
-   Print("NeurotradeBridge v3.07 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   Print("NeurotradeBridge v3.08 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
-   if(g_token != "")
-      Print("NeurotradeBridge: restored the saved link for account ",
-            IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), "@", AccountInfoString(ACCOUNT_SERVER),
-            ". No pairing code is needed — the connection resumes automatically.");
-   else if(StringLen(EffectivePairingCode()) == 0)
+   if(StringLen(EffectivePairingCode()) == 0)
       Log("Waiting for PairingCode input. Open Desk -> Link MT5 to generate one.");
+   else
+      Print("NeurotradeBridge: this session connects with the pairing code in the PairingCode input. The link ",
+            "lives only while this terminal is open — closing MT5 ends it, and the next session needs a NEW ",
+            "code from Desk -> Link MT5.");
 
    // Never fail initialization simply because pairing is not ready yet.
    return(INIT_SUCCEEDED);
@@ -783,9 +854,17 @@ void OnDeinit(const int reason)
    // this program never removes itself, so whatever happened came from the
    // terminal, and the terminal says which thing it was.
    Print("NeurotradeBridge: stopped — ", DeinitReasonText(reason), ".");
-   if(DeinitWasTerminalRestart(reason))
-      Print("NeurotradeBridge: MT5 restarted this expert on its own; nobody unlinked it. The saved link is in the ",
-            "terminal's common folder, so the next start resumes the connection with no new pairing code.");
+   // v3.08: the terminal session may be over. Say so while there is still a
+   // process to make the request from — the server then releases the link, its
+   // pairing code and this account's claim immediately, instead of waiting out
+   // the heartbeat lease. Best effort: MT5 does not wait for an expert's
+   // shutdown, and a hard kill runs nothing at all, which is why the lease
+   // exists.
+   if(LinkEndsWithThisRun(reason))
+      DisconnectBridge("the terminal or chart was closed");
+   else if(DeinitWasTerminalRestart(reason))
+      Print("NeurotradeBridge: MT5 restarted this expert on its own; nobody unlinked it. The link belongs to this ",
+            "running terminal and is still alive, so the EA re-attaches and continues on the same pairing code.");
 }
 
 // The chart tick is the fastest path for the chart's symbol; OnTimer below
@@ -826,10 +905,11 @@ void OnTimer()
    // would read as a huge negative duration. The elapsed time is unsigned.
    ulong beatStart = GetTickCount64();
    // v3.06: while an unverified refusal or a 5xx is being waited out, do not
-   // present the token on every beat. The saved link is kept, but a 500 ms
-   // heartbeat must not become a 500 ms 401 loop — that flooding is exactly
-   // what the original backoff was written to stop — and a struggling server
-   // must not be handed a full payload twice a second.
+   // present the token on every beat. The token is kept (only an explicit
+   // revocation or a spent retry budget gives it up), but a 500 ms heartbeat
+   // must not become a 500 ms 401 loop — that flooding is exactly what the
+   // original backoff was written to stop — and a struggling server must not be
+   // handed a full payload twice a second.
    bool waitingForLinkRetry = (NowServer() < g_nextTokenRetry);
    if(g_token == "")
       TryPair();
@@ -846,23 +926,37 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| Durable link (terminal-side)                                      |
+//| The link (terminal-side)                                          |
 //|                                                                  |
-//| The Desk persists the link server-side; this is the other half:  |
-//| the EA stores the token it was issued, plus the pairing code that |
-//| produced it, in the terminal's common Files folder so that        |
-//| restarting MT5 (or the machine) reconnects instead of falling    |
-//| back to a code the server has long forgotten.                    |
+//| NOTHING IS WRITTEN TO DISK. The bearer token exists only in this  |
+//| process's memory and dies with it, which is the point: the link    |
+//| lives exactly as long as the MT5 terminal that created it.        |
 //|                                                                  |
-//| The file lives in the COMMON folder on purpose: every chart of    |
-//| this installation shares it, so a second chart adopts the existing |
-//| link instead of pairing again (which is what made two instances   |
-//| invalidate each other in a re-pair loop).                        |
+//| Reconnecting is therefore a deliberate act — the user opens the   |
+//| Desk, copies a NEW pairing code into PairingCode, and that code is |
+//| valid only for the terminal session it pairs. Closing MT5 ends the |
+//| link here (OnDeinit -> DisconnectBridge) and on the server (the    |
+//| heartbeat lease, for a terminal that never got to say goodbye).    |
+//|                                                                  |
+//| An EA reload INSIDE one running terminal is not a new session:     |
+//| MT5 calls OnDeinit/OnInit for a recompile, an input change or a    |
+//| symbol/timeframe change, the link is untouched, and the EA re-pairs|
+//| with the code still in its PairingCode input — no user action and  |
+//| no interruption.                                                   |
 //+------------------------------------------------------------------+
-string LinkFileName()
+
+/**
+ * Delete the link file written by v3.03-v3.07, if this terminal has one.
+ *
+ * WHY: those builds saved the bearer token and pairing code in the terminal's
+ * common Files folder and restored them at startup. Leaving such a file on disk
+ * would undo this version's whole contract — the next MT5 start would find a
+ * token for a session the server has already released, and the user would see
+ * the old "reconnecting with a key I never agreed to keep" behaviour. The name
+ * is reproduced exactly as v3.07 built it, per broker account.
+ */
+void RemoveLegacyLinkFile()
 {
-   // One link per broker account, sanitised so a server name with spaces or
-   // slashes can never escape the folder.
    string account = StringFormat("%I64d_%s",
                                  AccountInfoInteger(ACCOUNT_LOGIN),
                                  AccountInfoString(ACCOUNT_SERVER));
@@ -875,57 +969,82 @@ string LinkFileName()
       else
          safe += "_";
    }
-   return "NeurotradeBridge_" + safe + ".link";
-}
-
-void SaveLink()
-{
-   string name = LinkFileName();
-   ResetLastError();
-   int handle = FileOpen(name, FILE_COMMON | FILE_WRITE | FILE_TXT | FILE_ANSI);
-   if(handle == INVALID_HANDLE)
-   {
-      Log("Could not save the connection link (" + IntegerToString(GetLastError()) +
-          "). This terminal will need the pairing code again after a restart.");
-      return;
-   }
-   FileWriteString(handle, "v1\n");
-   FileWriteString(handle, g_token + "\n");
-   FileWriteString(handle, EffectivePairingCode() + "\n");
-   FileClose(handle);
-}
-
-void LoadSavedLink()
-{
-   if(g_linkLoaded) return;
-   g_linkLoaded = true;
-   string name = LinkFileName();
+   string name = "NeurotradeBridge_" + safe + ".link";
    ResetLastError();
    if(!FileIsExist(name, FILE_COMMON)) return;
-   int handle = FileOpen(name, FILE_COMMON | FILE_READ | FILE_TXT | FILE_ANSI);
-   if(handle == INVALID_HANDLE) return;
-   string version = FileReadString(handle);
-   string token = FileReadString(handle);
-   string code = FileReadString(handle);
-   FileClose(handle);
-   if(version != "v1") return;
-   g_token = token;
-   if(StringLen(code) > 0) g_savedCode = code;
+   if(FileDelete(name, FILE_COMMON))
+      Print("NeurotradeBridge: removed the saved-link file left by an older version (", name,
+            "). The link now lives only while this terminal is open, as intended.");
+   else
+      Log("Could not remove the old saved-link file " + name + " (" + IntegerToString(GetLastError()) + ").");
 }
 
-/** Keep the saved token in step with memory (a 401 empties both). */
-void ForgetSavedLinkToken()
-{
-   g_token = "";
-   SaveLink();
-}
-
-/** The code to present: what the user typed, else the one that worked before. */
+/**
+ * The code to present: what the user typed into PairingCode.
+ *
+ * There is no fallback any more. v3.03-v3.07 remembered the last code that
+ * worked, which is what let a closed terminal reconnect on a spent credential;
+ * a code is now valid only for the terminal session that redeemed it, so the
+ * input IS the credential and a new session needs a new one.
+ */
 string EffectivePairingCode()
 {
-   string typed = StringTrimmed(PairingCode);
-   if(StringLen(typed) > 0) return typed;
-   return g_savedCode;
+   return StringTrimmed(PairingCode);
+}
+
+/**
+ * Tell the server this terminal is going away.
+ *
+ * Called from OnDeinit for the reasons that end a session (see
+ * LinkEndsWithThisRun). The server releases the link, its pairing code and this
+ * account's claim immediately, so the Desk does not sit on a dead terminal and
+ * the next session is not refused with "one account, one Desk".
+ *
+ * Best effort by definition: MT5 does not wait for an expert's shutdown. If the
+ * request does not land — the terminal is already tearing down, WebRequest is
+ * not allowlisted, the network is gone — nothing is lost: the server's
+ * heartbeat lease ends the same link within BRIDGE_LINK_LEASE_MS.
+ *
+ * The token is deliberately KEPT in g_token afterwards. If MT5 changes its mind
+ * and re-attaches the EA (a recompile during shutdown, a chart that reappears),
+ * the link may still be live and the next beat continues on it.
+ */
+void DisconnectBridge(const string why)
+{
+   if(StringLen(NormalisedServerUrl()) == 0) return;
+   if(g_token == "")
+      return; // Nothing was ever paired on this chart; nothing to release.
+
+   string response = "";
+   bool sent = HttpPost("/api/bridge/disconnect",
+                        "{\"reason\":\"" + JsonEscape(why) + "\"}",
+                        response, true);
+   if(!sent)
+   {
+      Print("NeurotradeBridge: could not tell the Desk this session ended (", why,
+            "). The link will be released by the server's own heartbeat timeout.");
+      return;
+   }
+   if(g_lastHttpStatus >= 200 && g_lastHttpStatus < 300)
+   {
+      // JsonBool returns an int: 1 true, 0 false, -1 key absent. `ended` is
+      // false when another chart of this terminal is still streaming, in which
+      // case the link stays up and nothing needs re-pairing.
+      int ended = JsonBool(response, "ended");
+      Print("NeurotradeBridge: the Desk released this link (", why, "). Open Desk -> Link MT5 ",
+            ended == 1 ? "for a NEW pairing code when you next start MT5."
+                       : "to see the terminal still connected — another chart of this terminal is still running.");
+   }
+   else if(g_lastHttpStatus >= 500)
+   {
+      WarnServerOnce("the Desk could not process the disconnect just now (" + IntegerToString(g_lastHttpStatus) +
+                     "). Nothing is wrong with the account — the link is released by the heartbeat timeout.");
+   }
+   else
+   {
+      Print("NeurotradeBridge: the Desk answered ", IntegerToString(g_lastHttpStatus),
+            " to the disconnect. The link is released by the heartbeat timeout.");
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -994,10 +1113,20 @@ void TryPair()
          if(!g_refusalPrinted)
          {
             g_refusalPrinted = true;
-            Print("NeurotradeBridge: this pairing code is not valid any more — it was replaced, the terminal was ",
-                  "unlinked in the Desk, or the server restarted without a durable link store. Open the Desk, copy ",
-                  "the CURRENT code into this EA's PairingCode input (or unlink and re-link), and the terminal will ",
-                  "connect again. Still trying in the background every 60s.");
+            // v3.08: since a code is active only while the terminal that used it
+            // is running, the ordinary reason for this refusal is now "the
+            // session that code belonged to is over". Say that, and say what to
+            // do — a fresh code, not a new link, is all that is needed.
+            if(g_lastHttpCode == "pairing_code_spent")
+               Print("NeurotradeBridge: this pairing code has already been used and the terminal it connected is ",
+                     "no longer open. Open Desk -> Link MT5, copy the NEW code into this EA's PairingCode input, and ",
+                     "the terminal will connect. A code is valid only while the MT5 session it paired with is ",
+                     "running. Still trying in the background every 60s.");
+            else
+               Print("NeurotradeBridge: this pairing code is not valid any more — it was replaced, it was already ",
+                     "used by a terminal session that has since ended, or the terminal was unlinked in the Desk. ",
+                     "Open Desk -> Link MT5, copy the NEW code into this EA's PairingCode input, and the terminal ",
+                     "will connect. Still trying in the background every 60s.");
          }
       }
       else
@@ -1018,19 +1147,19 @@ void TryPair()
    g_token = token;
    g_lastOk = now;
    g_seq = 0;
-   g_savedCode = code;
    g_pairAttemptDelaySeconds = 5;
    g_refusalPrinted = false;
    // v3.06: a fresh token starts with a clean refusal budget.
    g_tokenRefusals = 0;
    g_nextTokenRetry = 0;
    g_lastStoreWarnAt = 0;
-   // Persist immediately: from here on, a restart of MT5 or of the server
-   // reconnects with this token instead of asking the user for a code again.
-   SaveLink();
+   // v3.08: the token stays in memory — deliberately not on disk. It is what
+   // makes the link end when this terminal does.
    ApplyServerResponse(response);
-   Print("NeurotradeBridge: paired successfully. The link is saved in this terminal, so closing MT5 ",
-         "or restarting the platform will reconnect automatically. It ends only if you unlink the terminal in the Desk.");
+   Print("NeurotradeBridge: paired with account ", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
+         "@", AccountInfoString(ACCOUNT_SERVER), ". This link is held in memory only: it ends when MT5 is closed, ",
+         "and reconnecting then needs a NEW code from Desk -> Link MT5. An EA reload inside this running ",
+         "terminal continues on the same link.");
 }
 
 bool HttpPost(const string path, const string body, string &response, const bool authenticated)
@@ -1085,11 +1214,11 @@ bool HttpPost(const string path, const string body, string &response, const bool
       if(status >= 500)
       {
          // The server answered but could not do the work. Nothing is revoked,
-         // so the saved link stays exactly as it was and the next beat retries.
+         // so the token stays exactly as it was and the next beat retries.
          // Rate-limited: a rolling deploy or a database failover answers 503 on
          // every beat for a while, and an unguarded Print here would reproduce
          // the journal-flooding the 401 backoff was written to stop.
-         WarnServerOnce(StringFormat("HTTP %d from %s — %s. Nothing was revoked; the saved link is kept and will be retried.",
+         WarnServerOnce(StringFormat("HTTP %d from %s — %s. Nothing was revoked; this terminal's token is kept and will be retried.",
                                      status, path,
                                      (g_lastHttpError == "" ? "the server could not complete the request" : g_lastHttpError)));
          return false;
@@ -1097,7 +1226,7 @@ bool HttpPost(const string path, const string body, string &response, const bool
       Print("NeurotradeBridge: HTTP ", status, " from ", path, " — ", response);
       // v3.06: NOTHING is discarded here any more. This function is the lowest
       // level and cannot know whether a 401 was a verified verdict or a server
-      // that could not check; wiping the saved token here is what turned one
+      // that could not check; wiping the token here is what turned one
       // unreadable database row into a permanently disconnected terminal (and,
       // because the link file lives in the COMMON folder, disconnected every
       // other chart of the same account with it). Sync() and TryPair() decide.
@@ -1235,10 +1364,9 @@ void Sync()
       {
          Print("NeurotradeBridge: DISCONNECTED — ", (g_lastHttpError == "" ? "this MT5 account is now connected in another browser." : g_lastHttpError));
          Print("NeurotradeBridge: this terminal has stopped trading to avoid two desks managing one balance. ",
-               "Unlink it there, then enter a fresh pairing code here.");
+               "Unlink it there, then paste a fresh pairing code from Desk -> Link MT5 into PairingCode here.");
          g_token = "";
          g_tradingEnabled = false;
-         SaveLink();
          g_nextPairAttempt = 0;
       }
       else if(g_lastHttpStatus == 401)
@@ -1248,20 +1376,18 @@ void Sync()
          if(g_lastHttpCode == "bridge_link_revoked")
          {
             // FINAL. The user pressed "Unlink terminal" in the Desk, the row is
-            // marked revoked, and no retry will ever succeed — so the saved
-            // token is discarded now and a restart cannot resurrect it.
+            // marked revoked, and no retry will ever succeed — so the token is
+            // discarded now and nothing can resurrect it.
             if(!g_refusalPrinted)
             {
                g_refusalPrinted = true;
-               Print("NeurotradeBridge: the Desk REVOKED this terminal's link — it was unlinked. The saved link has ",
-                     "been discarded. Open Desk -> Link MT5, copy the current pairing code into this EA's PairingCode ",
-                     "input, and it will reconnect. Retrying slowly in the background.");
+               Print("NeurotradeBridge: the Desk REVOKED this terminal's link — it was unlinked. Open Desk -> Link ",
+                     "MT5, copy the NEW pairing code into this EA's PairingCode input, and it will reconnect. ",
+                     "Retrying slowly in the background.");
             }
             g_token = "";
             g_tokenRefusals = 0;
             g_tradingEnabled = false;
-            g_savedCode = EffectivePairingCode();
-            SaveLink();
             g_pairAttemptDelaySeconds = 60;
             g_nextPairAttempt = NowServer() + 60;
          }
@@ -1270,13 +1396,12 @@ void Sync()
             // UNVERIFIED — "no such link" from a store that has just been
             // emptied (a redeploy, a second replica, a database restored
             // without its rows), or an older server that could not read its own
-            // link store and answered 401 for it. v3.05 wiped the saved token
-            // here on the FIRST such answer, which is how a few seconds of
-            // unreadable database became a permanently disconnected terminal —
-            // and, because the link file is shared through the common folder,
-            // disconnected every other chart of this account too. The token is
-            // now kept and retried a few times, spaced out, before it is
-            // abandoned in favour of the pairing code.
+            // link store and answered 401 for it. v3.05 wiped the token here on
+            // the FIRST such answer, which is how a few seconds of unreadable
+            // database became a permanently disconnected terminal. The token is
+            // kept and retried a few times, spaced out, before the pairing code
+            // is tried instead — and while MT5 is open, a new code is one click
+            // away in the Desk.
             g_tokenRefusals++;
             g_tradingEnabled = false;
             if(g_tokenRefusals >= TOKEN_REFUSAL_GRACE)
@@ -1285,21 +1410,19 @@ void Sync()
                {
                   g_refusalPrinted = true;
                   Print("NeurotradeBridge: the Desk refused this terminal's link ", IntegerToString(g_tokenRefusals),
-                        " times in a row, so the saved token is being abandoned and the pairing code will be tried ",
-                        "instead. If that is refused too, open Desk -> Link MT5 and paste the current code into ",
+                        " times in a row, so the token is being abandoned and the pairing code will be tried ",
+                        "instead. If that is refused too, open Desk -> Link MT5 and paste a NEW code into ",
                         "PairingCode. The EA stays on this chart.");
                }
                g_token = "";
                g_tokenRefusals = 0;
-               g_savedCode = EffectivePairingCode();
-               SaveLink();
                g_pairAttemptDelaySeconds = 60;
                g_nextPairAttempt = NowServer() + 60;
             }
             else
             {
                WarnServerOnce(StringFormat(
-                  "the Desk could not verify this terminal's link (refusal %d of %d). NOTHING was unlinked: the saved link is kept and retried in %d s.",
+                  "the Desk could not verify this terminal's link (refusal %d of %d). NOTHING was unlinked: the token is kept and retried in %d s.",
                   g_tokenRefusals, TOKEN_REFUSAL_GRACE, TOKEN_RETRY_SECONDS));
                g_nextTokenRetry = NowServer() + TOKEN_RETRY_SECONDS;
             }
@@ -1310,7 +1433,7 @@ void Sync()
       // store and has revoked NOTHING. Space the next attempt by the server's
       // own `retryAfterMs` hint rather than sending a full payload (quotes,
       // candles, positions) twice a second at a service that is already
-      // struggling. The token and the saved link are untouched.
+      // struggling. The token — the whole link — is untouched.
       if(g_lastHttpStatus >= 500)
       {
          long retryMs = (long)JsonNumber(response, "retryAfterMs");

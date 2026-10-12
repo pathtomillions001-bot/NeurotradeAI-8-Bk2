@@ -325,8 +325,11 @@ CREATE INDEX IF NOT EXISTS mt5_account_claims_session_idx ON mt5_account_claims 
 --
 -- Tokens are stored HASHED: the raw bearer token only ever exists in the
 -- terminal and in process memory, so a database leak cannot be replayed
--- against the bridge. Revoking a link marks it revoked (the row is kept so a
--- reused link is still refused after a restart has cleared process memory).
+-- against the bridge. A row here is one LIVE terminal session, and it is
+-- deleted — not merely revoked — when that session ends (the terminal closes,
+-- or its heartbeat lease lapses). Only the user's explicit "Unlink terminal"
+-- marks a row revoked, because that is the one answer the EA is allowed to
+-- treat as final and stop retrying on; those rows are pruned on a timer.
 CREATE TABLE IF NOT EXISTS mt5_bridge_links (
   token_hash TEXT PRIMARY KEY,        -- sha256 of the bearer token the EA holds
   session_id TEXT NOT NULL,           -- Desk (browser session) this terminal feeds
@@ -334,22 +337,32 @@ CREATE TABLE IF NOT EXISTS mt5_bridge_links (
   login BIGINT NOT NULL,
   server TEXT NOT NULL,
   company TEXT,
+  code TEXT,                          -- pairing code that created this link; deleted with it
   paired_at_ms BIGINT NOT NULL,
-  last_seen_at_ms BIGINT NOT NULL,
-  revoked_at_ms BIGINT                -- non-null once the user unlinks
+  last_seen_at_ms BIGINT NOT NULL,    -- heartbeat marker; the lease is measured from here
+  revoked_at_ms BIGINT                -- non-null only after an explicit unlink
 );
 CREATE INDEX IF NOT EXISTS mt5_bridge_links_session_idx ON mt5_bridge_links (session_id);
 CREATE INDEX IF NOT EXISTS mt5_bridge_links_account_idx ON mt5_bridge_links (account_key);
 
--- Pairing codes live until the user unlinks the terminal (or rotates the
--- code), not for ten minutes: an EA restart must be able to re-pair with the
--- code the user already pasted instead of hammering a 401 loop until they
--- notice. The code is scoped to the browser session that generated it.
+-- Existing deployments: the link/code binding is new, so add it in place.
+ALTER TABLE mt5_bridge_links ADD COLUMN IF NOT EXISTS code TEXT;
+
+-- Pairing codes are active only while the terminal they paired is open. Before
+-- redemption a code simply has a short TTL (it is typed into the EA by hand).
+-- After redemption expires_at_ms is 0, which means "no timer of its own":
+-- the code then lives exactly as long as the link it created, so the same
+-- terminal can re-present it after an API redeploy. When that link ends the
+-- code is RETIRED — stamped with the time it stopped working — so a terminal
+-- presenting it is told "that session is over, take a new code" instead of the
+-- indistinguishable "unknown code"; the row is pruned shortly after.
+-- Reconnecting after MT5 was closed therefore requires a NEW code — which is
+-- the whole point.
 CREATE TABLE IF NOT EXISTS mt5_pairing_codes (
   code TEXT PRIMARY KEY,
   session_id TEXT NOT NULL,
   created_at_ms BIGINT NOT NULL,
-  expires_at_ms BIGINT NOT NULL,      -- sliding, refreshed by use
+  expires_at_ms BIGINT NOT NULL,      -- redeemed codes use 0 = bound to the link
   redeemed_at_ms BIGINT               -- first successful use
 );
 CREATE INDEX IF NOT EXISTS mt5_pairing_codes_session_idx ON mt5_pairing_codes (session_id);

@@ -135,9 +135,15 @@ test("the EA version agrees across #property, EA_VERSION and the Desk expectatio
   const property = eaSource.match(/#property version\s+"([\d.]+)"/)?.[1];
   const define = eaSource.match(/#define EA_VERSION\s+"([\d.]+)"/)?.[1];
   const expected = bridgeSource.match(/export const EXPECTED_EA_VERSION = "([\d.]+)"/)?.[1];
-  assert.equal(property, "3.07");
+  assert.equal(property, "3.08");
   assert.equal(define, property);
   assert.equal(expected, property);
+});
+
+test("the v3.08 changelog entry documents the link that ends with the terminal", () => {
+  assert.match(eaSource, /WHAT CHANGED IN v3\.08/);
+  assert.match(eaSource, /RemoveLegacyLinkFile/);
+  assert.match(eaSource, /bridge\/disconnect/);
 });
 
 test("the v3.07 changelog entry documents the detach fix", () => {

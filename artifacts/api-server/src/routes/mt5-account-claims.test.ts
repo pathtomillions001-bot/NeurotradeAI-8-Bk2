@@ -6,6 +6,7 @@ import express from "express";
 import { schemaReady } from "@workspace/db";
 import { runWithSession } from "../lib/session";
 import { __testing as claimTesting, accountKeyFor, resetClaims } from "../lib/multiasset/claims";
+import { resetBridgeLinks } from "../lib/multiasset/bridge-links";
 import { resetDesk } from "../lib/multiasset/store";
 import router, { pendingPairings } from "./bridge";
 
@@ -45,9 +46,24 @@ describe("MT5 bridge — one account, one Desk", () => {
   beforeEach(() => {
     resetClaims();
     pendingPairings.clear();
+    /**
+     * Links and codes are module state, not Desk state, and they are what the
+     * session scoping hangs off: a code issued by a Desk belongs to that Desk
+     * and to the terminal that redeemed it. A previous test's live link would
+     * therefore still own its account AND its code, so a later test pairing the
+     * same pretend browser on a different login would be answered
+     * `pairing_code_spent` — correctly, and for the wrong reason. Clearing both
+     * is what makes each test a genuinely fresh terminal session.
+     */
+    resetBridgeLinks();
     // Every browser starts from a genuinely empty Desk, so one test's
     // successful pairing can never mask another's refusal.
     for (const id of sessions.values()) resetDesk(id);
+    // New browser identities, too. `resetBridgeLinks()` forgets this process's
+    // mirror but deliberately keeps the store, and a code in the store is bound
+    // to the session that issued it — reusing a session id across tests would
+    // hand a later test the code belonging to an earlier test's live link.
+    sessions.clear();
   });
 
   /** Act as `as` for the duration of one request. */
@@ -84,12 +100,12 @@ describe("MT5 bridge — one account, one Desk", () => {
     return id;
   };
 
-  async function requestCode(session: string): Promise<string> {
-    const response = await as(session, () => post("/pairing-code", {}));
+  async function requestCode(session: string, request: Record<string, unknown> = {}): Promise<string> {
+    const response = await as(session, () => post("/pairing-code", request));
     assert.equal(response.status, 200);
-    const body = (await response.json()) as { pairingCode: string };
-    assert.ok(body.pairingCode, "a pairing code was issued");
-    return body.pairingCode;
+    const issued = (await response.json()) as { pairingCode: string };
+    assert.ok(issued.pairingCode, "a pairing code was issued");
+    return issued.pairingCode;
   }
 
   async function pair(session: string, code: string, login: number, server = "BROKER-DEMO") {
@@ -193,7 +209,23 @@ describe("MT5 bridge — one account, one Desk", () => {
 
   it("pairing a different account in one browser releases the previous one", async () => {
     await connect(browser("a"), 5009);
-    await connect(browser("a"), 5010);
+
+    /**
+     * Switching the account a Desk is linked to is an explicit act: the code
+     * that paired 5009 belongs to that terminal session, and re-presenting it
+     * for another login is refused (`pairing_code_spent`) rather than quietly
+     * rebinding the Desk. The user presses "Generate a new code", and THAT
+     * code is free to pair anything.
+     */
+    const staleCode = await requestCode(browser("a"));
+    assert.equal(
+      (await pair(browser("a"), staleCode, 5010)).status,
+      401,
+      "a code another account already redeemed must not rebind the Desk",
+    );
+
+    const fresh = await requestCode(browser("a"), { rotate: true });
+    assert.equal((await pair(browser("a"), fresh, 5010)).status, 201, "a new code may pair the second account");
 
     const codeB = await requestCode(browser("b"));
     assert.equal((await pair(browser("b"), codeB, 5010)).status, 409, "the current account is still held");

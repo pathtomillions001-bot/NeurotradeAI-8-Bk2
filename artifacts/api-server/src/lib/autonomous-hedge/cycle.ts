@@ -34,6 +34,7 @@ import {
   isLiveOrderInFlight,
   LiveOrderInFlightError,
   LiveOrderNotSentError,
+  UnsupportedDerivProposalError,
   TradeOutcomeUnknownError,
   waitForContractResult,
 } from "../deriv";
@@ -159,6 +160,8 @@ interface HedgeSession {
   execFailures: number;
   /** One analysed-and-tuned live attempt at a time — see liveAttemptHoldReason. */
   liveGate: LiveAttemptGate;
+  /** Market/contract families Deriv explicitly rejected at proposal stage. */
+  unsupportedProposalFamilies: Set<string>;
   ctx: { at: number; value: HedgeContext } | null;
   evidenceTracker: EvidenceTracker;
   timingV2: TimingV2Controller;
@@ -283,6 +286,7 @@ function newSession(): HedgeSession {
     lastEmitAt: 0,
     execFailures: 0,
     liveGate: newLiveAttemptGate(),
+    unsupportedProposalFamilies: new Set<string>(),
     ctx: null,
     evidenceTracker: new EvidenceTracker(),
     timingV2: new TimingV2Controller(),
@@ -297,6 +301,28 @@ function sessionState(sessionId: string): HedgeSession {
     sessions.set(sessionId, s);
   }
   return s;
+}
+
+/** Stable key for a broker-rejected market/contract family for this account currency. */
+function proposalFamilyKey(currency: string, symbol: string, contractType: string): string {
+  return `${currency}:${symbol}:${contractType}`;
+}
+
+/** Restore deterministic proposal-stage rejections from prior autonomous journal rows. */
+async function hydrateUnsupportedProposalFamilies(sessionId: string, s: HedgeSession): Promise<void> {
+  const rows = await db
+    .select({
+      symbol: tradesTable.symbol,
+      contractType: tradesTable.contractType,
+      agentReasoning: tradesTable.agentReasoning,
+    })
+    .from(tradesTable)
+    .where(sql`${tradesTable.sessionId} = ${sessionId} AND ${tradesTable.agentReasoning} LIKE ${"%[UNSUPPORTED PROPOSAL currency=%"}`);
+  for (const row of rows) {
+    const reason = String(row.agentReasoning ?? "");
+    const match = reason.match(new RegExp("\\[UNSUPPORTED PROPOSAL currency=([^\\]]+)\\]"));
+    if (match) s.unsupportedProposalFamilies.add(proposalFamilyKey(match[1]!, row.symbol, row.contractType));
+  }
 }
 
 /** Release the exposure gate. The waiting-since clock resets with it. */
@@ -699,6 +725,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
 
   if (!s.hydrated) {
     await hydrateExposure(host, s);
+    await hydrateUnsupportedProposalFamilies(host.sessionId, s);
     s.hydrated = true;
   }
   if (!(await exposureResolved(host, s))) {
@@ -759,12 +786,17 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     feed.fresh += 1;
     if (tape.live) feed.live += 1;
     else feed.simulated += 1;
+    // Proposal-stage InvalidContractProposal is deterministic for this
+    // currency + market + contract family. Keep ranking the rest of the
+    // enabled universe, but never select the rejected family again this session.
     const specs = familySpecsFor({
       settings: ctx.settings,
       mode,
       digitEnabled: market.digitEnabled,
       sets: ctx.contractSets,
-    });
+    }).filter((spec) =>
+      !s.unsupportedProposalFamilies.has(proposalFamilyKey(ctx.currency, market.symbol, spec.type))
+    );
     if (specs.length === 0) { feed.noSpecs += 1; continue; }
     if (tape.digits.length < HEDGE_MIN_TICKS) { feed.thin += 1; continue; }
     tapes.push(tape);
@@ -1316,16 +1348,31 @@ async function executeDecision(
       // Both are skips, not broker refusals or execution strikes.
       // Anything else is a definite broker refusal and remains subject to the
       // existing three-strike stop for deterministic execution failures.
+      const unsupportedProposal = buyErr instanceof UnsupportedDerivProposalError;
       const skipped = buyErr instanceof LiveOrderInFlightError || buyErr instanceof LiveOrderNotSentError;
       const message = buyErr instanceof Error ? buyErr.message : String(buyErr);
+      if (unsupportedProposal) {
+        s.unsupportedProposalFamilies.add(proposalFamilyKey(ctx.currency, b.symbol, b.contract));
+      }
+      const failureLabel = unsupportedProposal
+        ? `UNSUPPORTED PROPOSAL currency=${ctx.currency}`
+        : skipped ? "NOT SENT" : "EXECUTION FAILED";
       await claimOpenRow(openRow.id, {
         status: "error",
         profit: "0",
         payout: "0",
         closedAt: new Date(),
-        agentReasoning: `${reasoningBase} [${skipped ? "NOT SENT" : "EXECUTION FAILED"}: ${message}]`,
+        agentReasoning: `${reasoningBase} [${failureLabel}] [${message}]`,
       });
       clearExposure(s);
+      if (unsupportedProposal) {
+        logger.warn(
+          { symbol: b.symbol, contract: b.contract, currency: ctx.currency, reason: message },
+          "Autonomous 1-tick: Deriv does not offer this contract on this market; candidate quarantined, no buy was placed",
+        );
+        host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
+        return;
+      }
       if (skipped) {
         logger.warn(
           { symbol: b.symbol, reason: message },

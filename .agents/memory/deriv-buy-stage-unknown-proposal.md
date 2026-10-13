@@ -1,6 +1,6 @@
 ---
-name: Deriv "Unknown contract proposal" is stage-dependent
-description: The same broker text from `buy` and from `proposal` means opposite things; only the buy stage may be re-quoted, and the error code must survive into the stop reason.
+name: Deriv "Unknown contract proposal" is stage-dependent, and a buy must ride the session that quoted
+description: The same broker text from `buy` and from `proposal` means opposite things; the dead-quote case is now PREVENTED (session-bound quote, freshness ceiling, priority buy, one order pipeline per account) rather than repaired after the fact.
 ---
 
 ## Rule
@@ -12,17 +12,20 @@ Deriv's `InvalidContractProposal` / "Unknown contract proposal" is **stage-depen
 
 Classify with `isUnknownProposalRejection()` in `lib/deriv.ts` and only ever on a **buy** reply. Keep the broker's error `code` in the thrown message (`describeDerivRejection`) so a UI panel, the engine stop reason and the journal can be told apart after the fact.
 
-## Why
+## Why (the four invariants that keep the dead-quote case from happening)
 
-`executeLiveTrade` buys in two steps on the account's ONE pooled trading socket: `{proposal: 1, …}` → proposal **id**, then `{buy: <id>, price: <ask>}`. That id only exists inside the session that issued it, and it dies two ways that are both routine here:
+`executeLiveTrade` buys in two steps on the account's ONE pooled trading socket: `{proposal: 1, …}` → proposal **id**, then `{buy: <id>, price: <ask>}`. That id only exists inside the session that issued it, and it dies two ways that are both routine here: a **re-handshake** between the two calls, and the id **aging out** behind the send queue / a `RateLimit` pause. The pipeline is now built so neither can reach the broker:
 
-1. `DerivAccountConnection.request()` calls `ensureConnected()` before *every* message, so a socket that re-handshook between the two calls (no pong in 60 s, OTP re-issue, idle `destroy()`) sends the buy on a **new session** carrying the old id.
-2. Any `RateLimit` on that shared socket sets `pausedUntil = now + 4_000` and the queue paces at 10 msg/s, so a 1-tick quote can age out before its own buy is sent.
+1. **Session-bound quote** — `DerivAccountConnection.sessionGeneration()` is bumped on every successful handshake; a quote records the generation it was issued in, and `proposalNeedsRefresh()` forces a re-quote when the live generation has moved on.
+2. **Freshness ceiling** — `PROPOSAL_MAX_AGE_MS` (3 s): a quote older than that is replaced before the buy instead of being sent as a dead id.
+3. **Priority buy** — `AccountRequestHooks.priority` puts the buy at the FRONT of the paced send queue, so a burst of settlement polls can never push it past the proposal's life.
+4. **One order pipeline per account** — `executeLiveTrade` is single-flight per `accountId` (`LiveOrderInFlightError`, `isLiveOrderInFlight`). Racing purchases interleave proposals and buys on the shared socket; they are now skipped, never interleaved.
 
-`deriv.ts` used to `throw new Error(msg.error.message)` for both stages, discarding `error.code` and the stage. `autonomous-hedge/cycle.ts` counted the sentence as a strike and `host.stop()`ed after three — so a dead quote killed the engine, and restarting re-ranked the same tape and died the same way three times again.
+The reactive replay (re-quote once, buy the fresh id) is kept as the last-resort repair and runs through the same integrity check.
 
 ## How to apply
 
-- The replay is capped at ONE re-quote and is triggered **only** by an unknown-proposal buy rejection. Transient buy rejections (`RateLimit`) and unacknowledged buys (`TradeOutcomeUnknownError`) are still never replayed — those invariants are tested in `single-trade-execution.test.ts`.
-- A proposal-stage rejection throws before any buy is sent, so a capability verdict can never reach the replay path. There is a test for that; do not remove it.
-- The engine's 3-strike stop is unchanged on purpose: with the dead-quote case repaired it now only ever fires on a genuine, deterministic broker refusal, where stopping is the right answer.
+- Do NOT remove the reactive replay or the proposal-stage test (`single-trade-execution.test.ts`): the replay is the safety net, the stage rule is the classification.
+- A skipped caller sees `LiveOrderInFlightError`. That is a **skip, not a broker refusal** — the autonomous engine must never count it as a strike (`cycle.ts` classifies it as `[NOT SENT]`).
+- The autonomous engine's 3-strike stop is unchanged on purpose: with the dead-quote case repaired it only fires on genuine, deterministic broker refusals, where stopping is the right answer. What changed is that a refusal can no longer be re-sent on the same coalesced tick (`liveAttemptHoldReason`: 5 s backoff + a NEW analysed tick), so "3 consecutive buys" can never again mean one trade machine-gunned three times inside a second.
+- Never re-introduce a caller that buys outside `executeLiveTrade` without the same three guarantees.

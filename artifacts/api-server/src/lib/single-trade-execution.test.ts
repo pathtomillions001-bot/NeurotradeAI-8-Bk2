@@ -5,7 +5,10 @@ import {
   closeAccountConnections,
   executeLiveTrade,
   getAccountConnection,
+  isLiveOrderInFlight,
   isRetryableDerivError,
+  LiveOrderInFlightError,
+  proposalNeedsRefresh,
   waitForContractResult,
 } from "./deriv";
 
@@ -221,6 +224,110 @@ describe("single-contract execution", () => {
     await waitForContractResult(token, params.accountId, 1234);
     assert.equal(sent.length, 1);
     assert.equal(sent.filter((m) => m.buy).length, 0);
+  });
+
+  // ── One account = one order pipeline ────────────────────────────────────────
+  // Racing purchases are what interleave proposals and buys on the shared socket,
+  // and an interleaved buy is what Deriv refuses with a dead proposal id. The
+  // reported engine failure ("3 consecutive 1-tick buys — last: Unknown contract
+  // proposal") is exactly that: trades that should never have been concurrent.
+  it("never runs two purchase pipelines at once on one account", async () => {
+    let releaseProposal!: () => void;
+    const proposalGate = new Promise<void>((resolve) => { releaseProposal = resolve; });
+    const sent: any[] = [];
+    const connection = getAccountConnection(token, params.accountId);
+    mock.method(connection, "request", async (message: any) => {
+      sent.push(message);
+      if (message.proposal) {
+        await proposalGate;
+        return proposal;
+      }
+      return purchase;
+    });
+
+    const first = executeLiveTrade(token, params);
+    // The first call is now parked inside its proposal: it holds the order slot.
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(isLiveOrderInFlight(params.accountId), true, "the account's order slot is held while an order is in flight");
+    await assert.rejects(executeLiveTrade(token, params), LiveOrderInFlightError);
+
+    releaseProposal();
+    const result = await first;
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 1, "the skipped caller never even quoted");
+    assert.equal(sent.filter((m) => m.buy).length, 1, "exactly one purchase left the account");
+    assert.equal(isLiveOrderInFlight(params.accountId), false, "the slot is released when the order ends");
+  });
+
+  it("releases the order slot even when the purchase is refused", async () => {
+    fakeTransport(() => ({ error: { code: "InvalidContract", message: "Invalid contract" } }));
+    await assert.rejects(executeLiveTrade(token, params), /Invalid contract/);
+    assert.equal(isLiveOrderInFlight(params.accountId), false, "a refusal must not wedge the account's order slot");
+  });
+
+  // ── A buy must ride the session that quoted it ──────────────────────────────
+  // A proposal id only exists inside the socket session that issued it. If the
+  // socket re-handshook between the two calls, the id is dead — buying it anyway
+  // is what produced "Unknown contract proposal" on a 1-tick buy.
+  it("re-quotes and buys the fresh id when the socket re-handshook after the quote", async () => {
+    let generations = 0;
+    let quotes = 0;
+    const sent = fakeTransport((m) => m.proposal
+      ? { msg_type: "proposal", proposal: { id: `proposal-${++quotes}`, ask_price: 1, payout: 1.63 } }
+      : purchase);
+    const connection = getAccountConnection(token, params.accountId);
+    // First read is the session that quoted (1); the re-handshake happens before
+    // the buy, so every later read reports the new session (2).
+    mock.method(connection, "sessionGeneration", () => (++generations === 1 ? 1 : 2));
+
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 2, "the dead quote is replaced");
+    assert.deepEqual(
+      sent.filter((m) => m.buy).map((m) => m.buy),
+      ["proposal-2"],
+      "the buy carries the id of the session that is live, never the abandoned one",
+    );
+  });
+
+  it("re-quotes a quote that aged out behind the socket queue", async () => {
+    const realNow = Date.now;
+    let clock = 0;
+    // Every clock read is 5 s later than the previous one, so any quote is older
+    // than a proposal's life by the time its buy would be sent — the 4 s
+    // rate-limit pause case.
+    mock.method(Date, "now", () => realNow() + (clock += 5_000));
+    try {
+      let quotes = 0;
+      const sent = fakeTransport((m) => m.proposal
+        ? { msg_type: "proposal", proposal: { id: `proposal-${++quotes}`, ask_price: 1, payout: 1.63 } }
+        : purchase);
+      const result = await executeLiveTrade(token, params);
+      assert.equal(result.contractId, 1234);
+      assert.equal(sent.filter((m) => m.proposal).length, 2, "the aged quote is replaced");
+      assert.deepEqual(sent.filter((m) => m.buy).map((m) => m.buy), ["proposal-2"]);
+    } finally {
+      mock.restoreAll();
+    }
+  });
+
+  it("buys without a needless re-quote while the quote is fresh and its session is live", async () => {
+    const sent = fakeTransport((m) => (m.proposal ? proposal : purchase));
+    const connection = getAccountConnection(token, params.accountId);
+    mock.method(connection, "sessionGeneration", () => 1);
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 1, "a fresh quote on the live session is bought as-is");
+    // The buy is a PRIORITY message so the paced queue cannot push it past the
+    // proposal's short life.
+    assert.equal((connection.request as any).mock.calls.at(-1).arguments[2]?.priority, true);
+  });
+
+  it("classifies a quote by session and age", () => {
+    const quoted = { generation: 7, quotedAtMs: 1_000_000 };
+    assert.equal(proposalNeedsRefresh(quoted, 7, 1_000_500), false, "same session, young id");
+    assert.equal(proposalNeedsRefresh(quoted, 8, 1_000_500), true, "a re-handshake invalidates the id");
+    assert.equal(proposalNeedsRefresh(quoted, 7, 1_060_000), true, "an id older than a proposal's life is dead");
   });
 
   it("retains the shared single-order quote retry classification", () => {

@@ -4,8 +4,13 @@ import { randomUUID } from "node:crypto";
 import { db, schemaReady, tradesTable } from "@workspace/db";
 import { eq } from "drizzle-orm";
 import {
+  clearRefusedLiveAttempt,
   describeFeedHold,
   emptyFeedDiagnosis,
+  liveAttemptHoldReason,
+  LIVE_REFUSAL_BACKOFF_MS,
+  newLiveAttemptGate,
+  recordRefusedLiveAttempt,
   requestHedgeCycle,
   type HedgeContext,
   type HedgeHost,
@@ -209,6 +214,53 @@ describe("autonomous 1-tick cycle (tick-driven, coalesced)", () => {
     } finally {
       await db.delete(tradesTable).where(eq(tradesTable.id, row.id));
     }
+  });
+});
+
+// A refused 1-tick buy used to be re-attempted by the very next coalesced tick —
+// same tape, same decision, same refusal — so three refusals landed inside a
+// second and the engine stopped with "Deriv rejected 3 consecutive 1-tick buys".
+// That looks like three simultaneous trades; it was ONE trade re-sent three
+// times. The gate makes every attempt a newly analysed, newly timed decision.
+describe("live attempt gate (one analysed trade per attempt)", () => {
+  const decision = { symbol: "R_100", tickSequence: 42 };
+
+  it("lets the first attempt through", () => {
+    assert.equal(liveAttemptHoldReason(newLiveAttemptGate(), decision, 1_000), null);
+  });
+
+  it("refuses to re-send the exact tick the broker just refused", () => {
+    const gate = newLiveAttemptGate();
+    recordRefusedLiveAttempt(gate, decision, 1_000);
+    // Backoff elapsed, but the tape has not produced a new tick: the same
+    // analysed decision must not be bought again.
+    const reason = liveAttemptHoldReason(gate, decision, 1_000 + LIVE_REFUSAL_BACKOFF_MS + 1);
+    assert.match(String(reason), /already refused/);
+  });
+
+  it("holds every attempt during the backoff, and says how long it waits", () => {
+    const gate = newLiveAttemptGate();
+    recordRefusedLiveAttempt(gate, decision, 1_000);
+    const reason = liveAttemptHoldReason(gate, { symbol: "R_50", tickSequence: 7 }, 1_500);
+    assert.match(String(reason), /refused.*waits \d+s/);
+  });
+
+  it("allows the next freshly analysed tick once the backoff has passed", () => {
+    const gate = newLiveAttemptGate();
+    recordRefusedLiveAttempt(gate, decision, 1_000);
+    const now = 1_000 + LIVE_REFUSAL_BACKOFF_MS + 1;
+    assert.equal(
+      liveAttemptHoldReason(gate, { symbol: "R_100", tickSequence: 43 }, now),
+      null,
+      "a new tick is a new decision — that attempt is allowed",
+    );
+  });
+
+  it("releases the gate after a purchase that went through", () => {
+    const gate = newLiveAttemptGate();
+    recordRefusedLiveAttempt(gate, decision, 1_000);
+    clearRefusedLiveAttempt(gate);
+    assert.equal(liveAttemptHoldReason(gate, decision, 1_100), null);
   });
 });
 

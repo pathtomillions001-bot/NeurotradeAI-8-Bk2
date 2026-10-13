@@ -1789,6 +1789,12 @@ export interface AccountRequestHooks {
   beforeSend?: () => void;
   /** Conservatively called immediately before handing the message to the socket. */
   onSent?: () => void;
+  /**
+   * Send this message BEFORE anything already queued. Used by the BUY leg of a
+   * purchase: the proposal id it carries is short-lived and session-bound, so it
+   * must never wait behind a burst of read-only settlement polls.
+   */
+  priority?: boolean;
 }
 
 class DerivAccountConnection extends EventEmitter {
@@ -1811,6 +1817,8 @@ class DerivAccountConnection extends EventEmitter {
   private lastPongMs = Date.now();
   private connecting: Promise<void> | null = null;
   private closed = false;
+  /** Bumped on every successful handshake — see `sessionGeneration()`. */
+  private generation = 0;
   /** Subscriptions that must be re-sent after a reconnect. */
   private subscriptions: Array<Record<string, unknown>> = [];
 
@@ -1825,6 +1833,20 @@ class DerivAccountConnection extends EventEmitter {
 
   isOpen(): boolean {
     return this.ws?.readyState === WebSocket.OPEN;
+  }
+
+  /**
+   * Which socket session is serving this account right now: 0 before the first
+   * handshake, then a new number for every (re)connection.
+   *
+   * WHY: a Deriv proposal id only exists inside the session that issued it, so a
+   * buy carrying an id from a previous session is refused with
+   * `InvalidContractProposal` / "Unknown contract proposal". A caller that quotes
+   * and then buys must therefore prove it is still on the session it quoted on —
+   * this is that proof (see `proposalNeedsRefresh`).
+   */
+  sessionGeneration(): number {
+    return this.generation;
   }
 
   /** Swap in a freshly refreshed Bearer token without dropping the socket. */
@@ -1874,7 +1896,7 @@ class DerivAccountConnection extends EventEmitter {
           this.pending.delete(reqId);
           reject(error);
         }
-      });
+      }, hooks?.priority === true);
     });
   }
 
@@ -1906,8 +1928,13 @@ class DerivAccountConnection extends EventEmitter {
     }
   }
 
-  private enqueue(task: () => void): void {
-    this.sendQueue.push(task);
+  private enqueue(task: () => void, priority = false): void {
+    // A priority message (the buy leg of a purchase) goes to the FRONT: the
+    // queue is otherwise FIFO behind settlement polls and status reads, and a
+    // proposal id that waits seconds behind them can be dead by the time it is
+    // handed to the broker.
+    if (priority) this.sendQueue.unshift(task);
+    else this.sendQueue.push(task);
     this.processQueue();
   }
 
@@ -2000,6 +2027,9 @@ class DerivAccountConnection extends EventEmitter {
 
       ws.on("open", () => {
         this.reconnectDelay = 1_000;
+        // A NEW session: every proposal id issued before this point is dead to
+        // the broker, so callers holding a quote can see the change.
+        this.generation += 1;
         this.emit("open");
         this.lastPongMs = Date.now();
         this.startPing();
@@ -3239,14 +3269,124 @@ export class TradeOutcomeUnknownError extends Error {
 }
 
 /**
+ * How long a proposal id may be held before it is re-quoted instead of bought.
+ *
+ * A proposal is session-scoped AND short-lived. Between `{proposal: 1}` and
+ * `{buy: id}` the id sits in the shared socket's paced send queue (10 msg/s,
+ * plus a 4 s pause whenever Deriv rate-limits the account), so a quote that has
+ * waited longer than this window is replaced rather than handed to the broker as
+ * a dead id. Re-quoting is one round-trip on a socket that is already open.
+ */
+const PROPOSAL_MAX_AGE_MS = 3_000;
+
+/** A quote as bought: the id, its own ask price, and the session it belongs to. */
+interface LiveProposal {
+  proposalId: string;
+  askPrice: number;
+  /** Socket session that issued the id (see `sessionGeneration`). */
+  generation: number;
+  quotedAtMs: number;
+}
+
+/**
+ * Does this quote have to be replaced before it may be bought?
+ *
+ * Two ways a valid id can be dead by buy time — both are routine on the shared
+ * account socket, and both produce Deriv's `InvalidContractProposal` /
+ * "Unknown contract proposal" on the BUY reply, which used to cost the engine
+ * one of its three strikes per occurrence:
+ *
+ *  1. the socket re-handshook (no pong in 60 s, OTP re-issue, idle teardown), so
+ *     the buy would ride a session that never saw the quote;
+ *  2. the id aged out behind the send queue or a `RateLimit` pause.
+ *
+ * Pure so the rule is testable without a socket.
+ */
+export function proposalNeedsRefresh(
+  quoted: { generation: number; quotedAtMs: number },
+  currentGeneration: number,
+  now: number,
+): boolean {
+  if (quoted.generation !== currentGeneration) return true;
+  return now - quoted.quotedAtMs > PROPOSAL_MAX_AGE_MS;
+}
+
+/**
+ * Raised when a live purchase is already in flight on the account.
+ *
+ * One account = one socket = ONE order pipeline. A second caller (a manual
+ * trade, another engine, a cycle whose session state was reset) is skipped
+ * instead of racing the first for the same socket: racing is what interleaves
+ * proposals and buys, and an interleaved buy is what Deriv refuses with a dead
+ * proposal id. Skipping is not a broker refusal, so callers must never count it
+ * as one (see the autonomous engine's strike counter).
+ */
+export class LiveOrderInFlightError extends Error {
+  constructor(accountId: string) {
+    super(
+      `Another purchase is already in flight on this account (${accountId}) — ` +
+        "skipped so that only one contract is ever bought at a time.",
+    );
+    this.name = "LiveOrderInFlightError";
+  }
+}
+
+/** Accounts with a proposal → buy pipeline in flight right now. */
+const liveOrdersInFlight = new Set<string>();
+
+/** True while a purchase pipeline is running on this account. */
+export function isLiveOrderInFlight(accountId: string): boolean {
+  return liveOrdersInFlight.has(accountId);
+}
+
+/**
  * Execute a live trade using the new OTP-authenticated WebSocket flow:
  *  1. POST /accounts/{accountId}/otp → OTP WS URL
  *  2. Connect to OTP URL (no authorize message)
  *  3. Send `proposal` with `underlying_symbol`
  *  4. On proposal response, send `buy` with the proposal ID
  *  5. On buy confirmation, resolve with contract details
+ *
+ * SINGLE-FLIGHT per account: the whole proposal → buy pipeline holds the
+ * account's order slot, so two callers can never be mid-order on one socket.
+ * One account buys one thing at a time.
  */
 export async function executeLiveTrade(
+  bearerToken: string,
+  params: {
+    symbol: string;
+    contractType: string;
+    stake: number;
+    duration: number;
+    durationUnit: string;
+    currency: string;
+    accountId: string;
+    barrier?: number | string;
+    /** ACCU only: growth rate 0.01–0.05. */
+    growthRate?: number;
+    /** ACCU only: exchange-side take-profit in account currency. */
+    takeProfit?: number;
+  },
+): Promise<LiveTradeResult> {
+  const accountId = params.accountId;
+
+  if (!bearerToken || !accountId) {
+    throw new Error(
+      "No authenticated session. Please sign in with Deriv (OAuth) to enable live trading. " +
+      "A Bearer token and account ID are required for the new Deriv API.",
+    );
+  }
+
+  if (liveOrdersInFlight.has(accountId)) throw new LiveOrderInFlightError(accountId);
+  liveOrdersInFlight.add(accountId);
+  try {
+    return await runSingleLiveOrder(bearerToken, params);
+  } finally {
+    liveOrdersInFlight.delete(accountId);
+  }
+}
+
+async function runSingleLiveOrder(
   bearerToken: string,
   params: {
     symbol: string;
@@ -3294,11 +3434,15 @@ export async function executeLiveTrade(
   // A function so the ONE replay below — a buy handed a proposal id the broker no
   // longer knows — quotes through exactly the same path as the first attempt,
   // with the same retry policy and the same ACCU/barrier parameters.
-  const quote = async (): Promise<{ proposalId: string; askPrice: number }> => {
+  //
+  // Every quote records which SOCKET SESSION issued it and WHEN, so the buy can
+  // refuse to ride a different session or a stale id (proposalNeedsRefresh).
+  const connection = getAccountConnection(bearerToken, accountId);
+  const quote = async (): Promise<LiveProposal> => {
     let proposalMsg: any = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
-      proposalMsg = await accountRequest(
-        bearerToken, accountId, { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
+      proposalMsg = await connection.request(
+        { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
       );
       if (proposalMsg && !proposalMsg.error) break;
       if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
@@ -3324,14 +3468,50 @@ export async function executeLiveTrade(
     return {
       proposalId: String(proposalMsg.proposal.id),
       askPrice: Number(proposalMsg.proposal.ask_price ?? params.stake),
+      generation: connection.sessionGeneration(),
+      quotedAtMs: Date.now(),
     };
   };
 
-  const purchase = (proposalId: string, askPrice: number) => accountRequest(
-    bearerToken, accountId, { buy: proposalId, price: askPrice }, ACCOUNT_REQUEST_TIMEOUT_MS,
+  // The buy is a PRIORITY message: it jumps the paced send queue so a burst of
+  // read-only polls can never push the id past its short life.
+  const purchase = (proposal: LiveProposal) => connection.request(
+    { buy: proposal.proposalId, price: proposal.askPrice },
+    ACCOUNT_REQUEST_TIMEOUT_MS,
+    { priority: true },
   );
 
-  let quoted = await quote();
+  // ── Pre-buy integrity check (the dead-quote cause, prevented rather than
+  // repaired): if the socket re-handshook since the quote, or the id has been
+  // waiting longer than a proposal lives, the id is replaced BEFORE it is bought.
+  // Buying it anyway is what used to draw "Unknown contract proposal" from the
+  // broker and cost the autonomous engine one of its three strikes.
+  //
+  // A quote that may be bought right now: quotes, and replaces the answer once
+  // when it no longer rides the live socket session or has aged out. Used for the
+  // first attempt AND for the one replay, so neither can hand the broker an id it
+  // cannot resolve.
+  const buyableQuote = async (): Promise<LiveProposal> => {
+    let candidate = await quote();
+    const generationNow = connection.sessionGeneration();
+    if (proposalNeedsRefresh(candidate, generationNow, Date.now())) {
+      logger.warn(
+        {
+          proposalId: candidate.proposalId,
+          quotedGeneration: candidate.generation,
+          currentGeneration: generationNow,
+          ageMs: Date.now() - candidate.quotedAtMs,
+          symbol: params.symbol,
+          contractType: params.contractType,
+        },
+        "executeLiveTrade: quote no longer rides the live session or has aged out — re-quoting before the buy",
+      );
+      candidate = await quote();
+    }
+    return candidate;
+  };
+
+  let quoted = await buyableQuote();
   logger.info(
     { proposalId: quoted.proposalId, askPrice: quoted.askPrice },
     "executeLiveTrade: proposal received, sending buy",
@@ -3343,7 +3523,7 @@ export async function executeLiveTrade(
   // as never placed.
   // A rejected request promise means the message was never sent (no connection
   // or send failure), so it propagates unchanged as a definite "not placed".
-  let buyMsg = await purchase(quoted.proposalId, quoted.askPrice);
+  let buyMsg = await purchase(quoted);
 
   // ── The one and only purchase replay ────────────────────────────────────────
   // Deriv refused the buy because the proposal id we handed it does not exist in
@@ -3366,8 +3546,10 @@ export async function executeLiveTrade(
       },
       "executeLiveTrade: broker did not recognise the proposal id — re-quoting once to complete this purchase",
     );
-    quoted = await quote();
-    buyMsg = await purchase(quoted.proposalId, quoted.askPrice);
+    // Through the same integrity check as the first attempt: the replacement id
+    // must also ride the live session and be young when it is bought.
+    quoted = await buyableQuote();
+    buyMsg = await purchase(quoted);
   }
 
   if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");

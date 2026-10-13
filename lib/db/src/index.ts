@@ -557,133 +557,17 @@ if (useExternalPostgres) {
   dbInstance = drizzlePglite(pglite, { schema }) as unknown as NodePgDatabase<typeof schema>;
 }
 
-/**
- * Split the bootstrap DDL into its individual statements.
- *
- * WHY THIS EXISTS: the script used to be sent as ONE query. Postgres runs a
- * multi-statement simple query in an implicit transaction, so the FIRST failing
- * statement rolled back everything before it AND skipped everything after it.
- * One data-dependent failure — a `CREATE UNIQUE INDEX` over legacy rows that
- * duplicate each other — therefore failed on every boot, on the same database,
- * forever: every table and column the script still needed to create was never
- * created, and `schemaApplied()` could never become true. That is a database
- * fault the app cannot see (its tables already exist from an earlier deploy),
- * so it surfaces only where the flag is load-bearing: the MT5 bridge, answering
- * `503 bridge_store_unavailable` on every heartbeat for a link row that is
- * sitting in the table the whole time.
- *
- * Splitting makes a bad statement cost only itself. The script is plain DDL —
- * one statement per line-group, each terminated by a `;` at the end of a line,
- * `--` comments on their own lines, and no semicolons or `--` inside string
- * literals (checked; the regression test pins it).
- */
-export function splitSqlStatements(sql: string): string[] {
-  const statements: string[] = [];
-  let current: string[] = [];
-  for (const line of sql.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("--")) continue;
-    current.push(line);
-    if (trimmed.endsWith(";")) {
-      statements.push(current.join("\n").trim());
-      current = [];
-    }
+/** Applies the idempotent INIT_DDL. Safe to call repeatedly. */
+async function applySchemaDdl(): Promise<void> {
+  if (useExternalPostgres) {
+    await poolInstance.query(INIT_DDL);
+  } else {
+    await pgliteInstance!.exec(INIT_DDL);
   }
-  const tail = current.join("\n").trim();
-  if (tail) statements.push(tail);
-  return statements;
-}
-
-/** The statements of the bootstrap script, in order. */
-export function bootstrapDdlStatements(): string[] {
-  return splitSqlStatements(INIT_DDL);
 }
 
 /**
- * The tables this API cannot function without — core data plus the MT5 bridge
- * tables. Readiness is decided by whether these exist, not by whether every
- * statement happened to succeed: a statement that fails on its own (a unique
- * index a legacy table has outgrown) must not hold the whole schema — and every
- * caller that gates on `schemaApplied()` — hostage forever.
- */
-const REQUIRED_TABLES = [
-  "accounts",
-  "settings",
-  "trades",
-  "mt5_account_claims",
-  "mt5_bridge_links",
-  "mt5_pairing_codes",
-] as const;
-
-/**
- * Is a failure a connection-level one (dead database) rather than a statement
- * that this particular schema rejected?
- *
- * The distinction matters only for how hard we retry: a statement-level failure
- * is reported once and skipped, while a database we cannot reach aborts the
- * whole attempt immediately so the retry loop can back off instead of hammering
- * 69 statements at a wall that is not there.
- */
-function looksLikeConnectionFailure(err: unknown): boolean {
-  const code = (err as { code?: unknown })?.code;
-  if (typeof code === "string" && /^(08|57P0|53300)/.test(code)) return true;
-  const message = err instanceof Error ? err.message : String(err);
-  return /ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EHOSTUNREACH|Connection terminated|timeout exceeded when trying to connect|the database system is (starting up|shutting down)/i.test(
-    message,
-  );
-}
-
-/** Statements that have already been reported, so a retry loop cannot spam. */
-const reportedDdlFailures = new Set<string>();
-
-/**
- * Applies the idempotent INIT_DDL, ONE STATEMENT AT A TIME. Safe to call
- * repeatedly. Returns the statements that failed (each is reported once).
- *
- * A statement failing is NOT an error for the caller: the schema is applied up
- * to the granularity of the statements that work, and readiness is decided
- * separately by `requiredTablesPresent()`. Only a connection-level failure
- * throws, so the retry loop can back off and try the whole script again.
- */
-async function applySchemaDdl(): Promise<string[]> {
-  const failures: string[] = [];
-  for (const statement of bootstrapDdlStatements()) {
-    try {
-      if (useExternalPostgres) {
-        await poolInstance.query(statement);
-      } else {
-        await pgliteInstance!.exec(statement);
-      }
-    } catch (err) {
-      if (looksLikeConnectionFailure(err)) throw err;
-      const label = statement.split("\n")[0].trim();
-      if (!reportedDdlFailures.has(label)) {
-        reportedDdlFailures.add(label);
-        console.warn(
-          `[db] DDL statement failed — continuing with the rest of the schema: ${label}`,
-          err instanceof Error ? err.message : err,
-        );
-      }
-      failures.push(label);
-    }
-  }
-  return failures;
-}
-
-/** Do the tables this API needs actually exist now? */
-async function requiredTablesPresent(): Promise<boolean> {
-  const list = REQUIRED_TABLES.map((table) => `'${table}'`).join(", ");
-  const sql = `SELECT COUNT(*)::int AS present FROM information_schema.tables
-                WHERE table_schema = 'public' AND table_name IN (${list})`;
-  const result = useExternalPostgres
-    ? await poolInstance.query(sql)
-    : await pgliteInstance!.query(sql);
-  return Number((result?.rows?.[0] as { present?: unknown } | undefined)?.present ?? 0) >= REQUIRED_TABLES.length;
-}
-
-/**
- * Keep retrying the DDL until the required tables exist, then resolve
- * schemaReady.
+ * Keep retrying the DDL until it succeeds, then resolve schemaReady.
  *
  * WHY a retry loop: the first boot attempt can hit a transient Postgres outage
  * (on Railway a simultaneous redeploy produced `connect ETIMEDOUT …:5432` for
@@ -691,12 +575,6 @@ async function requiredTablesPresent(): Promise<boolean> {
  * the network recovered, so settings/accounts/markets stayed broken until a
  * manual redeploy. Retrying in the background self-heals as soon as Postgres
  * answers.
- *
- * WHY the readiness test is "do the tables exist", not "did the script run":
- * the script is applied statement by statement, so a single statement its own
- * schema rejects no longer counts as the schema being absent — see
- * `applySchemaDdl`. A database that is actually unreachable still fails the
- * whole attempt (and keeps retrying).
  */
 let ddlSucceeded = false;
 async function ddlRetryLoop(): Promise<void> {
@@ -704,21 +582,13 @@ async function ddlRetryLoop(): Promise<void> {
   while (!ddlSucceeded) {
     attempt++;
     try {
-      const failures = await applySchemaDdl();
-      if (!(await requiredTablesPresent())) {
-        throw new Error("required tables are still missing after applying the DDL");
-      }
+      await applySchemaDdl();
       ddlSucceeded = true;
       console.log(
         attempt === 1
           ? "[db] Initial DDL applied"
           : `[db] Initial DDL applied after ${attempt} attempts`,
       );
-      if (failures.length > 0) {
-        console.log(
-          `[db] ${failures.length} statement(s) could not be applied and were skipped (already reported above); every table this API needs exists.`,
-        );
-      }
       resolveSchemaReady();
     } catch (err) {
       if (attempt === 1) resolveSchemaReady(); // don't block routes on a dead DB

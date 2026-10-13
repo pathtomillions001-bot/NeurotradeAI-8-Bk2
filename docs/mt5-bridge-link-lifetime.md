@@ -93,42 +93,15 @@ only when its link is (unlink), or when the user rotates it in the dialog.
 Retired codes are kept for 30 minutes only so the fourth row can say something
 actionable; they can never mint a token.
 
-## 5. `503` on every beat — and the reason it kept coming back
+## 5. `503` on every beat — fixed, and now much rarer
 
 A live link never consults the store (the in-process mirror serves the hot
-path), reads retry three times 120–240 ms apart before giving up, and a store
-that genuinely cannot answer replies `503` with `retryAfterMs` while revoking
-nothing. Under this contract a 401 is either a revocation (final) or "unknown to
-this process", and the EA keeps its saved credential through the latter.
-
-Making the terminal patient was not enough, because the *server* was the one
-giving up. Two things in the read path turned a healthy database into a
-permanent `503`:
-
-1. **The bootstrap DDL was sent as one query.** Postgres runs a
-   multi-statement simple query in an implicit transaction, so the first
-   statement that fails on an *existing* database rolls back everything before
-   it and skips everything after it. A `CREATE UNIQUE INDEX` over legacy rows
-   that duplicate each other does exactly that, on every boot, on the same
-   database: the rows the terminal had paired with were in a table that was
-   already there, every statement the script still needed (the `code` column
-   among them) was never applied, and `schemaApplied()` could never become true.
-   Reproduced: with duplicate `accounts (session_id, login_id)` rows, the whole
-   script throws `could not create unique index "accounts_session_login_unique"`
-   and **not one table survives the batch**.
-2. **The link lookup gated on that flag.** `storeConsultable()` refused to read
-   the store while `schemaApplied()` was false — a statement about the SCHEMA
-   used as a statement about whether a row could be read. So the flag being
-   false, for any reason, was answered as "the store could not be reached", on
-   every heartbeat, forever.
-
-Both are fixed at the source: the script is applied statement by statement and
-readiness means "the tables this API needs exist", and the lookup no longer
-consults the flag at all — the read is the authority, and a table that really is
-missing says so by itself (`relation "mt5_bridge_links" does not exist` → an
-honest `503`, nothing revoked). `schemaApplied()` remains in `/api/healthz` and
-the Desk's diagnostics, where it belongs. See
-`docs/release-notes/mt5-bridge-store-readiness.md`.
+path), reads retry three times 120–240 ms apart before giving up, and an
+unreadable store answers `503` with `retryAfterMs` while revoking nothing. The
+old failure mode — a terminal retrying a credential forever — is gone for a
+second reason too: under this contract a 401 is either a revocation (final) or
+"unknown to this process", and the EA keeps its saved credential through the
+latter.
 
 ## 6. What the Desk shows
 

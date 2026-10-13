@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import {
   closeAccountConnections,
   executeLiveTrade,
+  UnsupportedDerivProposalError,
   getAccountConnection,
   isLiveOrderInFlight,
   isRetryableDerivError,
@@ -174,7 +175,7 @@ describe("single-contract execution", () => {
     const sent = fakeTransport(() => deadProposal);
     await assert.rejects(
       executeLiveTrade(token, params),
-      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
+      UnsupportedDerivProposalError,
     );
     assert.equal(sent.length, 1);
     assert.equal(sent.filter((m) => m.buy).length, 0);

@@ -353,18 +353,32 @@ describe("single-contract execution", () => {
     );
   });
 
-  it("re-quotes a quote that aged out behind the socket queue", async () => {
+  it("re-quotes a quote that ages out while the BUY waits in the socket queue", async () => {
     const realNow = Date.now;
-    let clock = 0;
-    // Every clock read is 5 s later than the previous one, so any quote is older
-    // than a proposal's life by the time its buy would be sent — the 4 s
-    // rate-limit pause case.
-    mock.method(Date, "now", () => realNow() + (clock += 5_000));
+    let clock = 1_000_000;
+    mock.method(Date, "now", () => clock);
     try {
       let quotes = 0;
-      const sent = fakeTransport((m) => m.proposal
-        ? { msg_type: "proposal", proposal: { id: `proposal-${++quotes}`, ask_price: 1, payout: 1.63 } }
-        : purchase);
+      let agedFirstBuy = false;
+      const sent: any[] = [];
+      const connection = getAccountConnection(token, params.accountId);
+      mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+        // Advance time only after preflight and just before the first buy's
+        // send guard, simulating a queue/rate-limit delay rather than making
+        // every operation take five seconds.
+        if (message.buy && !agedFirstBuy) {
+          agedFirstBuy = true;
+          clock += 5_000;
+        }
+        hooks?.beforeSend?.();
+        hooks?.onSent?.();
+        sent.push(message);
+        if (message.proposal) {
+          const n = ++quotes;
+          return { msg_type: "proposal", proposal: { id: `proposal-${n}`, ask_price: 1, payout: 1.63 } };
+        }
+        return purchase;
+      });
       const result = await executeLiveTrade(token, params);
       assert.equal(result.contractId, 1234);
       assert.equal(sent.filter((m) => m.proposal).length, 2, "the aged quote is replaced");

@@ -153,28 +153,72 @@ describe("single-contract execution", () => {
     assert.equal(sent.filter((m) => m.buy).length, 2);
   });
 
-  it("re-quotes a dead proposal id at most once, then reports the code", async () => {
-    const sent = fakeTransport((m) => m.proposal
-      ? { msg_type: "proposal", proposal: { id: "dead", ask_price: 1 } }
-      : deadProposal);
-    await assert.rejects(
-      executeLiveTrade(token, params),
-      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
-    );
-    assert.equal(sent.filter((m) => m.proposal).length, 2);
-    assert.equal(sent.filter((m) => m.buy).length, 2);
+  it("re-quotes a dead proposal id at most once, then completes the purchase without a proposal id", async () => {
+    // Two fresh ids in a row unknown to the broker proves the proposal-id path
+    // itself is broken for this purchase — not one stale quote. The purchase is
+    // then completed ONCE with a parameterised buy (the bot builder's form,
+    // carrying full contract parameters and no proposal id), still for the
+    // same single analysed trade.
+    const sent = fakeTransport((m) => {
+      if (m.proposal) return { msg_type: "proposal", proposal: { id: "dead", ask_price: 1 } };
+      if (m.parameters) return purchase;
+      return deadProposal;
+    });
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 2, "one re-quote, never a third quote");
+    assert.equal(sent.filter((m) => m.buy && !m.parameters).length, 2, "the dead id and its one replacement");
+    const parameterised = sent.filter((m) => m.parameters);
+    assert.equal(parameterised.length, 1, "exactly one parameterised buy completes the purchase");
+    assert.deepEqual(parameterised[0], {
+      buy: "1",
+      price: 1,
+      parameters: {
+        amount: 1,
+        basis: "stake",
+        contract_type: "DIGITOVER",
+        currency: "USD",
+        duration: 1,
+        duration_unit: "t",
+        underlying_symbol: "R_10",
+        barrier: "3",
+      },
+    });
   });
 
-  it("never re-quotes a contract this account is not offered at all", async () => {
-    // The same words from the PROPOSAL stage are a capability verdict, not a
-    // dead quote: deterministic, so it must fail fast without a second request.
-    const sent = fakeTransport(() => deadProposal);
-    await assert.rejects(
-      executeLiveTrade(token, params),
-      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
-    );
-    assert.equal(sent.length, 1);
-    assert.equal(sent.filter((m) => m.buy).length, 0);
+  it("completes the purchase when Deriv will not issue a proposal at all", async () => {
+    // The reported engine failure: InvalidContractProposal from the PROPOSAL
+    // stage. No proposal was created and no contract exists, so the engine must
+    // not burn a strike on it — the one analysed trade is bought once, with
+    // full parameters and no proposal id (exactly how the bot builder buys).
+    const sent = fakeTransport((m) => (m.parameters ? purchase : deadProposal));
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 1, "the refused quote is not re-sent");
+    assert.equal(sent.filter((m) => m.buy && !m.parameters).length, 0, "no proposal id is ever bought");
+    assert.equal(sent.filter((m) => m.parameters).length, 1, "exactly one parameterised buy is sent");
+  });
+
+  it("never repeats a parameterised buy Deriv refused", async () => {
+    const sent = fakeTransport((m) => {
+      if (m.parameters) return { error: { code: "ContractBuyValidationError", message: "Contract buy validation failed" } };
+      return deadProposal;
+    });
+    await assert.rejects(executeLiveTrade(token, params), /Contract buy validation failed/);
+    assert.equal(sent.filter((m) => m.parameters).length, 1, "a genuine refusal surfaces — it is not retried");
+  });
+
+  it("never repeats an unacknowledged parameterised buy", async () => {
+    const sent = fakeTransport((m) => (m.parameters ? null : deadProposal));
+    await assert.rejects(executeLiveTrade(token, params), /did not confirm the purchase/);
+    assert.equal(sent.filter((m) => m.parameters).length, 1, "an unacknowledged buy may exist — it is never re-sent");
+  });
+
+  it("does not send a null barrier as the string \"null\"", async () => {
+    const sent = fakeTransport((m) => (m.proposal ? proposal : purchase));
+    await executeLiveTrade(token, { ...params, barrier: null as any });
+    const quote = sent.find((m) => m.proposal);
+    assert.ok(quote && !("barrier" in quote), "no barrier key is sent when the caller has none");
   });
 
   for (const [unit, factor] of [["seconds", 1], ["milliseconds", 1000]] as const) {

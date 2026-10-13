@@ -3224,17 +3224,36 @@ export function isRetryableDerivError(msg: any): boolean {
  *    id died on the way (the pooled socket re-handshook between the two calls, or
  *    the quote aged out behind the socket's send pacing / a rate-limit pause).
  *    Quoting again and buying the fresh id completes the purchase.
- *  - on a `proposal`: this account is simply not offered that contract on that
- *    market. Deterministic — it fails on every tick and after every restart, so
- *    it must never be retried.
- *
- * Only ever call this on a BUY reply; the proposal stage throws before any buy is
- * sent, so a capability refusal can never reach the replay path below.
+ *  - on a `proposal`: Deriv created no proposal, so again NO contract exists.
+ *    This used to be read as a deterministic "account not offered this
+ *    contract" verdict and never retried — the assumption that let the
+ *    autonomous engine burn all three strikes without a single buy ever being
+ *    attempted, even though the identical contract buys fine from the bot
+ *    builder. It is now surfaced as `UnknownProposalError` and completed once
+ *    with a parameterised buy (no proposal id involved). If Deriv also refuses
+ *    THAT, the refusal is genuine and surfaces unchanged — never retried.
  */
 export function isUnknownProposalRejection(msg: any): boolean {
   const code = String(msg?.error?.code ?? "");
   const text = String(msg?.error?.message ?? "").toLowerCase();
   return code === "InvalidContractProposal" || text.includes("unknown contract proposal");
+}
+
+/**
+ * Deriv answered `InvalidContractProposal` at the PROPOSAL stage.
+ *
+ * Kept distinct from a generic quote failure because it has exactly one safe
+ * remedy (see `runSingleLiveOrder`): Deriv refused to even create a proposal,
+ * so provably NO proposal id exists and NO contract was created. The purchase
+ * can therefore be completed once with a parameterised buy — the form that
+ * carries the full contract parameters and no proposal id at all, which the
+ * (working) bot builder uses for every purchase that is not quote-bound.
+ */
+export class UnknownProposalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnknownProposalError";
+  }
 }
 
 /**
@@ -3422,7 +3441,15 @@ async function runSingleLiveOrder(
       duration_unit: params.durationUnit,
       underlying_symbol: params.symbol,   // new field name
     };
-    if (params.barrier !== undefined) proposalParams.barrier = String(params.barrier);
+    // Only a real, finite barrier may ride the request. Callers encode "no
+    // barrier" inconsistently (undefined, null, ""); String(null) would send
+    // barrier:"null" to Deriv and poison an otherwise valid proposal.
+    if (params.barrier !== undefined && params.barrier !== null) {
+      const barrier = String(params.barrier).trim();
+      if (barrier !== "" && Number.isFinite(Number(barrier))) {
+        proposalParams.barrier = barrier;
+      }
+    }
     // Accumulators: the compounding schedule and the exchange-side exit.
     if (params.growthRate !== undefined) proposalParams.growth_rate = params.growthRate;
     if (params.takeProfit !== undefined) proposalParams.limit_order = { take_profit: params.takeProfit };
@@ -3460,6 +3487,13 @@ async function runSingleLiveOrder(
     }
     if (proposalMsg.error) {
       logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
+      // Stage matters: an InvalidContractProposal HERE means Deriv never
+      // created a proposal (no id exists, no contract exists), so the caller
+      // may complete this one purchase with a parameterised buy. Tag it so
+      // only that stage gets that remedy — every other quote error is final.
+      if (isUnknownProposalRejection(proposalMsg)) {
+        throw new UnknownProposalError(describeDerivRejection(proposalMsg.error));
+      }
       throw new Error(describeDerivRejection(proposalMsg.error));
     }
     if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
@@ -3511,45 +3545,85 @@ async function runSingleLiveOrder(
     return candidate;
   };
 
-  let quoted = await buyableQuote();
-  logger.info(
-    { proposalId: quoted.proposalId, askPrice: quoted.askPrice },
-    "executeLiveTrade: proposal received, sending buy",
+  // ── Parameterised buy: the proposal-id-free purchase ───────────────────────
+  // Deriv also buys directly from full contract parameters
+  // (`{buy: "1", price, parameters: {…}}` — the exact form the bot builder's
+  // tradeOptionToBuy sends for every non-quote-bound purchase). No proposal id
+  // is involved, so `InvalidContractProposal` is impossible on this leg. It is
+  // sent AT MOST ONCE per executeLiveTrade call, and only after Deriv has
+  // explicitly replied that no proposal/contract exists (see below), so it can
+  // never become a second contract. Still the same single analysed trade, at
+  // the same stake, inside the same per-account single-flight slot.
+  const buyWithParameters = () => connection.request(
+    { buy: "1", price: params.stake, parameters: buildProposal() },
+    ACCOUNT_REQUEST_TIMEOUT_MS,
+    { priority: true },
   );
 
-  // Once the buy has been SENT, a missing or malformed reply means the purchase
-  // may still have happened. That is a different outcome from a rejection, so it
-  // is raised as TradeOutcomeUnknownError and the caller must not treat the trade
-  // as never placed.
-  // A rejected request promise means the message was never sent (no connection
-  // or send failure), so it propagates unchanged as a definite "not placed".
-  let buyMsg = await purchase(quoted);
-
-  // ── The one and only purchase replay ────────────────────────────────────────
-  // Deriv refused the buy because the proposal id we handed it does not exist in
-  // the session that received the purchase. Resolving that id is the step BEFORE
-  // contract creation, so this reply is proof that nothing was bought: quoting
-  // again and buying the FRESH id (at that quote's own ask price) completes the
-  // single purchase this call was asked for. It is not a second purchase, and it
-  // is capped at one attempt.
-  //
-  // Every other buy refusal (RateLimit, insufficient funds, validation) and every
-  // unacknowledged buy keep the existing rule and are never replayed.
-  if (buyMsg && isUnknownProposalRejection(buyMsg)) {
-    logger.warn(
-      {
-        derivError: buyMsg.error,
-        deadProposalId: quoted.proposalId,
-        symbol: params.symbol,
-        contractType: params.contractType,
-        barrier: params.barrier ?? null,
-      },
-      "executeLiveTrade: broker did not recognise the proposal id — re-quoting once to complete this purchase",
+  let buyMsg: any;
+  try {
+    let quoted = await buyableQuote();
+    logger.info(
+      { proposalId: quoted.proposalId, askPrice: quoted.askPrice },
+      "executeLiveTrade: proposal received, sending buy",
     );
-    // Through the same integrity check as the first attempt: the replacement id
-    // must also ride the live session and be young when it is bought.
-    quoted = await buyableQuote();
+
+    // Once the buy has been SENT, a missing or malformed reply means the purchase
+    // may still have happened. That is a different outcome from a rejection, so it
+    // is raised as TradeOutcomeUnknownError and the caller must not treat the trade
+    // as never placed.
+    // A rejected request promise means the message was never sent (no connection
+    // or send failure), so it propagates unchanged as a definite "not placed".
     buyMsg = await purchase(quoted);
+
+    // ── The one and only purchase replay ──────────────────────────────────────
+    // Deriv refused the buy because the proposal id we handed it does not exist in
+    // the session that received the purchase. Resolving that id is the step BEFORE
+    // contract creation, so this reply is proof that nothing was bought: quoting
+    // again and buying the FRESH id (at that quote's own ask price) completes the
+    // single purchase this call was asked for. It is not a second purchase, and it
+    // is capped at one attempt.
+    //
+    // Every other buy refusal (RateLimit, insufficient funds, validation) and every
+    // unacknowledged buy keep the existing rule and are never replayed.
+    if (buyMsg && isUnknownProposalRejection(buyMsg)) {
+      logger.warn(
+        {
+          derivError: buyMsg.error,
+          deadProposalId: quoted.proposalId,
+          symbol: params.symbol,
+          contractType: params.contractType,
+          barrier: params.barrier ?? null,
+        },
+        "executeLiveTrade: broker did not recognise the proposal id — re-quoting once to complete this purchase",
+      );
+      // Through the same integrity check as the first attempt: the replacement id
+      // must also ride the live session and be young when it is bought.
+      quoted = await buyableQuote();
+      buyMsg = await purchase(quoted);
+      if (buyMsg && isUnknownProposalRejection(buyMsg)) {
+        // Even a fresh, session-checked id is unknown to the broker: the
+        // proposal-id path itself is broken for this purchase, not one stale
+        // quote. Complete the SAME purchase once, without any proposal id.
+        logger.warn(
+          { symbol: params.symbol, contractType: params.contractType },
+          "executeLiveTrade: fresh proposal id still unknown — completing this purchase with a parameterised buy",
+        );
+        buyMsg = await buyWithParameters();
+      }
+    }
+  } catch (err) {
+    if (!(err instanceof UnknownProposalError)) throw err;
+    // Deriv refused to create a proposal at all (UnknownProposalError from the
+    // quote stage). No id was issued and no contract exists — the previous
+    // behaviour treated this as a deterministic "not offered" verdict and the
+    // engine burned its three strikes on it without ever attempting a buy.
+    // Complete the one analysed purchase with the parameterised form instead.
+    logger.warn(
+      { symbol: params.symbol, contractType: params.contractType },
+      "executeLiveTrade: Deriv would not issue a proposal — completing this purchase with a parameterised buy",
+    );
+    buyMsg = await buyWithParameters();
   }
 
   if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");

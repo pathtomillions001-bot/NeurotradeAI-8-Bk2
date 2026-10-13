@@ -1,11 +1,21 @@
 # A 401 the server could not verify ended the MT5 link permanently
 
-> **Partly superseded.** v3.08 removed link persistence altogether
-> (`docs/mt5-bridge-session-link.md`): there is no saved link in the terminal
-> and no remembered pairing code on the server, so the "one chart's unverified
-> 401 disarms every chart" path in §2 no longer exists. The diagnosis below —
-> an unverified refusal must never be read as a verdict — is unchanged and still
-> the contract the EA and the API implement.
+> **Partly superseded, twice.**
+>
+> **v3.08** removed link persistence altogether
+> (`docs/mt5-bridge-session-link.md`) — no saved link in the terminal, no
+> remembered pairing code — so the "one chart's unverified 401 disarms every
+> chart" path in §2 stopped existing.
+>
+> **v3.09 restores the persistence and keeps the lesson**
+> (`docs/mt5-bridge-link-lifetime.md`). The lesson below — *an unverified
+> refusal is never a verdict* — is still the contract the EA and the API
+> implement, and it is now the only thing that can clear a terminal's saved
+> credential: a 401 carrying `bridge_link_revoked` (the user pressed "Unlink
+> terminal"). Every other 401, every 5xx and every outage leaves the saved link
+> alone and is retried. The sharing hazard in §2 is also gone for a different
+> reason: one account has ONE link, so there is no second chart's token for the
+> first chart's refusal to wipe.
 
 ## What the user reported
 
@@ -101,10 +111,12 @@ file whose token had just been emptied by the other chart, and went straight to
 reason the token was, so it too came back 401, and the EA backed off to a
 sixty-second loop it would never win.
 
-v3.08 deletes that whole mechanism rather than repairing it: no link file, no
-remembered code, no shared credential for one chart to wipe on another chart's
-behalf. The lesson kept from this report is the one that made the wipe possible
-in the first place — **an unverified refusal is not a verdict**.
+v3.08 deleted that whole mechanism rather than repairing it; v3.09 brings back
+the saved link (the owner asked for it explicitly) but keeps the lesson that
+made the wipe possible in the first place — **an unverified refusal is not a
+verdict**. What clears a saved credential is a revocation and nothing else, and
+a link now belongs to an ACCOUNT rather than to a chart, so there is no second
+chart's token for the first chart's refusal to wipe.
 
 **One transient server fault became a permanent disconnection that only a human
 pasting a fresh code could undo.** And if the Desk was reopened in a new tab in
@@ -192,8 +204,10 @@ and logs a warning when it is not.
 `artifacts/mt5-ea/NeurotradeBridge.mq5` **v3.06** (published copy republished by
 `scripts/copy-mt5-ea.mjs`, parity-tested)
 
-* `HttpPost()` **no longer touches the credential.** (In v3.08 that means
-  `HttpPost()` does not even have a saved link to touch.) It publishes the status,
+* `HttpPost()` **no longer touches the credential.** (In v3.09 that file exists —
+  `NeurotradeBridge_<login>_<server>.link` — and `HttpPost()` still does not touch
+  it: it is deleted in exactly one place, the `bridge_link_revoked` branch.) It
+  publishes the status,
   the server's `error` and the server's `code`, and returns. Deciding what a
   refusal means belongs to the caller, which is the only place that knows
   whether the server verified anything.
@@ -213,11 +227,12 @@ and logs a warning when it is not.
   beat, so a long outage pauses new entries on schedule.
 * A confirmed heartbeat resets the refusal budget, so a *later* outage gets its
   own retries and its own single journal line.
-* `OnDeinit()` names the reason (`DeinitReasonText`) and, for the six causes
-  that come from the terminal rather than from a person, says plainly that
-  nobody unlinked anything. (In v3.08 those reasons *end* the link on purpose —
-  closing MT5 disconnects the terminal, by design. See
-  `docs/mt5-bridge-session-link.md` §3.)
+* `OnDeinit()` names the reason (`DeinitReasonText`) and, for the causes that
+  come from the terminal rather than from a person, says plainly that nobody
+  unlinked anything. (v3.09 reports a disconnect for **`REASON_CLOSE` only** —
+  the user closing MT5. Chart closes, EA removal, recompiles, timeframe and
+  account switches report nothing and keep the saved link. See
+  `docs/mt5-bridge-link-lifetime.md` §1.)
 
 ### Config
 
@@ -230,11 +245,12 @@ Railway the equivalent is the Postgres service and
 ## What a user has to do
 
 1. **Re-download and recompile the EA** (Desk → bridge dialog → download), then
-   re-attach it. A v3.08 terminal needs a **new** pairing code — the old one is
-   retired when the session that used it ends, and the dialog hands out a fresh
-   one when you reload it. Until then the Desk shows *"this terminal is running
-   an older EA"*, because an older terminal still wipes its link on the first
-   unverified 401.
+   re-attach it. A v3.09 terminal saves its link and re-adopts it across
+   restarts, so the code already in the EA's `PairingCode` input keeps working —
+   paste a fresh one only if you unlinked the terminal in the Desk. Until the
+   terminal runs v3.09+ the Desk shows *"this terminal is running an older
+   EA"*, because an older build treats a chart close as a disconnect and wipes
+   its credential too eagerly.
 2. **Check the store is durable.** Open `/api/healthz` on the API service, or
    the bridge dialog: if it says the link store is not durable, set a
    `postgres://` `DATABASE_URL`. Without it the link still dies on every deploy
@@ -254,10 +270,10 @@ Railway the equivalent is the Postgres service and
 | Path | Role |
 |---|---|
 | `artifacts/api-server/src/lib/multiasset/bridge-links.ts` | lookups that report *why* they failed; bounded negative cache; store report |
-| `artifacts/api-server/src/routes/bridge.ts` | 503 for "could not verify", machine-readable 401 verdicts (`bridge_link_revoked` / `bridge_token_unknown` / `pairing_code_unknown` / `pairing_code_spent`), store in `/status`, `EXPECTED_EA_VERSION` 3.08 |
+| `artifacts/api-server/src/routes/bridge.ts` | 503 for "could not verify", machine-readable 401 verdicts (`bridge_link_revoked` / `bridge_token_unknown` / `pairing_code_unknown` / `pairing_code_spent`), store in `/status`, `EXPECTED_EA_VERSION` 3.09 |
 | `artifacts/api-server/src/routes/health.ts` | bridge tables in the missing-table check; backend/durability in `/api/healthz` |
 | `lib/db/src/index.ts` | `databaseBackend`, `databaseIsDurable`, `databaseDetail`, `schemaApplied()` |
-| `artifacts/mt5-ea/NeurotradeBridge.mq5` | v3.08: refusal budget, 5xx handling, revocation-only clearing, named deinit reasons, and a link that ends with the terminal |
+| `artifacts/mt5-ea/NeurotradeBridge.mq5` | v3.09: refusal budget, 5xx handling, revocation-only clearing, named deinit reasons, a link saved per account and re-adopted on attach, and a disconnect reported for `REASON_CLOSE` only |
 | `artifacts/trading-platform/public/downloads/NeurotradeBridge.mq5` | the same file, republished |
 | `artifacts/trading-platform/src/lib/desk.ts` | `BridgeStoreReport` and the new fields |
 | `artifacts/trading-platform/src/components/terminal/bridge-dialog.tsx` | says when the link store is unreachable, and that the code lives only as long as the terminal |

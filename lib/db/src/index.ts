@@ -466,6 +466,17 @@ CREATE TABLE IF NOT EXISTS desk_governance_state (
   reason TEXT,
   PRIMARY KEY (session_id, agent_id)
 );
+
+-- The owner's auto-trader settings (desk-settings.ts), one row per browser
+-- session. The desk is otherwise in-process state that dies with the process,
+-- and an auto-trader policy that silently reverted to the factory defaults on
+-- every deploy would be a policy the owner cannot rely on: "risk 0.25% per
+-- scalp" is a promise, and this table is what keeps it.
+CREATE TABLE IF NOT EXISTS desk_settings (
+  session_id TEXT PRIMARY KEY,
+  payload_json TEXT NOT NULL,
+  updated_at_ms BIGINT NOT NULL
+);
 `;
 
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";

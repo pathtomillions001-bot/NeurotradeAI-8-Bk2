@@ -40,10 +40,72 @@ The sidebar's Learning item is removed.
    its tests stay exactly as they are; the Learning workspace uses them.
 3. No server behaviour change. The API additions in §3 are optional response
    fields computed from values the server already holds, each with a unit test.
-4. Every existing `data-testid` survives: `data-source`, `stream-status`,
-   `mode-scalp`, `mode-intraday`, `mode-swing`, `timezone-select`,
-   `auto-trade-toggle`, `open-bridge`, `kill-switch` — plus `arm-plan`,
-   `auto-select-report`, `watchlist-row-*` and `scan-row-*` for parity.
+4. ~~Every existing `data-testid` survives.~~ **Amended by the owner's
+   instruction (see §1a):** the informational chips in the title bar are deleted
+   outright, not hidden. The CONTROLS keep their testids — `mode-scalp`,
+   `mode-intraday`, `mode-swing`, `timezone-select`, `auto-trade-toggle`,
+   `open-bridge`, `kill-switch` — plus the new `open-settings`, and
+   `arm-plan`, `auto-select-report`, `watchlist-row-*` and `scan-row-*` for
+   parity. `data-source` and `stream-status` are **gone**: the same values are
+   rendered by the status bar (`data-testid="status-bar"`) and the Feed &
+   execution health panel, and `scripts/desk-layout.spec.mjs` asserts that the
+   deleted chips do not survive even as hidden nodes.
+
+## 1a. The title bar is controls only, and the auto-trader has a settings surface
+
+Both changes came from the owner after v5 shipped, and both are implemented as
+described here.
+
+**The deleted blocks.** `data-source` (MT5 LIVE/STALE/WARMING), `stream-status`
+(STREAM/POLL), the v4 layer chip and the key-numbers block (Equity, Day %, open
+risk) used to sit in the same 48px row as the mode control, the timezone, the
+auto toggle, the bridge button and FLATTEN. Between 1024 and 1279px they
+overflowed and visibly overlapped the mode control. They are deleted, not
+merely hidden, and each value they carried still renders where it belongs:
+
+| Deleted block | Where its value lives now |
+| --- | --- |
+| data-source (feed state) | status bar + Feed & execution health panel (`[data-testid="status-bar"]`) |
+| stream-status (STREAM/POLL) | status bar feed counts (the stream still wins over polling) |
+| v4 layer chip | Learning workspace headers, `v4` on `GET /desk/state` |
+| key numbers | the stat strip on every workspace + the Command panels |
+
+**The new surface: `[data-testid="open-settings"]`.** The title bar's Settings
+button opens the auto-trader settings dialog
+(`src/components/desk/auto-trader-settings.tsx`), which is the UI half of the
+`AutoTradeSettings` model the API stores in `desk_settings`. It exposes the
+whole model — nothing is left unexposed:
+
+* **per-mode stance** — conservative / balanced / aggressive, per scalp,
+  intraday and swing. Presets are applied BY THE SERVER: the dialog sends
+  `{perMode: {<mode>: {style}}}` with no `management` block, and the server
+  swaps in that mode+style's entire policy. Any hand-edit later makes the mode
+  read `custom`, because a policy that no longer equals a preset must not claim
+  to be one.
+* **risk & budget** — per-mode risk %, desk-wide risk %, max risk, max daily
+  loss, max drawdown, max open positions, max per symbol, currency exposure
+  cap, halt-after-losses, minimum margin level, symbol cooldown, sizing mode
+  (percent / fixed money), fixed money per trade, live-trading switch.
+* **stop management** — break-even enabled, trigger R, offset R, structure
+  requirement and the structure deadline (`structureFallbackR`, 0 = wait
+  forever — the fix for "1R and nothing happened").
+* **partial closes** — enabled plus up to four ascending rungs (R and %).
+* **trailing** — enabled, mode (ATR chandelier / structure / fixed points),
+  ATR period, ATR multiple, activation R, minimum step in points and as a
+  fraction of ATR.
+* **pyramid adds** — enabled, max adds, add-at R, size ratio, base-at-BE
+  requirement, portfolio risk cap.
+* **time stop** — enabled, no-progress bars, timeframe.
+* **entry guards** — max spread (0 = derive from the asset), news blackout
+  minutes, flat-before-session-close.
+
+Every input is bounded by `autoTradeBounds` — the server's own clamp table,
+shipped on `GET /desk/state`, so the dialog cannot offer a value the server
+would reject. Saving pushes to OPEN positions too: `POST /desk/settings`
+adopts the new policy, `reconcileManagement` enqueues `set_management` for every
+position whose fingerprint changed, and the heartbeat re-checks the
+fingerprints, so a change reaches a trade that is already running. The response
+reports `managementPushedTo`.
 5. The live wiring is unchanged: `useDeskStream` and the react-query keys
    `["desk-state"]`, `["desk-markets"]`, `["desk-instruments"]`,
    `["desk-performance"]`, `["desk-analysis", symbol, mode]`,

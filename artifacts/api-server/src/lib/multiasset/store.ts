@@ -9,6 +9,7 @@
 
 import { randomUUID } from "node:crypto";
 import { createRiskState, DEFAULT_RISK_POLICY, type RiskPolicy, type RiskState } from "./risk";
+import { defaultAutoTradeSettings, type AutoTradeSettings } from "./desk-settings";
 import { createSymbolTicks, syntheticSeries, type SymbolTicks } from "./subminute";
 import type {
   AccountSnapshot,
@@ -286,6 +287,26 @@ export interface DeskState {
    * without analysing hundreds of symbols inside one heartbeat.
    */
   autoSelectCursor: number;
+  /**
+   * Which management fingerprint each open ticket has already been sent.
+   *
+   * The desk pushes a position's policy when the fingerprint changes, so this
+   * map is what turns "the owner saved 0.25% trailing" into one `set_management`
+   * command instead of one per heartbeat. Keys are ticket strings; entries for
+   * closed tickets are dropped on every reconcile.
+   */
+  managementSent?: Map<string, string>;
+  /**
+   * The owner's auto-trader settings — risk per trade and, per mode, the whole
+   * management policy (stops, partials, trailing, pyramid, time stop, guards).
+   *
+   * This is the desk's authoritative policy: `policy` above is DERIVED from it
+   * (`riskPolicyFromSettings`) so the two can never describe different risk
+   * limits, and every plan the desk arms carries this policy's management block
+   * (`agent.ts::buildManagementPlan`). Loaded from `desk_settings` when the
+   * session first appears, saved whenever it changes.
+   */
+  autoTradeSettings: AutoTradeSettings;
 }
 
 const desks = new Map<string, DeskState>();
@@ -340,6 +361,7 @@ export function getDesk(sessionId: string): DeskState {
       lastAutoSelectAt: 0,
       lastAutoSelectNoteAt: 0,
       autoSelectCursor: 0,
+      autoTradeSettings: defaultAutoTradeSettings(),
     };
     desks.set(sessionId, desk);
   }

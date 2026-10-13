@@ -22,6 +22,7 @@ import { useLocation, useSearch } from "wouter";
 import { toast } from "sonner";
 import { Link2 } from "lucide-react";
 
+import { AutoTradeSettingsDialog } from "@/components/desk/auto-trader-settings";
 import { BridgeDialog } from "@/components/terminal/bridge-dialog";
 import { useDeskStream } from "@/hooks/use-desk-stream";
 import { DeskShell } from "@/components/desk/desk-shell";
@@ -100,6 +101,9 @@ export default function Terminal() {
 
   const [symbol, setSymbol] = useState("");
   const [bridgeOpen, setBridgeOpen] = useState(false);
+  // The auto-trader settings surface (change #2). It hangs off the title bar so
+  // the policy is one click from the desk it governs — no navigation away.
+  const [autoTradeOpen, setAutoTradeOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   /** The LEARNING journal's kind filter — part of its query key. */
   const [journalKind, setJournalKind] = useState<string | null>(null);
@@ -380,8 +384,13 @@ export default function Terminal() {
   const report = weekly.data?.available ? weekly.data.report : null;
 
   // ── title bar / tabs / status bar content ─────────────────────────────────
-  const sourceLabel = !terminal ? "MT5 REQUIRED" : terminal.stale ? "MT5 STALE" : !account ? "MT5 WARMING" : "MT5 LIVE";
-  const sourceTone = !terminal || !account ? ("am" as const) : terminal.stale ? ("dn" as const) : ("up" as const);
+  //
+  // The title bar is CONTROLS ONLY now: the data-source badge, the stream badge,
+  // the v4 chip and the equity/day/open-risk block were deleted, and each value
+  // they carried is still rendered where it belongs — feed state in the status
+  // bar and the Feed & health panel, the v4 layer flags in the Learning
+  // workspace, and equity/day/open risk in the stat strip below. Nothing was
+  // lost by removing them; the two lines that computed them are.
   const modeLabel = TRADE_MODES.find((entry) => entry.id === mode)?.label ?? mode;
 
   const stage = rolloutStage({
@@ -393,14 +402,6 @@ export default function Terminal() {
 
   const titleBar = (
     <TitleBar
-      sourceLabel={sourceLabel}
-      sourceTone={sourceTone}
-      streaming={stream.flowing}
-      v4={state.data?.v4 ?? null}
-      equity={liveAccount ? formatMoney(liveAccount.equity, liveAccount.currency) : "—"}
-      currency={liveAccount?.currency ?? ""}
-      dayPct={dayPct}
-      openRisk={account ? `${formatPct(openRiskValue)} of ${policy?.maxCurrencyExposurePct ?? "—"}% cap` : "—"}
       mode={mode}
       onMode={(next) => settings.mutate({ mode: next })}
       controlsEnabled={terminalLive}
@@ -413,6 +414,7 @@ export default function Terminal() {
       bridgeLabel={terminal ? `MT5 ${terminal.login}` : "Link MT5"}
       hasTerminal={hasTerminal}
       onOpenBridge={() => setBridgeOpen(true)}
+      onOpenSettings={() => setAutoTradeOpen(true)}
       onFlatten={() => flatten.mutate()}
       flattenBusy={flatten.isPending}
     />
@@ -692,6 +694,7 @@ export default function Terminal() {
           </div>
         </div>
         <BridgeDialog open={bridgeOpen} onClose={() => setBridgeOpen(false)} linked={hasTerminal} onChanged={invalidateDesk} />
+        <AutoTradeSettingsDialog open={autoTradeOpen} onClose={() => setAutoTradeOpen(false)} state={state.data ?? null} onSaved={invalidateDesk} />
       </div>
     );
   }
@@ -700,6 +703,7 @@ export default function Terminal() {
     <>
       <DeskShell tab={tab} titleBar={titleBar} tabs={tabs} context={context} alerts={alerts} panels={panels} status={statusBar} />
       <BridgeDialog open={bridgeOpen} onClose={() => setBridgeOpen(false)} linked={hasTerminal} onChanged={invalidateDesk} />
+      <AutoTradeSettingsDialog open={autoTradeOpen} onClose={() => setAutoTradeOpen(false)} state={state.data ?? null} onSaved={invalidateDesk} />
     </>
   );
 }

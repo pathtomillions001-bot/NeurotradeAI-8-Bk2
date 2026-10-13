@@ -1,3 +1,10 @@
+> **SUPERSEDED by v3.09** — see `docs/release-notes/mt5-desk-four-changes.md` and
+> `docs/mt5-bridge-link-lifetime.md`. The owner reported the rule below as *the
+> Desk keeps disconnecting itself from MT5*, and it was replaced by: a link ends
+> only when the user unlinks it in the Desk, or closes MT5. The migration is
+> documented rather than hidden, because the same credential file that this note
+> removed is the one v3.09 saves again — with a narrower ending.
+
 # Change: the MT5 link now lives only as long as the terminal
 
 ## Problem

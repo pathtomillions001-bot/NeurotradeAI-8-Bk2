@@ -48,6 +48,8 @@ import {
   STOP_ATR_MULT,
 } from "./desk-constants";
 import { deskV4, v4Live, v4On } from "./desk-v4-config";
+import { BREAKEVEN_STRUCTURE_FALLBACK_R } from "./position-manager";
+import type { ManagementSettings } from "./desk-settings";
 import { DEFAULT_REGIME_HMM_CONFIG, regimePermit, type RegimePermit } from "./regime-hmm";
 import { loadRegimeModel, persistRegimeModel, regimeModelVersion } from "./governance-runtime";
 import { executedPolicyMonteCarlo } from "./montecarlo-v2";
@@ -161,6 +163,15 @@ export interface AgentInput {
   specs: Map<string, SymbolSpec>;
   riskState: RiskState;
   policy?: Partial<RiskPolicy>;
+  /**
+   * The owner's management policy for THIS mode, from the Desk's auto-trader
+   * settings (`desk-settings.ts`). When supplied it is what the armed plan
+   * carries, field for field: the partial ladder, the break-even trigger and
+   * its structure deadline, the trail, the pyramid ladder, the time stop and
+   * the guards. Absent means the regime-derived policy, which is what the
+   * research harness and every study pin.
+   */
+  managementSettings?: ManagementSettings | null;
   /** MT5 high-impact calendar status. Missing/unavailable fails new entries closed. */
   news?: NewsFeed | null;
   now?: number;
@@ -711,10 +722,24 @@ export function structuralStop(
 /**
  * Build the management plan.
  *
- * Thresholds are regime-dependent, not fixed: a trending market is given room
- * and a trailing stop, a range is banked earlier at the band edge. Partial
- * ladders are feasibility-checked against the broker's volume step, because a
- * 50% close of 0.01 lots is not a legal order.
+ * ── TWO SOURCES, IN ORDER ───────────────────────────────────────────────────
+ *
+ * `settings` — the owner's auto-trader settings for this mode (the Desk's
+ * Auto-trader settings dialog, `desk-settings.ts`) — wins whenever it is
+ * supplied. That is the whole point of the settings surface: what the owner
+ * configured is what the terminal executes.
+ *
+ * Without it, the regime-derived policy below is used, unchanged: a trending
+ * market is given room and a trailing stop, a range is banked earlier. The
+ * legacy path is kept byte-for-byte because the research harness and the
+ * walk-forward studies pin it.
+ *
+ * In BOTH paths partial ladders are feasibility-checked against the broker's
+ * volume step, because a 50% close of 0.01 lots is not a legal order — but a
+ * ladder that cannot be expressed is no longer simply dropped. The first rung's
+ * R is moved onto break-even instead (see `partialsDeferredToBreakeven`), so a
+ * position too small to split still de-risks at the owner's own trigger. "The
+ * trade was 1R up and nothing happened" was two defects; this is one of them.
  */
 export function buildManagementPlan(input: {
   spec: SymbolSpec;
@@ -723,9 +748,12 @@ export function buildManagementPlan(input: {
   regimeKind: string;
   atrPoints: number;
   retraceProbability: number;
+  /** The owner's policy for this mode, when the Desk has one. */
+  settings?: ManagementSettings | null;
 }): ManagementPlan {
-  const { spec, mode, lots, regimeKind, atrPoints, retraceProbability } = input;
+  const { spec, mode, lots, regimeKind, atrPoints, retraceProbability, settings } = input;
   const trending = regimeKind === "trend_up" || regimeKind === "trend_down";
+  if (settings) return managementPlanFromSettings({ spec, mode, lots, atrPoints, settings, trending });
 
   // A partial is only real if the remaining and closed slices are both legal
   // volumes. Otherwise the ladder silently fails at the broker.
@@ -745,18 +773,32 @@ export function buildManagementPlan(input: {
         { atR: 1.0, closePct: 50 },
         { atR: 1.8, closePct: 25 },
       ];
-  const partials = desired.filter((p) => canSplit(p.closePct));
+  const splittable = desired.filter((p) => canSplit(p.closePct));
+  const partials = splittable;
+  // A ladder the broker cannot express (0.01 lots, a coarse volume step) used to
+  // vanish, leaving a position that never de-risked. Instead the first rung's R
+  // becomes the break-even trigger, so the trade still protects itself at the
+  // point the owner meant.
+  const deferredToBreakeven = partials.length === 0 && desired.length > 0;
 
   // Breakeven is only scheduled once the simulated probability of coming back
   // to entry is low. Blind BE-at-1R scratches winners on volatile symbols.
-  const breakeven =
+  const breakevenBase =
     retraceProbability <= 0.35
       ? { triggerR: trending ? 1.2 : 1.0, offsetR: 0.2, structureBuffer: true }
       : { triggerR: trending ? 1.8 : 1.5, offsetR: 0.1, structureBuffer: true };
+  // Even on the legacy path, structure confirmation has a deadline (the
+  // documented default). Without one, a fractal pivot that never confirms
+  // leaves a winning position with its original stop indefinitely.
+  const structureFallbackR = BREAKEVEN_STRUCTURE_FALLBACK_R;
+  const breakeven = deferredToBreakeven
+    ? { ...breakevenBase, triggerR: Math.min(breakevenBase.triggerR, desired[0].atR), structureBuffer: false, structureFallbackR }
+    : { ...breakevenBase, structureFallbackR };
 
   return {
     breakeven,
     partials,
+    partialsDeferredToBreakeven: deferredToBreakeven,
     // Trail in trends (let winners run); hard TP in ranges.
     trail: trending
       ? {
@@ -788,6 +830,94 @@ export function buildManagementPlan(input: {
       maxSpreadPoints: fillSpreadGuard(spec, atrPoints * (STOP_ATR_MULT[mode] ?? 1), spec.spreadPoints),
       newsBlackoutMin: mode === "scalp" ? 10 : 15,
       flatBeforeSessionClose: mode !== "swing",
+    },
+  };
+}
+
+/**
+ * The owner's policy, expressed as the wire shape the EA captures at arm time.
+ *
+ * Every field is the settings field — nothing is added here that the owner
+ * cannot see in the Desk, and nothing the owner sets is dropped. The two
+ * derived values are:
+ *
+ *   • `guards.maxSpreadPoints` when the owner left it on "auto" — computed from
+ *     the asset's own cost model exactly as the legacy path does, so "auto"
+ *     means "the desk's own number", not "no guard".
+ *   • `partials` filtered for feasibility — and when the ladder cannot be
+ *     expressed in this broker's volume step at this size, break-even is moved
+ *     down to the first rung's R and `partialsDeferredToBreakeven` says so.
+ */
+function managementPlanFromSettings(input: {
+  spec: SymbolSpec;
+  mode: TradeMode;
+  lots: number;
+  atrPoints: number;
+  settings: ManagementSettings;
+  trending: boolean;
+}): ManagementPlan {
+  const { spec, mode, lots, atrPoints, settings, trending } = input;
+  const step = spec.volumeStep > 0 ? spec.volumeStep : 0.01;
+  const canSplit = (pct: number) => {
+    const slice = lots * (pct / 100);
+    const quantised = Math.floor(slice / step + 1e-9) * step;
+    return quantised >= spec.volumeMin && lots - quantised >= spec.volumeMin;
+  };
+
+  const wanted = settings.partials.enabled ? settings.partials.rungs : [];
+  const partials = wanted
+    .filter((rung) => canSplit(rung.closePct))
+    .map((rung) => ({ atR: rung.atR, closePct: rung.closePct }));
+
+  const be = settings.breakeven;
+  const ladderBlocked = be.enabled && wanted.length > 0 && partials.length === 0;
+  const breakeven = be.enabled
+    ? {
+        triggerR: ladderBlocked ? Math.min(be.triggerR, wanted[0].atR) : be.triggerR,
+        offsetR: be.offsetR,
+        // A stop that cannot be split off still gets protected: with no rung to
+        // bank, waiting for structure would be waiting for nothing.
+        structureBuffer: ladderBlocked ? false : be.requireStructure,
+        structureFallbackR: be.structureFallbackR,
+      }
+    : null;
+
+  const trail = settings.trail;
+  const pyramid = settings.pyramid;
+  const timeStop = settings.timeStop;
+
+  return {
+    breakeven,
+    partials,
+    partialsDeferredToBreakeven: ladderBlocked,
+    trail: trail.enabled
+      ? {
+          mode: trail.mode,
+          period: trail.period,
+          mult: trail.mult,
+          activateAtR: trail.activateAtR,
+          stepPoints:
+            trail.stepPoints > 0 ? trail.stepPoints : Math.max(0, Math.round(atrPoints * trail.minStepAtr)),
+        }
+      : null,
+    pyramid: pyramid.enabled && pyramid.maxAdds > 0
+      ? {
+          maxAdds: pyramid.maxAdds,
+          addAtR: pyramid.addAtR,
+          sizeRatio: pyramid.sizeRatio,
+          requireBaseAtBreakeven: pyramid.requireBaseAtBreakeven,
+          portfolioRiskCapR: pyramid.portfolioRiskCapR,
+        }
+      : null,
+    timeStop: timeStop.enabled
+      ? { noProgressBars: timeStop.noProgressBars, timeframe: timeStop.timeframe ?? ENTRY_TIMEFRAME[mode] }
+      : null,
+    guards: {
+      maxSpreadPoints:
+        settings.guards.maxSpreadPoints ??
+        fillSpreadGuard(spec, atrPoints * (STOP_ATR_MULT[mode] ?? 1), spec.spreadPoints),
+      newsBlackoutMin: settings.guards.newsBlackoutMin,
+      flatBeforeSessionClose: settings.guards.flatBeforeSessionClose,
     },
   };
 }
@@ -1662,6 +1792,11 @@ export function evaluate(input: AgentInput): AgentDecision {
     regimeKind: regime.kind,
     atrPoints,
     retraceProbability: retrace,
+    // The owner's policy, when the Desk has one. This is the single point where
+    // a setting becomes execution: everything downstream (the EA's captured
+    // policy, the position manager, the server's own shadow ledger) reads the
+    // plan this produces.
+    settings: input.managementSettings ?? null,
   });
 
   const plan: ArmedPlan = {

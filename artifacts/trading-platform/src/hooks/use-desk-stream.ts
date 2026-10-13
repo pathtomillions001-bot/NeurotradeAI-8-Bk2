@@ -145,9 +145,9 @@ export function useDeskStream(enabled: boolean): DeskStreamState & {
     const interval = setInterval(() => {
       const last = lastEventAtRef.current;
       if (last !== null && Date.now() - last > STALE_STREAM_MS) {
-        // Clear the push cache so the polling fallback wins the `??` race,
-        // and mark the stream as not flowing so the desk polls fast and the
-        // STREAM/POLL badge tells the truth.
+        // Clear the push cache so the polling fallback wins the `??` race, and
+        // mark the stream as not flowing so the desk polls fast and the status
+        // bar's feed counts describe the polled data rather than a dead push.
         setState((prev) => ({
           ...prev,
           instruments: null,

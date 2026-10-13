@@ -15,6 +15,20 @@ import { evaluate, getSlippageLedger, getSpreadHistory, getTimingLedger, horizon
 import { SPREAD_Z_WINDOW, recordSpread, spreadHistoryFor } from "../lib/multiasset/execution";
 import { correlationFromBars, MIN_COVARIANCE_SAMPLES } from "../lib/multiasset/portfolio-risk";
 import { deskV4, deskV4Summary, v4On } from "../lib/multiasset/desk-v4-config";
+import {
+  AUTO_TRADE_SETTINGS_VERSION,
+  PRESET_LABELS,
+  RANGES,
+  TRADE_MODES_ALL,
+  defaultAutoTradeSettings,
+  presetFor,
+  resolveModePolicy,
+  riskPolicyFromSettings,
+  sanitiseAutoTradeSettings,
+  type AutoTradeSettings,
+} from "../lib/multiasset/desk-settings";
+import { adoptSettings, reconcileManagement } from "../lib/multiasset/desk-settings-runtime";
+import { loadDeskSettings, saveDeskSettings } from "../lib/multiasset/desk-settings-store";
 import { performanceStats } from "../lib/multiasset/analytics";
 import {
   AUTO_SELECT_INTERVAL_MS,
@@ -296,6 +310,9 @@ function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: numbe
     policy: desk.policy,
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
+    // THE wiring that makes an owner's setting execution: the plan this
+    // evaluation may arm carries the policy configured for this mode.
+    managementSettings: resolveModePolicy(desk.autoTradeSettings, mode).management,
     now,
     ...v4InputsFor(desk, symbol, mode),
     ...v4GovernanceInput(desk.sessionId),
@@ -321,8 +338,11 @@ function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: numbe
 
 // ── Desk overview and market universe ────────────────────────────────────────
 
-router.get("/state", (_req, res) => {
+router.get("/state", async (_req, res) => {
   const desk = getDesk(getBrowserSessionId());
+  // The owner's policy must be the one the desk is running, so a session that
+  // has never been read from the store waits for it before answering.
+  await ensureSettingsLoaded(desk);
   const now = Date.now();
   expirePlans(desk, now);
   pruneDeselectedSymbols(desk);
@@ -425,6 +445,15 @@ router.get("/state", (_req, res) => {
      * exactly the response it saw before.
      */
     v4: deskV4Summary(),
+    /**
+     * The owner's auto-trader settings — the policy the auto trader is actually
+     * running, not a copy the client keeps. Optional on the wire so an older
+     * client is unaffected; the Desk's settings dialog renders exactly this.
+     */
+    autoTradeSettings: desk.autoTradeSettings,
+    /** The bounds the settings dialog renders its sliders against. */
+    autoTradeBounds: RANGES,
+    autoTradePresets: PRESET_LABELS,
   });
 });
 
@@ -847,6 +876,9 @@ router.get("/analysis", (req, res) => {
     policy: desk.policy,
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
+    // THE wiring that makes an owner's setting execution: the plan this
+    // evaluation may arm carries the policy configured for this mode.
+    managementSettings: resolveModePolicy(desk.autoTradeSettings, mode).management,
     ...v4InputsFor(desk, symbol, mode),
     ...v4GovernanceInput(desk.sessionId),
   });
@@ -965,6 +997,9 @@ router.post("/arm", (req, res) => {
     policy: desk.policy,
     news: desk.news,
     outcomes: outcomesFor(desk, symbol, mode),
+    // THE wiring that makes an owner's setting execution: the plan this
+    // evaluation may arm carries the policy configured for this mode.
+    managementSettings: resolveModePolicy(desk.autoTradeSettings, mode).management,
     ...v4InputsFor(desk, symbol, mode),
     ...v4GovernanceInput(desk.sessionId),
   });
@@ -1018,7 +1053,7 @@ router.post("/flatten", (req, res) => {
 
 // ── Settings ─────────────────────────────────────────────────────────────────
 
-router.post("/settings", (req, res) => {
+router.post("/settings", async (req, res) => {
   const desk = getDesk(getBrowserSessionId());
   const body = req.body ?? {};
 
@@ -1064,8 +1099,33 @@ router.post("/settings", (req, res) => {
   }
 
   if (body.policy && typeof body.policy === "object") {
-    desk.policy = sanitisePolicy(desk.policy, body.policy as Record<string, unknown>);
+    // ── The legacy path, kept honest ────────────────────────────────────────
+    // An older client sends the flat risk policy. It is applied to the SETTINGS
+    // (which derive `desk.policy`), never to `desk.policy` directly: two stores
+    // for one limit is how a screen ends up showing 3% and enforcing 1%.
+    const merged = sanitiseAutoTradeSettings(desk.autoTradeSettings, {
+      risk: body.policy as Record<string, unknown>,
+    });
+    adoptSettings(desk, merged);
     journal(desk, "risk", null, "Risk policy updated.");
+  }
+
+  if (body.autoTradeSettings && typeof body.autoTradeSettings === "object") {
+    const next = sanitiseAutoTradeSettings(
+      desk.autoTradeSettings,
+      body.autoTradeSettings as Record<string, unknown>,
+    );
+    const { pushed } = adoptSettings(desk, next);
+    await persistSettings(desk);
+    journal(
+      desk,
+      "risk",
+      null,
+      `Auto-trader settings updated — risk ${next.risk.riskPerTradePct}%/trade` +
+        ` (${TRADE_MODES_ALL.map((m) => `${m} ${next.perMode[m].style} ${next.perMode[m].riskPerTradePct}%`).join(", ")})` +
+        (pushed.length > 0 ? `; policy pushed to ${pushed.length} open position(s).` : "."),
+      { pushed },
+    );
   }
 
   return res.json({
@@ -1075,8 +1135,51 @@ router.post("/settings", (req, res) => {
     policy: desk.policy,
     timezone: desk.timezone,
     timezones: DESK_TIMEZONES,
+    autoTradeSettings: desk.autoTradeSettings,
+    autoTradeBounds: RANGES,
+    autoTradePresets: PRESET_LABELS,
+    /** Everything the terminal needs to be running the policy this response describes. */
+    managementPushedTo: desk.managementSent ? [...desk.managementSent.keys()] : [],
   });
 });
+
+/**
+ * Settings load + persist, for a desk that may have been created by any request.
+ *
+ * Loaded LAZILY and once per session: `getDesk()` is synchronous and called
+ * from every route, so making it async would touch the whole desk. The promise
+ * is cached on the session so a burst of requests does not race three reads —
+ * and a failed load (the store is down) leaves the session on its in-process
+ * value rather than on the factory defaults, because "I could not read your
+ * policy" must never be answered by silently replacing it.
+ */
+const settingsLoads = new Map<string, Promise<void>>();
+
+function ensureSettingsLoaded(desk: DeskState): Promise<void> {
+  let pending = settingsLoads.get(desk.sessionId);
+  if (!pending) {
+    pending = loadDeskSettings(desk.sessionId)
+      .then((stored) => {
+        if (stored) {
+          desk.autoTradeSettings = stored;
+          desk.policy = { ...desk.policy, ...riskPolicyFromSettings(stored) };
+        }
+      })
+      .catch(() => {});
+    settingsLoads.set(desk.sessionId, pending);
+  }
+  return pending;
+}
+
+async function persistSettings(desk: DeskState): Promise<boolean> {
+  try {
+    await saveDeskSettings(desk.sessionId, desk.autoTradeSettings);
+    return true;
+  } catch (error) {
+    logger.warn({ err: error }, "desk settings could not be persisted — the policy is live in memory only");
+    return false;
+  }
+}
 
 export function sanitisePolicy(current: RiskPolicy, incoming: Record<string, unknown>): RiskPolicy {
   const num = (key: keyof RiskPolicy, lo: number, hi: number): number => {

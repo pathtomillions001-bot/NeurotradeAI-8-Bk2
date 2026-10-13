@@ -257,6 +257,63 @@
 //|     gets one actionable line (open the Desk, copy the NEW code),   |
 //|     not a silent retry loop, and the EA keeps trying in the        |
 //|     background so pasting a fresh code connects on its own.        |
+//| WHAT CHANGED IN v3.09                                             |
+//| 30. THE LINK ENDS ONLY WHEN THE USER SAYS SO.                     |
+//|     v3.08 made the link die with the terminal session, and it did  |
+//|     so for reasons the user never chose: 120 s without a heartbeat |
+//|     (a sleeping laptop, a weekend, a broker maintenance window)    |
+//|     revoked the token, released the account claim and cleared the  |
+//|     Desk — and the terminal came back to a refusal it was allowed  |
+//|     to treat as final. That is reversed, per the owner's rule.     |
+//|                                                                    |
+//|     A link now ends for exactly two reasons:                       |
+//|       1. the user unlinks the terminal in the Desk                 |
+//|          (`bridge_link_revoked` — the ONE answer that is final);   |
+//|       2. the user closes MT5 (`OnDeinit`, REASON_CLOSE only, which |
+//|          posts /api/bridge/disconnect).                            |
+//|                                                                    |
+//|     Everything else costs nothing. The token and the pairing code  |
+//|     are saved per MT5 account in the terminal's common folder, so  |
+//|     a reboot, an MT5 restart, an API redeploy, a database that     |
+//|     could not be read or a network outage all re-adopt the SAME    |
+//|     link — no new code, no user action. The saved credential is    |
+//|     deleted in exactly one place: on `bridge_link_revoked`.        |
+//|                                                                    |
+//|     The lease no longer ends anything; the Desk shows a silent     |
+//|     terminal as STALE and keeps the pairing.                       |
+//| 31. STRUCTURE HAS A DEADLINE (the "1R and nothing happens" fix).   |
+//|     Break-even required a confirmed structure shift, which on a    |
+//|     fast frame can simply never print: the trigger was met, the    |
+//|     confirmation never came, and a winning position kept its       |
+//|     original stop indefinitely. `structureFallbackR` — sent by the |
+//|     Desk per mode, default 0.35R, 0 = wait forever — moves the     |
+//|     stop on the R trigger alone once the deadline passes, and the  |
+//|     journal records that it was the deadline and not structure.    |
+//|     The server's state machine implements the identical rule.      |
+//| 32. NO PLAN NO LONGER MEANS NO PROTECTION.                         |
+//|     A position with no plan (an EA reload between the fill and the |
+//|     first sync, a manual trade, a position opened while the Desk   |
+//|     was redeploying) got `partialCount = 0` and nothing else, so   |
+//|     the one position in the terminal with nothing scheduled was    |
+//|     the orphaned one. The default policy now carries a 1R/50%      |
+//|     rung — quantised against the real broker volume exactly like   |
+//|     a plan's ladder, skipped if it cannot be split — until the      |
+//|     Desk pushes the owner's own policy on the next heartbeat.       |
+//| 33. EVERY SETTING THE OWNER CAN SET IS ONE THE TERMINAL OBEYS.      |
+//|     The Desk's auto-trader surface exposes `offsetR` and three      |
+//|     trailing styles, and the EA used to read both and then ignore   |
+//|     them: the break-even landed at a hard-coded 0.05R whatever the  |
+//|     owner chose, and every trail was a chandelier, so picking        |
+//|     "structure" or "fixed points" changed nothing in MT5. Both now  |
+//|     come from the plan (and from `set_management`, so a change      |
+//|     applies to OPEN positions too), and the record carries the      |
+//|     mode so a restart cannot quietly revert it.                     |
+//| 34. THE MINIMUM TRAIL STEP IS THE OWNER'S, NOT OURS.                |
+//|     `minStepAtr`/`stepPoints` are settings; the terminal used to    |
+//|     force its own 0.1xATR floor on top of them, which silently      |
+//|     widened a deliberately tight trail. The Desk folds the two      |
+//|     knobs into one step before sending; the built-in floor now      |
+//|     applies only to a position with no pushed policy at all.        |
 //| INSTALL                                                            |
 //|  1. Put this file in MQL5/Experts and compile it in MetaEditor.   |
 //|  2. MT5 -> Tools -> Options -> Expert Advisors -> enable          |
@@ -272,7 +329,7 @@
 //| transient WebRequest failure from making the EA appear to "not     |
 //| attach" to a chart.                                                |
 #property copyright "NeuroTrade AI"
-#property version   "3.08"
+#property version   "3.09"
 #property strict
 
 // The version this EA reports on the wire.
@@ -283,7 +340,7 @@
 // the heartbeat is the one the Desk stores (`desk.terminal.eaVersion`), so the
 // Desk's "this terminal is running an older EA" check could never tell a v3.05
 // terminal from a v3.04 one.
-#define EA_VERSION "3.08"
+#define EA_VERSION "3.09"
 
 #include <Trade/Trade.mqh>
 
@@ -393,6 +450,7 @@ struct ArmedPlan
    double beTriggerR;
    double beOffsetR;
    bool   beStructure;
+   double beFallbackR;   // structure deadline, R past the trigger (0 = never)
    int    partialCount;
    double partialAtR[4];
    double partialPct[4];
@@ -401,6 +459,7 @@ struct ArmedPlan
    double trailStepPoints;
    int    trailPeriod;
    bool   trailEnabled;
+   int    trailMode;         // 0 = ATR chandelier, 1 = structure, 2 = fixed points
    int    timeStopBars;
    int    pyramidMaxAdds;
    double pyramidAddAtR;
@@ -421,19 +480,21 @@ datetime  g_lastOk = 0;
 datetime  g_nextPairAttempt = 0;
 bool      g_tradingEnabled = false;
 bool      g_liveTradingEnabled = false;
-// ── The link lives in MEMORY, for the life of this terminal ──────────────────
-// v3.08: NOTHING is written to disk. `g_token` exists only in this process, and
-// it dies with it — closing MT5 ends the link by design, and the next session
-// starts from a NEW pairing code in the Desk. (v3.03–v3.07 saved the token and
-// the code in the terminal's common folder and restored them at startup; any
-// such file left by an older build is deleted on attach, see
-// RemoveLegacyLinkFile().)
+// ── The link SURVIVES a restart, and ends only when the user says so ─────────
+// v3.09: the token and the pairing code are saved per MT5 account in the
+// terminal's common folder (see SaveLinkFile). A reboot, a closed laptop, an
+// API redeploy, a database that could not be read, a rejected heartbeat — none
+// of them end the link, and none of them need the user to fetch a new code: the
+// EA re-attaches on the credential it already holds.
 //
-// Within one running terminal the link survives an EA reload: MT5 calls
+// The credential is cleared in exactly one place: when the Desk answers
+// `bridge_link_revoked`, which is the user pressing Unlink in the Desk. The
+// other permitted ending is the user closing MT5, and that is the only reason
+// that posts /api/bridge/disconnect (see LinkEndsWithThisRun).
+//
+// Within one running terminal the link also survives an EA reload: MT5 calls
 // OnDeinit/OnInit for a recompile, an input change or a symbol/timeframe
-// change, the link itself is untouched, and the EA re-pairs with the code still
-// in its PairingCode input. Only the reasons that mean "this chart is finished"
-// post /api/bridge/disconnect.
+// change, and the link itself is untouched.
 // A definitive refusal (401) must not be retried every five seconds forever:
 // that is what buried the real reason in thousands of identical journal lines.
 int       g_pairAttemptDelaySeconds = 5;
@@ -577,6 +638,12 @@ bool      g_clockWarningPrinted  = false;
 #define PM_TRAIL_MULT_SWING    3.0
 #define PM_TRAIL_MIN_STEP_ATR  0.1
 #define PM_BREAKEVEN_PROFIT_R  0.05
+// The structure deadline (see ManageOnePosition). R past the break-even trigger
+// after which an unconfirmed structure no longer blocks the stop move. The Desk
+// sends its own value per plan/mode; this is the default for a policy that
+// predates the field — and it is the same number the server's state machine
+// uses (BREAKEVEN_STRUCTURE_FALLBACK_R), so the two never disagree.
+#define PM_BREAKEVEN_STRUCTURE_FALLBACK_R 0.35
 #define PM_MODIFY_COOLDOWN_MS  1500
 #define PM_MODIFY_COOLDOWN_R   0.5
 #define PM_TIME_STOP_PROGRESS_R 0.5
@@ -626,10 +693,12 @@ struct PositionState
    double          beTriggerR;
    double          beOffsetR;
    bool            beStructure;
+   double          beFallbackR;   // structure deadline, R past the trigger (0 = never)
    int             partialCount;
    double          partialAtR[4];
    double          partialPct[4];
    bool            trailEnabled;
+   int             trailMode;    // 0 = ATR chandelier, 1 = structure, 2 = fixed points
    double          trailMult;
    double          trailActivateR;
    double          trailStepPoints;
@@ -773,10 +842,26 @@ bool DeinitWasTerminalRestart(const int reason)
  * link — which is bound to one account and holds that account's claim — cannot
  * be carried over.
  */
+/**
+ * Does this deinit mean the operator is finished with the terminal?
+ *
+ * ── v3.09: ONE reason, not four ─────────────────────────────────────────────
+ *
+ * v3.08 sent `/disconnect` for CHARTCLOSE, CLOSE, INITFAILED and ACCOUNT as
+ * well. Every one of those is something the USER did to the chart, not a
+ * decision to end the connection: closing one chart of a two-chart terminal,
+ * switching accounts to check something, even an attach that MT5 aborted. The
+ * owner's rule is explicit — the link ends when the user unlinks it in the Desk
+ * or when they close MT5, and nothing else.
+ *
+ * So only REASON_CLOSE (the terminal itself going down) tells the Desk the
+ * session is over. Everything else leaves the link alone; if the EA really is
+ * gone, the Desk shows the terminal as stale and keeps the pairing, and the
+ * next attach resumes on the saved link without the user fetching a new code.
+ */
 bool LinkEndsWithThisRun(const int reason)
 {
-   return (reason == REASON_CHARTCLOSE || reason == REASON_CLOSE ||
-           reason == REASON_INITFAILED || reason == REASON_ACCOUNT);
+   return (reason == REASON_CLOSE);
 }
 
 //+------------------------------------------------------------------+
@@ -803,16 +888,24 @@ int OnInit()
                                AccountInfoInteger(ACCOUNT_LOGIN),
                                MathRand());
 
-   // v3.08: nothing is restored, because nothing is saved. The token lives in
-   // this process's memory, so an EA that has just attached has no link — it
-   // pairs with the code in the PairingCode input, and MT5 keeps calling this
-   // OnInit for a recompile, an input change or a timeframe change, so a
-   // running terminal re-pairs itself without the user touching anything.
+   // v3.09: re-adopt the saved link, if this account has one.
    //
-   // A file written by v3.03-v3.07 is deleted here, before anything can read
-   // it: that file is a link nobody asked to keep, and leaving it on disk would
-   // mean the next MT5 start resumed a session the user believes they closed.
-   RemoveLegacyLinkFile();
+   // This is what makes a reboot, an MT5 restart, an API redeploy or a
+   // transient network failure cost nothing: the terminal holds the credential
+   // the Desk issued, so it re-attaches to the SAME link instead of asking the
+   // user for a new pairing code. The credential is cleared in exactly one
+   // place — when the Desk answers that the link was revoked (the user pressed
+   // Unlink), which is the only answer that is final.
+   {
+      string savedToken = "", savedCode = "";
+      if(LoadLinkFile(savedToken, savedCode))
+      {
+         g_token = savedToken;
+         Print("NeurotradeBridge: resuming the saved link for account ",
+               IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)), "@", AccountInfoString(ACCOUNT_SERVER),
+               ". Nothing to do — the Desk keeps its pairing until you unlink it here or close MT5.");
+      }
+   }
 
    // v3.05: rebuild management state for every position this terminal already
    // manages. The record lives in the terminal's common folder, so a restart,
@@ -826,7 +919,7 @@ int OnInit()
    g_nextTokenRetry = 0;
    g_lastStoreWarnAt = 0;
 
-   Print("NeurotradeBridge v3.08 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
+   Print("NeurotradeBridge v3.09 attached. Configure ServerUrl and PairingCode in EA Inputs; ",
          "pairing will retry without removing the EA from this chart.");
    if(StringLen(NormalisedServerUrl()) == 0)
       Print("NeurotradeBridge: ServerUrl is empty. Set it to the public Desk origin.");
@@ -946,16 +1039,35 @@ void OnTimer()
 //+------------------------------------------------------------------+
 
 /**
- * Delete the link file written by v3.03-v3.07, if this terminal has one.
+ * ── THE SAVED LINK (v3.09) ──────────────────────────────────────────────────
  *
- * WHY: those builds saved the bearer token and pairing code in the terminal's
- * common Files folder and restored them at startup. Leaving such a file on disk
- * would undo this version's whole contract — the next MT5 start would find a
- * token for a session the server has already released, and the user would see
- * the old "reconnecting with a key I never agreed to keep" behaviour. The name
- * is reproduced exactly as v3.07 built it, per broker account.
+ * One file per MT5 account in the terminal's common Files folder, holding the
+ * bearer token and the pairing code this terminal last connected with.
+ *
+ * WHY IT IS BACK, AND WHY IT IS DIFFERENT FROM v3.03's VERSION:
+ *
+ * The owner's rule is that a link ends for exactly two reasons — the user
+ * unlinks the terminal in the Desk, or the user closes MT5. Everything else
+ * (a reboot, a closed laptop, an API redeploy, a store that could not be read,
+ * a rejected heartbeat) must not cost the user their connection, and without a
+ * credential on disk the terminal cannot re-adopt a link it already owns: the
+ * server has nothing to recognise it by, and the user is sent to the Desk for a
+ * new code. That is what the report describes as "the desk disconnects itself
+ * from the MT5 at times".
+ *
+ * What is different from v3.03: the file is deleted the moment the Desk says
+ * the link was REVOKED, and that answer is the only one that clears it. It is
+ * never used to keep a link alive that the server has ended — the server only
+ * ends a link when the user unlinks it, so a saved credential can only ever
+ * re-adopt a link that is still the user's.
+ *
+ * The file is written with the token, so it is a credential: it lives in the
+ * terminal's COMMON folder (per terminal, not per chart), and it is the reason
+ * the EA can come back from a restart without the user touching anything.
  */
-void RemoveLegacyLinkFile()
+#define LINK_DIR  "Neurotrade\\"
+
+string LinkFileName()
 {
    string account = StringFormat("%I64d_%s",
                                  AccountInfoInteger(ACCOUNT_LOGIN),
@@ -969,14 +1081,57 @@ void RemoveLegacyLinkFile()
       else
          safe += "_";
    }
-   string name = "NeurotradeBridge_" + safe + ".link";
-   ResetLastError();
-   if(!FileIsExist(name, FILE_COMMON)) return;
-   if(FileDelete(name, FILE_COMMON))
-      Print("NeurotradeBridge: removed the saved-link file left by an older version (", name,
-            "). The link now lives only while this terminal is open, as intended.");
+   return "NeurotradeBridge_" + safe + ".link";
+}
+
+/** Persist the live link so the next MT5 session re-adopts it. */
+void SaveLinkFile(const string token, const string code)
+{
+   if(token == "" || code == "") return;
+   string file = LinkFileName();
+   int handle = FileOpen(file, FILE_WRITE | FILE_TXT | FILE_COMMON | FILE_ANSI);
+   if(handle == INVALID_HANDLE)
+   {
+      Log("could not save the link file " + file + " (" + IntegerToString(GetLastError()) +
+          "). The link still works for this session; a restart will need the pairing code again.");
+      return;
+   }
+   FileWriteString(handle, "v1|" + token + "|" + code);
+   FileClose(handle);
+}
+
+/** Read the saved link, if this account has one. Returns false when absent. */
+bool LoadLinkFile(string &token, string &code)
+{
+   token = "";
+   code = "";
+   string file = LinkFileName();
+   if(!FileIsExist(file, FILE_COMMON)) return false;
+   int handle = FileOpen(file, FILE_READ | FILE_TXT | FILE_COMMON | FILE_ANSI);
+   if(handle == INVALID_HANDLE) return false;
+   string text = "";
+   while(!FileIsEnding(handle)) text += FileReadString(handle);
+   FileClose(handle);
+   StringTrimRight(text);
+   StringReplace(text, "\r", "");
+   StringReplace(text, "\n", "");
+   string parts[];
+   if(StringSplit(text, StringGetCharacter("|", 0), parts) != 3) return false;
+   if(parts[0] != "v1") return false;
+   token = parts[1];
+   code = parts[2];
+   return (StringLen(token) > 0 && StringLen(code) > 0);
+}
+
+/** Forget the saved link. Called for the ONE answer that is final: revoked. */
+void DeleteLinkFile(const string why)
+{
+   string file = LinkFileName();
+   if(!FileIsExist(file, FILE_COMMON)) return;
+   if(FileDelete(file, FILE_COMMON))
+      Print("NeurotradeBridge: cleared the saved link (", why, ").");
    else
-      Log("Could not remove the old saved-link file " + name + " (" + IntegerToString(GetLastError()) + ").");
+      Log("could not clear the saved link file " + file + " (" + IntegerToString(GetLastError()) + ").");
 }
 
 /**
@@ -989,7 +1144,16 @@ void RemoveLegacyLinkFile()
  */
 string EffectivePairingCode()
 {
-   return StringTrimmed(PairingCode);
+   string typed = StringTrimmed(PairingCode);
+   if(StringLen(typed) > 0) return typed;
+   // No code in the inputs: this is an unattended restart (an MT5 reboot, a
+   // terminal that came back after a crash). The saved link carries the code it
+   // paired with, and the server accepts that code for as long as the link
+   // remains unrevoked — which is exactly the "nothing but the user ends it"
+   // contract. An empty answer means "no saved link": the EA waits for a code.
+   string token = "", code = "";
+   if(LoadLinkFile(token, code)) return code;
+   return "";
 }
 
 /**
@@ -1145,6 +1309,10 @@ void TryPair()
    }
 
    g_token = token;
+   // v3.09: remember the link on disk, so the next session re-adopts it rather
+   // than needing a new code. Written only here — where the Desk has just
+   // confirmed the pairing — and cleared only on a revocation.
+   SaveLinkFile(token, code);
    g_lastOk = now;
    g_seq = 0;
    g_pairAttemptDelaySeconds = 5;
@@ -1153,13 +1321,11 @@ void TryPair()
    g_tokenRefusals = 0;
    g_nextTokenRetry = 0;
    g_lastStoreWarnAt = 0;
-   // v3.08: the token stays in memory — deliberately not on disk. It is what
-   // makes the link end when this terminal does.
    ApplyServerResponse(response);
    Print("NeurotradeBridge: paired with account ", IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)),
-         "@", AccountInfoString(ACCOUNT_SERVER), ". This link is held in memory only: it ends when MT5 is closed, ",
-         "and reconnecting then needs a NEW code from Desk -> Link MT5. An EA reload inside this running ",
-         "terminal continues on the same link.");
+         "@", AccountInfoString(ACCOUNT_SERVER), ". The link is saved for this account: MT5 restarts, an API ",
+         "redeploy and a network outage all resume it automatically. It ends only when you unlink the terminal ",
+         "in the Desk, or when you close MT5.");
 }
 
 bool HttpPost(const string path, const string body, string &response, const bool authenticated)
@@ -1390,6 +1556,12 @@ void Sync()
             g_tradingEnabled = false;
             g_pairAttemptDelaySeconds = 60;
             g_nextPairAttempt = NowServer() + 60;
+            // The saved link is cleared HERE and nowhere else: this is the ONE
+            // answer from the Desk that is final (the user unlinked the
+            // terminal). Every other refusal — including a 5xx, a 503 and an
+            // unverified 401 — keeps the credential, because none of them mean
+            // the user decided anything.
+            DeleteLinkFile("the terminal was unlinked in the Desk");
          }
          else
          {
@@ -2434,10 +2606,17 @@ void ArmPlanFromJson(const string obj, const string commandId)
    g_plans[slot].beOffsetR = JsonNumber(breakeven, "offsetR");
    int structureFlag = JsonBool(breakeven, "structureBuffer");
    g_plans[slot].beStructure = (structureFlag != 0);
+   // The structure deadline. Presence is checked by NAME rather than by value,
+   // because 0 is a meaningful setting ("wait for structure, however long it
+   // takes") and must not be confused with a plan that predates the field.
+   g_plans[slot].beFallbackR = (StringFind(breakeven, "\"structureFallbackR\"") >= 0)
+                                  ? JsonNumber(breakeven, "structureFallbackR")
+                                  : PM_BREAKEVEN_STRUCTURE_FALLBACK_R;
    string trail = JsonObject(management, "trail");
    g_plans[slot].trailMult = JsonNumber(trail, "mult");
    g_plans[slot].trailActivateR = JsonNumber(trail, "activateAtR");
    g_plans[slot].trailStepPoints = JsonNumber(trail, "stepPoints");
+   g_plans[slot].trailMode = PmTrailModeFromName(JsonString(trail, "mode"));
    double trailPeriod = JsonNumber(trail, "period");
    g_plans[slot].trailPeriod = (trailPeriod > 0 ? (int)trailPeriod : 14);
    g_plans[slot].trailEnabled = (trail != "");
@@ -2592,6 +2771,19 @@ void ApplyManagementCommand(const string obj, const string commandId)
       ps.beTriggerR = JsonNumber(breakeven, "triggerR");
       ps.beOffsetR = JsonNumber(breakeven, "offsetR");
       ps.beStructure = (JsonBool(breakeven, "structureBuffer") == 1);
+      // Absent = a policy from an older desk → the default deadline, not "no
+      // deadline": a stop that never moves is the defect being fixed.
+      ps.beFallbackR = (StringFind(breakeven, "\"structureFallbackR\"") >= 0)
+                          ? JsonNumber(breakeven, "structureFallbackR")
+                          : PM_BREAKEVEN_STRUCTURE_FALLBACK_R;
+      // A policy sent WITHOUT break-even (`breakeven` absent) means "no
+      // scheduled stop move", so the deadline must not fire either.
+   }
+   else
+   {
+      ps.beTriggerR = 0;
+      ps.beStructure = false;
+      ps.beFallbackR = 0;
    }
    string trail = JsonObject(management, "trail");
    ps.trailEnabled = (trail != "");
@@ -2600,6 +2792,7 @@ void ApplyManagementCommand(const string obj, const string commandId)
       ps.trailMult = JsonNumber(trail, "mult");
       ps.trailActivateR = JsonNumber(trail, "activateAtR");
       ps.trailStepPoints = JsonNumber(trail, "stepPoints");
+      ps.trailMode = PmTrailModeFromName(JsonString(trail, "mode"));
       double period = JsonNumber(trail, "period");
       ps.trailPeriod = (period > 0 ? (int)period : 14);
       if(ps.trailMult <= 0)
@@ -2799,6 +2992,8 @@ void PsInitBlank(PositionState &ps, const ulong ticket)
    ps.beTriggerR = 0;
    ps.beOffsetR = 0;
    ps.beStructure = true;
+   ps.beFallbackR = PM_BREAKEVEN_STRUCTURE_FALLBACK_R;
+   ps.trailMode = 0;
    ps.partialCount = 0;
    for(int i = 0; i < 4; i++)
    {
@@ -2806,6 +3001,7 @@ void PsInitBlank(PositionState &ps, const ulong ticket)
       ps.partialPct[i] = 0;
    }
    ps.trailEnabled = false;
+   ps.trailMode = 0;
    ps.trailMult = 0;
    ps.trailActivateR = 0;
    ps.trailStepPoints = 0;
@@ -2852,8 +3048,8 @@ string PsStageOr(const string stage) { return stage == "" ? "OPEN_RISK" : stage;
 string PsEncode(const PositionState &ps)
 {
    string f[];
-   ArrayResize(f, 29);
-   f[0]  = "v1";
+   ArrayResize(f, 31);
+   f[0]  = "v3";
    f[1]  = IntegerToString((long)ps.ticket);
    f[2]  = ps.planId;
    f[3]  = ps.symbol;
@@ -2882,8 +3078,16 @@ string PsEncode(const PositionState &ps)
    f[26] = DoubleToString(ps.atrEntry, 8);
    f[27] = IntegerToString(ps.lastModifyAt);
    f[28] = DoubleToString(ps.lastModifyR, 8);
+   // v2 (v3.09): the structure deadline travels with the position, so a restart
+   // does not silently revert a policy the owner configured. Appended LAST so a
+   // v1 record written by an earlier build still decodes.
+   f[29] = DoubleToString(ps.beFallbackR, 8);
+   // v3 (v3.09): the owner's TRAIL MODE travels with the position too, so a
+   // restart cannot quietly turn a structure trail back into a chandelier.
+   // Appended last again, so a v1 or v2 record still decodes.
+   f[30] = IntegerToString(ps.trailMode);
    string out = f[0];
-   for(int i = 1; i < 29; i++) out += "|" + f[i];
+   for(int i = 1; i < 31; i++) out += "|" + f[i];
    return out;
 }
 
@@ -2891,8 +3095,14 @@ bool PsDecode(const string text, PositionState &ps)
 {
    string f[];
    int n = StringSplit(text, StringGetCharacter("|", 0), f);
-   if(n != 29) return false;
-   if(f[0] != "v1") return false;
+   // v1 (29 fields, v3.08 — no deadline, no trail mode), v2 (30 fields, v3.09 —
+   // adds beFallbackR) and v3 (31 fields, v3.09 — adds trailMode). Older records
+   // decode with the defaults rather than being discarded: an upgrade must not
+   // orphan a live position's management state.
+   bool v1 = (n == 29 && f[0] == "v1");
+   bool v2 = (n == 30 && f[0] == "v2");
+   bool v3 = (n == 31 && f[0] == "v3");
+   if(!v1 && !v2 && !v3) return false;
    ps.ticket         = (ulong)StringToInteger(f[1]);
    ps.planId         = f[2];
    ps.symbol         = f[3];
@@ -2923,6 +3133,9 @@ bool PsDecode(const string text, PositionState &ps)
    ps.atrEntry       = StringToDouble(f[26]);
    ps.lastModifyAt   = (long)StringToInteger(f[27]);
    ps.lastModifyR    = StringToDouble(f[28]);
+   ps.beFallbackR    = (v2 || v3) ? StringToDouble(f[29]) : PM_BREAKEVEN_STRUCTURE_FALLBACK_R;
+   ps.trailMode      = v3 ? (int)StringToInteger(f[30]) : 0;
+   if(ps.trailMode < 0 || ps.trailMode > 2) ps.trailMode = 0;
    return (ps.entryTfIndex >= 0 && ps.riskPrice > 0);
 }
 
@@ -3042,6 +3255,22 @@ double AtrValue(const string symbol, const ENUM_TIMEFRAMES timeframe, const int 
 }
 
 /**
+ * The trail mode, from the name the Desk sends.
+ *
+ * The Desk's settings surface offers three trailing styles, so the terminal has
+ * to implement three — a dropdown whose value the EA ignored was exactly the
+ * "setting that does not apply" the owner reported. Anything unknown (an older
+ * Desk, a name this build does not know) degrades to the chandelier, which is
+ * every preset's default.
+ */
+int PmTrailModeFromName(const string name)
+{
+   if(name == "structure")    return 1;
+   if(name == "fixed_points") return 2;
+   return 0;   // "atr_chandelier", and anything unrecognised
+}
+
+/**
  * Breakeven's structure requirement: a confirmed higher low (buy) / lower high
  * (sell) beyond the entry, plus a closed bar in profit.
  *
@@ -3075,6 +3304,42 @@ bool PmStructureConfirmed(const string symbol, const ENUM_TIMEFRAMES tf,
       if(!isPivot) continue;
       double pivot = isBuy ? rates[i].low : rates[i].high;
       return isBuy ? (pivot > entry) : (pivot < entry);
+   }
+   return false;
+}
+
+/**
+ * WHERE structure is now, for the `structure` trail.
+ *
+ * `PmStructureConfirmed` answers "has structure turned?"; this answers "where is
+ * the level?". Same fractal rule, walked backwards from the newest closed bar,
+ * and only a pivot BEYOND the entry is offered — a swing on the wrong side of
+ * entry is not a stop, it is a loss. Returning false means "no level yet"; the
+ * caller defers and asks again on the next tick rather than loosening the rule.
+ */
+bool PmLastSwingStop(const string symbol, const ENUM_TIMEFRAMES tf, const bool isBuy,
+                     const double entry, double &out)
+{
+   MqlRates rates[];
+   int need = PM_SWING_LOOKBACK * 2 + 12;
+   if(CopyRates(symbol, tf, 0, need, rates) < need) return false;
+   int n = ArraySize(rates);
+   int lastClosed = n - 2;
+   if(lastClosed < PM_SWING_LOOKBACK * 2) return false;
+   for(int i = lastClosed - PM_SWING_LOOKBACK; i >= PM_SWING_LOOKBACK; i--)
+   {
+      bool isPivot = true;
+      for(int j = i - PM_SWING_LOOKBACK; j <= i + PM_SWING_LOOKBACK; j++)
+      {
+         if(j == i) continue;
+         if(isBuy && rates[j].low <= rates[i].low) { isPivot = false; break; }
+         if(!isBuy && rates[j].high >= rates[i].high) { isPivot = false; break; }
+      }
+      if(!isPivot) continue;
+      double level = isBuy ? rates[i].low : rates[i].high;
+      if(isBuy ? (level < entry) : (level > entry)) continue;
+      out = level;
+      return true;
    }
    return false;
 }
@@ -3369,10 +3634,36 @@ void ManageOnePosition(const int index)
    // ── 4. Breakeven ──────────────────────────────────────────────────────────
    if(ps.beTriggerR > 0 && !ps.beDone && ps.progressR >= ps.beTriggerR)
    {
-      bool confirmed = !ps.beStructure || PmStructureConfirmed(symbol, tf, isBuy, ps.entry);
+      bool structural = !ps.beStructure || PmStructureConfirmed(symbol, tf, isBuy, ps.entry);
+      /**
+       * THE STRUCTURE DEADLINE.
+       *
+       * Structure confirmation is the better reading of "+1R" and it is also how
+       * a winning position kept its original stop indefinitely: on a fast frame
+       * the pivot the rule wants may simply never print, so the trigger is met,
+       * the confirmation never comes, and nothing happens. That is the reported
+       * defect.
+       *
+       * `ps.beFallbackR` is R past the trigger after which the stop moves on the
+       * R trigger alone. 0 disables the fallback (wait for structure, however
+       * long it takes). The Desk sets it per mode; its own state machine
+       * implements the identical rule, and both are pinned by golden vectors.
+       */
+      bool pastDeadline = (ps.beFallbackR > 0) && (ps.progressR >= ps.beTriggerR + ps.beFallbackR);
+      bool confirmed = structural || pastDeadline;
       if(confirmed)
       {
-         double offset = ps.costPrice + PM_BREAKEVEN_PROFIT_R * ps.riskPrice;
+         /**
+          * THE OWNER'S OFFSET, NOT A CONSTANT.
+          *
+          * `offsetR` is a setting (0–2R, per mode) and it used to be captured —
+          * and then ignored, because this line used the EA's own constant. An
+          * owner who asked for the stop half an R beyond entry got 0.05R, which
+          * is a setting that does not apply. The constant is now only the floor
+          * for a position the Desk has not pushed a policy to yet.
+          */
+         double beOffsetR = (ps.beOffsetR > 0) ? ps.beOffsetR : PM_BREAKEVEN_PROFIT_R;
+         double offset = ps.costPrice + beOffsetR * ps.riskPrice;
          double candidate = isBuy ? ps.entry + offset : ps.entry - offset;
          bool tighter = (currentSl <= 0) || (isBuy ? candidate > currentSl : candidate < currentSl);
          if(!PmRespectsBroker(symbol, isBuy, candidate, atr))
@@ -3401,8 +3692,11 @@ void ManageOnePosition(const int index)
                if(ps.stage == "OPEN_RISK") ps.stage = "BE_ARMED";
                modifyDone = true;
                PmEvent(ticket, "breakeven",
-                       StringFormat("+%.2fR with structure confirmed → stop %.5f (entry + cost + %.2fR)",
-                                    ps.progressR, candidate, PM_BREAKEVEN_PROFIT_R));
+                       structural
+                         ? StringFormat("+%.2fR with structure confirmed → stop %.5f (entry + cost + %.2fR)",
+                                        ps.progressR, candidate, beOffsetR)
+                         : StringFormat("+%.2fR — structure had not confirmed by +%.2fR (deadline) → stop %.5f anyway (entry + cost + %.2fR)",
+                                        ps.progressR, ps.beTriggerR + ps.beFallbackR, candidate, beOffsetR));
                g_ps[index] = ps;
                PsSave(ps);
             }
@@ -3419,18 +3713,57 @@ void ManageOnePosition(const int index)
       }
    }
 
-   // ── 5. Trailing stop (ENTRY timeframe ATR, chandelier) ────────────────────
+   // ── 5. Trailing stop — the OWNER'S mode ──────────────────────────────────
+   //
+   // Three styles, all three implemented here because all three are offered in
+   // the Desk's settings surface:
+   //
+   //   0 atr_chandelier  the extreme minus an ATR multiple (every preset)
+   //   1 structure       behind the last confirmed swing beyond entry
+   //   2 fixed_points    a fixed distance in points behind the extreme
+   //
+   // Structure mode can find no level yet (a pivot needs bars AFTER it): that is
+   // a deferral, never a reason to loosen the rule or to fall back silently.
    if(ps.trailEnabled && !modifyDone && ps.progressR >= ps.trailActivateR && atr > 0)
    {
       double mult = ps.trailMult > 0 ? ps.trailMult : (ps.mode == 0 ? PM_TRAIL_MULT_SCALP :
                                                       (ps.mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING));
       double best = ps.bestPrice > 0 ? ps.bestPrice : exitPrice;
-      double candidate = isBuy ? best - mult * atr : best + mult * atr;
-      double minStep = MathMax(ps.trailStepPoints * point, PM_TRAIL_MIN_STEP_ATR * atr);
-      double improvement = isBuy ? (candidate - currentSl) : (currentSl - candidate);
+      double candidate = 0;
+      string trailNote = "";
+      if(ps.trailMode == 1)
+      {
+         double swing = 0;
+         if(PmLastSwingStop(symbol, tf, isBuy, ps.entry, swing))
+         {
+            candidate = swing;
+            trailNote = StringFormat("structure: last confirmed %s %.5f",
+                                     isBuy ? "swing low" : "swing high", swing);
+         }
+         else if(VerboseLog)
+            Log("trail deferred on #" + IntegerToString((long)ticket) + ": no confirmed swing beyond entry yet");
+      }
+      else if(ps.trailMode == 2)
+      {
+         double distance = (ps.trailStepPoints > 0 ? ps.trailStepPoints * point : mult * atr);
+         candidate = isBuy ? best - distance : best + distance;
+         trailNote = StringFormat("fixed: %.5f behind the extreme (%.0f points)", best, distance / point);
+      }
+      else
+      {
+         candidate = isBuy ? best - mult * atr : best + mult * atr;
+         trailNote = StringFormat("chandelier: best %.5f − %.1fxATR(%d,%s)", best, mult, ps.trailPeriod, TfNameAt(ps.entryTfIndex));
+      }
+
+      // The Desk folds `minStepAtr` into `stepPoints` before sending, so a
+      // non-zero step IS the owner's minimum. The ATR floor only applies to a
+      // position with no pushed policy (stepPoints still 0).
+      double minStep = (ps.trailStepPoints > 0) ? ps.trailStepPoints * point : PM_TRAIL_MIN_STEP_ATR * atr;
+      double improvement = (candidate > 0) ? (isBuy ? (candidate - currentSl) : (currentSl - candidate))
+                                           : -1.0;
       bool cooling = (NowUtcMs() - ps.lastModifyAt) < PM_MODIFY_COOLDOWN_MS;
       bool meaningful = (ps.progressR - ps.lastModifyR) >= PM_MODIFY_COOLDOWN_R;
-      if(improvement >= minStep)
+      if(candidate > 0 && improvement >= minStep)
       {
          if(cooling && !meaningful)
          {
@@ -3451,9 +3784,7 @@ void ManageOnePosition(const int index)
                ps.lastModifyR = ps.progressR;
                ps.retryCount = 0;
                if(ps.beDone && ps.partialsDone > 0) ps.stage = "RUNNER";
-               PmEvent(ticket, "trail",
-                       StringFormat("chandelier: best %.5f − %.1fxATR(%d,%s) = %.5f",
-                                    best, mult, ps.trailPeriod, TfNameAt(ps.entryTfIndex), candidate));
+               PmEvent(ticket, "trail", trailNote + StringFormat(" → stop %.5f", candidate));
                g_ps[index] = ps;
                PsSave(ps);
             }
@@ -3588,8 +3919,28 @@ void PsApplyDefaults(PositionState &ps)
    ps.beTriggerR = 1.0;
    ps.beOffsetR = PM_BREAKEVEN_PROFIT_R;
    ps.beStructure = true;
-   ps.partialCount = 0;
+   ps.beFallbackR = PM_BREAKEVEN_STRUCTURE_FALLBACK_R;
+   /**
+    * v3.09: a defaulted position is no longer the one position in the terminal
+    * with no ladder at all.
+    *
+    * The old default was `partialCount = 0` plus a structure-confirmed 1R
+    * break-even — so a position whose plan had gone (an EA reload between the
+    * fill and the first sync, a manual trade, a position opened while the desk
+    * was redeploying) had NOTHING that could happen at 1R. The Desk pushes a
+    * proper policy on the next heartbeat (`reconcileManagement`), and until it
+    * arrives this rung is what makes "+1R and nothing happens" impossible: the
+    * EA quantises it against the real broker volume and skips it if the
+    * position cannot be split, exactly as it does for a plan's own ladder.
+    */
+   ps.partialCount = 1;
+   ps.partialAtR[0] = 1.0;
+   ps.partialPct[0] = 50;
+   ps.partialAtR[1] = 0; ps.partialPct[1] = 0;
+   ps.partialAtR[2] = 0; ps.partialPct[2] = 0;
+   ps.partialAtR[3] = 0; ps.partialPct[3] = 0;
    ps.trailEnabled = true;
+   ps.trailMode = 0;   // chandelier — every preset's default
    ps.trailMult = (ps.mode == 0 ? PM_TRAIL_MULT_SCALP : (ps.mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING));
    ps.trailActivateR = 1.2;
    ps.trailStepPoints = 1;
@@ -3607,6 +3958,9 @@ void PsApplyPlanPolicy(PositionState &ps, const ArmedPlan &plan)
    ps.beTriggerR = (plan.beTriggerR > 0 ? plan.beTriggerR : 1.0);
    ps.beOffsetR = plan.beOffsetR;
    ps.beStructure = plan.beStructure;
+   ps.beFallbackR = (plan.beFallbackR > 0 || plan.beStructure == false)
+                       ? plan.beFallbackR
+                       : PM_BREAKEVEN_STRUCTURE_FALLBACK_R;
    ps.partialCount = (int)MathMin(4, MathMax(0, plan.partialCount));
    for(int i = 0; i < ps.partialCount; i++)
    {
@@ -3614,6 +3968,7 @@ void PsApplyPlanPolicy(PositionState &ps, const ArmedPlan &plan)
       ps.partialPct[i] = plan.partialPct[i];
    }
    ps.trailEnabled = plan.trailEnabled;
+   ps.trailMode = plan.trailMode;
    ps.trailMult = (plan.trailMult > 0 ? plan.trailMult :
                    (ps.mode == 0 ? PM_TRAIL_MULT_SCALP : (ps.mode == 1 ? PM_TRAIL_MULT_INTRADAY : PM_TRAIL_MULT_SWING)));
    ps.trailActivateR = plan.trailActivateR;

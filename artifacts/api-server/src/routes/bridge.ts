@@ -32,6 +32,7 @@ import { recordTick } from "../lib/multiasset/subminute";
 import { getSlippageLedger, getSpreadHistory, getTimingLedger } from "../lib/multiasset/agent";
 import { recordSlippage, recordSpread, recordTimingOutcome, signedSlippageR } from "../lib/multiasset/execution";
 import { deskV4, v4On } from "../lib/multiasset/desk-v4-config";
+import { reconcileManagement } from "../lib/multiasset/desk-settings-runtime";
 import { bindTicket, recordClosedTrade } from "../lib/multiasset/governance-runtime";
 import { deskAlertNow } from "../lib/multiasset/alerts";
 import {
@@ -142,31 +143,31 @@ const router: IRouter = Router();
  * `OnDeinit` names the reason MT5 stopped the expert, so "it detached itself"
  * is answered in the journal instead of guessed at.
  *
- * v3.08 reverses the persistence contract: the link now lives only as long as
- * the terminal. The EA keeps its bearer token in MEMORY (nothing is written to
- * the terminal's common folder any more, and any file an older build left
- * behind is deleted on sight), the pairing code in its input is spent when the
- * terminal that redeemed it goes away, and `OnDeinit` calls
- * `/api/bridge/disconnect` when MT5 closes the chart or the terminal — so the
- * next session starts from a fresh code instead of resuming a link the user
- * never agreed to keep. `BRIDGE_LINK_LEASE_MS` (120 s of heartbeat silence) is
- * the backstop for the cases where no deinit ever runs.
+ * v3.09 restores the persistence the owner asked for, with a narrower ending:
+ * the EA saves its token and pairing code per MT5 account and re-adopts them on
+ * the next attach, so a reboot, a redeploy or a network outage costs nothing
+ * and needs no new code. A link ends for exactly two reasons — the user unlinks
+ * the terminal in the Desk (`bridge_link_revoked`, the only final answer the EA
+ * may act on), or the user closes MT5 (`OnDeinit` → `/disconnect`, now sent for
+ * `REASON_CLOSE` alone). `BRIDGE_LINK_LEASE_MS` no longer ends anything: silence
+ * marks the terminal STALE for display and nothing more.
  */
-export const EXPECTED_EA_VERSION = "3.08";
+export const EXPECTED_EA_VERSION = "3.09";
 
 /**
  * What a terminal is told when its code no longer works.
  *
- * Two things end a code: the terminal session that redeemed it (closed MT5, a
- * swept lease, the Desk replacing it), or the user generating a new one in the
- * dialog. Both mean the same thing to whoever is reading the journal — fetch the
+ * Two things end a code, and only two: the user pressing "Unlink terminal"
+ * (which revokes the code with the link), or the user generating a newer code in
+ * the dialog. Silence, a redeploy and a reboot all leave a code alone. Both
+ * endings mean the same thing to whoever is reading the journal — fetch the
  * current code and paste it in — so both answer with this, and the EA prints a
  * single actionable line instead of retrying a dead value forever.
  */
 const SPENT_CODE_MESSAGE =
-  "This pairing code is no longer active: the MT5 terminal session that used it has ended, or a newer " +
-  "code replaced it. A code is valid only while the terminal it paired with is running — generate a NEW " +
-  "code in the Desk (Link MT5) and paste it into the EA's PairingCode input.";
+  "This pairing code is no longer active: the Desk unlinked the terminal it belonged to, or a newer " +
+  "code replaced it. Generate a NEW code in the Desk (Link MT5) and paste it into the EA's PairingCode " +
+  "input.";
 
 /**
  * Answer "I could not check", never "your credential is dead".
@@ -247,20 +248,21 @@ function makePairingCode(): string {
 /**
  * Issue the browser a pairing code — or hand back the one it already has.
  *
- * THE CODE IS USED ONCE, FOR ONE TERMINAL SESSION. It exists to move a
- * credential from the Desk into a running MT5 terminal by hand: it is minted
- * here, typed into the EA's `PairingCode` input, redeemed by `/pair`, and from
- * that moment it is bound to the link it created. Nothing about it is meant to
- * survive the terminal that used it — when that link ends (MT5 closes, the EA
- * is disconnected, its heartbeats stop) the code is deleted, so reconnecting
- * means generating a new one here.
+ * THE CODE BELONGS TO THE LINK IT CREATED, FOR AS LONG AS THAT LINK LASTS. It
+ * exists to move a credential from the Desk into a running MT5 terminal by
+ * hand: it is minted here, typed into the EA's `PairingCode` input, and
+ * redeemed by `/pair`. From that moment it is the terminal's credential too —
+ * the EA keeps it on disk next to its token, so a reboot, a redeploy or a
+ * weekend of silence all reconnect on the SAME code, with no new value to type.
+ * It is spent only when the link is: the user unlinks the terminal, or the user
+ * closes MT5 and the EA says so.
  *
- * WHY THE REUSE IS STILL NEEDED WHILE A TERMINAL IS LIVE: the desk holds one
- * link per (browser session, account). An EA reload, a second chart on the same
- * account, or an API redeploy the terminal survived all re-present the SAME
- * code — and must be able to, or a deploy would demand a code the user has no
- * reason to expect. Reuse is therefore scoped to this session, and the redeemed
- * code only ever re-pairs the account its link already holds (see `/pair`).
+ * WHY THE REUSE IS NEEDED: the desk holds one link per (browser session,
+ * account). An EA reload, a second chart on the same account, a redeploy the
+ * terminal survived and the next MT5 session all re-present the SAME code — and
+ * must be able to, or every restart would demand a code the user has no reason
+ * to expect. Reuse stays scoped to this session, and a redeemed code only ever
+ * re-pairs the account its link already holds (see `/pair`).
  *
  * Rotation retires the previous codes outright: leaving alive a value the user
  * believes they have replaced would be a credential they no longer control.
@@ -348,11 +350,13 @@ router.post("/pairing-code", async (req, res) => {
  * of rotating it: two instances invalidating each other is what made the
  * connection flap.
  *
- * A CODE THAT HAS ALREADY PAIRED is only accepted back from the terminal it
- * paired: the link it created must still be alive, and this call must be
- * presenting the same account. Anything else is refused with
- * `pairing_code_spent`, because the alternative — a spent code that still mints
- * tokens — is a credential the user believes they have used up.
+ * A CODE THAT HAS ALREADY PAIRED is accepted back for as long as the link it
+ * created is alive, and only for that link's account. That is the whole point:
+ * the EA saved the code in the terminal's common folder, so the next session
+ * re-adopts its own link without the user touching anything. A code whose link
+ * is gone — revoked by "Unlink terminal", or deleted with a closed terminal —
+ * is refused with `pairing_code_spent`, because a credential that outlives its
+ * link is exactly what the user asked us not to keep.
  */
 router.post("/pair", async (req, res) => {
   prunePairings();
@@ -538,16 +542,20 @@ router.post("/pair", async (req, res) => {
     /**
      * The link contract, told to the terminal.
      *
-     * `linkEndsWithTerminal` replaces the old `durableLink: true`. It is not a
-     * promise about storage — it is the rule the EA implements: hold the token
-     * in memory, send `POST /api/bridge/disconnect` when MT5 closes this chart
-     * or the terminal, and expect to need a NEW code next time. `leaseMs` is
-     * how long the server will keep this link alive without hearing from it,
-     * so a terminal that is slow to start beating knows it is not forgotten.
+     * A link ends for exactly two reasons: the user unlinks it in the Desk, or
+     * the user closes MT5 (the EA's own `OnDeinit` reports that one). The EA is
+     * expected to persist its token and pairing code per MT5 account and
+     * re-adopt them on the next attach, so silence is never interpreted as an
+     * ending by either side. `leaseMs` is how long this link may go unheard
+     * before the DESK shows the terminal as stale — a display state, not a
+     * deadline after which anything is revoked. `durableLink` is back, and this
+     * time it is true: the rows, the code and the account claim all outlive the
+     * terminal process.
      */
-    linkModel: "terminal-session",
-    linkEndsWithTerminal: true,
-    durableLink: false,
+    linkModel: "unlink-or-terminal-close",
+    linkEndsWithTerminal: false,
+    durableLink: true,
+    resumesAutomatically: true,
     leaseMs: BRIDGE_LINK_LEASE_MS,
     subscriptions: { symbols: desk.watchlist, timeframes: TIMEFRAMES },
   });
@@ -597,12 +605,16 @@ router.post("/unpair", async (_req, res) => {
 /**
  * The terminal is going away — end its link, now.
  *
- * Called by the EA from `OnDeinit` for the reasons that mean the operator is
- * finished with this chart (MT5 closing the terminal or the chart, the EA being
- * removed, initialisation failing, the account changing). It is best effort by
- * design: MT5 does not wait for an EA's shutdown, so the call may not arrive at
- * all — the lease in `sweepExpiredLinks()` is what guarantees the link still
- * ends, just later.
+ * Called by the EA from `OnDeinit` for ONE reason: the user is closing MT5
+ * (REASON_CLOSE). A chart close, an EA removal, a timeframe switch or a failed
+ * attach does not come through here — those are things the user does to a
+ * chart, not decisions to end the connection, and the EA keeps its credentials
+ * through all of them.
+ *
+ * It is best effort by design: MT5 does not wait for an EA's shutdown, so the
+ * call may not arrive at all. Nothing else ends the link on a missed goodbye —
+ * the next MT5 session re-adopts the saved credentials, and the Desk shows the
+ * terminal as stale in the meantime.
  *
  * Several charts of one terminal share ONE link, each holding its own token, so
  * this drops the token that asked and only ends the link when it was the last
@@ -655,9 +667,9 @@ router.post("/disconnect", async (req, res) => {
  * the code that created them, release the account claim, and clear every
  * terminal-derived value from the Desk.
  *
- * Shared by the terminal's own `disconnect`, the heartbeat-lease sweeper and an
- * account handover, so "the link is over" means exactly one thing wherever it
- * is decided. The in-process Desk is cleared as well as the store, because the
+ * Shared by the terminal's own `disconnect` (the user closed MT5), an account
+ * handover to another Desk, and a re-pair that supersedes a live terminal, so
+ * "the link is over" means exactly one thing wherever it is decided. The in-process Desk is cleared as well as the store, because the
  * next thing the user sees is the Desk UI: leaving a stale terminal record
  * there would show a connected account that no longer exists.
  */
@@ -680,39 +692,47 @@ async function endSessionLink(sessionId: string, journalMessage: string): Promis
 }
 
 /**
- * End every link whose terminal has stopped heartbeating.
+ * Housekeeping for link rows. IT NO LONGER ENDS ANYTHING.
  *
- * THE RULE THIS ENFORCES: a pairing code is active only while the MT5 terminal
- * it paired with is running. A clean shutdown says so through `/disconnect`, but
- * a power cut, a killed process or a VPS reboot says nothing at all — so a link
- * that has been silent for longer than `BRIDGE_LINK_LEASE_MS` is ended here:
- * tokens deleted, claim released, code deleted, Desk cleared. The terminal
- * cannot come back on its own after that, which is the point: the user gets a
- * fresh code when they next open MT5.
+ * ── WHAT CHANGED, AND WHY ───────────────────────────────────────────────────
+ *
+ * This function used to be the desk's biggest source of unrequested
+ * disconnections: any link silent for `BRIDGE_LINK_LEASE_MS` (120 s) had its
+ * tokens revoked, its account claim released, its pairing code retired and its
+ * Desk cleared. A sleeping laptop, a closed lid, a weekend, a broker-side
+ * weekend maintenance window, a five-minute ISP wobble — all of it read as "the
+ * user unlinked the terminal", and the terminal came back to a 401 it was
+ * allowed to treat as final.
+ *
+ * The owner's rule is now the rule: a link ends when the USER ends it. So:
+ *
+ *   • silence still marks the terminal stale for DISPLAY (the Desk shows
+ *     `MT5 STALE`, the analysis path gates on quote freshness) and nothing more;
+ *   • the only rows this prunes are those already REVOKED — the user pressed
+ *     Unlink, the EA has had its spaced retries to read that final answer, and
+ *     the row is then deleted rather than accumulated;
+ *   • revoked links whose lease-out period has passed are the only thing that
+ *     changes state here.
+ *
+ * It keeps returning `0` as "links ended", because nothing ends links any more;
+ * the number is retained so the boot log and the tests read the same.
  */
 export async function sweepExpiredLinks(now = Date.now()): Promise<number> {
-  const expired = await staleLinks(now);
-  let ended = 0;
-  for (const link of expired) {
-    // Another chart of the same terminal still beating? Then the link is alive
-    // and only THIS token is gone — drop the one row and leave the link alone.
+  // ── Link rows the user never revoked are left exactly as they are ─────────
+  //
+  // `staleLinks()` is deliberately still consulted, because a link that has
+  // been silent for a very long time while ANOTHER token of the same session is
+  // still beating is a dead chart's leftover row: it is dropped so the Desk's
+  // token list cannot grow forever, and the link itself is untouched.
+  const stale = await staleLinks(now);
+  for (const link of stale) {
     const siblingsLive = await sessionHasLiveLink(link.sessionId, link.tokenHash, now);
-    if (siblingsLive) {
-      await deleteBridgeLinkByHash(link.tokenHash);
-      continue;
-    }
-    await endSessionLink(
-      link.sessionId,
-      `MetaTrader 5 terminal ${link.login}@${link.server} stopped syncing for over ` +
-        `${Math.round(BRIDGE_LINK_LEASE_MS / 1000)}s, so its link was released. ` +
-        `Open Desk → Link MT5 for a new pairing code when the terminal is running again.`,
-    );
-    ended++;
+    if (siblingsLive) await deleteBridgeLinkByHash(link.tokenHash);
   }
   // Revoked rows are kept only long enough for the EA's spaced retries to see
   // the final answer; past that they are deleted rather than accumulated.
   await pruneRevokedLinks(now);
-  return ended;
+  return 0;
 }
 
 /**
@@ -1486,6 +1506,33 @@ router.post("/sync", async (req, res) => {
   recordLegacyHistoryRequests(desk, historyKeys);
   const needsHistory = historyKeys.length > 0;
 
+  // ── The owner's policy, enforced on every open position ──────────────────
+  //
+  // Runs on every heartbeat, AFTER positions have been folded in, and it is
+  // what makes a setting true rather than aspirational:
+  //
+  //   • a position the EA opened itself (a manual trade, a pending order that
+  //     filled while the desk was redeploying) has never been sent a policy, so
+  //     it gets one here — otherwise it is the one position in the terminal
+  //     with no partials and no break-even rule at all;
+  //   • a position whose policy was set before the owner changed the settings
+  //     is re-sent, because its fingerprint no longer matches;
+  //   • a position whose policy already matches is left alone — this runs at
+  //     the heartbeat's own rate and a stop modification must never be chatter.
+  try {
+    const pushed = reconcileManagement(desk);
+    if (pushed.length > 0) {
+      journal(
+        desk,
+        "execution",
+        null,
+        `Management policy sent to ${pushed.length} position${pushed.length === 1 ? "" : "s"} (#${pushed.join(", #")}).`,
+      );
+    }
+  } catch (err) {
+    logger.warn({ err }, "Management reconcile failed");
+  }
+
   // ── Automatic best-market pass ───────────────────────────────────────────
   // Runs here — after quotes, candles and positions have been folded in and
   // before the browser is updated — so the desk arms the best of the user's
@@ -1571,10 +1618,14 @@ router.get("/status", async (_req, res) => {
       selectedCount: 0,
       lastPairingError,
       store,
-      // The contract, stated even with nothing connected: a code works for one
-      // terminal session, and the dialog says so next to the code itself.
-      linkModel: "terminal-session",
-      linkEndsWithTerminal: true,
+      // The contract, stated even with nothing connected: the dialog tells the
+      // user what will and will not end a link BEFORE they trust it with an
+      // account. One statement, in both branches — the previous split is how
+      // the dialog came to promise durability the server did not implement.
+      durable: true,
+      linkModel: "unlink-or-terminal-close" as const,
+      linkEndsWithTerminal: false,
+      resumesAutomatically: true,
       leaseMs: BRIDGE_LINK_LEASE_MS,
     });
   }
@@ -1610,21 +1661,26 @@ router.get("/status", async (_req, res) => {
     staleAfterMs: terminalStaleWindowMs(desk),
     syncIntervalMs: desk.terminal.syncIntervalMs || null,
     /**
-     * The link lives exactly as long as this terminal session.
+     * ── THE LIFETIME RULE, AS THE DESK STATES IT TO THE USER ─────────────────
      *
-     * `linkEndsWithTerminal` is the rule the dialog states to the user: MT5
-     * closing ends the connection, the code that made it is spent, and
-     * reconnecting starts from a NEW code. `leaseMs` is the server's own
-     * deadline — the terminal is given this long between heartbeats before the
-     * link is released — so the UI can explain the gap between "I closed MT5"
-     * and "the Desk shows it as gone" without inventing a second number.
+     * A link ends for two reasons: the user unlinks the terminal from the Desk,
+     * or the user closes MT5. Nothing else — not silence, not a redeploy, not a
+     * refused heartbeat, not a slow store.
      *
-     * `durable: false` is deliberately kept: older Desks read that key, and it
-     * must never again claim a link outlives the terminal that owns it.
+     * `resumesAutomatically` is the part that matters when MT5 is closed and
+     * reopened: the terminal keeps its link credential on disk, so the next
+     * session re-adopts the SAME link instead of asking the user for a new
+     * pairing code. Closing MT5 therefore ends the streaming session, not the
+     * pairing.
+     *
+     * `leaseMs` is still reported, and it now means only "this long without a
+     * heartbeat and the Desk shows the terminal as stale" — a display state,
+     * not a deadline after which anything is revoked.
      */
-    durable: false,
-    linkModel: "terminal-session" as const,
-    linkEndsWithTerminal: true,
+    durable: true,
+    linkModel: "unlink-or-terminal-close" as const,
+    linkEndsWithTerminal: false,
+    resumesAutomatically: true,
     leaseMs: BRIDGE_LINK_LEASE_MS,
     store,
     eaVersion: desk.terminal.eaVersion,

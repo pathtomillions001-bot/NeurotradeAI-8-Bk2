@@ -16,29 +16,28 @@ import { getDesk, resetDesk } from "../lib/multiasset/store";
 import router, { EXPECTED_EA_VERSION, pendingPairings, sweepExpiredLinks } from "./bridge";
 
 /**
- * The MT5 link lives exactly as long as the terminal that created it.
+ * The MT5 link ends when the USER ends it, and at no other time.
  *
  * THE CONTRACT THESE TESTS PIN
  *
- *   • A pairing code connects ONE terminal session. It is minted in the Desk,
- *     redeemed by `/pair`, and from then on it belongs to the link it created:
- *     it may re-pair that same account (an EA reload, a second chart, an API
- *     redeploy the terminal survived) and nothing else.
- *   • When that terminal goes away the link is GONE — the terminal says so
- *     through `/api/bridge/disconnect` when MT5 closes it, and the heartbeat
- *     lease (`BRIDGE_LINK_LEASE_MS` of silence) covers the case where no
- *     shutdown code ever runs. Tokens, the code and the account claim are all
- *     released with it.
- *   • Reconnecting is therefore deliberate: the user generates a NEW code.
- *     A spent code is refused, and so is a token from a released link.
+ *   • A link ends for exactly two reasons: the user presses "Unlink terminal"
+ *     in the Desk (`/unpair`, which REVOKES — the only answer an EA may act on
+ *     as final), or the user closes MT5 (the EA's `OnDeinit` posts
+ *     `/api/bridge/disconnect` for `REASON_CLOSE` alone).
+ *   • Silence ends nothing. `BRIDGE_LINK_LEASE_MS` is a DISPLAY window: past it
+ *     the Desk shows the terminal as STALE, and the analysis path pauses, but
+ *     the token, the pairing code and the account claim all stay valid —
+ *     `sweepExpiredLinks()` returns 0.
+ *   • Because the claim survives, an account stays reserved to this Desk
+ *     through a sleeping laptop, a redeploy and a broker outage. Nobody can
+ *     take an account by waiting for it.
  *
- * This file used to assert the OPPOSITE — that a link and its code survived a
- * restart and could only be ended by the user pressing "Unlink terminal". That
- * contract is what left credentials for closed sessions in the terminal and in
- * the database, and what made a terminal that reconnected after its session had
- * ended impossible to distinguish from one that was never disconnected.
+ * This file used to assert the OPPOSITE: that a link lived exactly as long as
+ * one terminal session, that the heartbeat lease ended it, and that a silent
+ * terminal released its claim. That contract disconnected users mid-trade, and
+ * it is gone.
  */
-describe("MT5 bridge — the link is scoped to the terminal session", () => {
+describe("MT5 bridge — the link ends when the user ends it", () => {
   const app = express();
   const sessions = new Map<string, string>();
   let sessionId = "session-a";
@@ -136,7 +135,7 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
     );
   }
 
-  /** Pair and return the bearer token, as the EA would hold it in memory. */
+  /** Pair and return the bearer token, as the EA would hold it on disk. */
   async function connect(session: string, login: number, server = "BROKER-DEMO"): Promise<string> {
     const { pairingCode } = await requestCode(session);
     const response = await pair(session, pairingCode, login, server);
@@ -146,15 +145,19 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
 
   /**
    * The terminal stopped beating without saying goodbye: a power cut, a killed
-   * process, a VPS reboot. Its last heartbeat is pushed beyond the lease, then
-   * the sweeper runs exactly as the interval would in production.
+   * process, a VPS reboot, a laptop lid, a broker-side weekend.
+   *
+   * Its link rows and the Desk's own last-heartbeat stamp are pushed past the
+   * display window, then the sweeper runs exactly as the interval does in
+   * production. NOTHING here may end the link — every caller asserts the return
+   * value is 0, because this is the state the Desk has to survive.
    */
-  async function terminalWentSilent(): Promise<number> {
+  async function terminalWentSilent(session: string): Promise<number> {
     const aged = Date.now() - BRIDGE_LINK_LEASE_MS - 1_000;
     for (const record of linkTesting.linkSnapshot()) record.lastSeenAt = aged;
+    const desk = getDesk(session);
+    if (desk.terminal) desk.terminal.lastSyncAt = aged;
     const ended = await sweepExpiredLinks();
-    // Mirror entries removed by the sweep are gone; any the sweeper decided to
-    // keep are aged again so the next call sees the same world.
     for (const record of linkTesting.linkSnapshot()) record.lastSeenAt = aged;
     return ended;
   }
@@ -220,48 +223,76 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
     assert.equal((await as(session, () => post("/sync", { seq: 2, instanceId: "ea-1" }, token))).status, 200);
   });
 
-  it("refuses a spent code once the terminal it paired has gone", async () => {
+  /**
+   * ── Silence is not an ending ───────────────────────────────────────────────
+   *
+   * The reported failure was the Desk disconnecting itself from MT5 with no
+   * user action. The cause was a lease: 120 s without a beat revoked the link.
+   * The user's rule is now the only rule, so this test walks through the exact
+   * sequence that used to kill a live account — silence, a sweep, a status
+   * read, a beat, a re-pair — and asserts that NOTHING was lost.
+   */
+  it("keeps the link, the token and the claim when the terminal goes silent", async () => {
     const session = browser("a");
     const { pairingCode } = await requestCode(session);
     const token = await connect(session, 6201);
+    assert.ok(claimHolder(accountKeyFor(6201, "BROKER-DEMO")), "pairing claims the account");
 
-    assert.equal(await terminalWentSilent(), 1, "the silent terminal's link is released");
+    assert.equal(await terminalWentSilent(session), 0, "the sweeper ends NOTHING — silence is a display state");
 
-    // The terminal is gone, so the code is gone with it.
-    const refused = await pair(session, pairingCode, 6201);
-    assert.equal(refused.status, 401);
-    const body = (await refused.json()) as { code: string; error: string };
-    assert.equal(body.code, "pairing_code_spent");
-    assert.match(body.error, /new code/i, "the refusal says what to do about it");
+    // The Desk sees the truth: still linked, visibly stale.
+    const status = (await (await as(session, () => get("/status"))).json()) as {
+      linked: boolean;
+      stale: boolean;
+      linkEndsWithTerminal: boolean;
+      resumesAutomatically: boolean;
+    };
+    assert.equal(status.linked, true, "a quiet terminal is a stale terminal, not an unlinked one");
+    assert.equal(status.stale, true, "the analysis path must still pause on stale quotes");
+    assert.equal(status.linkEndsWithTerminal, false);
+    assert.equal(status.resumesAutomatically, true);
 
-    // And so is the token: nothing may resurrect a closed session.
-    const stale = await as(session, () => post("/sync", { seq: 3, instanceId: "ea-1" }, token));
-    assert.equal(stale.status, 401);
-    assert.equal(((await stale.json()) as { code: string }).code, "bridge_token_unknown");
+    // The token the EA holds on disk still beats…
+    assert.equal((await as(session, () => post("/sync", { seq: 3, instanceId: "ea-1" }, token))).status, 200);
+    // …the code it holds still pairs…
+    const again = await pair(session, pairingCode, 6201);
+    assert.equal(again.status, 201, "the code the terminal already saved still pairs");
+    // …and the account is still this Desk's, so no other Desk can take it by waiting.
+    assert.ok(claimHolder(accountKeyFor(6201, "BROKER-DEMO")), "the claim survives silence");
+  });
 
-    // A NEW code is all it takes to come back.
-    const fresh = await requestCode(session);
-    const reconnected = await pair(session, fresh.pairingCode, 6201);
-    assert.equal(reconnected.status, 201);
+  it("does not release an account a silent terminal still holds", async () => {
+    const session = browser("a");
+    await connect(session, 6202);
+    assert.equal(await terminalWentSilent(session), 0);
+
+    // A second browser asks for a code and tries to take the same account.
+    const other = browser("b");
+    const { pairingCode } = await requestCode(other);
+    const refused = await pair(other, pairingCode, 6202);
+    assert.equal(refused.status, 409, "an account is not freed by silence");
+    assert.equal(((await refused.json()) as { code: string }).code, "account_already_connected");
+    assert.ok(claimHolder(accountKeyFor(6202, "BROKER-DEMO")));
   });
 
   it("refuses a live code presented for a different account", async () => {
     const session = browser("a");
     const { pairingCode } = await requestCode(session);
-    assert.equal((await pair(session, pairingCode, 6202)).status, 201);
+    assert.equal((await pair(session, pairingCode, 6203)).status, 201);
 
-    const other = await pair(session, pairingCode, 6203);
+    const other = await pair(session, pairingCode, 6204);
     assert.equal(other.status, 401, "a code belongs to the link it created, not to any terminal that asks");
     assert.equal(((await other.json()) as { code: string }).code, "pairing_code_spent");
   });
 
-  it("releases the link, the code and the account claim when the terminal disconnects", async () => {
+  it("releases the link, the code and the account claim when the user closes MT5", async () => {
     const session = browser("a");
     const { pairingCode } = await requestCode(session);
     const token = await connect(session, 6301);
     assert.ok(claimHolder(accountKeyFor(6301, "BROKER-DEMO")), "pairing claims the account");
 
-    const response = await as(session, () => post("/disconnect", { reason: "the terminal or chart was closed" }, token));
+    // This is the ONE ending the EA reports: `OnDeinit` for REASON_CLOSE.
+    const response = await as(session, () => post("/disconnect", { reason: "terminal closing" }, token));
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), { ok: true, ended: true });
 
@@ -270,6 +301,12 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
     assert.equal((await as(session, () => post("/sync", { seq: 1 }, token))).status, 401);
     assert.equal((await pair(session, pairingCode, 6301)).status, 401);
     assert.equal(claimHolder(accountKeyFor(6301, "BROKER-DEMO")), null);
+
+    // Coming back is a NEW code, generated for the new session — which is what
+    // "the user closed MT5" means.
+    const fresh = await requestCode(session);
+    const reconnected = await pair(session, fresh.pairingCode, 6301);
+    assert.equal(reconnected.status, 201);
   });
 
   it("keeps the link alive when only ONE chart of the terminal disconnects", async () => {
@@ -300,18 +337,24 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
     assert.equal(claimHolder(accountKeyFor(6302, "BROKER-DEMO")), null);
   });
 
-  it("releases a link whose terminal stopped beating, and claims nothing extra", async () => {
+  it("does not release a link whose terminal stopped beating", async () => {
     const session = browser("a");
-    await connect(session, 6401);
+    const token = await connect(session, 6401);
 
-    assert.equal(await terminalWentSilent(), 1);
-    assert.equal(claimHolder(accountKeyFor(6401, "BROKER-DEMO")), null, "the claim is released with the link");
+    assert.equal(await terminalWentSilent(session), 0, "a silent day must cost the user nothing");
+    assert.equal(claimHolder(accountKeyFor(6401, "BROKER-DEMO")) !== null, true, "the claim is not released");
 
-    const status = (await (await as(session, () => get("/status"))).json()) as { linked: boolean };
-    assert.equal(status.linked, false);
+    const status = (await (await as(session, () => get("/status"))).json()) as { linked: boolean; stale: boolean };
+    assert.equal(status.linked, true);
+    assert.equal(status.stale, true);
 
-    // Sweeping again is a no-op: there is nothing left to end.
-    assert.equal(await terminalWentSilent(), 0);
+    // Beating again is all it takes to clear the stale state — no re-pair.
+    assert.equal((await as(session, () => post("/sync", { seq: 1, instanceId: "ea-1" }, token))).status, 200);
+    const after = (await (await as(session, () => get("/status"))).json()) as { linked: boolean; stale: boolean };
+    assert.equal(after.stale, false, "the next beat makes the terminal live again");
+
+    // Sweeping again is still a no-op: there is nothing to end, ever.
+    assert.equal(await sweepExpiredLinks(), 0);
   });
 
   it("does not release a link that is still beating", async () => {
@@ -400,7 +443,7 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
     assert.equal(
       ((await revoked.json()) as { code: string }).code,
       "bridge_link_revoked",
-      "the EA may discard its token for this answer and no other",
+      "the EA may discard its saved credentials for this answer and no other",
     );
 
     // A token nobody ever issued is a different statement, and must not claim
@@ -445,7 +488,7 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
     assert.equal(fresh.eaUpdateAvailable, false);
   });
 
-  it("tells the Desk — and the EA — that the link ends with the terminal", async () => {
+  it("tells the Desk — and the EA — the two reasons a link can end", async () => {
     const session = browser("a");
     const { pairingCode } = await requestCode(session);
     const pairResponse = await pair(session, pairingCode, 6701);
@@ -453,23 +496,27 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
       linkModel: string;
       linkEndsWithTerminal: boolean;
       durableLink: boolean;
+      resumesAutomatically: boolean;
       leaseMs: number;
     };
-    assert.equal(pairBody.linkModel, "terminal-session");
-    assert.equal(pairBody.linkEndsWithTerminal, true);
-    assert.equal(pairBody.durableLink, false, "the protocol no longer promises a link that outlives MT5");
+    assert.equal(pairBody.linkModel, "unlink-or-terminal-close");
+    assert.equal(pairBody.linkEndsWithTerminal, false, "the terminal is not the thing that ends this link");
+    assert.equal(pairBody.durableLink, true, "the rows, the code and the claim outlive the terminal process");
+    assert.equal(pairBody.resumesAutomatically, true);
     assert.equal(pairBody.leaseMs, BRIDGE_LINK_LEASE_MS);
 
     const linked = (await (await as(session, () => get("/status"))).json()) as {
       linked: boolean;
       durable: boolean;
       linkEndsWithTerminal: boolean;
+      resumesAutomatically: boolean;
       leaseMs: number;
       store: { backend: string; reachable: boolean };
     };
     assert.equal(linked.linked, true);
-    assert.equal(linked.durable, false);
-    assert.equal(linked.linkEndsWithTerminal, true);
+    assert.equal(linked.durable, true);
+    assert.equal(linked.linkEndsWithTerminal, false);
+    assert.equal(linked.resumesAutomatically, true);
     assert.equal(linked.leaseMs, BRIDGE_LINK_LEASE_MS);
     assert.ok(linked.store, "the dialog still needs to know WHERE live links are tracked");
     assert.equal(linked.store.reachable, true);
@@ -478,11 +525,15 @@ describe("MT5 bridge — the link is scoped to the terminal session", () => {
     // user is reading the pairing code and about to trust it.
     const unlinked = (await (await as(browser("b"), () => get("/status"))).json()) as {
       linked: boolean;
+      durable: boolean;
       linkEndsWithTerminal: boolean;
+      resumesAutomatically: boolean;
       leaseMs: number;
     };
     assert.equal(unlinked.linked, false);
-    assert.equal(unlinked.linkEndsWithTerminal, true);
+    assert.equal(unlinked.durable, true);
+    assert.equal(unlinked.linkEndsWithTerminal, false);
+    assert.equal(unlinked.resumesAutomatically, true);
     assert.equal(unlinked.leaseMs, BRIDGE_LINK_LEASE_MS);
   });
 });

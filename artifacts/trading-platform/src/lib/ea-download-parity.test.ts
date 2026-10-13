@@ -71,36 +71,35 @@ test("the downloadable EA is byte-identical to the EA source", () => {
 });
 
 /**
- * The EA writes exactly one kind of record to disk — and it is not the link.
+ * The EA writes exactly two kinds of record to disk, and nothing else.
  *
- * v3.08 moved the bearer token into memory: closing MT5 must end the
- * connection, so nothing about a session may survive the process. What the EA
- * still persists is the POSITION-MANAGER state (v3.05), which has to survive a
- * restart or an open position would be left unmanaged. These assertions keep
- * the two apart: the file writes must be the manager's, with a real handle, and
- * none of them may carry the token.
+ *   1. the POSITION-MANAGER state (v3.05), which must survive a restart or an
+ *      open position would be left unmanaged;
+ *   2. the LINK credential (v3.09) — a deliberate reversal of v3.08, because a
+ *      link that cannot be re-adopted after a reboot is a link the desk drops
+ *      on the user, which is the reported defect.
+ *
+ * So this test now asserts the SHAPE of both rather than the absence of the
+ * second: every file write goes through a real handle, the link writer is the
+ * one that carries the token (and writes nothing else), and no other code path
+ * writes a file at all.
  */
-test("the only file writes are the position manager's, and never the token", () => {
+test("the two file writes are the position manager's and the link's, nothing else", () => {
   const source_body = fs.readFileSync(source, "utf8");
   const writes = [...source_body.matchAll(/\bFileWriteString\s*\(([^;]*?)\)\s*;/g)];
 
-  assert.ok(writes.length > 0, "the position manager must still persist its records (v3.05)");
+  assert.equal(writes.length, 2, "exactly two writers: the manager's records and the saved link");
   for (const [, args] of writes) {
     assert.match(args, /^\s*handle\s*,/, `FileWriteString must receive its open handle: ${args}`);
-    assert.doesNotMatch(args, /g_token/, `the link token must never be written to disk: ${args}`);
   }
-  // And no link FILE is touched anywhere except the routine that deletes the
-  // one an older build left behind.
-  assert.doesNotMatch(source_body, /SaveLink\s*\(/, "the EA must not write a link file");
-  const removalStart = source_body.indexOf("void RemoveLegacyLinkFile");
-  const removalEnd = source_body.indexOf("\n}", removalStart);
-  for (const match of source_body.matchAll(/"\.link"/g)) {
-    const at = match.index ?? 0;
-    assert.ok(
-      removalStart >= 0 && at > removalStart && at < removalEnd,
-      "the only code that may name a link file is RemoveLegacyLinkFile()",
-    );
-  }
+  const linkWrite = writes.map(([, args]) => args).find((args) => /token/.test(args));
+  assert.ok(linkWrite, "the link writer is the one that persists the credential");
+  assert.match(linkWrite, /^\s*handle\s*,\s*"v1\|"/, "and it writes one versioned record");
+
+  // The link file is named in one place only (the helper), and the token only
+  // reaches disk through SaveLinkFile.
+  const source_occurrences = [...source_body.matchAll(/"\.link"/g)].length;
+  assert.equal(source_occurrences, 1, "exactly one place names a .link file");
 });
 
 test("the published EA is a build that reports its own version and link", () => {
@@ -116,8 +115,10 @@ test("the published EA is a build that reports its own version and link", () => 
     "instanceId",
     "windowFromMs",
     "rawCount",
-    // v3.08: the terminal half of the session-scoped link.
-    "RemoveLegacyLinkFile",
+    // v3.09: the terminal half of the durable link.
+    "SaveLinkFile",
+    "DeleteLinkFile",
+    "LinkEndsWithThisRun",
     "DisconnectBridge",
     "LinkEndsWithThisRun",
     "pairing_code_spent",

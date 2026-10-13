@@ -354,7 +354,6 @@ describe("single-contract execution", () => {
   });
 
   it("re-quotes a quote that ages out while the BUY waits in the socket queue", async () => {
-    const realNow = Date.now;
     let clock = 1_000_000;
     mock.method(Date, "now", () => clock);
     try {

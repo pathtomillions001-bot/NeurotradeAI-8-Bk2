@@ -42,15 +42,17 @@ export function Badge({ tone = "mute", children, title }: { tone?: Tone; childre
 // ── meter ───────────────────────────────────────────────────────────────────
 
 /**
- * A 4px progress bar — the only "bar" the Desk draws, and always decoration
+ * A 3px progress bar — the only "bar" the Desk draws, and always decoration
  * beside a printed number (aria-hidden). A null fraction draws an empty
- * track: an unknown value is not a zero value.
+ * track: an unknown value is not a zero value. `tick` marks a limit position
+ * (e.g. where "near a limit" begins) so the bar has a scale, not just a hue.
  */
-export function Meter({ fraction, tone = "cy", className }: { fraction: number | null; tone?: Tone; className?: string }) {
+export function Meter({ fraction, tone = "cy", tick, className }: { fraction: number | null; tone?: Tone; tick?: number | null; className?: string }) {
   const pct = fraction === null ? null : Math.max(0, Math.min(1, fraction)) * 100;
   return (
     <div className={`desk-meter d-${tone}${className ? ` ${className}` : ""}`} aria-hidden="true">
       {pct !== null ? <div className="desk-meter-fill" style={{ width: `${pct}%` }} /> : null}
+      {tick !== null && tick !== undefined && tick > 0 && tick < 1 ? <div className="desk-meter-tick" style={{ left: `${tick * 100}%` }} /> : null}
     </div>
   );
 }

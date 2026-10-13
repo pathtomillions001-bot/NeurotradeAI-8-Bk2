@@ -361,13 +361,22 @@
 
 /* ── meters (the only "bars" on the Desk; no charts) ─────────────────────── */
 .desk-root .desk-meter {
-  height: 4px;
+  position: relative;
+  height: 3px;
   border-radius: 2px;
   background: var(--desk-s3);
   overflow: hidden;
   flex: none;
 }
 .desk-root .desk-meter-fill { height: 100%; border-radius: 2px; background: currentColor; }
+/* The limit tick: where "near a limit" begins (DESK_THRESHOLDS.nearLimitFraction). */
+.desk-root .desk-meter-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--desk-tx3) 80%, transparent);
+}
 
 /* ── table cells: padding lives here so every template aligns identically ── */
 .desk-root .desk-tr > * { min-width: 0; padding: 0 2px; }
@@ -498,4 +507,10 @@
   font-size: 10.5px;
   color: var(--desk-tx2);
   min-width: 0;
+}
+
+/* ── the calendar's blackout line (34px, amber, reason verbatim) ─────────── */
+.desk-root .desk-blackout {
+  border-bottom: 1px solid color-mix(in srgb, var(--desk-am) 40%, transparent);
+  background: color-mix(in srgb, var(--desk-am) 9%, transparent);
 }

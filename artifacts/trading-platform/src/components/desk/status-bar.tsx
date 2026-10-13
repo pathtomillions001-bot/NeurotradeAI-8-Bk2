@@ -9,7 +9,7 @@
  * — and shows an em dash, not the browser's clock, until the first stamp
  * lands. The browser clock is never presented as the server's.
  */
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { formatInZone, zoneAbbreviation } from "@/lib/desk";
 
@@ -27,9 +27,13 @@ export interface StatusBarProps {
   /** …and the moment the client received it (the query's dataUpdatedAt). */
   stateFetchedAt: number | null;
   timeZone: string;
+  /** The newest decision-journal line, e.g. "12:04 refused XAUUSD". */
+  lastJournal?: string | null;
+  /** Free slot for a calm one-line note (never an alarm — that is the strip's job). */
+  note?: ReactNode;
 }
 
-export function StatusBar({ fresh, warming, stale, mismatch, lastEventAt, eaVersion, serverTime, stateFetchedAt, timeZone }: StatusBarProps) {
+export function StatusBar({ fresh, warming, stale, mismatch, lastEventAt, eaVersion, serverTime, stateFetchedAt, timeZone, lastJournal, note }: StatusBarProps) {
   // One local tick a second: enough for a clock and a beat age, cheap enough
   // to leave running. Reduced motion is irrelevant — no animation, just text.
   const [now, setNow] = useState(() => Date.now());
@@ -71,6 +75,13 @@ export function StatusBar({ fresh, warming, stale, mismatch, lastEventAt, eaVers
       <span className="d-mute hidden shrink-0 sm:inline" title="The connected MT5 expert advisor">
         EA <span className="d-tx2" data-testid="ea-version">{eaVersion ?? "—"}</span>
       </span>
+
+      {lastJournal ? (
+        <span className="d-mute hidden shrink-0 truncate lg:inline" title="The newest decision-journal line" data-testid="last-journal">
+          {lastJournal}
+        </span>
+      ) : null}
+      {note ? <span className="d-mute hidden min-w-0 shrink truncate md:inline">{note}</span> : null}
 
       <span className="d-mute ml-auto shrink-0" title="Broker-side server clock, in the desk's timezone">
         server <span className="tnum d-tx2" data-testid="server-time">{clockLabel}</span>

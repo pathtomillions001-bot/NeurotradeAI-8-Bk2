@@ -10,7 +10,7 @@
  * desk-ui's formatters) and passes strings — an unavailable number arrives as
  * "—" and is rendered exactly like that. Below 1024px the strip becomes 4×2.
  */
-import type { Tone } from "./primitives";
+import { Meter, type Tone } from "./primitives";
 
 export interface StatTile {
   id: string;
@@ -20,6 +20,8 @@ export interface StatTile {
   tone?: Tone;
   /** Optional second line (e.g. the money behind a day %). */
   sub?: string | null;
+  /** Optional limit meter under the value (fraction against a policy limit). */
+  meter?: { fraction: number | null; tone?: Tone; tick?: number | null };
   title?: string;
 }
 
@@ -30,6 +32,7 @@ export function StatStrip({ tiles }: { tiles: StatTile[] }) {
         <div key={tile.id} className="desk-tile" data-tile={tile.id} title={tile.title ?? (tile.sub ? `${tile.label}: ${tile.sub}` : undefined)}>
           <span className="t-cap d-mute truncate">{tile.label}</span>
           <span className={`t-tile tnum truncate ${tile.tone ? `d-${tile.tone}` : "d-tx"}`}>{tile.value}</span>
+          {tile.meter ? <Meter fraction={tile.meter.fraction} tone={tile.meter.tone ?? tile.tone ?? "cy"} tick={tile.meter.tick} className="mt-0.5" /> : null}
           {tile.sub ? <span className="t-cap d-mute truncate">{tile.sub}</span> : null}
         </div>
       ))}

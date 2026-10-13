@@ -48,7 +48,10 @@ afterEach(() => {
 function fakeTransport(reply: (message: any) => any) {
   const sent: any[] = [];
   const connection = getAccountConnection(token, params.accountId);
-  mock.method(connection, "request", async (message: any) => {
+  mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { onSent?: () => void }) => {
+    // Match the production connection's send-time hook so these tests exercise
+    // the exact session that issued each proposal, including reconnect races.
+    hooks?.onSent?.();
     sent.push(message);
     return reply(message);
   });
@@ -269,6 +272,38 @@ describe("single-contract execution", () => {
   // A proposal id only exists inside the socket session that issued it. If the
   // socket re-handshook between the two calls, the id is dead — buying it anyway
   // is what produced "Unknown contract proposal" on a 1-tick buy.
+  it("re-quotes when the socket reconnects while the proposal response is in flight", async () => {
+    let generation = 1;
+    let quotes = 0;
+    const sent: any[] = [];
+    const connection = getAccountConnection(token, params.accountId);
+    mock.method(connection, "sessionGeneration", () => generation);
+    mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { onSent?: () => void }) => {
+      hooks?.onSent?.();
+      sent.push(message);
+      if (message.proposal) {
+        const quoteNumber = ++quotes;
+        // The first quote was sent on generation 1, but its response arrives
+        // after the socket has reconnected to generation 2.
+        if (quoteNumber === 1) generation = 2;
+        return {
+          msg_type: "proposal",
+          proposal: { id: `proposal-${quoteNumber}`, ask_price: quoteNumber, payout: 1.63 },
+        };
+      }
+      return purchase;
+    });
+
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 2, "the pre-reconnect quote is replaced");
+    assert.deepEqual(
+      sent.filter((m) => m.buy).map((m) => m.buy),
+      ["proposal-2"],
+      "only the proposal issued by the current session is bought",
+    );
+  });
+
   it("re-quotes and buys the fresh id when the socket re-handshook after the quote", async () => {
     let generations = 0;
     let quotes = 0;

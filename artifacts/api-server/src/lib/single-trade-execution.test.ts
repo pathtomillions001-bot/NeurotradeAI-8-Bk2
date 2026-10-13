@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import {
   closeAccountConnections,
   executeLiveTrade,
+  UnsupportedDerivProposalError,
   getAccountConnection,
   isLiveOrderInFlight,
   isRetryableDerivError,
@@ -48,7 +49,10 @@ afterEach(() => {
 function fakeTransport(reply: (message: any) => any) {
   const sent: any[] = [];
   const connection = getAccountConnection(token, params.accountId);
-  mock.method(connection, "request", async (message: any) => {
+  mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+    // Mimic production order: validate before send, capture session, then reply.
+    hooks?.beforeSend?.();
+    hooks?.onSent?.();
     sent.push(message);
     return reply(message);
   });
@@ -171,7 +175,7 @@ describe("single-contract execution", () => {
     const sent = fakeTransport(() => deadProposal);
     await assert.rejects(
       executeLiveTrade(token, params),
-      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
+      UnsupportedDerivProposalError,
     );
     assert.equal(sent.length, 1);
     assert.equal(sent.filter((m) => m.buy).length, 0);
@@ -269,6 +273,66 @@ describe("single-contract execution", () => {
   // A proposal id only exists inside the socket session that issued it. If the
   // socket re-handshook between the two calls, the id is dead — buying it anyway
   // is what produced "Unknown contract proposal" on a 1-tick buy.
+  it("re-quotes when the socket reconnects while the proposal response is in flight", async () => {
+    let generation = 1;
+    let quotes = 0;
+    const sent: any[] = [];
+    const connection = getAccountConnection(token, params.accountId);
+    mock.method(connection, "sessionGeneration", () => generation);
+    mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+      hooks?.beforeSend?.();
+      hooks?.onSent?.();
+      sent.push(message);
+      if (message.proposal) {
+        const quoteNumber = ++quotes;
+        // The first quote was sent on generation 1, but its response arrives
+        // after the socket has reconnected to generation 2.
+        if (quoteNumber === 1) generation = 2;
+        return {
+          msg_type: "proposal",
+          proposal: { id: `proposal-${quoteNumber}`, ask_price: quoteNumber, payout: 1.63 },
+        };
+      }
+      return purchase;
+    });
+
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 2, "the pre-reconnect quote is replaced");
+    assert.deepEqual(
+      sent.filter((m) => m.buy).map((m) => m.buy),
+      ["proposal-2"],
+      "only the proposal issued by the current session is bought",
+    );
+  });
+
+  it("re-quotes when the session changes after preflight but before the BUY is sent", async () => {
+    let generation = 1;
+    let quotes = 0;
+    const sent: any[] = [];
+    const connection = getAccountConnection(token, params.accountId);
+    mock.method(connection, "sessionGeneration", () => generation);
+    mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+      // Simulate a reconnect while the queued BUY is waiting, after preflight.
+      // The beforeSend guard must block this stale request before recording it.
+      if (message.buy && generation === 1) generation = 2;
+      hooks?.beforeSend?.();
+      hooks?.onSent?.();
+      sent.push(message);
+      if (message.proposal) {
+        const n = ++quotes;
+        return { msg_type: "proposal", proposal: { id: `proposal-${n}`, ask_price: n, payout: 1.63 } };
+      }
+      return purchase;
+    });
+
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 2, "a new proposal is requested after reconnect");
+    assert.equal(sent.filter((m) => m.buy).length, 1, "only one BUY is sent");
+    assert.equal(sent.filter((m) => m.buy)[0].buy, "proposal-2", "the stale proposal is never purchased");
+  });
+
   it("re-quotes and buys the fresh id when the socket re-handshook after the quote", async () => {
     let generations = 0;
     let quotes = 0;
@@ -290,18 +354,58 @@ describe("single-contract execution", () => {
     );
   });
 
-  it("re-quotes a quote that aged out behind the socket queue", async () => {
-    const realNow = Date.now;
-    let clock = 0;
-    // Every clock read is 5 s later than the previous one, so any quote is older
-    // than a proposal's life by the time its buy would be sent — the 4 s
-    // rate-limit pause case.
-    mock.method(Date, "now", () => realNow() + (clock += 5_000));
+  it("measures proposal age from send time when the quote response is delayed", async () => {
+    let clock = 1_000_000;
+    mock.method(Date, "now", () => clock);
     try {
       let quotes = 0;
-      const sent = fakeTransport((m) => m.proposal
-        ? { msg_type: "proposal", proposal: { id: `proposal-${++quotes}`, ask_price: 1, payout: 1.63 } }
-        : purchase);
+      const sent: any[] = [];
+      const connection = getAccountConnection(token, params.accountId);
+      mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+        hooks?.beforeSend?.();
+        hooks?.onSent?.();
+        sent.push(message);
+        if (message.proposal) {
+          const n = ++quotes;
+          if (n === 1) clock += 5_000; // response arrives after the quote has expired
+          return { msg_type: "proposal", proposal: { id: `proposal-${n}`, ask_price: 1, payout: 1.63 } };
+        }
+        return purchase;
+      });
+      const result = await executeLiveTrade(token, params);
+      assert.equal(result.contractId, 1234);
+      assert.equal(sent.filter((m) => m.proposal).length, 2, "the delayed quote is replaced");
+      assert.deepEqual(sent.filter((m) => m.buy).map((m) => m.buy), ["proposal-2"]);
+    } finally {
+      mock.restoreAll();
+    }
+  });
+
+  it("re-quotes a quote that ages out while the BUY waits in the socket queue", async () => {
+    let clock = 1_000_000;
+    mock.method(Date, "now", () => clock);
+    try {
+      let quotes = 0;
+      let agedFirstBuy = false;
+      const sent: any[] = [];
+      const connection = getAccountConnection(token, params.accountId);
+      mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+        // Advance time only after preflight and just before the first buy's
+        // send guard, simulating a queue/rate-limit delay rather than making
+        // every operation take five seconds.
+        if (message.buy && !agedFirstBuy) {
+          agedFirstBuy = true;
+          clock += 5_000;
+        }
+        hooks?.beforeSend?.();
+        hooks?.onSent?.();
+        sent.push(message);
+        if (message.proposal) {
+          const n = ++quotes;
+          return { msg_type: "proposal", proposal: { id: `proposal-${n}`, ask_price: 1, payout: 1.63 } };
+        }
+        return purchase;
+      });
       const result = await executeLiveTrade(token, params);
       assert.equal(result.contractId, 1234);
       assert.equal(sent.filter((m) => m.proposal).length, 2, "the aged quote is replaced");

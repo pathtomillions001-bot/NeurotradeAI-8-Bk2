@@ -3331,6 +3331,38 @@ export class LiveOrderInFlightError extends Error {
   }
 }
 
+/**
+ * Deriv rejected the PROPOSAL request itself. This means the account is not
+ * offered that contract tuple on that market (unlike a rejected BUY with an
+ * expired proposal id). Callers should quarantine the candidate, not retry it
+ * on every tick or count it as a failed purchase.
+ */
+export class UnsupportedDerivProposalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedDerivProposalError";
+  }
+}
+
+/**
+ * A proposal became stale before the BUY was put on the wire. The before-send
+ * guard proves no purchase request was sent, so refresh the quote rather than
+ * recording a broker refusal or consuming an execution strike.
+ */
+export class LiveOrderNotSentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LiveOrderNotSentError";
+  }
+}
+
+class ProposalNeedsRefreshBeforeBuyError extends Error {
+  constructor() {
+    super("Proposal session or freshness changed before buy send.");
+    this.name = "ProposalNeedsRefreshBeforeBuyError";
+  }
+}
+
 /** Accounts with a proposal → buy pipeline in flight right now. */
 const liveOrdersInFlight = new Set<string>();
 
@@ -3440,9 +3472,21 @@ async function runSingleLiveOrder(
   const connection = getAccountConnection(bearerToken, accountId);
   const quote = async (): Promise<LiveProposal> => {
     let proposalMsg: any = null;
+    // Bind the proposal to the session that actually sent the request. A
+    // reconnect while the quote is in flight can otherwise make an id from the
+    // old session look like it belongs to the new one when the reply arrives.
+    let quotedGeneration: number | null = null;
+    let quotedAtMs: number | null = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       proposalMsg = await connection.request(
-        { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
+        { proposal: 1, ...buildProposal() },
+        ACCOUNT_REQUEST_TIMEOUT_MS,
+        {
+          onSent: () => {
+            quotedGeneration = connection.sessionGeneration();
+            quotedAtMs = Date.now();
+          },
+        },
       );
       if (proposalMsg && !proposalMsg.error) break;
       if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
@@ -3460,6 +3504,11 @@ async function runSingleLiveOrder(
     }
     if (proposalMsg.error) {
       logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
+      const code = String(proposalMsg.error?.code ?? "");
+      const text = String(proposalMsg.error?.message ?? "").toLowerCase();
+      if (code === "InvalidContractProposal" || text.includes("unknown contract proposal")) {
+        throw new UnsupportedDerivProposalError(describeDerivRejection(proposalMsg.error));
+      }
       throw new Error(describeDerivRejection(proposalMsg.error));
     }
     if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {
@@ -3468,8 +3517,12 @@ async function runSingleLiveOrder(
     return {
       proposalId: String(proposalMsg.proposal.id),
       askPrice: Number(proposalMsg.proposal.ask_price ?? params.stake),
-      generation: connection.sessionGeneration(),
-      quotedAtMs: Date.now(),
+      // Use the send-time generation, never the generation observed after the
+      // awaited response (the socket may have reconnected in between).
+      generation: quotedGeneration ?? connection.sessionGeneration(),
+      // Proposal lifetime starts when Deriv receives the request, not when a
+      // delayed quote reply finally reaches this process.
+      quotedAtMs: quotedAtMs ?? Date.now(),
     };
   };
 
@@ -3478,7 +3531,17 @@ async function runSingleLiveOrder(
   const purchase = (proposal: LiveProposal) => connection.request(
     { buy: proposal.proposalId, price: proposal.askPrice },
     ACCOUNT_REQUEST_TIMEOUT_MS,
-    { priority: true },
+    {
+      priority: true,
+      // Preflight alone is not sufficient: the request may wait for reconnect
+      // or throttling before the queue actually sends it. Revalidate here.
+      // Throwing from this hook rejects locally, before anything reaches Deriv.
+      beforeSend: () => {
+        if (proposalNeedsRefresh(proposal, connection.sessionGeneration(), Date.now())) {
+          throw new ProposalNeedsRefreshBeforeBuyError();
+        }
+      },
+    },
   );
 
   // ── Pre-buy integrity check (the dead-quote cause, prevented rather than
@@ -3511,19 +3574,35 @@ async function runSingleLiveOrder(
     return candidate;
   };
 
-  let quoted = await buyableQuote();
-  logger.info(
-    { proposalId: quoted.proposalId, askPrice: quoted.askPrice },
-    "executeLiveTrade: proposal received, sending buy",
-  );
+  // Validate at the actual socket-send boundary as well as before it. If the
+  // socket reconnects or throttling ages the quote between preflight and send,
+  // the request is rejected locally and we quote again; no stale BUY is sent.
+  const buyWithFreshQuote = async (): Promise<{ quoted: LiveProposal; buyMsg: any }> => {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const candidate = await buyableQuote();
+      logger.info(
+        { proposalId: candidate.proposalId, askPrice: candidate.askPrice },
+        "executeLiveTrade: proposal received, validating and sending buy",
+      );
+      try {
+        return { quoted: candidate, buyMsg: await purchase(candidate) };
+      } catch (error) {
+        if (!(error instanceof ProposalNeedsRefreshBeforeBuyError)) throw error;
+        logger.warn(
+          { symbol: params.symbol, contractType: params.contractType, attempt },
+          "executeLiveTrade: session changed at send time; refreshing quote before any buy was sent",
+        );
+      }
+    }
+    throw new LiveOrderNotSentError(
+      "Deriv trading session kept changing before the buy could be sent; no purchase was placed.",
+    );
+  };
 
-  // Once the buy has been SENT, a missing or malformed reply means the purchase
-  // may still have happened. That is a different outcome from a rejection, so it
-  // is raised as TradeOutcomeUnknownError and the caller must not treat the trade
-  // as never placed.
-  // A rejected request promise means the message was never sent (no connection
-  // or send failure), so it propagates unchanged as a definite "not placed".
-  let buyMsg = await purchase(quoted);
+  // Once the buy has actually been SENT, a missing or malformed reply means
+  // the purchase may still have happened. Locally blocked stale quotes are a
+  // different outcome: they are known not to have been sent.
+  let { quoted, buyMsg } = await buyWithFreshQuote();
 
   // ── The one and only purchase replay ────────────────────────────────────────
   // Deriv refused the buy because the proposal id we handed it does not exist in
@@ -3548,8 +3627,7 @@ async function runSingleLiveOrder(
     );
     // Through the same integrity check as the first attempt: the replacement id
     // must also ride the live session and be young when it is bought.
-    quoted = await buyableQuote();
-    buyMsg = await purchase(quoted);
+    ({ quoted, buyMsg } = await buyWithFreshQuote());
   }
 
   if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");

@@ -763,11 +763,11 @@ export const deskApi = {
       source: "mt5";
       horizonMinutes: number;
       /**
-       * v5 UI — the server's gate constants (MIN_RR_FILL, MIN_COST_COVERAGE),
-       * so the legacy gate rows print thresholds the server owns. Optional:
-       * absent on an older server.
+       * v5 UI — the server's gate constants (MIN_RR_FILL, MIN_COST_COVERAGE,
+       * DEFAULT_MIN_EDGE_R), so the legacy gate rows print thresholds the
+       * server owns. Optional: absent on an older server.
        */
-      thresholds?: { minRrFill: number; minCostCoverage: number };
+      thresholds?: { minRrFill: number; minCostCoverage: number; minEdgeR: number };
       decision: AgentDecision;
     }>(`/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`),
   scan: (mode: TradeMode) => request<{ mode: TradeMode; source: "mt5"; results: ScanRow[]; coverage: { selected: number; live: number; warming: number; stale: number }; scannedAt: number }>(`/desk/scan?mode=${mode}`),

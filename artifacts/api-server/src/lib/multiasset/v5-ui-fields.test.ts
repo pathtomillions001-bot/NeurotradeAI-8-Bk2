@@ -22,6 +22,7 @@ import {
   withManagementState,
 } from "./presenter";
 import { MIN_COST_COVERAGE, MIN_RR_FILL } from "./desk-constants";
+import { DEFAULT_MIN_EDGE_R } from "./agent";
 import {
   CALIBRATION_BUCKET_EDGES,
   calibrationBuckets,
@@ -119,9 +120,16 @@ describe("v5 UI fields — pure derivations", () => {
   });
 
   it("serves the gate constants the Decision panel prints, from desk-constants", () => {
-    assert.deepEqual(analysisThresholds(), { minRrFill: MIN_RR_FILL, minCostCoverage: MIN_COST_COVERAGE });
+    assert.deepEqual(analysisThresholds(), {
+      minRrFill: MIN_RR_FILL,
+      minCostCoverage: MIN_COST_COVERAGE,
+      minEdgeR: DEFAULT_MIN_EDGE_R,
+    });
     assert.equal(analysisThresholds().minRrFill, 2.0);
     assert.equal(analysisThresholds().minCostCoverage, 4);
+    // The live routes never override minEdgeR, so the legacy expectancy floor
+    // the UI prints is the agent's own default.
+    assert.equal(analysisThresholds().minEdgeR, 0.15);
   });
 
   it("summarises the v4 flags without changing them", () => {

@@ -12,6 +12,7 @@ import { feedHealth, type FeedStatus } from "./integrity";
 import { terminalIsFresh } from "./live";
 import { seriesFor, type DeskState } from "./store";
 import { MIN_COST_COVERAGE, MIN_RR_FILL } from "./desk-constants";
+import { DEFAULT_MIN_EDGE_R } from "./agent";
 import type { AssetClass, Position, Timeframe } from "./types";
 
 /** Timeframe used for the 24-hour high/low and the change percentage. */
@@ -188,8 +189,12 @@ export function scanEdgeFields(decision: {
  * The gate constants the Decision panel prints when the gatekeeper is not the
  * decider (the shipped, v4-off path). Served as an OPTIONAL `thresholds` block
  * on `GET /desk/analysis` so the UI never hard-codes a threshold the server
- * owns — these two numbers live in `desk-constants.ts` and nowhere else.
+ * owns. The live routes never override `minEdgeR`, so the expectancy floor the
+ * legacy path enforces IS `DEFAULT_MIN_EDGE_R`, read here from the agent module
+ * that owns the gate. (Safe to import statically: presenter is a leaf only the
+ * routes and the stream read — agent.ts never imports it, so there is no
+ * cycle.)
  */
-export function analysisThresholds(): { minRrFill: number; minCostCoverage: number } {
-  return { minRrFill: MIN_RR_FILL, minCostCoverage: MIN_COST_COVERAGE };
+export function analysisThresholds(): { minRrFill: number; minCostCoverage: number; minEdgeR: number } {
+  return { minRrFill: MIN_RR_FILL, minCostCoverage: MIN_COST_COVERAGE, minEdgeR: DEFAULT_MIN_EDGE_R };
 }

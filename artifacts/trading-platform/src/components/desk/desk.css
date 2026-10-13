@@ -1,0 +1,501 @@
+/**
+ * v5 Desk — design tokens and frame rules, scoped to `.desk-root`.
+ *
+ * The brief's tokens live HERE and nowhere else: global theme variables are
+ * not edited, and Tailwind classes reference these via arbitrary values
+ * (bg-[var(--desk-s1)]). Everything that prevents misalignment is a rule in
+ * this file or a number in desk-layout.ts — panels never choose their own
+ * heights, borders or scroll behaviour.
+ *
+ * Colour meaning is fixed:
+ *   green (--desk-up)  passed / profit / armed / healthy
+ *   rose  (--desk-dn)  failed / loss / stop / blocked / halted
+ *   amber (--desk-am)  warming / halved / near a limit / news pause
+ *   cyan  (--desk-cy)  selected / current step / primary action
+ *   violet(--desk-vi)  range regime ONLY
+ */
+
+.desk-root {
+  --desk-bg: #06080c;
+  --desk-rail: #05070a;
+  --desk-s1: #0b0f15; /* panel */
+  --desk-s2: #10151d; /* panel header, footers */
+  --desk-s3: #161c27;
+  --desk-line: #1b2330;
+  --desk-line2: #273244;
+  --desk-tx: #e8edf4;
+  --desk-tx2: #9aa7b9;
+  --desk-tx3: #64708a;
+  --desk-cy: #22d3ee;
+  --desk-up: #34d399;
+  --desk-dn: #fb7185;
+  --desk-am: #fbbf24;
+  --desk-vi: #a78bfa;
+
+  background: var(--desk-bg);
+  color: var(--desk-tx);
+  font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+  font-size: 11.5px;
+  line-height: 1.45;
+  letter-spacing: 0.005em;
+}
+
+/* ── numbers ───────────────────────────────────────────────────────────────
+   Every number on the Desk uses tabular figures so columns of digits do not
+   shimmer while the stream pushes. Applied via the .tnum utility and to every
+   <td>-role cell carrying data-num. */
+.desk-root .tnum {
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+/* ── type scale (the brief's five sizes) ─────────────────────────────────── */
+.desk-root .t-key { font-size: 28px; font-weight: 600; line-height: 1.1; }        /* key number */
+.desk-root .t-tile { font-size: 18px; font-weight: 600; line-height: 1.15; }      /* tile value */
+.desk-root .t-title { font-size: 12px; font-weight: 600; line-height: 1.2; }      /* panel title */
+.desk-root .t-body { font-size: 11.5px; font-weight: 400; line-height: 1.45; }    /* body and rows */
+.desk-root .t-cap { font-size: 10.5px; font-weight: 500; line-height: 1.3; }      /* caption, column head */
+
+/* ── focus: a visible keyboard ring everywhere inside the Desk ───────────── */
+.desk-root :focus-visible {
+  outline: 2px solid var(--desk-cy);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+
+/* ── thin scrollbars — panel bodies are the ONLY scrollers ───────────────── */
+.desk-root .desk-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: var(--desk-line2) transparent;
+}
+.desk-root .desk-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+.desk-root .desk-scroll::-webkit-scrollbar-track { background: transparent; }
+.desk-root .desk-scroll::-webkit-scrollbar-thumb {
+  background: var(--desk-line2);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+.desk-root .desk-scroll::-webkit-scrollbar-thumb:hover { background-color: #33415a; }
+
+/* ── the frame ───────────────────────────────────────────────────────────── */
+.desk-root .desk-frame {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--desk-bg);
+}
+
+.desk-root .desk-work {
+  flex: 1;
+  min-height: 0;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden; /* the work area itself does not scroll… */
+}
+
+.desk-root .desk-grid {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  column-gap: 12px;
+  row-gap: 12px;
+  grid-template-rows: var(--desk-rows, auto);
+}
+
+/* …except below 800px of viewport height: the work area scrolls vertically
+   and every row keeps a usable 300px minimum. Panels still never overlap —
+   the grid stretches, it does not stack. */
+@media (max-height: 800px) {
+  .desk-root .desk-work { overflow-y: auto; overflow-x: hidden; }
+  .desk-root .desk-work .desk-scroll { scrollbar-gutter: stable; }
+  .desk-root .desk-grid {
+    grid-template-rows: repeat(var(--desk-row-count, 2), minmax(300px, auto));
+  }
+}
+
+/* ── the panel: header 36px, body scrolls, nothing else ──────────────────── */
+.desk-root .desk-panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--desk-line);
+  border-radius: 6px;
+  background: var(--desk-s1);
+}
+.desk-root .desk-panel-header {
+  height: 36px;
+  flex: 0 0 36px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--desk-line);
+  background: linear-gradient(var(--desk-s2), var(--desk-s1));
+}
+.desk-root .desk-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+/* The Decision panel's focus treatment: cyan border at 35% + a faint glow. */
+.desk-root .desk-panel-focus {
+  border-color: color-mix(in srgb, var(--desk-cy) 35%, var(--desk-line));
+  box-shadow: 0 0 20px rgba(34, 211, 238, 0.06);
+}
+
+/* ── selected rows / current pipeline node ───────────────────────────────── */
+.desk-root .desk-row-selected {
+  background: color-mix(in srgb, var(--desk-cy) 8%, transparent);
+  box-shadow: inset 2px 0 0 var(--desk-cy);
+}
+.desk-root .desk-node-current {
+  box-shadow: inset 0 -2px 0 var(--desk-cy), 0 6px 14px -8px rgba(34, 211, 238, 0.5);
+}
+
+/* ── workspace tabs: cyan underline with a soft glow on the active tab ───── */
+.desk-root .desk-tab-active {
+  color: var(--desk-cy);
+  box-shadow: inset 0 -2px 0 var(--desk-cy), 0 4px 12px -6px rgba(34, 211, 238, 0.55);
+}
+
+/* ── tables: one template per table, header and rows share it ────────────── */
+.desk-root .desk-tr {
+  display: grid;
+  align-items: center;
+  gap: 0 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--desk-line) 60%, transparent);
+}
+.desk-root .desk-tr:last-child { border-bottom: none; }
+.desk-root .desk-thead {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--desk-s1);
+  border-bottom: 1px solid var(--desk-line);
+  color: var(--desk-tx3);
+}
+
+/* ── reduced motion: the Desk is calm — nothing moves unless data does ───── */
+@media (prefers-reduced-motion: reduce) {
+  .desk-root *,
+  .desk-root *::before,
+  .desk-root *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── compact widths: single column, natural heights, bottom tab bar ──────── */
+@media (max-width: 1023px) {
+  .desk-root .desk-work { overflow-y: auto; overflow-x: hidden; }
+  .desk-root .desk-grid {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+    grid-auto-rows: auto;
+  }
+}
+
+/* ── frame bands ─────────────────────────────────────────────────────────── */
+.desk-root .desk-titlebar {
+  flex: 0 0 48px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--desk-line);
+  background: var(--desk-rail);
+  min-width: 0;
+}
+.desk-root .desk-tabbar {
+  flex: 0 0 40px;
+  display: flex;
+  align-items: stretch;
+  padding: 0 12px;
+  gap: 2px;
+  border-bottom: 1px solid var(--desk-line);
+  background: var(--desk-rail);
+  min-width: 0;
+}
+.desk-root .desk-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.desk-root .desk-context { flex: 0 0 60px; min-height: 0; }
+.desk-root .desk-alertstrip { flex: 0 0 32px; min-height: 0; }
+.desk-root .desk-statusbar {
+  flex: 0 0 28px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 12px;
+  border-top: 1px solid var(--desk-line);
+  background: var(--desk-rail);
+  color: var(--desk-tx2);
+  font-size: 10.5px;
+  min-width: 0;
+}
+.desk-root .desk-cell { display: flex; min-width: 0; min-height: 0; }
+.desk-root .desk-cell > * { flex: 1; min-width: 0; min-height: 0; }
+
+/* ── tone utilities (colour + the text next to it; never colour alone) ───── */
+.desk-root .d-tx { color: var(--desk-tx); }
+.desk-root .d-tx2 { color: var(--desk-tx2); }
+.desk-root .d-mute { color: var(--desk-tx3); }
+.desk-root .d-up { color: var(--desk-up); }
+.desk-root .d-dn { color: var(--desk-dn); }
+.desk-root .d-am { color: var(--desk-am); }
+.desk-root .d-cy { color: var(--desk-cy); }
+.desk-root .d-vi { color: var(--desk-vi); }
+
+/* ── badges ──────────────────────────────────────────────────────────────── */
+.desk-root .desk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--desk-line2);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: var(--desk-tx2);
+  background: transparent;
+}
+.desk-root .desk-badge-up { color: var(--desk-up); border-color: color-mix(in srgb, var(--desk-up) 40%, transparent); background: color-mix(in srgb, var(--desk-up) 9%, transparent); }
+.desk-root .desk-badge-dn { color: var(--desk-dn); border-color: color-mix(in srgb, var(--desk-dn) 40%, transparent); background: color-mix(in srgb, var(--desk-dn) 9%, transparent); }
+.desk-root .desk-badge-am { color: var(--desk-am); border-color: color-mix(in srgb, var(--desk-am) 40%, transparent); background: color-mix(in srgb, var(--desk-am) 9%, transparent); }
+.desk-root .desk-badge-cy { color: var(--desk-cy); border-color: color-mix(in srgb, var(--desk-cy) 45%, transparent); background: color-mix(in srgb, var(--desk-cy) 9%, transparent); }
+.desk-root .desk-badge-vi { color: var(--desk-vi); border-color: color-mix(in srgb, var(--desk-vi) 40%, transparent); background: color-mix(in srgb, var(--desk-vi) 9%, transparent); }
+
+/* ── buttons ─────────────────────────────────────────────────────────────── */
+.desk-root .desk-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 4px;
+  border: 1px solid var(--desk-line2);
+  color: var(--desk-tx2);
+  font-size: 10.5px;
+  font-weight: 500;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.desk-root .desk-btn:hover:not(:disabled) { color: var(--desk-tx); background: var(--desk-s2); }
+.desk-root .desk-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.desk-root .desk-btn-danger {
+  color: var(--desk-dn);
+  border-color: color-mix(in srgb, var(--desk-dn) 45%, transparent);
+  background: color-mix(in srgb, var(--desk-dn) 8%, transparent);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.desk-root .desk-btn-danger:hover:not(:disabled) { background: color-mix(in srgb, var(--desk-dn) 16%, transparent); color: var(--desk-dn); }
+.desk-root .desk-btn-primary {
+  color: #06202a;
+  background: var(--desk-cy);
+  border-color: transparent;
+  font-weight: 600;
+}
+.desk-root .desk-btn-primary:hover:not(:disabled) { background: #4adcf3; color: #06202a; }
+
+/* ── segmented control (the trade-mode switch) ───────────────────────────── */
+.desk-root .desk-seg { display: flex; border: 1px solid var(--desk-line2); border-radius: 4px; overflow: hidden; }
+.desk-root .desk-seg-btn {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--desk-tx2);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.desk-root .desk-seg-btn + .desk-seg-btn { border-left: 1px solid var(--desk-line2); }
+.desk-root .desk-seg-btn:hover:not(:disabled) { color: var(--desk-tx); background: var(--desk-s2); }
+.desk-root .desk-seg-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.desk-root .desk-seg-active {
+  color: var(--desk-cy);
+  background: color-mix(in srgb, var(--desk-cy) 10%, transparent);
+  box-shadow: inset 0 -2px 0 var(--desk-cy);
+}
+
+/* ── filter chips (radius 11 per the brief) ──────────────────────────────── */
+.desk-root .desk-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 10px;
+  border-radius: 11px;
+  border: 1px solid var(--desk-line2);
+  color: var(--desk-tx2);
+  font-size: 10.5px;
+  font-weight: 500;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.desk-root .desk-chip:hover { color: var(--desk-tx); }
+.desk-root .desk-chip-active {
+  color: var(--desk-cy);
+  border-color: color-mix(in srgb, var(--desk-cy) 45%, transparent);
+  background: color-mix(in srgb, var(--desk-cy) 8%, transparent);
+}
+
+/* ── meters (the only "bars" on the Desk; no charts) ─────────────────────── */
+.desk-root .desk-meter {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--desk-s3);
+  overflow: hidden;
+  flex: none;
+}
+.desk-root .desk-meter-fill { height: 100%; border-radius: 2px; background: currentColor; }
+
+/* ── table cells: padding lives here so every template aligns identically ── */
+.desk-root .desk-tr > * { min-width: 0; padding: 0 2px; }
+.desk-root .desk-tr > *:first-child { padding-left: 12px; }
+.desk-root .desk-tr > *:last-child { padding-right: 12px; }
+.desk-root button.desk-tr {
+  width: 100%;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--desk-line) 60%, transparent);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.desk-root button.desk-tr:last-child { border-bottom: none; }
+.desk-root button.desk-tr:hover { background: color-mix(in srgb, var(--desk-s3) 60%, transparent); }
+
+/* ── sub-headers inside a panel body (28px, sticky) ──────────────────────── */
+.desk-root .desk-subheader {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 28px;
+  flex: 0 0 28px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--desk-tx3);
+  background: var(--desk-s1);
+  border-bottom: 1px solid color-mix(in srgb, var(--desk-line) 60%, transparent);
+}
+
+/* ── empty states and skeletons ──────────────────────────────────────────── */
+.desk-root .desk-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 100%;
+  min-height: 80px;
+  padding: 16px;
+  color: var(--desk-tx3);
+  font-size: 11.5px;
+  text-align: center;
+}
+.desk-root .desk-skel { background: var(--desk-s2); border-radius: 4px; height: 8px; }
+
+/* ── alert strip ─────────────────────────────────────────────────────────── */
+.desk-root .desk-alert {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 6px 0 10px;
+  border-radius: 6px;
+  border: 1px solid var(--desk-line2);
+  font-size: 11px;
+  min-width: 0;
+  background: var(--desk-s1);
+}
+.desk-root .desk-alert-rose { border-color: color-mix(in srgb, var(--desk-dn) 40%, transparent); background: color-mix(in srgb, var(--desk-dn) 8%, var(--desk-s1)); }
+.desk-root .desk-alert-amber { border-color: color-mix(in srgb, var(--desk-am) 40%, transparent); background: color-mix(in srgb, var(--desk-am) 8%, var(--desk-s1)); }
+.desk-root .desk-alert-sky { border-color: color-mix(in srgb, var(--desk-cy) 40%, transparent); background: color-mix(in srgb, var(--desk-cy) 7%, var(--desk-s1)); }
+
+/* ── status dot (always beside a word, never alone) ──────────────────────── */
+.desk-root .desk-dot { width: 6px; height: 6px; border-radius: 999px; flex: none; background: currentColor; }
+
+/* ── workspace tabs ──────────────────────────────────────────────────────── */
+.desk-root .desk-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 14px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--desk-tx2);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.desk-root .desk-tab:hover { color: var(--desk-tx); }
+
+/* ── stat strip: 8 tiles × 60px; 4×2 below 1024 ──────────────────────────── */
+.desk-root .desk-statstrip {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 12px;
+  height: 100%;
+}
+.desk-root .desk-tile {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  min-width: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--desk-line);
+  border-radius: 6px;
+  background: var(--desk-s1);
+}
+
+@media (max-width: 1023px) {
+  .desk-root .desk-context { flex: 0 0 auto; height: auto; }
+  .desk-root .desk-statstrip { grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 60px; height: auto; }
+  .desk-root .desk-titlebar { gap: 6px; padding: 0 8px; }
+  .desk-root .desk-tab { padding: 0 10px; }
+}
+
+/* ── panel footer (34px, totals line) ────────────────────────────────────── */
+.desk-root .desk-footer {
+  height: 34px;
+  flex: 0 0 34px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-top: 1px solid var(--desk-line);
+  background: var(--desk-s2);
+  font-size: 10.5px;
+  color: var(--desk-tx2);
+  min-width: 0;
+}

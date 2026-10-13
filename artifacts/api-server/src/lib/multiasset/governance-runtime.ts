@@ -169,6 +169,23 @@ export function planIdForTicket(ticket: number): string | null {
 }
 
 /**
+ * v5 UI — the agents that proposed a filled ticket's plan, for the closed-trade
+ * table's Agent column.
+ *
+ * The join already exists (`bindTicket` at fill acknowledgement → the plan's
+ * own memory); this only exposes it. Plan memory is capped, so an old ticket
+ * legitimately returns null — which renders as an em dash. It must never
+ * render as "no agents", because "the memory expired" and "no agent proposed
+ * this" are different claims.
+ */
+export function agentsForTicket(ticket: number): string[] | null {
+  const planId = planIdForTicket(ticket);
+  if (planId === null) return null;
+  const memory = planMemory(planId);
+  return memory ? [...memory.agents] : null;
+}
+
+/**
  * Apply one realised outcome to the agents that proposed it.
  *
  * Returns the actions taken so the caller can journal them — an agent being

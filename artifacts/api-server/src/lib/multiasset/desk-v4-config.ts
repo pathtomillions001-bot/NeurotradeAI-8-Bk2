@@ -308,3 +308,47 @@ export function v4On(feature: DeskV4Feature): boolean {
  * reader can see what "off" means without setting 20 environment variables.
  */
 export const DESK_V4_DEFAULTS: DeskV4Config = resolveDeskV4Config({});
+
+/**
+ * v5 UI — the flags in the shape the Desk renders them.
+ *
+ * The title bar's `V4 SHADOW` / `V4 LIVE` chip and the Learning workspace's
+ * "layer is switched off" empty states both need to know which subsystems are
+ * computing right now. The browser cannot read `process.env`, and a UI that
+ * guessed from endpoint 404s alone could not tell "off" from "broken" — so the
+ * configuration is summarised here, in ONE pure function of the resolved
+ * config, and served as an OPTIONAL block on `GET /desk/state`. It reports
+ * only what this module already decided; it changes nothing.
+ */
+export interface DeskV4Summary {
+  /** Master switch. */
+  enabled: boolean;
+  /** Global shadow: nothing v4 produces may arm an order. */
+  shadow: boolean;
+  /** Per-layer "is it computing at all" — the `v4On` predicate, by layer. */
+  layers: {
+    governance: boolean;
+    regimeHmm: boolean;
+    gatekeeper: boolean;
+    metaModel: boolean;
+    execution: boolean;
+    portfolio: boolean;
+    ui: boolean;
+  };
+}
+
+export function deskV4Summary(config: DeskV4Config = deskV4()): DeskV4Summary {
+  return {
+    enabled: config.enabled,
+    shadow: config.shadow,
+    layers: {
+      governance: v4On(config.governance),
+      regimeHmm: v4On(config.regimeHmm),
+      gatekeeper: v4On(config.gatekeeper),
+      metaModel: v4On(config.metaModel),
+      execution: v4On(config.execution),
+      portfolio: v4On(config.portfolio),
+      ui: v4On(config.ui),
+    },
+  };
+}

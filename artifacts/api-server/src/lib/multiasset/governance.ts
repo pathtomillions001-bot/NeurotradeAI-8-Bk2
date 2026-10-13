@@ -417,6 +417,20 @@ export interface WeeklyReport {
     meanSlippageR: number | null;
     worstR: number | null;
     bestR: number | null;
+    /**
+     * v5 UI — realised hit rate per predicted-probability bucket, built ONLY
+     * from stored rows that carry both a prediction and a realised R. Buckets
+     * with no trades are omitted; the UI marks a bucket with fewer than 10
+     * trades as "n too small" itself.
+     */
+    calibrationBuckets: CalibrationBucket[];
+    /**
+     * v5 UI — the one-sided 80% lower confidence bound of the mean measured R
+     * (mean − 1.2816·sd/√n, sample sd). Null below two measured trades: the sd
+     * of one sample is not a bound, and a bound the desk cannot compute must
+     * render as an em dash, never as the mean itself.
+     */
+    meanRLower80: number | null;
   };
   decisions: {
     evaluated: number;
@@ -439,6 +453,92 @@ export function refusalCode(refusal: string): string {
 
 function mean(values: number[]): number | null {
   return values.length > 0 ? values.reduce((a, v) => a + v, 0) / values.length : null;
+}
+
+// ── v5 UI: calibration buckets and the mean's lower bound ───────────────────
+
+/** One predicted-probability bucket of the weekly calibration table. */
+export interface CalibrationBucket {
+  /** Display label, e.g. "60–70%". */
+  label: string;
+  /** Inclusive lower edge, as a probability. */
+  lower: number;
+  /** Exclusive upper edge (the top bucket includes p = 1). */
+  upper: number;
+  /** Measured trades in the bucket (prediction AND realised R present). */
+  n: number;
+  meanPredicted: number | null;
+  realisedHitRate: number | null;
+  /** realisedHitRate − meanPredicted, in points — the bucket's own gap. */
+  gapPoints: number | null;
+}
+
+/**
+ * The bucket edges: fine where the desk actually predicts (50–100%, because a
+ * plan is only armed with a positive expectancy), one catch-all below.
+ */
+export const CALIBRATION_BUCKET_EDGES: { label: string; lower: number; upper: number }[] = [
+  { label: "<50%", lower: 0, upper: 0.5 },
+  { label: "50–60%", lower: 0.5, upper: 0.6 },
+  { label: "60–70%", lower: 0.6, upper: 0.7 },
+  { label: "70–80%", lower: 0.7, upper: 0.8 },
+  { label: "80–90%", lower: 0.8, upper: 0.9 },
+  // A hair past 1 so a predicted probability of exactly 1 lands in the top
+  // bucket rather than falling off the table.
+  { label: "90–100%", lower: 0.9, upper: 1 + 1e-9 },
+];
+
+/**
+ * Realised hit rate per predicted-probability bucket, from stored rows only.
+ *
+ * Pure and lossless: a trade without BOTH a prediction and a realised R is
+ * excluded (it cannot be calibrated against), and a bucket with no trades is
+ * omitted rather than reported as a hit rate of zero — zero trades and a 0%
+ * hit rate are different claims.
+ */
+export function calibrationBuckets(trades: WeeklyTrade[]): CalibrationBucket[] {
+  const measured = trades.filter(
+    (trade): trade is WeeklyTrade & { realisedR: number; predictedProbability: number } =>
+      trade.realisedR !== null && trade.predictedProbability !== null,
+  );
+  return CALIBRATION_BUCKET_EDGES.map((bucket) => {
+    const rows = measured.filter(
+      (trade) => trade.predictedProbability >= bucket.lower && trade.predictedProbability < bucket.upper,
+    );
+    if (rows.length === 0) {
+      return { label: bucket.label, lower: bucket.lower, upper: bucket.upper, n: 0, meanPredicted: null, realisedHitRate: null, gapPoints: null };
+    }
+    const meanPredicted = mean(rows.map((row) => row.predictedProbability)) as number;
+    const realisedHitRate = rows.filter((row) => row.realisedR > 0).length / rows.length;
+    return {
+      label: bucket.label,
+      lower: bucket.lower,
+      upper: bucket.upper,
+      n: rows.length,
+      meanPredicted,
+      realisedHitRate,
+      gapPoints: realisedHitRate * 100 - meanPredicted * 100,
+    };
+  }).filter((bucket) => bucket.n > 0);
+}
+
+/** One-sided 80% normal quantile: P(Z ≤ 1.2816) ≈ 0.80. */
+export const LOWER80_Z = 1.2816;
+
+/**
+ * The one-sided 80% lower confidence bound of a mean, sample sd, √n scaling.
+ *
+ * Null below two samples — with one trade the "bound" would be the trade
+ * itself, and printing that as a confidence bound is exactly the kind of
+ * number-that-looks-like-a-measurement the rollout forbids.
+ */
+export function meanRLower80(values: number[]): number | null {
+  if (values.length < 2) return null;
+  const m = mean(values) as number;
+  const variance = values.reduce((a, v) => a + (v - m) * (v - m), 0) / (values.length - 1);
+  const sd = Math.sqrt(variance);
+  if (!Number.isFinite(sd)) return null;
+  return m - (LOWER80_Z * sd) / Math.sqrt(values.length);
 }
 
 /**
@@ -569,6 +669,8 @@ export function weeklyReport(input: {
       meanSlippageR: mean(slippages),
       worstR: measured.length > 0 ? Math.min(...measured) : null,
       bestR: measured.length > 0 ? Math.max(...measured) : null,
+      calibrationBuckets: calibrationBuckets(trades),
+      meanRLower80: meanRLower80(measured),
     },
     decisions: {
       evaluated: evaluations.length,

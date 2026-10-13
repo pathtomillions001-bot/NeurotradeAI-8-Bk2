@@ -1,4 +1,4 @@
-import { Switch, Route, Router as WouterRouter, useLocation } from "wouter";
+import { Switch, Route, Redirect, Router as WouterRouter, useLocation } from "wouter";
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -12,7 +12,6 @@ import Markets from "./pages/markets";
 import Terminal from "./pages/terminal";
 import MarketDetail from "./pages/market-detail";
 import Trades from "./pages/trades";
-import Learning from "./pages/learning";
 import Analytics from "./pages/analytics";
 import Connect from "./pages/connect";
 import Settings from "./pages/settings";
@@ -240,7 +239,11 @@ function Router() {
         <Route path="/bots" component={Bots} />
         <Route path="/bot-builder" component={BotBuilder} />
         <Route path="/trades" component={Trades} />
-        <Route path="/learning" component={Learning} />
+        {/* v5: Learning is a Desk workspace now, not a page. The old URL keeps
+            working — it lands on the Desk with the Learning tab open. */}
+        <Route path="/learning">
+          <Redirect to="/terminal?tab=learning" replace />
+        </Route>
         <Route path="/analytics" component={Analytics} />
         <Route path="/intelligence" component={Intelligence} />
         <Route path="/settings" component={Settings} />

@@ -11,7 +11,9 @@ import { closes } from "./math";
 import { feedHealth, type FeedStatus } from "./integrity";
 import { terminalIsFresh } from "./live";
 import { seriesFor, type DeskState } from "./store";
-import type { AssetClass, Timeframe } from "./types";
+import { MIN_COST_COVERAGE, MIN_RR_FILL } from "./desk-constants";
+import { DEFAULT_MIN_EDGE_R } from "./agent";
+import type { AssetClass, Position, Timeframe } from "./types";
 
 /** Timeframe used for the 24-hour high/low and the change percentage. */
 const REFERENCE_TIMEFRAME: Timeframe = "M5";
@@ -126,9 +128,73 @@ export function deskSummary(desk: DeskState, now = Date.now()) {
       : null,
     account: desk.account,
     instruments: quoteSnapshot(desk, now),
-    positions: desk.positions,
+    positions: desk.positions.map(withManagementState),
     plans: [...desk.plans.values()],
     clockSkewMs: desk.clockSkewMs,
     lastQuoteAgeMs: desk.lastQuoteAgeMs,
   };
+}
+
+// ── v5 UI: small derived fields, all pure, all optional on the wire ─────────
+
+/**
+ * The management state of a position, as far as the wire data honestly shows.
+ *
+ * The WP0 state machine runs in the EA, and the heartbeat carries no state
+ * field — so the server does NOT claim to know "partial" or "runner". What it
+ * can state without inventing anything is geometry: a stop that sits at or
+ * beyond the entry has removed the position's initial risk, which is exactly
+ * what "breakeven armed" means. Everything else stays `"open"`, and the UI
+ * renders only these two words (an absent state shows no badge at all).
+ */
+export type PositionManagementState = "open" | "be";
+
+export function positionManagementState(position: Position): PositionManagementState {
+  if (position.sl === null || !(position.sl > 0)) return "open";
+  if (position.side === "buy") return position.sl >= position.openPrice ? "be" : "open";
+  return position.sl <= position.openPrice ? "be" : "open";
+}
+
+/** Attach the derived state without disturbing any other field. */
+export function withManagementState<T extends Position>(
+  position: T,
+): T & { managementState: PositionManagementState } {
+  return { ...position, managementState: positionManagementState(position) };
+}
+
+/**
+ * The scanner's edge columns, derived only from what the decision carries.
+ *
+ * `monteCarlo.rewardRisk` IS the reward:risk at the expected fill (agent.ts
+ * §5a), so it is reported as `rrFill` without recomputation. The edge floor is
+ * the gatekeeper's EV at p_LCB and the floor it was measured against; both are
+ * null whenever the gatekeeper did not decide (v4 off) — a null renders as an
+ * em dash, never as zero.
+ */
+export function scanEdgeFields(decision: {
+  monteCarlo: { rewardRisk: number } | null;
+  gatekeeper: { evLcbR: number | null; requiredEvLcbR: number } | null;
+}): { rrFill: number | null; edgeFloorR: number | null; edgeRequiredR: number | null } {
+  return {
+    rrFill: decision.monteCarlo ? Number(decision.monteCarlo.rewardRisk.toFixed(2)) : null,
+    edgeFloorR:
+      decision.gatekeeper && decision.gatekeeper.evLcbR !== null
+        ? Number(decision.gatekeeper.evLcbR.toFixed(3))
+        : null,
+    edgeRequiredR: decision.gatekeeper ? Number(decision.gatekeeper.requiredEvLcbR.toFixed(3)) : null,
+  };
+}
+
+/**
+ * The gate constants the Decision panel prints when the gatekeeper is not the
+ * decider (the shipped, v4-off path). Served as an OPTIONAL `thresholds` block
+ * on `GET /desk/analysis` so the UI never hard-codes a threshold the server
+ * owns. The live routes never override `minEdgeR`, so the expectancy floor the
+ * legacy path enforces IS `DEFAULT_MIN_EDGE_R`, read here from the agent module
+ * that owns the gate. (Safe to import statically: presenter is a leaf only the
+ * routes and the stream read — agent.ts never imports it, so there is no
+ * cycle.)
+ */
+export function analysisThresholds(): { minRrFill: number; minCostCoverage: number; minEdgeR: number } {
+  return { minRrFill: MIN_RR_FILL, minCostCoverage: MIN_COST_COVERAGE, minEdgeR: DEFAULT_MIN_EDGE_R };
 }

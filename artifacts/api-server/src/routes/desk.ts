@@ -14,7 +14,7 @@ import { logger } from "../lib/logger";
 import { evaluate, getSlippageLedger, getSpreadHistory, getTimingLedger, horizonMinutes } from "../lib/multiasset/agent";
 import { SPREAD_Z_WINDOW, recordSpread, spreadHistoryFor } from "../lib/multiasset/execution";
 import { correlationFromBars, MIN_COVARIANCE_SAMPLES } from "../lib/multiasset/portfolio-risk";
-import { deskV4, v4On } from "../lib/multiasset/desk-v4-config";
+import { deskV4, deskV4Summary, v4On } from "../lib/multiasset/desk-v4-config";
 import { performanceStats } from "../lib/multiasset/analytics";
 import {
   AUTO_SELECT_INTERVAL_MS,
@@ -37,7 +37,13 @@ import {
   terminalStaleWindowMs,
 } from "../lib/multiasset/live";
 import { upcomingRedFolder } from "../lib/multiasset/news";
-import { quoteSnapshot, deskSummary } from "../lib/multiasset/presenter";
+import {
+  analysisThresholds,
+  quoteSnapshot,
+  deskSummary,
+  scanEdgeFields,
+  withManagementState,
+} from "../lib/multiasset/presenter";
 import { addSSEClient, broadcastSSE, removeSSEClient } from "../lib/sse";
 import {
   DEFAULT_RISK_POLICY,
@@ -66,6 +72,7 @@ import {
   planMemory,
   rememberPlan,
   recordShadowDecision,
+  agentsForTicket,
 } from "../lib/multiasset/governance-runtime";
 import { E_DISABLE, E_HALVE, resumeAgent, weekWindow } from "../lib/multiasset/governance";
 import { REGIME_STATE_TTL_MS, deskRegimeState } from "../lib/multiasset/regime-state";
@@ -268,6 +275,9 @@ function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: numbe
       winProbability: null,
       lots: null,
       riskMoney: null,
+      rrFill: null,
+      edgeFloorR: null,
+      edgeRequiredR: null,
       rejections: [reason],
       summary: `${symbol}: ${reason}`,
     };
@@ -301,6 +311,9 @@ function scanRowFor(desk: DeskState, symbol: string, mode: TradeMode, now: numbe
     winProbability: decision.monteCarlo ? Number(decision.monteCarlo.winProbability.toFixed(3)) : null,
     lots: decision.sizing?.ok ? decision.sizing.lots : null,
     riskMoney: decision.sizing?.ok ? Number(decision.sizing.riskMoney.toFixed(2)) : null,
+    // v5 UI: the scanner's Edge floor / R:R columns, derived only from what the
+    // decision already carries (null ⇒ the UI prints an em dash).
+    ...scanEdgeFields(decision),
     rejections: decision.rejections,
     summary: decision.summary,
   };
@@ -373,7 +386,10 @@ router.get("/state", (_req, res) => {
       lastQuoteAgeMs: desk.lastQuoteAgeMs,
       quoteFreshForMs: QUOTE_STALE_MS,
     },
-    positions: desk.positions,
+    // v5 UI: each position carries the ONE management state its own geometry
+    // can prove (stop at or beyond entry ⇒ "be"); optional on the wire, so
+    // existing consumers are unaffected.
+    positions: desk.positions.map(withManagementState),
     plans: [...desk.plans.values()],
     policy: desk.policy,
     risk: {
@@ -403,6 +419,12 @@ router.get("/state", (_req, res) => {
     },
     journal: desk.journal.slice(0, 50),
     serverTime: now,
+    /**
+     * v5 UI: which v4 layers are computing right now, straight from the
+     * resolved configuration. Optional block — a client that predates it sees
+     * exactly the response it saw before.
+     */
+    v4: deskV4Summary(),
   });
 });
 
@@ -769,7 +791,13 @@ router.get("/performance", (_req, res) => {
     source: desk.terminal ? "mt5" : "unlinked",
     currency: desk.account?.currency ?? "USD",
     equityCurve: desk.equityHistory,
-    closedTrades: desk.closedTrades.slice(-50).reverse(),
+    // v5 UI: agent attribution via the fill→plan join that already exists.
+    // `agents` is null when the (capped) plan memory no longer holds the
+    // ticket — which renders as an em dash, never as "no agents".
+    closedTrades: desk.closedTrades
+      .slice(-50)
+      .reverse()
+      .map((trade) => ({ ...trade, agents: agentsForTicket(trade.ticket) })),
     bySymbol: symbols,
     overall: performanceStats(allR),
     outcomes: [...desk.outcomes.values()],
@@ -828,6 +856,11 @@ router.get("/analysis", (req, res) => {
     source: "mt5",
     horizonMinutes: horizonMinutes(mode),
     timezone: desk.timezone,
+    /**
+     * v5 UI: the gate constants the Decision panel prints when the gatekeeper
+     * is not the decider. Optional block; the decision itself is unchanged.
+     */
+    thresholds: analysisThresholds(),
     decision: {
       ...decision,
       confluence: {

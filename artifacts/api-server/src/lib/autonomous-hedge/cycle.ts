@@ -31,6 +31,8 @@ import {
   fetchDerivPortfolioContracts,
   fetchDerivProfitTable,
   isAutomatedMarket,
+  isLiveOrderInFlight,
+  LiveOrderInFlightError,
   TradeOutcomeUnknownError,
   waitForContractResult,
 } from "../deriv";
@@ -154,6 +156,8 @@ interface HedgeSession {
   lastReconcileAt: number;
   lastEmitAt: number;
   execFailures: number;
+  /** One analysed-and-tuned live attempt at a time — see liveAttemptHoldReason. */
+  liveGate: LiveAttemptGate;
   ctx: { at: number; value: HedgeContext } | null;
   evidenceTracker: EvidenceTracker;
   timingV2: TimingV2Controller;
@@ -165,6 +169,80 @@ const EMIT_THROTTLE_MS = 400;
 const EXPOSURE_RECHECK_MS = 1_500;
 const RECONCILE_THROTTLE_MS = 5_000;
 const CONSECUTIVE_EXEC_FAILURE_LIMIT = 3;
+
+// ── Live attempt gate: one trade, analysed and tuned, per attempt ─────────────
+//
+// The engine is tick-driven and coalesces ticks, so a buy that Deriv refuses in
+// 100 ms used to be retried by the very next coalesced cycle — same tape, same
+// decision, same refusal. Three of those inside a second tripped the three-strike
+// stop ("Deriv rejected 3 consecutive 1-tick buys"), which looks exactly like the
+// engine firing three trades at once. It never was three trades: it was ONE trade
+// re-sent three times. This gate makes a re-attempt wait for a fresh analysis and
+// a short backoff, so every live buy is a decision the engine reached on its own
+// newest tick.
+/** How long a refused live buy blocks the next live attempt. */
+export const LIVE_REFUSAL_BACKOFF_MS = 5_000;
+
+export interface LiveAttemptGate {
+  /** Symbol of the decision the broker refused (null when nothing was refused). */
+  refusedSymbol: string | null;
+  /** Tick sequence that decision was analysed on. */
+  refusedTickSequence: number;
+  /** Epoch ms before which no new live buy may be attempted. */
+  retryNotBeforeMs: number;
+}
+
+export function newLiveAttemptGate(): LiveAttemptGate {
+  return { refusedSymbol: null, refusedTickSequence: 0, retryNotBeforeMs: 0 };
+}
+
+/**
+ * Why this decision may not be bought right now — or null when it may.
+ * Pure so the rule is testable without a broker, a tape or a clock.
+ */
+export function liveAttemptHoldReason(
+  gate: LiveAttemptGate,
+  decision: { symbol: string; tickSequence: number },
+  now: number,
+): string | null {
+  if (gate.retryNotBeforeMs > now) {
+    const seconds = Math.max(1, Math.ceil((gate.retryNotBeforeMs - now) / 1000));
+    return (
+      `the previous 1-tick buy was refused, so the engine waits ${seconds}s and then buys ` +
+      "a freshly analysed tick instead of re-sending the refused trade"
+    );
+  }
+  if (
+    gate.refusedSymbol !== null &&
+    gate.refusedSymbol === decision.symbol &&
+    gate.refusedTickSequence === decision.tickSequence
+  ) {
+    return (
+      `this exact ${decision.symbol} tick was already refused — the engine buys the next ` +
+      "analysed tick instead of re-sending the same trade"
+    );
+  }
+  return null;
+}
+
+/** Arm the gate after a broker refusal: back off, and never re-buy that tick. */
+export function recordRefusedLiveAttempt(
+  gate: LiveAttemptGate,
+  decision: { symbol: string; tickSequence: number },
+  now: number,
+  backoffMs = LIVE_REFUSAL_BACKOFF_MS,
+): void {
+  gate.refusedSymbol = decision.symbol;
+  gate.refusedTickSequence = decision.tickSequence;
+  gate.retryNotBeforeMs = now + backoffMs;
+}
+
+/** The gate is released by a purchase that actually went through. */
+export function clearRefusedLiveAttempt(gate: LiveAttemptGate): void {
+  gate.refusedSymbol = null;
+  gate.refusedTickSequence = 0;
+  gate.retryNotBeforeMs = 0;
+}
 /** A tape with no tick for this long belongs to a closed or stalled market and is not ranked. */
 const STALE_TAPE_MS = 15_000;
 const MIN_STAKE = 0.35;
@@ -203,6 +281,7 @@ function newSession(): HedgeSession {
     lastReconcileAt: 0,
     lastEmitAt: 0,
     execFailures: 0,
+    liveGate: newLiveAttemptGate(),
     ctx: null,
     evidenceTracker: new EvidenceTracker(),
     timingV2: new TimingV2Controller(),
@@ -1121,6 +1200,40 @@ async function executeDecision(
     logger.warn({ symbol: b.symbol }, "Autonomous 1-tick: market is not automated — holding");
     return;
   }
+  const accountId = ctx.derivAccountId!;
+  const token = ctx.token!;
+
+  // ── ONE trade at a time, and only the analysed+tuned decision ───────────────
+  // Two gates, both BEFORE a row exists, so a refused or skipped attempt never
+  // leaves a phantom "open" trade behind:
+  //
+  //  1. This exact decision must not be a re-send of one Deriv just refused.
+  //     The cycle request coalesces ticks, so a fast broker refusal used to
+  //     re-rank the SAME tape and buy again immediately — three refusals inside a
+  //     second, three strikes, and the engine stopped with
+  //     "Deriv rejected 3 consecutive 1-tick buys". A fresh attempt now needs a
+  //     fresh analysed tick PLUS a short backoff.
+  //  2. No purchase may already be in flight on the account. `executeLiveTrade`
+  //     enforces this too; checking here keeps the journal clean (no row that was
+  //     never bought) when a manual trade, another engine, or a cycle whose
+  //     session state was reset got there first.
+  const holdReason = liveAttemptHoldReason(s.liveGate, b, Date.now());
+  if (holdReason) {
+    host.publish({ nextScanIn: null });
+    logger.warn(
+      { symbol: b.symbol, contract: b.contract, tickSequence: b.tickSequence },
+      `Autonomous 1-tick: not buying — ${holdReason}`,
+    );
+    return;
+  }
+  if (isLiveOrderInFlight(accountId)) {
+    host.publish({ nextScanIn: null });
+    logger.warn(
+      { symbol: b.symbol, accountId },
+      "Autonomous 1-tick: another purchase is already in flight on this account — holding instead of placing a second trade",
+    );
+    return;
+  }
   const [openRow] = await db.insert(tradesTable).values({
     sessionId,
     symbol: b.symbol,
@@ -1161,8 +1274,6 @@ async function executeDecision(
     ev: b.ev, mode: activeDecision.mode,
   });
 
-  const accountId = ctx.derivAccountId!;
-  const token = ctx.token!;
   let contractId: number;
   let buyPrice: number;
   try {
@@ -1193,16 +1304,35 @@ async function executeDecision(
       contractId = found.contractId;
       buyPrice = found.buyPrice;
     } else {
-      // Definite rejection: no contract was placed, so nothing enters the ledger.
+      // No contract was placed, so nothing enters the ledger. Two different
+      // things can land here and they must NOT be counted alike:
+      //
+      //  - LiveOrderInFlightError: another purchase pipeline on this account got
+      //    the order slot first (a manual trade, another engine, a cycle that was
+      //    restarted mid-order). Nothing was refused by the broker and this
+      //    engine did nothing wrong — it is a SKIP, not a strike.
+      //  - anything else: a definite broker refusal. That IS a strike, and three
+      //    consecutive ones still stop the engine (a deterministic refusal must
+      //    not be retried forever).
+      const skipped = buyErr instanceof LiveOrderInFlightError;
       const message = buyErr instanceof Error ? buyErr.message : String(buyErr);
       await claimOpenRow(openRow.id, {
         status: "error",
         profit: "0",
         payout: "0",
         closedAt: new Date(),
-        agentReasoning: `${reasoningBase} [EXECUTION FAILED: ${message}]`,
+        agentReasoning: `${reasoningBase} [${skipped ? "NOT SENT" : "EXECUTION FAILED"}: ${message}]`,
       });
       clearExposure(s);
+      if (skipped) {
+        logger.warn({ symbol: b.symbol }, "Autonomous 1-tick: purchase skipped — another order was in flight on this account");
+        host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
+        return;
+      }
+      // A refusal also arms the attempt gate: the next live buy needs a NEW
+      // analysed tick and a short backoff, so a coalesced tick can never re-send
+      // the trade that was just refused (three rapid re-sends == three strikes).
+      recordRefusedLiveAttempt(s.liveGate, b, Date.now());
       s.execFailures += 1;
       logger.warn({ err: message, symbol: b.symbol, failures: s.execFailures }, "Autonomous 1-tick buy rejected by Deriv");
       host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
@@ -1213,6 +1343,8 @@ async function executeDecision(
     }
   }
 
+  // Bought: the refusal gate starts clean, and the strike counter resets.
+  clearRefusedLiveAttempt(s.liveGate);
   s.execFailures = 0;
   s.exposure.contractId = contractId;
   await db.update(tradesTable).set({

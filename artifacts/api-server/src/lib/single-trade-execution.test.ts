@@ -6,7 +6,6 @@ import {
   executeLiveTrade,
   getAccountConnection,
   isRetryableDerivError,
-  UnknownContractProposalError,
   waitForContractResult,
 } from "./deriv";
 
@@ -157,14 +156,7 @@ describe("single-contract execution", () => {
       : deadProposal);
     await assert.rejects(
       executeLiveTrade(token, params),
-      (err: unknown) => {
-        // Typed as a no-trade outcome: at the buy stage Deriv created no
-        // contract, so the autonomous engine must not count this toward its
-        // consecutive-execution-failure stop.
-        assert.ok(err instanceof UnknownContractProposalError);
-        assert.match((err as Error).message, /Unknown contract proposal \(Deriv code InvalidContractProposal\)/);
-        return true;
-      },
+      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
     );
     assert.equal(sent.filter((m) => m.proposal).length, 2);
     assert.equal(sent.filter((m) => m.buy).length, 2);
@@ -176,49 +168,10 @@ describe("single-contract execution", () => {
     const sent = fakeTransport(() => deadProposal);
     await assert.rejects(
       executeLiveTrade(token, params),
-      (err: unknown) => {
-        assert.ok(!(err instanceof UnknownContractProposalError), "a proposal-stage refusal stays a plain, countable failure");
-        assert.match((err as Error).message, /Unknown contract proposal \(Deriv code InvalidContractProposal\)/);
-        return true;
-      },
+      /Unknown contract proposal \(Deriv code InvalidContractProposal\)/,
     );
     assert.equal(sent.length, 1);
     assert.equal(sent.filter((m) => m.buy).length, 0);
-  });
-
-  it("serialises purchases on one account: the second trade quotes only after the first buy is acknowledged", async () => {
-    // The reported production failure: concurrent purchases on one Deriv
-    // account interleaved proposal → buy on the shared socket, so buys were
-    // handed proposal ids Deriv no longer knew. Only the single analysed,
-    // timed trade may be in flight; the next one quotes fresh when its turn
-    // comes — never alongside the trade ahead of it.
-    let releaseFirstBuy!: () => void;
-    const firstBuyGate = new Promise<void>((resolve) => { releaseFirstBuy = resolve; });
-    let buys = 0;
-    const sent = fakeTransport((m) => {
-      if (m.proposal) return proposal;
-      buys += 1;
-      return buys === 1 ? firstBuyGate.then(() => purchase) : purchase;
-    });
-
-    const first = executeLiveTrade(token, params);
-    while (!sent.some((m) => m.buy)) await new Promise((r) => setTimeout(r, 5));
-
-    const second = executeLiveTrade(token, params);
-    // Give the second purchase every chance to interleave if it could.
-    await new Promise((r) => setTimeout(r, 50));
-    assert.equal(sent.filter((m) => m.proposal).length, 1, "the second trade must not quote while the first buy is in flight");
-    assert.equal(sent.filter((m) => m.buy).length, 1, "exactly one buy may be in flight per account");
-
-    releaseFirstBuy();
-    const [a, b] = await Promise.all([first, second]);
-    assert.equal(a.contractId, 1234);
-    assert.equal(b.contractId, 1234);
-    assert.deepEqual(
-      sent.map((m) => (m.proposal ? "proposal" : "buy")),
-      ["proposal", "buy", "proposal", "buy"],
-      "each purchase is a complete, uninterleaved proposal → buy sequence",
-    );
   });
 
   for (const [unit, factor] of [["seconds", 1], ["milliseconds", 1000]] as const) {

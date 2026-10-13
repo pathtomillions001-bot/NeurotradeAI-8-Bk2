@@ -182,17 +182,9 @@ export interface DeskPerformance {
   generatedAt: number;
 }
 
-export interface DeskSeries {
-  symbol: string;
-  source: "mt5";
-  series: Partial<Record<string, Bar[]>>;
-  spec: { digits: number; point: number; contractSize: number } | null;
-  quote: { bid: number; ask: number; ts: number } | null;
-  health: { status: FeedStatus; ageMs: number | null; detail: string | null };
-}
-
-/** A compact OHLC bar: [time, open, high, low, close, volume]. */
-export type Bar = [number, number, number, number, number, number];
+// v5 Desk: DeskSeries/Bar and deskApi.series were removed with the chart
+// panes — the Desk renders no OHLC series anywhere. The server endpoint is
+// untouched (other consumers are out of this client's scope).
 
 /** One family of the statistical evidence ensemble. */
 export interface EvidenceFactor {
@@ -757,7 +749,6 @@ export const deskApi = {
   markets: () => request<{ source: "mt5" | "unlinked"; markets: Market[]; catalogCount: number }>("/desk/markets"),
   instruments: () => request<{ source: "mt5" | "unlinked"; instruments: Instrument[]; feed: FeedDiagnostics }>("/desk/instruments"),
   performance: () => request<DeskPerformance>("/desk/performance"),
-  series: (symbol: string) => request<DeskSeries>(`/desk/series?symbol=${encodeURIComponent(symbol)}`),
   analysis: (symbol: string, mode: TradeMode) =>
     request<{
       source: "mt5";

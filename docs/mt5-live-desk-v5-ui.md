@@ -193,7 +193,7 @@ existing consumers keep working unchanged. `deskApi.execution()` is added
 | `src/components/desk/desk-shell.tsx` | frame: title bar, tabs, alert slot, context strip, panel grid, status bar; not-linked card; responsive switches |
 | `src/components/desk/title-bar.tsx` | chips (data-source, stream, v4, demo/real), Equity / Day / Open risk, mode segmented control, timezone, Auto, MT5·login, Flatten |
 | `src/components/desk/workspace-tabs.tsx` | `role="tablist"`, arrow keys, URL `?tab=` state, badges (Markets: selected count; Learning: halved+disabled agents), right-hand context text |
-| `src/components/desk/alert-strip.tsx` | one 32px slot: halt › mismatch › stale › reconnecting › actionError, "+N more" popover |
+| `src/components/desk/alert-strip.tsx` | one 32px slot: halt › mismatch › stale › reconnecting › actionError; "+N more" CYCLES the slot (a popover would float over the grid; the strip never grows) |
 | `src/components/desk/status-bar.tsx` | feed counts, heartbeat age, EA version, server time in zone, last journal event, note slot |
 | `src/components/desk/stat-strip.tsx` | eight equal tiles (caption 10.5, value 18/600, unit, optional limit meter) |
 | `src/components/desk/pipeline-strip.tsx` | L0–L6 nodes + chevrons, state dots, current node cyan |
@@ -314,6 +314,24 @@ the required v4 keys and intervals are untouched.
     `initialRiskMoney` the EA stamped; unstampable positions contribute to the
     money total and are counted in a "(n unmeasured)" caption rather than
     faking an R.
+18. The four learning queries (`desk-governance` 30s, `desk-weekly` 60s,
+    `desk-journal[kind]` 30s, `desk-regime` 2s) keep their exact keys and
+    intervals but gained `enabled: paired` — on the old standalone page they
+    ran unconditionally; on the Desk an unpaired terminal has nothing to
+    learn from, and the unlinked screen shows no numbers at all.
+19. Decision-journal timestamps render in the DESK timezone (the old page
+    printed an ISO-UTC slice); the full ISO instant is kept in the row's
+    tooltip. Learning-journal rows likewise.
+20. The By-agent table aggregates `closedTrades[].agents` client-side (pure
+    helper `agentAttribution()`, test D14): shared attribution counts for each
+    named agent, `null`/empty attribution belongs to NO row, and `totalR` is
+    null (em dash) when none of an agent's trades is R-stamped.
+21. The Feed & health panel's slippage row reads the v4 ledger's
+    `slippage.ewmaR` (the same number the kill rule uses); a 404 ledger is a
+    "not serving" paragraph, never zeros.
+22. The old ScannerPane's auto-select report block moved verbatim (testid
+    `auto-select-report`) into the Auto-select panel, sentence built by the
+    tested `autoSelectSummary()` helper.
 
 ## 9. How to run the checks
 
@@ -327,11 +345,18 @@ cd artifacts/trading-platform && pnpm test
 # server unit tests (includes the new presenter/governance field tests)
 cd artifacts/api-server && pnpm test
 
-# browser layout contract (needs a dev machine with browsers installed)
+# first-paint routing regression (SSR; App.tsx route changes touched it)
+cd artifacts/trading-platform && pnpm run check:first-paint
+
+# browser layout contract — 4 viewports × 4 tabs, screenshots included.
+# Playwright is deliberately NOT a repo dependency (no-new-deps rule); this
+# needs a dev machine, and the API served on :8080 (the spec mocks all
+# /api/** responses itself, so no paired MT5 terminal is required).
 cd artifacts/trading-platform
-pnpm dev &  # plus the API on :8080
-npx playwright install chromium   # once
-npx playwright test scripts/desk-layout.spec.mjs
+pnpm dev &                                  # web on :5000
+npm i -D playwright && npx playwright install chromium   # once, locally
+BASE_URL=http://localhost:5000 node scripts/desk-layout.spec.mjs
+# screenshots land in scripts/desk-layout-shots/ (override with OUT_DIR)
 ```
 
 ## 10. Known gaps / not verified here
@@ -340,8 +365,12 @@ npx playwright test scripts/desk-layout.spec.mjs
   the reference file was not available in this workspace; the implementation
   follows the written spec's numbers exactly instead.
 * Real-browser screenshots at the four viewport sizes — no browser binary in
-  this sandbox; the Playwright spec is checked in and saves screenshots next to
-  the reference when run locally.
+  this sandbox (and browser CDNs are unreachable from it). The checked-in
+  Playwright spec (`scripts/desk-layout.spec.mjs`) is the substitute: it mocks
+  the wire with synthetic fixtures, asserts the layout contract at all four
+  viewports × four tabs, and saves the screenshots (`{w}x{h}-{tab}.png`) when
+  run on a machine with chromium. The pure tiling contract is additionally
+  proven without a browser by `desk-layout.test.ts` (T1–T8).
 * The v4-gated surfaces (gatekeeper rows with thresholds, calibration buckets,
   governance, regime) were verified against unit fixtures and the live API with
   the flags off (404 → empty states). Verifying them against a paired MT5

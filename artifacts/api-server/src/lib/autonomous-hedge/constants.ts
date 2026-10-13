@@ -75,3 +75,56 @@ export function hedgeGroupIndex(symbol: string): number {
   if (symbol.startsWith("JD")) return 2;
   return 3;
 }
+
+// ── Recovery Quality Pipeline v2 constants ────────────────────────────────────
+
+export type RecoveryV2Mode = "off" | "shadow" | "on";
+
+/**
+ * Feature flag for Recovery Quality Pipeline v2:
+ * - "off":    v1 behaviour exactly.
+ * - "shadow": v1 decides and trades; v2 is computed alongside and logged.
+ * - "on":     v2 decides and executes through the same executeDecision / ladder path.
+ */
+export const RECOVERY_V2_MODE: RecoveryV2Mode = "shadow";
+
+let recoveryV2ModeOverride: RecoveryV2Mode | null = null;
+
+export function setRecoveryV2ModeOverride(mode: RecoveryV2Mode | null): void {
+  recoveryV2ModeOverride = mode;
+}
+
+export function getRecoveryV2Mode(): RecoveryV2Mode {
+  if (recoveryV2ModeOverride) return recoveryV2ModeOverride;
+  const envMode = process.env["RECOVERY_V2_MODE"];
+  if (envMode === "off" || envMode === "shadow" || envMode === "on") return envMode;
+  return RECOVERY_V2_MODE;
+}
+
+/** Multi-horizon windows evaluated by M1 (ticks). */
+export const HEDGE_V2_WINDOWS = [120, 500, 1500] as const;
+export const HEDGE_V2_MAX_WINDOW = 1500;
+
+/**
+ * Tail aversion: weight on max(0, -es5) / base in M3 soft cost J(c).
+ * Penalises contracts whose worst-5% recovery episode shortfall is large relative to base stake.
+ */
+export const LAMBDA_TAIL = 0.25;
+
+/**
+ * Streak aversion: weight on pStop in M3 soft cost J(c).
+ * Penalises contracts with a high probability of hitting the consecutive-loss stop inside an episode.
+ */
+export const LAMBDA_STOP = 4;
+
+/** Deterministic seeded PRNG (Mulberry32). Never use Math.random in scoring paths. */
+export function mulberry32(seed: number): () => number {
+  let a = seed | 0;
+  return function next(): number {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+

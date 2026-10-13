@@ -36,19 +36,29 @@ import {
 } from "../deriv";
 import {
   AUTONOMOUS_HEDGE_PREFIX,
+  getRecoveryV2Mode,
   HEDGE_DURATION_TICKS,
   HEDGE_DURATION_UNIT,
   HEDGE_MIN_TICKS,
+  HEDGE_V2_MAX_WINDOW,
+  HEDGE_WINDOW,
   hedgeGroupIndex,
   HEDGE_GROUP_NAMES,
 } from "./constants";
-import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeMode } from "./hedge-analysis";
+import { buildMarketCandidates, candidateKey, type HedgeCandidate, type HedgeFamilySpec, type HedgeMode } from "./hedge-analysis";
 import { recoveryEscalation } from "./recovery-risk";
-import { decideHedge, type HedgeDecision } from "./contest";
-import { applySettlement, requiredConfirmations, type HedgeMemory } from "./hedge-state";
+import { decideHedge, type HedgeDecision, type HedgeV2ScanTelemetry } from "./contest";
+import { applySettlement, rankRows, requiredConfirmations, type HedgeMemory } from "./hedge-state";
 import { readHedgeTape, type HedgeTape } from "./tape";
 import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
+import { EvidenceTracker, type MarketTapeInput } from "./evidence";
+import { clearLadderOutcomeCache } from "./ladder-outcomes";
+import { buildV2RecoveryDecision, scoreV2Candidates, type V2LadderConfig, type V2ScoredCandidate } from "./score-v2";
+import { isDecisionStale, shouldSwitchCandidateBeforeBuy, TimingV2Controller } from "./timing-v2";
+import { livePayoutFor, stopQuotePrefetchTask, syncQuotePrefetchTask } from "./quote-prefetch";
+import { defaultShadowLedger, type LatestTickObservation } from "./shadow-ledger";
+import { CalibrationGuard } from "./calibration-guard";
 import {
   claimOpenRow,
   ledgerEntryPayout,
@@ -128,6 +138,8 @@ interface Exposure {
   decisionSequence: number;
   contractId: number | null;
   stake: number;
+  mode?: HedgeMode;
+  pTilde?: number;
 }
 
 interface HedgeSession {
@@ -143,6 +155,9 @@ interface HedgeSession {
   lastEmitAt: number;
   execFailures: number;
   ctx: { at: number; value: HedgeContext } | null;
+  evidenceTracker: EvidenceTracker;
+  timingV2: TimingV2Controller;
+  calibrationGuard: CalibrationGuard;
 }
 
 const CONTEXT_TTL_MS = 2_000;
@@ -189,6 +204,9 @@ function newSession(): HedgeSession {
     lastEmitAt: 0,
     execFailures: 0,
     ctx: null,
+    evidenceTracker: new EvidenceTracker(),
+    timingV2: new TimingV2Controller(),
+    calibrationGuard: new CalibrationGuard(),
   };
 }
 
@@ -375,9 +393,14 @@ async function exposureResolved(host: HedgeHost, s: HedgeSession): Promise<boole
     return true;
   }
   if (row.status === "won" || row.status === "lost") {
+    const won = row.status === "won";
     // The reconciler has already recorded the ledger for this row.
+    clearLadderOutcomeCache();
+    if (s.exposure.mode === "RECOVERY" && typeof s.exposure.pTilde === "number") {
+      s.calibrationGuard.recordRecoveryTrade({ won, pTilde: s.exposure.pTilde });
+    }
     applySettlement(s.memory, {
-      won: row.status === "won",
+      won,
       key: s.exposure.key,
       lossRun: recoveryEngine.getState().streakLossCount,
       decisionSequence: s.exposure.decisionSequence,
@@ -515,6 +538,79 @@ function emitHoldScan(
   });
 }
 
+function buildV2LadderConfig(
+  ctx: HedgeContext,
+  ledger: recoveryEngine.RecoveryState,
+  risk: RiskDecision,
+): V2LadderConfig {
+  const base = ledger.baseStake > 0 ? ledger.baseStake : risk.recommendedStake;
+  return {
+    method: ctx.settings.recoveryMethod,
+    autoMode: ctx.settings.recoveryAutoMode,
+    multiplier: ctx.settings.recoveryMultiplier,
+    step: Math.max(1, ledger.recoveryStep || 1),
+    maxRecoverySteps: ctx.settings.maxRecoverySteps,
+    debt: ledger.unrecoveredAmount > 0 ? ledger.unrecoveredAmount : base,
+    targetRemaining: Math.max(0, ledger.remainingTargetProfit),
+    base,
+    maxTradeStake: ctx.settings.maxTradeStake,
+    balance: ctx.balance,
+    consecutiveLossLimit: ctx.consecutiveLossLimit,
+    currentLossRun: ledger.streakLossCount,
+    hardStop: risk.hardStop,
+  };
+}
+
+function recomputeV2CandidatesOnFreshestTapes(
+  s: HedgeSession,
+  ctx: HedgeContext,
+  risk: RiskDecision,
+): { ranked: V2ScoredCandidate[]; tapes: Map<string, HedgeTape> } {
+  const markets = watchedMarkets(ctx);
+  const marketInputs: MarketTapeInput[] = [];
+  const tickSequenceBySymbol = new Map<string, number>();
+  const tapes = new Map<string, HedgeTape>();
+  const ledger = recoveryEngine.getState();
+  const escalation = recoveryEscalation(ledger.streakLossCount, ledger.recoveryStep);
+
+  for (const market of markets) {
+    const tape = readHedgeTape(market.symbol, HEDGE_V2_MAX_WINDOW);
+    if (!tape || tape.ageMs > STALE_TAPE_MS) continue;
+    if (!tape.live && !ctx.paperTradeMode) continue;
+    const specs = familySpecsFor({
+      settings: ctx.settings,
+      mode: "RECOVERY",
+      digitEnabled: market.digitEnabled,
+      sets: ctx.contractSets,
+    });
+    if (specs.length === 0 || tape.digits.length < HEDGE_MIN_TICKS) continue;
+    tapes.set(market.symbol, tape);
+    tickSequenceBySymbol.set(market.symbol, tape.tickSequence);
+    marketInputs.push({
+      symbol: market.symbol,
+      digits: tape.digits,
+      prices: tape.prices,
+      tickSequence: tape.tickSequence,
+      specs,
+    });
+  }
+
+  const evidenceRows = s.evidenceTracker.evaluate({
+    markets: marketInputs,
+    marketsScanned: marketInputs.length,
+    payoutResolver: (symbol, contract, barrier) => livePayoutFor({ symbol, contract, barrier }),
+    evidenceWeight: s.calibrationGuard.getEvidenceWeight(),
+  });
+  const ladder = buildV2LadderConfig(ctx, ledger, risk);
+  const ranked = scoreV2Candidates({
+    evidenceRows,
+    tickSequenceBySymbol,
+    ladder,
+    escalation,
+  });
+  return { ranked, tapes };
+}
+
 // ── Cycle ─────────────────────────────────────────────────────────────────────
 
 async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
@@ -561,12 +657,21 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
   //    Every skip is classified into the feed diagnosis so a cycle that ranks
   //    nothing can still report WHY (see the null-decision HOLD below) instead
   //    of returning silently and stranding the dashboard on "Scanning markets…".
+  const v2Mode = mode === "RECOVERY" ? getRecoveryV2Mode() : "off";
+  const useV2Recovery = mode === "RECOVERY" && v2Mode !== "off";
+  const tapeWindow = useV2Recovery ? HEDGE_V2_MAX_WINDOW : HEDGE_WINDOW;
+
   const markets = watchedMarkets(ctx);
   const feed = emptyFeedDiagnosis(markets.length);
   const tapes: HedgeTape[] = [];
   const rows: HedgeCandidate[] = [];
+  const v2MarketInputs: MarketTapeInput[] = [];
+  const v2TickSequenceBySymbol = new Map<string, number>();
+  const latestObservations = new Map<string, LatestTickObservation>();
+  const allRecoverySpecs: HedgeFamilySpec[] = [];
+
   for (const market of markets) {
-    const tape = readHedgeTape(market.symbol);
+    const tape = readHedgeTape(market.symbol, tapeWindow);
     if (!tape) { feed.missing += 1; continue; }
     if (tape.ageMs > STALE_TAPE_MS) { feed.stale += 1; continue; }
     // Live trades never rely on simulated prices. Paper mode may use either.
@@ -583,20 +688,152 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     if (specs.length === 0) { feed.noSpecs += 1; continue; }
     if (tape.digits.length < HEDGE_MIN_TICKS) { feed.thin += 1; continue; }
     tapes.push(tape);
-    rows.push(...buildMarketCandidates({
-      symbol: market.symbol,
-      group: hedgeGroupIndex(market.symbol),
-      digits: tape.digits,
-      prices: tape.prices,
-      tickSequence: tape.tickSequence,
-      specs,
-      mode,
-      escalation,
-    }));
+
+    const v1Digits = useV2Recovery ? tape.digits.slice(-HEDGE_WINDOW) : tape.digits;
+    const v1Prices = useV2Recovery ? tape.prices.slice(-HEDGE_WINDOW) : tape.prices;
+
+    if (v2Mode !== "on") {
+      rows.push(...buildMarketCandidates({
+        symbol: market.symbol,
+        group: hedgeGroupIndex(market.symbol),
+        digits: v1Digits,
+        prices: v1Prices,
+        tickSequence: tape.tickSequence,
+        specs,
+        mode,
+        escalation,
+      }));
+    } else if (useV2Recovery) {
+      // In "on" mode, still build v1 rows for M6 shadow-ledger comparison without mutating v1 memory.
+      rows.push(...buildMarketCandidates({
+        symbol: market.symbol,
+        group: hedgeGroupIndex(market.symbol),
+        digits: v1Digits,
+        prices: v1Prices,
+        tickSequence: tape.tickSequence,
+        specs,
+        mode,
+        escalation,
+      }));
+    }
+
+    if (useV2Recovery) {
+      v2MarketInputs.push({
+        symbol: market.symbol,
+        digits: tape.digits,
+        prices: tape.prices,
+        tickSequence: tape.tickSequence,
+        specs,
+      });
+      v2TickSequenceBySymbol.set(market.symbol, tape.tickSequence);
+      const len = tape.digits.length;
+      latestObservations.set(market.symbol, {
+        symbol: market.symbol,
+        tickSequence: tape.tickSequence,
+        digit: tape.digits[len - 1]!,
+        price: tape.prices[len - 1]!,
+        prevPrice: len >= 2 ? tape.prices[len - 2]! : tape.prices[len - 1]!,
+      });
+      if (allRecoverySpecs.length === 0) {
+        allRecoverySpecs.push(...specs);
+      }
+    }
+  }
+
+  if (!useV2Recovery) {
+    stopQuotePrefetchTask(host.sessionId);
+  } else {
+    syncQuotePrefetchTask({
+      sessionId: host.sessionId,
+      active: true,
+      symbols: tapes.map((t) => t.symbol),
+      specs: allRecoverySpecs,
+      currency: ctx.currency,
+    });
+    s.calibrationGuard.onTick(1);
   }
 
   // 2. Contest and gate.
-  const decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
+  let decision: HedgeDecision | null = null;
+  if (!useV2Recovery) {
+    // NORMAL mode (byte-for-byte unchanged) or RECOVERY with RECOVERY_V2_MODE === "off"
+    decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
+  } else {
+    // RECOVERY with RECOVERY_V2_MODE === "shadow" | "on"
+    const evidenceRows = s.evidenceTracker.evaluate({
+      markets: v2MarketInputs,
+      marketsScanned: v2MarketInputs.length,
+      payoutResolver: (symbol, contract, barrier) => livePayoutFor({ symbol, contract, barrier }),
+      evidenceWeight: s.calibrationGuard.getEvidenceWeight(),
+    });
+    const ladder = buildV2LadderConfig(ctx, ledger, risk);
+    const v2Ranked = scoreV2Candidates({
+      evidenceRows,
+      tickSequenceBySymbol: v2TickSequenceBySymbol,
+      ladder,
+      escalation,
+    });
+    const v1RankedForLedger = rankRows(rows.map((r) => ({ ...r })));
+
+    defaultShadowLedger.stepTick({
+      observations: latestObservations,
+      v2Ranked,
+      v1Ranked: v1RankedForLedger,
+    });
+
+    if (v2Ranked.length > 0) {
+      const v2Best = v2Ranked[0]!;
+      let maxSeq = 0;
+      for (const t of tapes) {
+        if (t.tickSequence > maxSeq) maxSeq = t.tickSequence;
+      }
+      let baselineJ = v2Best.nullJ;
+      for (const c of v2Ranked) {
+        if (c.nullJ < baselineJ) baselineJ = c.nullJ;
+      }
+      const timing = s.timingV2.evaluate({
+        bestJ: v2Best.J,
+        baselineJ,
+        tickSequence: maxSeq,
+      });
+      const v2Decision = buildV2RecoveryDecision({
+        ranked: v2Ranked,
+        escalation,
+        waitTicks: timing.waitTicks,
+        shouldFireNow: timing.shouldFire,
+        waitReason: timing.reason,
+      });
+      const v2Telemetry: HedgeV2ScanTelemetry = {
+        mode: v2Mode,
+        pTilde: Math.round(v2Best.pTilde * 10000) / 10000,
+        z: Math.round(v2Best.z * 1000) / 1000,
+        edgeIndex: Math.round(v2Best.edgeIndex * 1000) / 1000,
+        J: Math.round(v2Best.J * 1000) / 1000,
+        pStop: Math.round(v2Best.pStop * 10000) / 10000,
+        waitTicks: timing.waitTicks,
+        skill: Math.round(defaultShadowLedger.getMetrics("v2").brierSkill * 1000) / 1000,
+      };
+
+      if (v2Mode === "shadow") {
+        const v1Decision = decideHedge({ rows, mode, memory: s.memory, lossRun, escalation });
+        if (v1Decision) {
+          const v2ContractLabel = v2Best.barrier >= 0 ? `${v2Best.contract} ${v2Best.barrier}` : v2Best.contract;
+          const v1ContractLabel =
+            v1Decision.best.barrier >= 0
+              ? `${v1Decision.best.contract} ${v1Decision.best.barrier}`
+              : v1Decision.best.contract;
+          const shadowNote = ` [v2 shadow: would trade ${v2Best.symbol} ${v2ContractLabel} J=${v2Best.J.toFixed(3)} | v1 chose ${v1Decision.best.symbol} ${v1ContractLabel}]`;
+          v1Decision.reason = `${v1Decision.reason}${shadowNote}`;
+          v1Decision.v2 = v2Telemetry;
+          decision = v1Decision;
+        }
+      } else if (v2Decision) {
+        v2Decision.v2 = v2Telemetry;
+        decision = v2Decision;
+      }
+    }
+  }
+
   if (!decision) {
     host.publish({ currentMarket: null, nextScanIn: null });
     // Ranked nothing this tick — HOLD with the feed cause, never silence.
@@ -678,6 +915,7 @@ function publishScan(
     lossRunRisk: Math.round(b.lossRunRisk * 1000) / 1000,
     riskWeight: Math.round(b.riskWeight * 100) / 100,
     escalation: decision.escalation,
+    ...(decision.v2 ? { v2: decision.v2 } : {}),
   });
   for (const gw of decision.groupWinners) {
     const w = gw.winner;
@@ -770,10 +1008,55 @@ async function executeDecision(
   risk: RiskDecision,
   lastPrice: number,
 ): Promise<void> {
-  const b = decision.best;
+  let activeDecision = decision;
+  let activeLastPrice = lastPrice;
   const sessionId = host.sessionId;
-  const reasoningBase = `${AUTONOMOUS_HEDGE_PREFIX}${decision.reason}`;
-  const { stake: rawStake, payout } = await resolveStake(decision, ctx, mode, risk);
+  let { stake: rawStake, payout } = await resolveStake(activeDecision, ctx, mode, risk);
+
+  // M8 / M4 pre-dispatch freshness re-evaluation (when RECOVERY_V2_MODE === "on"):
+  // AFTER the existing awaits (context refresh, quote) and BEFORE buy, recompute J
+  // for the chosen candidate on the freshest tape; if another candidate now beats
+  // it by more than 0.02 (or >1 tick elapsed and a better candidate exists), switch once.
+  if (mode === "RECOVERY" && getRecoveryV2Mode() === "on") {
+    const { ranked: freshRanked, tapes: freshTapes } = recomputeV2CandidatesOnFreshestTapes(s, ctx, risk);
+    if (freshRanked.length > 0) {
+      const chosenFresh = freshRanked.find((r) => r.key === activeDecision.best.key);
+      const bestFresh = freshRanked[0]!;
+      const chosenJ = chosenFresh ? chosenFresh.J : -activeDecision.best.score;
+      const stale =
+        chosenFresh !== undefined && isDecisionStale(activeDecision.best.tickSequence, chosenFresh.tickSequence);
+      const shouldSwitch =
+        bestFresh.eligible &&
+        bestFresh.key !== activeDecision.best.key &&
+        (shouldSwitchCandidateBeforeBuy(chosenJ, bestFresh.J) || (stale && bestFresh.J < chosenJ));
+      if (shouldSwitch) {
+        const switchedDecision = buildV2RecoveryDecision({
+          ranked: freshRanked,
+          escalation: activeDecision.escalation,
+          waitTicks: activeDecision.v2?.waitTicks ?? 0,
+          shouldFireNow: true,
+        });
+        if (switchedDecision) {
+          switchedDecision.reason = `${switchedDecision.reason} [switched pre-buy from ${activeDecision.best.symbol} ${activeDecision.best.contract} dJ=${(chosenJ - bestFresh.J).toFixed(3)}]`;
+          activeDecision = switchedDecision;
+          activeLastPrice = freshTapes.get(bestFresh.symbol)?.prices.at(-1) ?? activeLastPrice;
+          const resolved = await resolveStake(activeDecision, ctx, mode, risk);
+          rawStake = resolved.stake;
+          payout = resolved.payout;
+        }
+      } else if (chosenFresh) {
+        // Keep chosen candidate on freshest probability/sequence
+        activeDecision = {
+          ...activeDecision,
+          best: chosenFresh,
+        };
+        activeLastPrice = freshTapes.get(chosenFresh.symbol)?.prices.at(-1) ?? activeLastPrice;
+      }
+    }
+  }
+
+  const b = activeDecision.best;
+  const reasoningBase = `${AUTONOMOUS_HEDGE_PREFIX}${activeDecision.reason}`;
   const stake = Math.round(rawStake * 100) / 100;
   if (!Number.isFinite(stake) || stake < MIN_STAKE || stake > ctx.balance) {
     host.publish({ nextScanIn: null });
@@ -793,7 +1076,7 @@ async function executeDecision(
     host.emit("trade_started", {
       symbol: b.symbol, contract: b.contract, barrier, stake,
       duration: HEDGE_DURATION_TICKS, paper: true, regime: null,
-      confidence: Math.round(b.probability * 100), ev: b.ev, mode: decision.mode,
+      confidence: Math.round(b.probability * 100), ev: b.ev, mode: activeDecision.mode,
     });
     const [row] = await db.insert(tradesTable).values({
       sessionId,
@@ -806,17 +1089,21 @@ async function executeDecision(
       status: won ? "won" : "lost",
       payout: String(actualPayout),
       profit: String(profit),
-      entryPrice: String(lastPrice),
-      exitPrice: String(lastPrice),
+      entryPrice: String(activeLastPrice),
+      exitPrice: String(activeLastPrice),
       aiConfidence: String(Math.round(b.probability * 10000) / 100),
       aiRiskScore: String(riskScore),
       isAutonomous: true,
-      agentReasoning: `${AUTONOMOUS_HEDGE_PREFIX}[PAPER] ${decision.reason}`,
+      agentReasoning: `${AUTONOMOUS_HEDGE_PREFIX}[PAPER] ${activeDecision.reason}`,
       duration: HEDGE_DURATION_TICKS,
       durationUnit: HEDGE_DURATION_UNIT,
       closedAt: new Date(),
     }).returning();
     recordLedger(sessionId, { won, profit, cost: stake, contract: b.contract, payout, maxRecoverySteps: ctx.settings.maxRecoverySteps });
+    clearLadderOutcomeCache();
+    if (mode === "RECOVERY") {
+      s.calibrationGuard.recordRecoveryTrade({ won, pTilde: b.probability });
+    }
     applySettlement(s.memory, {
       won,
       key: b.key,
@@ -824,7 +1111,7 @@ async function executeDecision(
       decisionSequence: b.tickSequence,
     });
     s.ctx = null;
-    finishTrade(host, s, { id: row?.id, symbol: b.symbol, won, profit, contract: b.contract, barrier, stake, paper: true, live: false, regime: null, reason: decision.reason, ctx });
+    finishTrade(host, s, { id: row?.id, symbol: b.symbol, won, profit, contract: b.contract, barrier, stake, paper: true, live: false, regime: null, reason: activeDecision.reason, ctx });
     return;
   }
 
@@ -863,13 +1150,15 @@ async function executeDecision(
     decisionSequence: b.tickSequence,
     contractId: null,
     stake,
+    mode,
+    pTilde: b.probability,
   };
   s.exposureCheckedAt = Date.now();
   s.exposureSince = Date.now();
   host.emit("trade_started", {
     id: openRow.id, symbol: b.symbol, contract: b.contract, barrier, stake,
     duration: HEDGE_DURATION_TICKS, regime: null, confidence: Math.round(b.probability * 100),
-    ev: b.ev, mode: decision.mode,
+    ev: b.ev, mode: activeDecision.mode,
   });
 
   const accountId = ctx.derivAccountId!;
@@ -973,6 +1262,10 @@ async function executeDecision(
     logger.info({ rowId: openRow.id }, "Autonomous 1-tick: settlement already recorded by the reconciler — ledger not updated twice");
   }
   clearExposure(s);
+  clearLadderOutcomeCache();
+  if (mode === "RECOVERY") {
+    s.calibrationGuard.recordRecoveryTrade({ won: result.won, pTilde: b.probability });
+  }
   applySettlement(s.memory, {
     won: result.won,
     key: b.key,
@@ -980,7 +1273,7 @@ async function executeDecision(
     decisionSequence: b.tickSequence,
   });
   s.ctx = null;
-  finishTrade(host, s, { id: openRow.id, symbol: b.symbol, won: result.won, profit: result.profit, contract: b.contract, barrier, stake, paper: false, live: true, regime: null, reason: decision.reason, ctx });
+  finishTrade(host, s, { id: openRow.id, symbol: b.symbol, won: result.won, profit: result.profit, contract: b.contract, barrier, stake, paper: false, live: true, regime: null, reason: activeDecision.reason, ctx });
   host.afterSettlement(ctx);
 }
 

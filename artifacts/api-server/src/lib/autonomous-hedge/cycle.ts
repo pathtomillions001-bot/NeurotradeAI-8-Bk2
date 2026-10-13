@@ -32,7 +32,6 @@ import {
   fetchDerivProfitTable,
   isAutomatedMarket,
   TradeOutcomeUnknownError,
-  UnknownContractProposalError,
   waitForContractResult,
 } from "../deriv";
 import {
@@ -1204,23 +1203,8 @@ async function executeDecision(
         agentReasoning: `${reasoningBase} [EXECUTION FAILED: ${message}]`,
       });
       clearExposure(s);
-      // A dead proposal id is NOT an execution failure: Deriv resolved no
-      // quote, created no contract, and executeLiveTrade already re-quoted
-      // once inside the same purchase. Purchases are now serialised per
-      // account, so this can only be a quote that died in transit — the next
-      // tick re-analyses, re-times and quotes fresh. Counting it here is what
-      // stopped the engine with "Deriv rejected 3 consecutive 1-tick buys —
-      // last: Unknown contract proposal" over three trades that never existed.
-      // Genuine rejections (balance, barrier, a contract this account is not
-      // offered at all) still count toward the stop exactly as before.
-      const deadQuote = buyErr instanceof UnknownContractProposalError;
-      if (!deadQuote) s.execFailures += 1;
-      logger.warn(
-        { err: message, symbol: b.symbol, failures: s.execFailures, deadQuote },
-        deadQuote
-          ? "Autonomous 1-tick: Deriv no longer knew the quoted proposal — no contract placed, not counted as an execution failure; the next tick re-quotes"
-          : "Autonomous 1-tick buy rejected by Deriv",
-      );
+      s.execFailures += 1;
+      logger.warn({ err: message, symbol: b.symbol, failures: s.execFailures }, "Autonomous 1-tick buy rejected by Deriv");
       host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
       if (s.execFailures >= CONSECUTIVE_EXEC_FAILURE_LIMIT) {
         host.stop(`Deriv rejected ${CONSECUTIVE_EXEC_FAILURE_LIMIT} consecutive 1-tick buys — last: ${message}`);

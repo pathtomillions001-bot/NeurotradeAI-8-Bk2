@@ -3440,9 +3440,15 @@ async function runSingleLiveOrder(
   const connection = getAccountConnection(bearerToken, accountId);
   const quote = async (): Promise<LiveProposal> => {
     let proposalMsg: any = null;
+    // Bind the proposal to the session that actually sent the request. A
+    // reconnect while the quote is in flight can otherwise make an id from the
+    // old session look like it belongs to the new one when the reply arrives.
+    let quotedGeneration: number | null = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       proposalMsg = await connection.request(
-        { proposal: 1, ...buildProposal() }, ACCOUNT_REQUEST_TIMEOUT_MS,
+        { proposal: 1, ...buildProposal() },
+        ACCOUNT_REQUEST_TIMEOUT_MS,
+        { onSent: () => { quotedGeneration = connection.sessionGeneration(); } },
       );
       if (proposalMsg && !proposalMsg.error) break;
       if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
@@ -3468,7 +3474,9 @@ async function runSingleLiveOrder(
     return {
       proposalId: String(proposalMsg.proposal.id),
       askPrice: Number(proposalMsg.proposal.ask_price ?? params.stake),
-      generation: connection.sessionGeneration(),
+      // Use the send-time generation, never the generation observed after the
+      // awaited response (the socket may have reconnected in between).
+      generation: quotedGeneration ?? connection.sessionGeneration(),
       quotedAtMs: Date.now(),
     };
   };

@@ -1310,11 +1310,12 @@ async function executeDecision(
       //
       //  - LiveOrderInFlightError: another purchase pipeline on this account got
       //    the order slot first (a manual trade, another engine, a cycle that was
-      //    restarted mid-order). Nothing was refused by the broker and this
-      //    engine did nothing wrong — it is a SKIP, not a strike.
-      //  - anything else: a definite broker refusal. That IS a strike, and three
-      //    consecutive ones still stop the engine (a deterministic refusal must
-      //    not be retried forever).
+      //    restarted mid-order).
+      //  - LiveOrderNotSentError: the send-time guard caught a reconnect/expired
+      //    quote before the BUY reached Deriv.
+      // Both are skips, not broker refusals or execution strikes.
+      // Anything else is a definite broker refusal and remains subject to the
+      // existing three-strike stop for deterministic execution failures.
       const skipped = buyErr instanceof LiveOrderInFlightError || buyErr instanceof LiveOrderNotSentError;
       const message = buyErr instanceof Error ? buyErr.message : String(buyErr);
       await claimOpenRow(openRow.id, {

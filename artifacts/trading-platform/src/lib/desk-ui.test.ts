@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  agentAttribution,
   autoSelectSummary,
   buildAlerts,
   buildGateRows,
@@ -586,4 +587,31 @@ test("D13 — regime split, permits, badge counts and the auto-select sentence",
   assert.equal(lines[1], "1970-01-01T00:00:00.000Z,EURUSD,buy,0.1,trend,1.400,128.60");
   // No attribution and no R ⇒ empty cells, never invented ones.
   assert.equal(lines[2], "1970-01-01T00:00:00.001Z,XAUUSD,sell,0.05,,,-41.50");
+});
+
+test("D14 — by-agent attribution pools only what the server attributed", () => {
+  const rows = agentAttribution([
+    { agents: ["trend", "meanrev"], rMultiple: 1.4 },
+    { agents: ["trend"], rMultiple: -0.6 },
+    { agents: ["meanrev"], rMultiple: null },
+    { agents: null, rMultiple: 2.0 },
+    { agents: [], rMultiple: 0.5 },
+    { agents: ["trend", "trend"], rMultiple: 0.2 },
+  ]);
+  // trend: 1.4 - 0.6 + 0.2 = 1.0 over 3 trades (the duplicated agent counts once per trade).
+  const trend = rows.find((row) => row.agent === "trend");
+  assert.ok(trend && trend.trades === 3 && trend.measured === 3);
+  assert.ok(Math.abs((trend?.totalR ?? 0) - 1.0) < 1e-9);
+  // meanrev: one measured (1.4), one unmeasured ⇒ totalR is the measured sum.
+  const meanrev = rows.find((row) => row.agent === "meanrev");
+  assert.ok(meanrev && meanrev.trades === 2 && meanrev.measured === 1);
+  assert.ok(Math.abs((meanrev?.totalR ?? 0) - 1.4) < 1e-9);
+  // The unattributed trades (null and []) belong to no row at all.
+  assert.deepEqual(rows.map((row) => row.agent).sort(), ["meanrev", "trend"]);
+  // Sorted by totalR descending: meanrev's 1.4R outranks trend's 1.0R.
+  assert.deepEqual(rows.map((row) => row.agent), ["meanrev", "trend"]);
+  // An agent whose trades are ALL unmeasured shows totalR null, not 0.
+  const unmeasured = agentAttribution([{ agents: ["x"], rMultiple: null }]);
+  assert.equal(unmeasured[0].totalR, null);
+  assert.deepEqual(agentAttribution([]), []);
 });

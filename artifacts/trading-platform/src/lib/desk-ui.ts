@@ -997,3 +997,53 @@ export function closedTradesCsv(rows: {
   });
   return [header, ...lines].join("\n");
 }
+
+// ── by-agent attribution ────────────────────────────────────────────────────
+
+export interface AgentAttributionRow {
+  agent: string;
+  /** Closed trades whose plan this agent proposed (shared attribution counts for each). */
+  trades: number;
+  /** The subset of those trades carrying a stamped R multiple. */
+  measured: number;
+  /** Sum of the stamped R multiples; null when none of them is measured. */
+  totalR: number | null;
+}
+
+/**
+ * The By-agent table's rows, aggregated from the closed trades' own `agents`
+ * attribution (the server's fill→plan join). A trade with no attribution
+ * (null) belongs to NO agent row — "unknown" is not silently pooled into an
+ * "other" bucket, and never counted as zero.
+ */
+export function agentAttribution(
+  closedTrades: { agents?: string[] | null; rMultiple: number | null }[],
+): AgentAttributionRow[] {
+  const byAgent = new Map<string, { trades: number; measured: number; totalR: number }>();
+  for (const trade of closedTrades) {
+    const agents = trade.agents ?? null;
+    if (!agents || agents.length === 0) continue;
+    for (const agent of new Set(agents)) {
+      const row = byAgent.get(agent) ?? { trades: 0, measured: 0, totalR: 0 };
+      row.trades += 1;
+      if (trade.rMultiple !== null && Number.isFinite(trade.rMultiple)) {
+        row.measured += 1;
+        row.totalR += trade.rMultiple;
+      }
+      byAgent.set(agent, row);
+    }
+  }
+  return [...byAgent.entries()]
+    .map(([agent, row]) => ({
+      agent,
+      trades: row.trades,
+      measured: row.measured,
+      totalR: row.measured > 0 ? row.totalR : null,
+    }))
+    .sort(
+      (a, b) =>
+        (b.totalR ?? Number.NEGATIVE_INFINITY) - (a.totalR ?? Number.NEGATIVE_INFINITY) ||
+        b.trades - a.trades ||
+        a.agent.localeCompare(b.agent),
+    );
+}

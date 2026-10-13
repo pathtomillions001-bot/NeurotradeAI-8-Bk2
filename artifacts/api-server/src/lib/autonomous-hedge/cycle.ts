@@ -33,6 +33,7 @@ import {
   isAutomatedMarket,
   isLiveOrderInFlight,
   LiveOrderInFlightError,
+  LiveOrderNotSentError,
   TradeOutcomeUnknownError,
   waitForContractResult,
 } from "../deriv";
@@ -1314,7 +1315,7 @@ async function executeDecision(
       //  - anything else: a definite broker refusal. That IS a strike, and three
       //    consecutive ones still stop the engine (a deterministic refusal must
       //    not be retried forever).
-      const skipped = buyErr instanceof LiveOrderInFlightError;
+      const skipped = buyErr instanceof LiveOrderInFlightError || buyErr instanceof LiveOrderNotSentError;
       const message = buyErr instanceof Error ? buyErr.message : String(buyErr);
       await claimOpenRow(openRow.id, {
         status: "error",
@@ -1325,7 +1326,10 @@ async function executeDecision(
       });
       clearExposure(s);
       if (skipped) {
-        logger.warn({ symbol: b.symbol }, "Autonomous 1-tick: purchase skipped — another order was in flight on this account");
+        logger.warn(
+          { symbol: b.symbol, reason: message },
+          "Autonomous 1-tick: purchase skipped before broker execution — no buy was sent",
+        );
         host.emit("trade_completed", { id: openRow.id, symbol: b.symbol, won: false, profit: "0", contract: b.contract, error: message });
         return;
       }

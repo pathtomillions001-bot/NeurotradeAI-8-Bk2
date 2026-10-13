@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
+    "recovery-lab": "tsx ./recovery-lab/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "devDependencies": {

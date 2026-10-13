@@ -18,6 +18,17 @@ export interface GroupWinner {
   rowsInGroup: number;
 }
 
+export interface HedgeV2ScanTelemetry {
+  mode: "off" | "shadow" | "on";
+  pTilde: number;
+  z: number;
+  edgeIndex: number;
+  J: number;
+  pStop: number;
+  waitTicks: number;
+  skill: number;
+}
+
 export interface HedgeDecision {
   mode: HedgeMode;
   best: HedgeCandidate;
@@ -32,6 +43,8 @@ export interface HedgeDecision {
   reason: string;
   groupWinners: GroupWinner[];
   rowsRanked: number;
+  /** Recovery Quality Pipeline v2 scan telemetry when active in shadow or on mode. */
+  v2?: HedgeV2ScanTelemetry;
 }
 
 export interface DecideInput {

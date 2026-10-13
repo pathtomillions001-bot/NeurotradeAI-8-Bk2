@@ -3239,6 +3239,23 @@ export class TradeOutcomeUnknownError extends Error {
 }
 
 /**
+ * Thrown when a BUY was refused because Deriv no longer knew the proposal id
+ * it was handed — and the one fresh re-quote inside the same purchase was
+ * refused the same way. Resolving a proposal id happens BEFORE any contract
+ * is created, so this is proof that NO trade was placed: the caller may
+ * safely let the next analysed, timed opportunity try again on a fresh quote.
+ * It is deliberately distinct from a proposal-stage refusal of the same
+ * words (a contract this account is not offered at all), which throws a plain
+ * Error and stays a definite, countable execution failure.
+ */
+export class UnknownContractProposalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnknownContractProposalError";
+  }
+}
+
+/**
  * Execute a live trade using the new OTP-authenticated WebSocket flow:
  *  1. POST /accounts/{accountId}/otp → OTP WS URL
  *  2. Connect to OTP URL (no authorize message)
@@ -3246,31 +3263,75 @@ export class TradeOutcomeUnknownError extends Error {
  *  4. On proposal response, send `buy` with the proposal ID
  *  5. On buy confirmation, resolve with contract details
  */
+type LiveTradeParams = {
+  symbol: string;
+  contractType: string;
+  stake: number;
+  duration: number;
+  durationUnit: string;
+  currency: string;
+  accountId: string;
+  barrier?: number | string;
+  /** ACCU only: growth rate 0.01–0.05. */
+  growthRate?: number;
+  /** ACCU only: exchange-side take-profit in account currency. */
+  takeProfit?: number;
+};
+
+// ── One purchase at a time per Deriv account ─────────────────────────────────
+// A Deriv proposal id is only known to the session that quoted it, and only
+// briefly. The autonomous cycle serialises its own buys, but it is keyed by
+// browser session: a second session (or another executor) on the SAME Deriv
+// account shares this pooled socket, and nothing stopped two purchases from
+// interleaving their quote/buy sequences (proposal, proposal, buy, buy) on
+// it. The later buy then
+// handed Deriv a quote that had been superseded or had aged out behind the
+// other trade — "Unknown contract proposal" (InvalidContractProposal) — even
+// though only the single analysed trade should ever have been in flight.
+//
+// The whole quote → buy sequence (including the one dead-quote re-quote) is
+// therefore a single critical section per ACCOUNT: a caller that arrives
+// while a purchase is in flight waits, and only quotes — fresh, at that
+// moment — once the previous buy has been acknowledged. Settlement polling
+// stays outside the lock, so one trade at a time never becomes one
+// unsettled contract at a time.
+const accountExecutionTails = new Map<string, Promise<void>>();
+
+async function withAccountExecutionLock<T>(accountId: string, task: () => Promise<T>): Promise<T> {
+  const previous = accountExecutionTails.get(accountId) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  // `current` only ever resolves, so the stored tail can never reject and
+  // poison the queue for the next caller.
+  const tail = previous.then(() => current);
+  accountExecutionTails.set(accountId, tail);
+  await previous.catch(() => undefined);
+  try {
+    return await task();
+  } finally {
+    release();
+    if (accountExecutionTails.get(accountId) === tail) accountExecutionTails.delete(accountId);
+  }
+}
+
 export async function executeLiveTrade(
   bearerToken: string,
-  params: {
-    symbol: string;
-    contractType: string;
-    stake: number;
-    duration: number;
-    durationUnit: string;
-    currency: string;
-    accountId: string;
-    barrier?: number | string;
-    /** ACCU only: growth rate 0.01–0.05. */
-    growthRate?: number;
-    /** ACCU only: exchange-side take-profit in account currency. */
-    takeProfit?: number;
-  },
+  params: LiveTradeParams,
 ): Promise<LiveTradeResult> {
-  const accountId = params.accountId;
-
-  if (!bearerToken || !accountId) {
+  if (!bearerToken || !params.accountId) {
     throw new Error(
       "No authenticated session. Please sign in with Deriv (OAuth) to enable live trading. " +
       "A Bearer token and account ID are required for the new Deriv API.",
     );
   }
+  return withAccountExecutionLock(params.accountId, () => executeLiveTradeOnAccount(bearerToken, params));
+}
+
+async function executeLiveTradeOnAccount(
+  bearerToken: string,
+  params: LiveTradeParams,
+): Promise<LiveTradeResult> {
+  const accountId = params.accountId;
 
   const buildProposal = (): Record<string, unknown> => {
     const proposalParams: Record<string, unknown> = {
@@ -3371,7 +3432,15 @@ export async function executeLiveTrade(
   }
 
   if (!buyMsg) throw new TradeOutcomeUnknownError("Trade execution timeout — Deriv did not confirm the purchase.");
-  if (buyMsg.error) throw new Error(describeDerivRejection(buyMsg.error));
+  if (buyMsg.error) {
+    // A dead proposal id at the BUY stage (after the one re-quote above) means
+    // no contract was created — a typed, recoverable no-trade outcome, so the
+    // autonomous engine does not count it toward its consecutive-failure stop.
+    if (isUnknownProposalRejection(buyMsg)) {
+      throw new UnknownContractProposalError(describeDerivRejection(buyMsg.error));
+    }
+    throw new Error(describeDerivRejection(buyMsg.error));
+  }
   if (buyMsg.msg_type !== "buy" || !buyMsg.buy) {
     throw new TradeOutcomeUnknownError("Deriv returned an unexpected response to the buy request.");
   }

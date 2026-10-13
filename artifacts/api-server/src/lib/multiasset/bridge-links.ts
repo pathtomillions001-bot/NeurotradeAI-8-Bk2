@@ -231,25 +231,19 @@ let forcedStoreFailure: Error | null = null;
 /**
  * Can a read be trusted right now?
  *
- * The read itself is the authority. This deliberately does NOT consult
- * `schemaApplied()` any more, and that is the whole point of the fix: the flag
- * says "the bootstrap DDL finished", which is a statement about the SCHEMA, not
- * about whether this query can be answered. Gating a lookup on it is how a
- * perfectly readable store answered "could not be consulted" on every
- * heartbeat — a single DDL statement that failed on an existing database left
- * the flag false on every boot, and the terminal was refused a link row that
- * was sitting in the table the entire time. (The batch is now applied statement
- * by statement, so that particular cause is gone; the gate is gone with it,
- * because it can only ever turn a working read into a refusal.)
- *
- * A table that is genuinely missing still says so by itself: the query fails
- * with `relation "mt5_bridge_links" does not exist`, which is a truthful
- * `checked: false` → 503 "retry, nothing revoked". The flag remains in
- * `bridgeStoreReport()` for `/api/healthz` and the Desk's diagnostics.
+ * `schemaApplied()` is checked rather than awaited: `schemaReady` resolves even
+ * when the DDL FAILED on its first attempt (deliberately, so routes are not
+ * blocked behind a dead database), and the HTTP server listens while that retry
+ * loop is still running. A request that lands in that window would otherwise
+ * read a table that does not exist yet and report a perfectly good token as
+ * unknown.
  */
 async function storeConsultable(): Promise<{ ok: boolean; detail?: string }> {
   const mod = await dbModule();
   if (!mod?.pool) return { ok: false, detail: "no database pool" };
+  if (typeof mod.schemaApplied === "function" && !mod.schemaApplied()) {
+    return { ok: false, detail: "schema bootstrap has not been applied yet" };
+  }
   return { ok: true };
 }
 

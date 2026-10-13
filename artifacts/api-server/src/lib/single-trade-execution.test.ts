@@ -48,9 +48,9 @@ afterEach(() => {
 function fakeTransport(reply: (message: any) => any) {
   const sent: any[] = [];
   const connection = getAccountConnection(token, params.accountId);
-  mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { onSent?: () => void }) => {
-    // Match the production connection's send-time hook so these tests exercise
-    // the exact session that issued each proposal, including reconnect races.
+  mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+    // Mimic production order: validate before send, capture session, then reply.
+    hooks?.beforeSend?.();
     hooks?.onSent?.();
     sent.push(message);
     return reply(message);
@@ -278,7 +278,8 @@ describe("single-contract execution", () => {
     const sent: any[] = [];
     const connection = getAccountConnection(token, params.accountId);
     mock.method(connection, "sessionGeneration", () => generation);
-    mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { onSent?: () => void }) => {
+    mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+      hooks?.beforeSend?.();
       hooks?.onSent?.();
       sent.push(message);
       if (message.proposal) {
@@ -302,6 +303,33 @@ describe("single-contract execution", () => {
       ["proposal-2"],
       "only the proposal issued by the current session is bought",
     );
+  });
+
+  it("re-quotes when the session changes after preflight but before the BUY is sent", async () => {
+    let generation = 1;
+    let quotes = 0;
+    const sent: any[] = [];
+    const connection = getAccountConnection(token, params.accountId);
+    mock.method(connection, "sessionGeneration", () => generation);
+    mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+      // Simulate a reconnect while the queued BUY is waiting, after preflight.
+      // The beforeSend guard must block this stale request before recording it.
+      if (message.buy && generation === 1) generation = 2;
+      hooks?.beforeSend?.();
+      hooks?.onSent?.();
+      sent.push(message);
+      if (message.proposal) {
+        const n = ++quotes;
+        return { msg_type: "proposal", proposal: { id: `proposal-${n}`, ask_price: n, payout: 1.63 } };
+      }
+      return purchase;
+    });
+
+    const result = await executeLiveTrade(token, params);
+    assert.equal(result.contractId, 1234);
+    assert.equal(sent.filter((m) => m.proposal).length, 2, "a new proposal is requested after reconnect");
+    assert.equal(sent.filter((m) => m.buy).length, 1, "only one BUY is sent");
+    assert.equal(sent.filter((m) => m.buy)[0].buy, "proposal-2", "the stale proposal is never purchased");
   });
 
   it("re-quotes and buys the fresh id when the socket re-handshook after the quote", async () => {

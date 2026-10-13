@@ -353,6 +353,33 @@ describe("single-contract execution", () => {
     );
   });
 
+  it("measures proposal age from send time when the quote response is delayed", async () => {
+    let clock = 1_000_000;
+    mock.method(Date, "now", () => clock);
+    try {
+      let quotes = 0;
+      const sent: any[] = [];
+      const connection = getAccountConnection(token, params.accountId);
+      mock.method(connection, "request", async (message: any, _timeoutMs?: number, hooks?: { beforeSend?: () => void; onSent?: () => void }) => {
+        hooks?.beforeSend?.();
+        hooks?.onSent?.();
+        sent.push(message);
+        if (message.proposal) {
+          const n = ++quotes;
+          if (n === 1) clock += 5_000; // response arrives after the quote has expired
+          return { msg_type: "proposal", proposal: { id: `proposal-${n}`, ask_price: 1, payout: 1.63 } };
+        }
+        return purchase;
+      });
+      const result = await executeLiveTrade(token, params);
+      assert.equal(result.contractId, 1234);
+      assert.equal(sent.filter((m) => m.proposal).length, 2, "the delayed quote is replaced");
+      assert.deepEqual(sent.filter((m) => m.buy).map((m) => m.buy), ["proposal-2"]);
+    } finally {
+      mock.restoreAll();
+    }
+  });
+
   it("re-quotes a quote that ages out while the BUY waits in the socket queue", async () => {
     let clock = 1_000_000;
     mock.method(Date, "now", () => clock);

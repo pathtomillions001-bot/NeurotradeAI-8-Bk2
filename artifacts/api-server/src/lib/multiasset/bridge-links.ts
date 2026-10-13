@@ -38,16 +38,26 @@
  *     `SPENT_CODE_KEEP_MS` later. It can never mint a token in that window: the
  *     only way /pair redeems it is while its LINK is alive, and a retired code
  *     has no live link (see `codeIsLive`).
- *   • `mt5_bridge_links` — a link is alive only while its terminal keeps
- *     heartbeating. Past `BRIDGE_LINK_LEASE_MS` of silence the sweeper in
- *     `routes/bridge.ts` ends it: tokens revoked, account claim released, the
- *     code retired, the Desk's terminal data cleared. A terminal that comes
- *     back after that has nothing live to present and needs a new code.
+ *   • `mt5_bridge_links` — a link ends for exactly TWO reasons, and neither of
+ *     them is a timer:
  *
- * The terminal's own `POST /api/bridge/disconnect` (sent from `OnDeinit` when
- * MT5 closes the chart or the terminal) ends the link immediately; the lease is
- * the backstop for the cases where no deinit ever runs — a power cut, a killed
- * process, a VPS that reboots mid-session.
+ *       1. the user unlinks the terminal in the Desk (`/unpair`, which REVOKES
+ *          rather than deletes, because that answer is final for the EA); or
+ *       2. the user closes MT5 (the EA's `OnDeinit` sends `/disconnect` for
+ *          `REASON_CLOSE` — the terminal itself going down).
+ *
+ *     Silence past `BRIDGE_LINK_LEASE_MS` no longer ends anything. A laptop
+ *     lid, a weekend market close, a sleeping VPS, a five-minute network
+ *     outage — every one of those used to retire the token, release the claim
+ *     and clear the Desk, and the user was told their terminal had "stopped
+ *     syncing" when nothing had gone wrong with it. Now a silent link is
+ *     reported as STALE (the Desk already renders `MT5 STALE`, and the analysis
+ *     path gates on quote freshness, not on the link's liveness) and stays
+ *     paired until one of the two things above happens.
+ *
+ * The lease constant is kept because two things still need the number: the Desk
+ * reports how long a silent terminal has been silent, and the sweep below prunes
+ * the rows of revoked links.
  *
  * ── WHY THE STORE REPORT IS STILL HERE ──────────────────────────────────────
  *
@@ -741,7 +751,11 @@ export async function linkByCode(code: string, now = Date.now()): Promise<StoreL
   const cached = [...linksByTokenHash.values()]
     .filter((record) => record.code === code && !record.revokedAt)
     .sort((a, b) => b.pairedAt - a.pairedAt)[0];
-  if (cached && linkIsLive(cached, now)) return { record: cached, checked: true, health: "ok" };
+  // A silent link's code still pairs: the terminal is coming back from a reboot,
+  // a closed laptop or a redeploy, and it presents exactly this code. Refusing
+  // it here is how a reconnect used to need a NEW code that the user had to
+  // fetch from the browser.
+  if (cached && linkIsValid(cached)) return { record: cached, checked: true, health: "ok" };
 
   const consultable = await storeConsultable();
   if (!consultable.ok) {
@@ -761,11 +775,11 @@ export async function linkByCode(code: string, now = Date.now()): Promise<StoreL
       ),
     );
     const record = rowToLink(result?.rows?.[0] as Record<string, unknown> | undefined);
-    if (!record) return { record: null, checked: true, health: "ok", detail: "no live link for this code" };
+    if (!record) return { record: null, checked: true, health: "ok", detail: "no link for this code" };
     linksByTokenHash.set(record.tokenHash, record);
-    return linkIsLive(record, now)
+    return linkIsValid(record)
       ? { record, checked: true, health: "ok" }
-      : { record: null, checked: true, health: "ok", detail: "the code's terminal is gone" };
+      : { record: null, checked: true, health: "ok", detail: "the code's link was revoked" };
   } catch (err) {
     warnOnce(err);
     return { record: null, checked: false, health: "error", detail: messageOf(err) };
@@ -773,22 +787,34 @@ export async function linkByCode(code: string, now = Date.now()): Promise<StoreL
 }
 
 /**
- * Is this link still being kept alive by a terminal?
+ * Is this a LINK at all — i.e. may credentials issued under it still be used?
  *
- * A revoked link is never live, and neither is one that has been silent for
- * longer than the lease — that is the whole definition of the lifetime rule.
+ * The whole definition is now one clause: it has not been revoked. Silence does
+ * not invalidate a credential, because silence is not a decision anybody made;
+ * a power cut is not the user pressing Unlink.
+ */
+export function linkIsValid(link: StoredBridgeLink): boolean {
+  return !link.revokedAt;
+}
+
+/**
+ * Has this link been heard from recently?
+ *
+ * This is a REPORTING question — the Desk shows `MT5 STALE`, the pairing dialog
+ * says "waiting for the terminal" — and deliberately not an authorisation one.
+ * See `linkIsValid` for what may still be used.
  */
 export function linkIsLive(link: StoredBridgeLink, now = Date.now()): boolean {
   if (link.revokedAt) return false;
   return now - link.lastSeenAt <= BRIDGE_LINK_LEASE_MS;
 }
 
-/** Live (non-revoked, non-expired) link for a session, if any. */
+/** The session's link, if it has one that has not been revoked. */
 export async function liveLinkForSession(sessionId: string, now = Date.now()): Promise<StoredBridgeLink | null> {
   const cached = [...linksByTokenHash.values()]
     .filter((record) => record.sessionId === sessionId && !record.revokedAt)
     .sort((a, b) => b.pairedAt - a.pairedAt)[0];
-  if (cached && linkIsLive(cached, now)) return cached;
+  if (cached && linkIsValid(cached)) return cached;
 
   const db = await pool();
   if (!db) return null;
@@ -803,7 +829,7 @@ export async function liveLinkForSession(sessionId: string, now = Date.now()): P
     const record = rowToLink(result?.rows?.[0] as Record<string, unknown> | undefined);
     if (!record) return null;
     linksByTokenHash.set(record.tokenHash, record);
-    return linkIsLive(record, now) ? record : null;
+    return linkIsValid(record) ? record : null;
   } catch (err) {
     warnOnce(err);
     return null;

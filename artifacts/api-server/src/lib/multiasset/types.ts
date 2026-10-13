@@ -393,8 +393,25 @@ export interface PlanRationale {
 }
 
 export interface ManagementPlan {
-  breakeven: { triggerR: number; offsetR: number; structureBuffer: boolean } | null;
+  breakeven: {
+    triggerR: number;
+    offsetR: number;
+    structureBuffer: boolean;
+    /**
+     * R beyond `triggerR` after which an unconfirmed structure no longer blocks
+     * the stop move. Optional: absent means the EA's own default (0.35R on the
+     * current build), and `0` disables the fallback entirely.
+     */
+    structureFallbackR?: number;
+  } | null;
   partials: { atR: number; closePct: number }[];
+  /**
+   * True when the owner's ladder could not be expressed at this position size,
+   * so break-even took over its first rung's R. Optional and informational —
+   * the EA needs no behaviour change to honour it, because the break-even
+   * trigger it receives has already been moved.
+   */
+  partialsDeferredToBreakeven?: boolean;
   trail:
     | {
         mode: "atr_chandelier" | "structure" | "fixed_points";

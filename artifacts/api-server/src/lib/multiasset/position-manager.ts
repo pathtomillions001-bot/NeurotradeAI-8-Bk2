@@ -102,6 +102,12 @@ export interface ManagementPolicy extends Omit<ManagementPlan, "trail"> {
   } | null;
   /** v4 breakeven requires a confirmed structure shift, not just +1R. */
   requireStructure?: boolean;
+  /**
+   * R past `breakeven.triggerR` after which an unconfirmed structure no longer
+   * blocks the stop move. Absent → `BREAKEVEN_STRUCTURE_FALLBACK_R`; `0` →
+   * structure confirmation is mandatory and there is no deadline.
+   */
+  structureFallbackR?: number;
 }
 
 /**
@@ -124,6 +130,21 @@ export const TRAIL_MIN_STEP_ATR = 0.1;
 
 /** Breakeven covers the round trip plus this much of R. */
 export const BREAKEVEN_PROFIT_R = 0.05;
+
+/**
+ * The structure deadline, in R past the breakeven trigger.
+ *
+ * A policy that requires a confirmed structure shift is right to prefer one —
+ * and wrong to wait for it forever. Past this much progress the stop moves on
+ * the R trigger alone and the journal records that the confirmation was
+ * deferred, so the decision is auditable rather than invisible. 0.35R is small
+ * enough that the stop moves while the trade is still worth protecting and
+ * large enough to give a genuine pivot one more bar to print.
+ *
+ * Owners set this per mode in the Desk's Auto-trader settings; `0` there means
+ * "wait for structure, however long it takes".
+ */
+export const BREAKEVEN_STRUCTURE_FALLBACK_R = 0.35;
 
 /** Minimum interval between stop modifications, per position. */
 export const MODIFY_COOLDOWN_MS = 1500;
@@ -536,7 +557,21 @@ export function managePosition(input: ManageInput): ManageResult {
 
   // Book-keeping that must happen on every evaluation, exit or not.
   const movePrice = long ? exitPrice - state.entry : state.entry - exitPrice;
-  next.progressR = movePrice / state.riskPrice;
+  /**
+   * ── R IS ROUNDED, AND THAT IS NOT COSMETIC ────────────────────────────────
+   *
+   * A trade that is exactly 1R in profit evaluates to 0.9999999999999787,
+   * because 1.10500 − 1.10000 is 0.004999999999999893 in binary floating point.
+   * The desk's triggers are all of the form "progressR >= triggerR", so the
+   * ONE reading an owner checks — "we are 1R up, why has nothing happened" —
+   * was the reading that fell through the gap by 2 × 10⁻¹⁴.
+   *
+   * 1e-6 of R is far below any broker's price granularity (it is 0.0001% of the
+   * money at risk) and far above float dust, so rounding here removes the gap
+   * without moving a trigger by a measurable amount. The EA keeps more digits
+   * on the wire; this is the arithmetic the rules are evaluated in.
+   */
+  next.progressR = Number((movePrice / state.riskPrice).toFixed(6));
   next.mfeR = Math.max(state.mfeR, next.progressR);
   next.bestPrice = long
     ? Math.max(state.bestPrice, exitPrice)
@@ -666,9 +701,28 @@ export function managePosition(input: ManageInput): ManageResult {
   const be = policy.breakeven;
   if (be && !next.beDone && next.progressR >= be.triggerR) {
     const requireStructure = policy.requireStructure !== false && be.structureBuffer;
-    const confirmed = requireStructure
+    const structural = requireStructure
       ? structureConfirmed(input.bars, state.side, state.entry)
       : true;
+    /**
+     * ── THE STRUCTURE DEADLINE ───────────────────────────────────────────────
+     *
+     * Waiting for a confirmed fractal pivot is the higher-quality reading of
+     * "+1R", and it is also how a winning position kept its original stop
+     * indefinitely: a fast frame can simply never print the pivot the rule
+     * wants, so the trigger is met, the confirmation never comes, and the desk
+     * does nothing. That is the reported defect ("1R in profit and no SL
+     * adjustment").
+     *
+     * So structure remains the PREFERRED confirmation, and it now has a
+     * deadline: `structureFallbackR` past the trigger, the stop moves on the R
+     * trigger alone. `0` disables the fallback for an owner who genuinely wants
+     * to wait. This mirrors the EA's `Pm*` implementation field for field —
+     * both sides are pinned by the same golden vectors.
+     */
+    const fallbackR = policy.structureFallbackR ?? BREAKEVEN_STRUCTURE_FALLBACK_R;
+    const deadlinePassed = fallbackR > 0 && next.progressR >= be.triggerR + fallbackR;
+    const confirmed = structural || deadlinePassed;
     if (confirmed) {
       /**
        * The stop goes to entry + the round-trip cost + 0.05R.
@@ -709,9 +763,16 @@ export function managePosition(input: ManageInput): ManageResult {
           kind: "modify_sl",
           ticket: state.ticket,
           sl: candidate,
-          reason: `breakeven: +${next.progressR.toFixed(2)}R with structure confirmed → stop to entry + cost + ${BREAKEVEN_PROFIT_R}R.`,
+          reason: structural
+            ? `breakeven: +${next.progressR.toFixed(2)}R with structure confirmed → stop to entry + cost + ${BREAKEVEN_PROFIT_R}R.`
+            : `breakeven: +${next.progressR.toFixed(2)}R — structure had not confirmed by +${(be.triggerR + fallbackR).toFixed(2)}R (deadline), stop moved anyway to entry + cost + ${BREAKEVEN_PROFIT_R}R.`,
           stage: next.stage,
         });
+        if (!structural) {
+          notes.push(
+            `structure confirmation missed its +${(be.triggerR + fallbackR).toFixed(2)}R deadline — break-even taken on the R trigger alone.`,
+          );
+        }
       } else {
         next.beDone = true;
         if (next.stage === "OPEN_RISK") next.stage = "BE_ARMED";

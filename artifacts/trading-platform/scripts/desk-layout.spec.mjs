@@ -264,7 +264,10 @@ function collectMeasurements() {
     const heights = [...new Set(rows.map((row) => Math.round(row.getBoundingClientRect().height)))];
     return { id: table.getAttribute("data-table"), uniformTemplate: templates.size <= 1, heights };
   });
-  const testids = ["data-source", "stream-status", "mode-scalp", "mode-intraday", "mode-swing", "timezone-select", "auto-trade-toggle", "open-bridge", "kill-switch"]
+  // The title bar is CONTROLS ONLY: the data-source and stream-status chips were
+  // deleted (their values live in the status bar and the Feed & health panel),
+  // and `open-settings` — the auto-trader settings surface — was added.
+  const testids = ["mode-scalp", "mode-intraday", "mode-swing", "timezone-select", "auto-trade-toggle", "open-settings", "open-bridge", "kill-switch"]
     .map((id) => [id, Boolean(document.querySelector(`[data-testid="${id}"]`))]);
   const root = document.querySelector(".desk-root");
   return {
@@ -384,13 +387,17 @@ for (const vp of VIEWPORTS) {
   await page.waitForTimeout(400);
   await page.screenshot({ path: `${OUT_DIR}1440x900-unlinked.png` });
   const unlinked = await page.evaluate(() => ({
-    source: document.querySelector('[data-testid="data-source"]')?.textContent ?? "",
+    connect: document.querySelector('[data-testid="connect-card"]')?.textContent ?? "",
     killDisabled: document.querySelector('[data-testid="kill-switch"]')?.disabled ?? null,
+    settings: Boolean(document.querySelector('[data-testid="open-settings"]')),
+    // The deleted title-bar chips must not survive as hidden nodes either.
+    deletedChips: ["data-source", "stream-status"].filter((id) => document.querySelector(`[data-testid="${id}"]`)).length,
     grid: document.querySelectorAll(".desk-grid [data-panel]").length,
     statusBar: document.querySelectorAll('[data-testid="status-bar"]').length,
     tabs: document.querySelectorAll('[role="tab"]').length,
   }));
-  check("unlinked: source chip says MT5 REQUIRED", unlinked.source.includes("MT5 REQUIRED"), unlinked.source);
+  check("unlinked: the connect card asks for MT5", unlinked.connect.includes("Connect MT5"), unlinked.connect.slice(0, 80));
+  check("unlinked: title-bar chips are gone, settings stays reachable", unlinked.deletedChips === 0 && unlinked.settings === true, JSON.stringify(unlinked));
   check("unlinked: kill switch present but disabled", unlinked.killDisabled === true);
   check("unlinked: no workspace grid, no tabs, no status bar", unlinked.grid === 0 && unlinked.tabs === 0 && unlinked.statusBar === 0, JSON.stringify(unlinked));
   await context.close();

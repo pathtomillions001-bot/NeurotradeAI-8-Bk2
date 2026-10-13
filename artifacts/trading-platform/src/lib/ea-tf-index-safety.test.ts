@@ -135,15 +135,24 @@ test("the EA version agrees across #property, EA_VERSION and the Desk expectatio
   const property = eaSource.match(/#property version\s+"([\d.]+)"/)?.[1];
   const define = eaSource.match(/#define EA_VERSION\s+"([\d.]+)"/)?.[1];
   const expected = bridgeSource.match(/export const EXPECTED_EA_VERSION = "([\d.]+)"/)?.[1];
-  assert.equal(property, "3.08");
+  assert.equal(property, "3.09");
   assert.equal(define, property);
   assert.equal(expected, property);
 });
 
-test("the v3.08 changelog entry documents the link that ends with the terminal", () => {
+test("the v3.08 changelog entry stays, and v3.09 documents the new link lifetime", () => {
+  // The v3.08 entry is history and is not rewritten; what matters is that the
+  // CURRENT contract is documented where a reader of the EA will find it.
   assert.match(eaSource, /WHAT CHANGED IN v3\.08/);
-  assert.match(eaSource, /RemoveLegacyLinkFile/);
+  assert.match(eaSource, /WHAT CHANGED IN v3\.09/);
+  assert.match(eaSource, /A link now ends for exactly two reasons/);
   assert.match(eaSource, /bridge\/disconnect/);
+  assert.match(eaSource, /structureFallbackR/);
+  // The owner's own knobs are documented too: a reader must be able to see that
+  // the offset and the trailing style are honoured by the terminal, not merely
+  // offered by the Desk.
+  assert.match(eaSource, /EVERY SETTING THE OWNER CAN SET IS ONE THE TERMINAL OBEYS/);
+  assert.match(eaSource, /THE MINIMUM TRAIL STEP IS THE OWNER'S, NOT OURS/);
 });
 
 test("the v3.07 changelog entry documents the detach fix", () => {

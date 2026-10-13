@@ -170,3 +170,24 @@ export type DeskTrade = typeof deskTradesTable.$inferSelect;
 export type DeskJournalRow = typeof deskJournalTable.$inferSelect;
 export type DeskCalibrator = typeof deskCalibratorsTable.$inferSelect;
 export type DeskGovernanceState = typeof deskGovernanceStateTable.$inferSelect;
+
+/**
+ * The owner's auto-trader settings, one row per browser session.
+ *
+ * Stored as a single JSON payload rather than a column per knob, and that is a
+ * deliberate trade: the settings model grows every time a new management rule
+ * is added, and a table that needed a migration for each one would make adding
+ * a knob expensive — which is how a settings surface ends up with "every knob
+ * except this one". The payload carries its own `version`, so a shape change
+ * is detected by the reader (`desk-settings.ts`) rather than by the schema.
+ *
+ * `updated_at_ms` is epoch milliseconds for the same reason the other desk
+ * tables use it: the application clock is the one the change was made on.
+ */
+export const deskSettingsTable = pgTable("desk_settings", {
+  sessionId: text("session_id").primaryKey(),
+  payloadJson: text("payload_json").notNull(),
+  updatedAtMs: bigint("updated_at_ms", { mode: "number" }).notNull(),
+});
+
+export type DeskSettingsRow = typeof deskSettingsTable.$inferSelect;

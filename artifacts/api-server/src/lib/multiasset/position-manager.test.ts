@@ -20,6 +20,7 @@ import { strict as assert } from "node:assert";
 import test from "node:test";
 import {
   BREAKEVEN_PROFIT_R,
+  BREAKEVEN_STRUCTURE_FALLBACK_R,
   MODIFY_COOLDOWN_MS,
   TRAIL_MIN_STEP_ATR,
   countBarsSince,
@@ -195,15 +196,45 @@ test("V2 — breakeven fires on the trigger WITH structure confirmation", () => 
   assert.equal(out.state.stage, "BE_ARMED");
 });
 
-test("V3 — breakeven does NOT fire while structure is unconfirmed", () => {
-  // Price is +2R on the last close, but there is no confirmed swing low above
-  // the entry: the series has never pulled back, so there is no higher low.
+test("V3 — structure still gates break-even, up to its deadline", () => {
+  /**
+   * UPDATED for the structure deadline (`BREAKEVEN_STRUCTURE_FALLBACK_R`).
+   *
+   * The old vector ran this exact series at +2R and asserted that NOTHING
+   * happened, forever. That is the behaviour the owner reported as a defect:
+   * "we may be 1R in profit and nothing happens, no SL adjustment". Structure
+   * is still required — this vector keeps proving it is — but it is now
+   * required UNTIL the deadline, after which the stop moves on the R trigger
+   * alone and the journal says the confirmation was deferred.
+   *
+   * Both halves are asserted, because "the deadline exists" and "structure is
+   * still required" are different claims and only the second one protects the
+   * original intent of this test.
+   */
   const state = makeState();
   const bars = barsFromCloses([1.1002, 1.1012, 1.102, 1.1025, 1.103, 1.104]);
-  const out = run(state, bars, 1.104, basePolicy());
-  assert.deepEqual(out.actions, []);
-  assert.equal(out.state.beDone, false);
-  assert.ok(out.notes.some((n) => n.includes("structure has not confirmed")));
+
+  // Before the deadline: trigger met (1.2R), structure unconfirmed → no
+  // modification. Nothing happens, and the note says why — which is the
+  // behaviour that remains, up to the deadline.
+  const early = run(state, bars, 1.1024, basePolicy());
+  assert.deepEqual(early.actions, []);
+  assert.equal(early.state.beDone, false);
+  assert.ok(early.notes.some((n) => n.includes("structure has not confirmed")));
+  assert.ok(early.state.progressR < 1.0 + BREAKEVEN_STRUCTURE_FALLBACK_R);
+
+  // Past the deadline: the stop moves, and the reason says why.
+  const late = run(state, bars, 1.104, basePolicy());
+  assert.equal(late.actions.length, 1);
+  assert.equal(late.actions[0].kind, "modify_sl");
+  assert.ok(late.actions[0].reason.includes("deadline"));
+  assert.equal(late.state.beDone, true);
+  assert.ok(late.notes.some((n) => n.includes("missed its")));
+
+  // And `structureFallbackR: 0` restores the old contract exactly.
+  const never = run(state, bars, 1.104, basePolicy({ structureFallbackR: 0 }));
+  assert.deepEqual(never.actions, []);
+  assert.equal(never.state.beDone, false);
 });
 
 test("V3b — structureConfirmation is side-symmetric", () => {
@@ -456,7 +487,17 @@ test("V12b — a runner beyond 1R is not cut by a regime exit", () => {
   const out = run(state, bars, 1.104, basePolicy(), {
     regime: { requiredProbability: 0.2, permit: false, changeProbability: 0.9 },
   });
-  assert.deepEqual(out.actions, []);
+  // The claims under test are about EXITS: a regime that no longer permits this
+  // side must not close a trade that is already beyond 1R. A stop modification
+  // is not an exit, and at +2R the (new) structure deadline legitimately moves
+  // the stop to break-even — that is the fix for "1R up and nothing happens",
+  // and it is asserted separately in V3.
+  assert.deepEqual(
+    out.actions.filter((action) => action.kind !== "modify_sl"),
+    [],
+    "no exit action may be emitted on a runner",
+  );
+  assert.equal(out.state.stage, "BE_ARMED");
 });
 
 // ── V13: session / news flatten ─────────────────────────────────────────────

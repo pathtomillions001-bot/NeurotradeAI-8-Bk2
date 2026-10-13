@@ -80,11 +80,12 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <dt>Economic calendar</dt><dd className={status.data.calendarAvailable ? "text-emerald-300" : "text-amber-300"}>{status.data.calendarAvailable ? "Available" : "Unavailable — entries paused"}</dd>
                 </dl>
                 <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
-                  This link is held by the running MT5 terminal. Closing MT5 ends it, and the next session starts
-                  from a new code — nothing is saved in the terminal. An EA reload inside the same running terminal
-                  (recompile, input change, timeframe change) continues this link without a new code. If MT5 is
-                  force-closed and cannot say goodbye, the server notices within{" "}
-                  {Math.round((status.data.leaseMs ?? 120_000) / 1000)}s and releases the link then.
+                  Two things end this link, and nothing else: you unlink the terminal here, or you close MT5. The EA
+                  saves its token and this code in the terminal&apos;s common folder for this account, so a reboot, a
+                  redeploy, an EA reload, a timeframe change and a weekend of silence all reconnect on their own — no
+                  new code to type. If the heartbeat stops, the Desk shows the terminal as stale after{" "}
+                  {Math.round((status.data.leaseMs ?? 120_000) / 1000)}s and pauses new entries; it does not disconnect
+                  you, and the next beat clears it.
                 </p>
               </div>
               {(() => {
@@ -141,9 +142,11 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p>Set <code className="text-zinc-200">ServerUrl</code> to the same origin and paste this code into <code className="text-zinc-200">PairingCode</code>:</p>
                   <CopyValue value={pairing.isPending || rotate.isPending ? "Generating…" : (code ?? "Try again shortly") } copied={copied === "code"} onCopy={() => code && copy(code, "code")} disabled={!code} large />
                   <p className="mt-2 text-[10px] text-zinc-500">
-                    This code connects one MT5 terminal session, and it is active only while that terminal is open.
-                    Nothing is saved in the terminal: when MT5 closes, the link and this code are released, and
-                    reconnecting needs a new code from this dialog. Have the terminal running when you paste it.
+                    This code connects ONE MT5 account to this Desk. The EA saves it with its token in the
+                    terminal&apos;s common folder, so this same code reconnects after a restart, a redeploy or a
+                    closed terminal — and a second chart on the same account shares the same link. It stops working in
+                    exactly two cases: you unlink the terminal here, or you close MT5. Generate a new code only if it
+                    may have been seen by someone else.
                   </p>
                   <div className="mt-2 flex items-center gap-2">
                     <button type="button" onClick={() => rotate.mutate()} disabled={rotate.isPending} className="rounded-md border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 transition-colors hover:text-zinc-100 disabled:opacity-50">
@@ -166,7 +169,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                   <p className="flex items-center gap-1.5 font-medium text-red-300"><AlertTriangle className="h-3.5 w-3.5 shrink-0" />Pairing refused</p>
                   <p className="mt-1.5">{status.data.lastPairingError}</p>
                   <p className="mt-2 text-[10px] text-red-300/70">
-                    The terminal keeps retrying with the code above, so it connects by itself as soon as the account is free — or unlink it elsewhere and generate a new code. If the code was already used by a terminal that has since closed, generate a new one here.
+                    The terminal keeps retrying with the code above, so it connects by itself as soon as the account is free — or unlink it in the other Desk and it will reconnect here. A code is only refused when the Desk that issued it unlinked the terminal, or when a newer code replaced it.
                   </p>
                 </div>
               ) : (
@@ -199,7 +202,7 @@ function CopyValue({ value, copied, onCopy, disabled, large = false }: { value: 
  */
 function StoreWarning({ store, warning }: { store?: BridgeStoreReport | null; warning?: string | null }) {
   const detail = warning ?? (store && !store.durable
-    ? `This Desk's link store is ${store.detail}. A link is remembered only for as long as the terminal that made it is open, and that memory lives in a store that does not survive a restart — so a deploy, cold start or second replica will drop a RUNNING terminal, and it will need a new code. Closing MT5 still ends the link by itself, as designed. Set a postgres:// DATABASE_URL on the api service to keep a running terminal connected across restarts.`
+    ? `This Desk's link store is ${store.detail}, and it does not survive a restart. A link is meant to outlive the terminal that made it, so a deploy, a cold start or a second replica drops a RUNNING terminal and it needs a new code — the one thing this setting is supposed to prevent. Set a postgres:// DATABASE_URL on the api service. Until then, do not restart the api while the terminal is attached.`
     : store && !store.reachable
       ? "The link store could not be read just now. Nothing is revoked — a terminal that is already linked keeps streaming and retries on its own. If this persists, check the api service's database connection."
       : null);

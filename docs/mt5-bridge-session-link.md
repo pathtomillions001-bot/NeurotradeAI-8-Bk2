@@ -1,4 +1,14 @@
-# The MT5 link lives only as long as the terminal
+> **HISTORICAL — this contract was overturned in v3.09.**
+>
+> The rule below ("a link lives only as long as the terminal session") is what
+> shipped in EA v3.08, and it is what the owner then reported as *the Desk keeps
+> disconnecting itself*. The current contract — a link ends only when the user
+> unlinks it in the Desk or closes MT5 — is `docs/mt5-bridge-link-lifetime.md`.
+> This file is kept as the record of what was tried, why the server-side version
+> of it looked reasonable, and which tests pinned it; those tests were rewritten
+> with the contract, not worked around.
+
+# The MT5 link lives only as long as the terminal (v3.08 — SUPERSEDED)
 
 This supersedes `docs/mt5-bridge-durable-link.md`. The rule it describes — a
 link that survives closing MT5, closing the browser and redeploying the API, and

@@ -228,11 +228,11 @@ test("OnDeinit names the reason MT5 stopped the expert", () => {
   assert.match(init, /return\s*\(\s*INIT_SUCCEEDED\s*\)/, "OnInit must never fail to attach");
 });
 
-test("the shipped EA carries the v3.08 contract, and the Desk serves that same file", () => {
+test("the shipped EA carries the v3.09 contract, and the Desk serves that same file", () => {
   const version = ea.match(/#property\s+version\s+"([^"]+)"/)![1];
   const reported = ea.match(/#define\s+EA_VERSION\s+"([^"]+)"/)![1];
   assert.equal(version, reported, "the declared version and the one sent on the wire must agree");
-  assert.equal(version, "3.08");
+  assert.equal(version, "3.09");
 
   assert.equal(
     fs.readFileSync(publishedPath, "utf8"),
@@ -252,52 +252,77 @@ test("the shipped EA carries the v3.08 contract, and the Desk serves that same f
 });
 
 /**
- * v3.08 — the link lives only as long as the terminal.
+ * v3.09 — the link ends only when the user says so.
  *
- * The reversal of v3.03 note 9, pinned statically because the EA is MQL5 and
- * nothing here can run it. What must stay true of every future build:
+ * Pinned statically because the EA is MQL5 and nothing here can run it. What
+ * must stay true of every future build:
  *
- *   • the bearer token is NEVER written to disk — the terminal's common folder
- *     held a link that outlived the session nobody closed on purpose;
- *   • a file an older build left behind is deleted, or the next MT5 start
- *     resumes a session the server has already released;
- *   • the pairing code comes only from the user's input — a remembered code is
- *     what let a closed terminal reconnect on a spent credential;
- *   • MT5 closing this chart or the terminal tells the server, so the link, its
- *     code and the account claim are freed immediately rather than after a
- *     timeout;
- *   • a code the server calls SPENT produces one actionable line, not a silent
- *     retry loop.
+ *   • the link credential is SAVED (per MT5 account, in the terminal's common
+ *     folder) so a reboot, a restart, a redeploy or an outage re-adopts the same
+ *     link without the user fetching a new pairing code;
+ *   • the pairing code may therefore come from the saved link when the input is
+ *     empty — an unattended MT5 restart has nobody to type a code;
+ *   • that credential is cleared in exactly ONE place: the Desk answering
+ *     `bridge_link_revoked`, which is the user pressing Unlink;
+ *   • the only deinit reason that tells the server the session is over is
+ *     REASON_CLOSE (the terminal closing) — a chart closing, an account
+ *     switch or a failed attach must never disconnect the user;
+ *   • an unverified refusal (401 without `bridge_link_revoked`) or a 5xx NEVER
+ *     costs the credential.
  */
-test("the EA never persists its token, and removes what an older build left", () => {
+test("the EA saves its link, and clears it only when the Desk revokes it", () => {
   const code = codeOnly(ea);
-  assert.doesNotMatch(code, /SaveLink\s*\(/, "the EA must not write a link file");
-  assert.doesNotMatch(code, /LoadSavedLink\s*\(/, "the EA must not restore one");
-  assert.doesNotMatch(code, /g_savedCode/, "a remembered pairing code is what v3.08 removed");
-  assert.doesNotMatch(code, /g_savedCode/, "no remembered code");
+  assert.match(code, /void\s+SaveLinkFile\s*\(/, "the link must be persisted");
+  assert.match(code, /bool\s+LoadLinkFile\s*\(/, "and restored on attach");
+  assert.match(code, /void\s+DeleteLinkFile\s*\(/, "and cleared when revoked");
 
-  // The one place that touches the old file must DELETE it.
-  const removal = functionBody("RemoveLegacyLinkFile");
-  assert.match(removal, /FileDelete\s*\(/, "an older build's saved link must be deleted on attach");
-  assert.doesNotMatch(removal, /FileWriteString\s*\(/, "and never rewritten");
-  assert.match(code, /RemoveLegacyLinkFile\s*\(\s*\)\s*;/, "OnInit must call it");
+  // The ONE call that clears it sits in the revoked branch, not in a timeout or
+  // an unverified-refusal path.
+  const revokeIndex = code.indexOf('g_lastHttpCode == "bridge_link_revoked"');
+  // The CALL site (the definition sits earlier in the file, which is fine).
+  const deleteIndex = code.indexOf('DeleteLinkFile("');
+  assert.ok(revokeIndex >= 0, "the revocation branch must exist");
+  assert.ok(deleteIndex > revokeIndex, "the saved link is cleared only inside that branch");
+  assert.equal(
+    [...code.matchAll(/DeleteLinkFile\s*\(\s*"/g)].length,
+    1,
+    "exactly one CALL that clears the link — a second would be a second way to lose it",
+  );
 
-  // No file WRITE may mention the token anywhere in the file: the position
-  // manager's own records are the only thing this EA persists.
-  for (const [, args] of ea.matchAll(/\bFileWriteString\s*\(([^;]*?)\)\s*;/g)) {
-    assert.doesNotMatch(args, /g_token/, `the token must never reach a file: ${args}`);
+  // A file WRITE carrying the token is expected now (that is the resume
+  // credential), and it must be the link writer rather than a stray one.
+  const writes = [...code.matchAll(/\bFileWriteString\s*\(([^;]*?)\)\s*;/g)];
+  assert.ok(
+    writes.some(([, args]) => /token/.test(args)),
+    "SaveLinkFile must be the write that carries the token",
+  );
+});
+
+test("only closing MT5 ends the link from the terminal's side", () => {
+  const body = functionBody("LinkEndsWithThisRun");
+  assert.match(body, /REASON_CLOSE/);
+  for (const reason of ["REASON_CHARTCLOSE", "REASON_INITFAILED", "REASON_ACCOUNT", "REASON_REMOVE"]) {
+    assert.doesNotMatch(
+      body,
+      new RegExp(reason),
+      `${reason} is not the user ending the connection, so it must not disconnect`,
+    );
   }
 });
 
-test("the pairing code is the user's input, and nothing else", () => {
+test("the pairing code is the user's input, or the link this terminal already owns", () => {
   const body = functionBody("EffectivePairingCode");
-  assert.match(body, /StringTrimmed\s*\(\s*PairingCode\s*\)/, "the input is the credential");
-  // Any second source would be a remembered key by another name.
-  assert.doesNotMatch(body, /g_/, "no global may stand in for the input");
+  assert.match(body, /StringTrimmed\s*\(\s*PairingCode\s*\)/, "the input always wins");
+  // The ONE permitted fallback is the code stored in the saved link — the code
+  // the Desk itself issued to this terminal. It is read from the link file, not
+  // from a global and not from any other remembered value, so an unattended
+  // restart can re-adopt a link it already owns and nothing else can.
+  assert.match(body, /LoadLinkFile\s*\(/, "the fallback is the saved link");
+  assert.doesNotMatch(body, /g_savedCode|g_remembered/, "no remembered-input fallback");
   assert.equal(
-    (body.match(/return/g) ?? []).length,
-    1,
-    "one return: there is no fallback code to fall back TO",
+    (body.match(/\breturn\b/g) ?? []).length,
+    3,
+    "input → saved code → empty, in that order",
   );
 });
 
@@ -307,8 +332,12 @@ test("closing the terminal tells the server, and only for the reasons that end a
   assert.match(deinit, /DisconnectBridge\s*\(/, "and say so to the server");
 
   const ends = functionBody("LinkEndsWithThisRun");
-  for (const constant of ["REASON_CHARTCLOSE", "REASON_CLOSE", "REASON_INITFAILED", "REASON_ACCOUNT"]) {
-    assert.match(ends, new RegExp(constant), `${constant} ends the link`);
+  // v3.09: ONLY the terminal closing ends the link. Chart closes, failed
+  // attaches and account switches are things the user does to a chart, not
+  // decisions to end the connection.
+  assert.match(ends, /REASON_CLOSE/);
+  for (const constant of ["REASON_CHARTCLOSE", "REASON_INITFAILED", "REASON_ACCOUNT"]) {
+    assert.doesNotMatch(ends, new RegExp(constant), `${constant} must NOT end the link`);
   }
   // REASON_REMOVE is what MT5 also reports for some symbol/timeframe changes:
   // disconnecting there would drop a live link every time a user switched
@@ -339,4 +368,65 @@ test("a spent code is answered with something the user can act on", () => {
     /Desk -> Link MT5/,
     "and the line must tell the user to fetch a NEW code",
   );
+});
+
+/**
+ * ── The auto-trader's settings reach the terminal ───────────────────────────
+ *
+ * The owner's requirement was explicit: every setting the Desk offers must be
+ * one the auto trader RESPECTS. Two of them were read by the EA and then
+ * ignored — the break-even offset and the trailing style — which is precisely
+ * the "I set it and nothing changed" defect. These tests pin the fix at the
+ * source, because the failure mode is silent: the UI accepts the value and the
+ * terminal quietly keeps doing what it did before.
+ */
+test("the break-even stop uses the owner's offset, not the EA's own constant", () => {
+  const body = functionBody("ManageOnePosition");
+  // Comments are stripped by `functionBody`, so the section is located by its
+  // first executable statement rather than by its heading.
+  const be = body.slice(body.indexOf("ps.beTriggerR > 0 && !ps.beDone"));
+  assert.match(be, /ps\.beOffsetR/, "the plan's offsetR must be the one that is used");
+  assert.match(
+    be,
+    /double offset = ps\.costPrice \+ \w+ \* ps\.riskPrice/,
+    "and it must land past entry + round-trip cost at that offset",
+  );
+  // The constant survives as a FLOOR for a position with no pushed policy; it
+  // must never be the only thing in the expression.
+  assert.match(be, /ps\.beOffsetR > 0/, "the constant is the fallback, not the policy");
+});
+
+test("all three trailing styles the Desk offers are implemented in the terminal", () => {
+  const parse = functionBody("PmTrailModeFromName");
+  for (const [name, code] of [
+    ["structure", "1"],
+    ["fixed_points", "2"],
+  ]) {
+    assert.match(parse, new RegExp(`"${name}"\\)\\s*return ${code}`), `${name} must map to its own mode`);
+  }
+  assert.match(parse, /return 0/, "and an unknown name degrades to the chandelier");
+
+  // The structure trail needs its own level lookup — the same fractal rule that
+  // gates break-even, asked a different question.
+  assert.ok(ea.includes("bool PmLastSwingStop("), "the structure trail needs a confirmed swing to trail behind");
+
+  const body = functionBody("ManageOnePosition");
+  const trail = body.slice(body.indexOf("ps.trailEnabled && !modifyDone"));
+  for (const mode of ["ps.trailMode == 1", "ps.trailMode == 2"]) {
+    assert.ok(trail.includes(mode), `${mode} must have its own branch`);
+  }
+  assert.match(trail, /PmLastSwingStop\s*\(/, "structure mode trails the confirmed swing");
+  assert.match(trail, /ps\.trailStepPoints > 0/, "a fixed-points trail needs an explicit distance");
+});
+
+test("the trail mode travels with the position, so a restart cannot revert it", () => {
+  const encode = functionBody("PsEncode");
+  assert.match(encode, /f\[30\] = IntegerToString\(ps\.trailMode\)/, "the record carries the mode");
+  assert.match(encode, /ArrayResize\(f, 31\)/, "and the field count matches the encoder");
+  const decode = functionBody("PsDecode");
+  assert.match(decode, /n == 31 && f\[0\] == "v3"/);
+  // Older records must still decode: a v2 written seconds before the upgrade
+  // cannot be allowed to orphan a live position's management.
+  assert.match(decode, /n == 30 && f\[0\] == "v2"/, "v2 still decodes");
+  assert.match(decode, /n == 29 && f\[0\] == "v1"/, "v1 still decodes");
 });

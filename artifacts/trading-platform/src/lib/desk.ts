@@ -415,6 +415,139 @@ export interface RiskPolicy {
   liveTradingEnabled: boolean;
 }
 
+// ── The auto-trader's settings (change #2) ──────────────────────────────────
+//
+// The server owns this model (`desk-settings.ts` in the api) and clamps every
+// number to `autoTradeBounds` before it is stored. The Desk mirrors it so the
+// dialog can render every knob the trader is actually run with — "no setting
+// left behind" is a UI promise, and a field the dialog cannot name is a setting
+// the user cannot set. Presets are applied by the SERVER: the dialog sends a
+// style and the server swaps in that mode+style's whole management policy, so
+// the numbers on screen always come from one home.
+
+/** The trader's stance for one mode. `custom` = a preset that was then edited. */
+export type ModeStyle = "conservative" | "balanced" | "aggressive" | "custom";
+
+/** The stances the user can pick. Labels/blurbs come from `autoTradePresets`. */
+export const MODE_STYLE_IDS: Exclude<ModeStyle, "custom">[] = ["conservative", "balanced", "aggressive"];
+
+export type SizingMode = "percent" | "fixed_money";
+
+export interface BreakevenSettings {
+  enabled: boolean;
+  /** R progress that arms the stop move. */
+  triggerR: number;
+  /** How far beyond entry+round-trip the stop lands, in R. */
+  offsetR: number;
+  /** Require a confirmed structure shift before moving (the v4 rule). */
+  requireStructure: boolean;
+  /** R beyond `triggerR` after which an unconfirmed stop moves anyway. 0 = never. */
+  structureFallbackR: number;
+}
+
+export interface PartialRung {
+  atR: number;
+  closePct: number;
+}
+
+export interface PartialSettings {
+  enabled: boolean;
+  /** Up to four rungs, ascending by `atR`. */
+  rungs: PartialRung[];
+}
+
+export type TrailMode = "atr_chandelier" | "structure" | "fixed_points";
+
+export interface TrailSettings {
+  enabled: boolean;
+  mode: TrailMode;
+  /** ATR period, on the entry timeframe. */
+  period: number;
+  /** ATR multiple behind the extreme (chandelier). */
+  mult: number;
+  /** R progress at which the trail starts moving the stop. */
+  activateAtR: number;
+  /** Absolute minimum step, in points. */
+  stepPoints: number;
+  /** Minimum meaningful step as a fraction of an ATR. */
+  minStepAtr: number;
+}
+
+export interface PyramidSettings {
+  enabled: boolean;
+  maxAdds: number;
+  addAtR: number;
+  sizeRatio: number;
+  requireBaseAtBreakeven: boolean;
+  portfolioRiskCapR: number;
+}
+
+export interface TimeStopSettings {
+  enabled: boolean;
+  /** Closed bars on `timeframe` with no progress before the trade is cut. */
+  noProgressBars: number;
+  timeframe: string | null;
+}
+
+export interface GuardSettings {
+  /** Maximum spread at fill, in points. `null` = derive from the asset's cost. */
+  maxSpreadPoints: number | null;
+  /** Minutes either side of a red-folder release during which entries pause. */
+  newsBlackoutMin: number;
+  /** Flatten before the session close (scalp/intraday; never swing by default). */
+  flatBeforeSessionClose: boolean;
+}
+
+export interface ManagementSettings {
+  breakeven: BreakevenSettings;
+  partials: PartialSettings;
+  trail: TrailSettings;
+  pyramid: PyramidSettings;
+  timeStop: TimeStopSettings;
+  guards: GuardSettings;
+}
+
+export interface RiskSettings {
+  sizingMode: SizingMode;
+  /** Percent of equity risked per trade when `sizingMode = "percent"`. */
+  riskPerTradePct: number;
+  /** Currency risked per trade when `sizingMode = "fixed_money"`. */
+  riskPerTradeMoney: number;
+  maxRiskPct: number;
+  maxDailyLossPct: number;
+  maxDrawdownPct: number;
+  maxOpenPositions: number;
+  maxPositionsPerSymbol: number;
+  maxCurrencyExposurePct: number;
+  haltAfterConsecutiveLosses: number;
+  minMarginLevelPct: number;
+  symbolCooldownMs: number;
+  liveTradingEnabled: boolean;
+}
+
+export interface ModeSettings {
+  style: ModeStyle;
+  /** Per-trade budget for THIS mode, overriding `risk.riskPerTradePct`. */
+  riskPerTradePct: number;
+  management: ManagementSettings;
+}
+
+export interface AutoTradeSettings {
+  /** Bumped when a field's meaning changes; the dialog refuses a shape it does not know. */
+  version: number;
+  risk: RiskSettings;
+  perMode: Record<TradeMode, ModeSettings>;
+  updatedAt: number;
+}
+
+/** Clamp ranges, straight from the API — no second copy of a limit. */
+export type DeskSettingBounds = Record<string, readonly [number, number]>;
+
+export interface ModeStyleLabel {
+  label: string;
+  blurb: string;
+}
+
 export interface JournalEntry {
   id: string;
   ts: number;
@@ -528,10 +661,21 @@ export interface DeskStateResponse {
   serverTime: number;
   /**
    * v5 UI — which v4 layers are computing right now (the server's own flag
-   * summary). Optional: absent on a server that predates the field, and then
-   * the title bar simply shows no V4 chip.
+   * summary). Optional: absent on a server that predates the field, and the
+   * Learning workspace simply shows nothing about v4.
    */
   v4?: DeskV4Summary | null;
+  /**
+   * The auto-trader's settings, as the server enforces them.
+   *
+   * Optional so a Desk pointed at an older api still renders: the settings
+   * dialog then says the surface is unavailable instead of showing zeros.
+   */
+  autoTradeSettings?: AutoTradeSettings | null;
+  /** Every clamp the server applies, so an input cannot offer an invalid value. */
+  autoTradeBounds?: DeskSettingBounds | null;
+  /** Style labels/blurbs, so the words live with the numbers they describe. */
+  autoTradePresets?: Record<string, ModeStyleLabel> | null;
 }
 
 /** The server's `DESK_V4_*` configuration, summarised for the Desk UI. */
@@ -774,7 +918,28 @@ export const deskApi = {
   cancelPlan: (id: string) => request<{ ok: true }>(`/desk/plans/${id}`, { method: "DELETE" }),
   closePosition: (ticket: number, lots?: number) => request<{ ok: true }>(`/desk/positions/${ticket}/close`, { method: "POST", body: JSON.stringify(lots === undefined ? {} : { lots }) }),
   flatten: (reason: string) => request<{ ok: true }>("/desk/flatten", { method: "POST", body: JSON.stringify({ reason }) }),
-  settings: (patch: Record<string, unknown>) => request<{ mode: TradeMode; autoTrade: boolean; watchlist: string[]; policy: RiskPolicy; timezone: string; timezones: DeskTimezone[] }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
+  /**
+   * Apply a settings patch.
+   *
+   * Two shapes are accepted by the API and both are used here: the legacy flat
+   * keys (`mode`, `autoTrade`, `timezone`, `watchlist`, `policy`) and the
+   * auto-trader block (`autoTradeSettings`). The response echoes the stored
+   * state, so the caller never has to guess what the sanitiser kept.
+   */
+  settings: (patch: Record<string, unknown>) =>
+    request<{
+      mode: TradeMode;
+      autoTrade: boolean;
+      watchlist: string[];
+      policy: RiskPolicy;
+      timezone: string;
+      timezones: DeskTimezone[];
+      autoTradeSettings?: AutoTradeSettings | null;
+      autoTradeBounds?: DeskSettingBounds | null;
+      autoTradePresets?: Record<string, ModeStyleLabel> | null;
+      /** How many OPEN positions the change was pushed to (0 when none). */
+      managementPushedTo?: number;
+    }>("/desk/settings", { method: "POST", body: JSON.stringify(patch) }),
   resumeSymbol: (symbol: string) => request<unknown>("/desk/risk/resume", { method: "POST", body: JSON.stringify({ symbol }) }),
   /**
    * The per-agent governance registry.
@@ -891,17 +1056,22 @@ export const deskApi = {
     lastBeatRttMs?: number | null;
     avgBeatRttMs?: number | null;
     /**
-     * The link lives only as long as the terminal (EA v3.08+). Closing MT5 ends
-     * it, its pairing code is spent, and reconnecting starts from a new code.
-     * `durable` is always false now — kept so an older Desk reading this key is
-     * never told a link outlives the terminal that owns it.
+     * The link ends for exactly two reasons (EA v3.09+): the user unlinks the
+     * terminal here, or the user closes MT5. `durable` is true — the token, the
+     * pairing code and the account claim outlive the terminal process, so a
+     * reboot, a redeploy or a weekend of silence costs the user nothing.
      */
     durable?: boolean;
     /** The link contract the API implements. */
-    linkModel?: "terminal-session";
-    /** True: MT5 closing ends the connection. */
+    linkModel?: "unlink-or-terminal-close";
+    /** False: closing MT5 is a reason, but the terminal is not what owns the link. */
     linkEndsWithTerminal?: boolean;
-    /** Heartbeat silence, in ms, after which the server releases the link. */
+    /** True: the next MT5 session re-adopts the saved link with no new code. */
+    resumesAutomatically?: boolean;
+    /**
+     * Heartbeat silence, in ms, after which the Desk DISPLAYS the terminal as
+     * stale. It is a display window now — nothing is revoked when it lapses.
+     */
     leaseMs?: number;
     /** Where the link is stored, and whether that store survives a restart. */
     store?: BridgeStoreReport;

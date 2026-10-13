@@ -3332,6 +3332,19 @@ export class LiveOrderInFlightError extends Error {
 }
 
 /**
+ * Deriv rejected the PROPOSAL request itself. This means the account is not
+ * offered that contract tuple on that market (unlike a rejected BUY with an
+ * expired proposal id). Callers should quarantine the candidate, not retry it
+ * on every tick or count it as a failed purchase.
+ */
+export class UnsupportedDerivProposalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnsupportedDerivProposalError";
+  }
+}
+
+/**
  * A proposal became stale before the BUY was put on the wire. The before-send
  * guard proves no purchase request was sent, so refresh the quote rather than
  * recording a broker refusal or consuming an execution strike.
@@ -3491,6 +3504,11 @@ async function runSingleLiveOrder(
     }
     if (proposalMsg.error) {
       logger.error({ derivError: proposalMsg.error }, "executeLiveTrade: Deriv error");
+      const code = String(proposalMsg.error?.code ?? "");
+      const text = String(proposalMsg.error?.message ?? "").toLowerCase();
+      if (code === "InvalidContractProposal" || text.includes("unknown contract proposal")) {
+        throw new UnsupportedDerivProposalError(describeDerivRejection(proposalMsg.error));
+      }
       throw new Error(describeDerivRejection(proposalMsg.error));
     }
     if (proposalMsg.msg_type !== "proposal" || !proposalMsg.proposal) {

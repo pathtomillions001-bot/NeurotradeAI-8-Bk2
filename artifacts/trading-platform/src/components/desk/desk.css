@@ -514,3 +514,7 @@
   border-bottom: 1px solid color-mix(in srgb, var(--desk-am) 40%, transparent);
   background: color-mix(in srgb, var(--desk-am) 9%, transparent);
 }
+
+/* ── key/value diagnostic rows (Feed & execution health) ─────────────────── */
+.desk-root .desk-kv { border-bottom: 1px solid color-mix(in srgb, var(--desk-line) 60%, transparent); }
+.desk-root .desk-kv:last-child { border-bottom: none; }

@@ -17,6 +17,8 @@ import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
 import type { DeskAlert } from "@/lib/desk-ui";
 
+import "./desk.css";
+
 import { AlertStrip } from "./alert-strip";
 import {
   GRID_ROWS,

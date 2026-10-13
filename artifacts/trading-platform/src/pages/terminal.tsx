@@ -1,66 +1,110 @@
 /**
- * Multi-Asset Desk.
+ * Multi-Asset Desk — v5: ONE terminal-style dashboard.
  *
- * A live-terminal operations workspace, not a chart dashboard. The Desk only
- * renders broker data supplied by a paired MT5 EA; before pairing it provides
- * a clear connection workflow instead of demo balances, replay prices or mock
- * signals. The responsive layout stacks intentionally on small screens and
- * uses independent columns on desktop, so plans, positions and market controls
- * cannot overlap each other.
+ * Four workspaces (Command | Markets | Learning | Journal & performance) in a
+ * single frame: title bar 48 · tabs 40 · work area (context strip, alert
+ * slot, twelve-column panel grid) · status bar 28. The old /learning page
+ * lives here now as the Learning workspace (?tab=learning), and no chart is
+ * rendered anywhere — markets are numbers, calibration is a table with bars.
  *
- * Prices arrive over a server-sent event stream pushed the moment the MT5
- * terminal's heartbeat lands. Polling remains only as a fallback, so a dropped
- * stream degrades to a slower refresh instead of freezing on stale quotes.
+ * Everything operational about the v4 desk is untouched: the same queries and
+ * keys, the same refetch intervals (the stream beats polling), the same
+ * mutations and safety flows (FLATTEN, resume-symbol, resume-agent with a
+ * ≥3-character reason, arm only when armable), the same data-testids, and the
+ * same rule that nothing is shown until a paired MT5 terminal provides it.
+ * Two lightweight keys were ADDED for the new surfaces: ["desk-execution"]
+ * (30s) and ["desk-bridge-status"] (60s), both only while paired.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import {
-  Activity,
-  AlertTriangle,
-  Globe,
-  Link2,
-  Power,
-  RefreshCw,
-  ShieldAlert,
-  Unplug,
-  WifiOff,
-  Zap,
-} from "lucide-react";
-import {
-  AgentPane,
-  ArmedPlansPane,
-  JournalPane,
-  LiveQuotePane,
-  MarketUniversePane,
-  NewsPane,
-  Pane,
-  PerformancePane,
-  PositionsPane,
-  RiskPane,
-  ScannerPane,
-  WatchlistPane,
-} from "@/components/terminal/panes";
+import { useLocation, useSearch } from "wouter";
+import { toast } from "sonner";
+import { Link2 } from "lucide-react";
+
 import { BridgeDialog } from "@/components/terminal/bridge-dialog";
 import { useDeskStream } from "@/hooks/use-desk-stream";
+import { DeskShell } from "@/components/desk/desk-shell";
+import { TitleBar } from "@/components/desk/title-bar";
+import { WorkspaceTabs } from "@/components/desk/workspace-tabs";
+import { StatusBar } from "@/components/desk/status-bar";
+import { StatStrip, type StatTile } from "@/components/desk/stat-strip";
+import { PipelineStrip } from "@/components/desk/pipeline-strip";
+import { ROLLOUT_STAGES, type DeskTab } from "@/components/desk/desk-layout";
+import {
+  CalendarPanel,
+  DecisionPanel,
+  OpportunitiesPanel,
+  PositionsPanel,
+  RiskPanel,
+} from "@/components/desk/workspaces/command";
+import {
+  AutoSelectPanel,
+  HealthPanel,
+  ScannerPanel,
+  UniversePanel,
+} from "@/components/desk/workspaces/markets";
+import {
+  CalibrationPanel,
+  GovernancePanel,
+  LearningJournalPanel,
+  RefusedPanel,
+  RegimePanel,
+  SafetyPanel,
+  WeekPanel,
+} from "@/components/desk/workspaces/learning";
+import {
+  BySymbolPanel,
+  ClosedTradesPanel,
+  DecisionJournalPanel,
+} from "@/components/desk/workspaces/journal";
 import {
   DEFAULT_DESK_TIMEZONE,
-  MODE_ANALYSIS_LABEL,
   TRADE_MODES,
   deskApi,
+  formatInZone,
   formatMoney,
   type Instrument,
   type TradeMode,
 } from "@/lib/desk";
+import {
+  buildAlerts,
+  buildGateRows,
+  buildOpportunityRows,
+  buildPipeline,
+  buildRiskRows,
+  committedRisk,
+  dayChangePct,
+  deskSearchForTab,
+  deskTabFromSearch,
+  formatPct,
+  formatPrice,
+  formatSignedPct,
+  formatSignedR,
+  governedAgentAlertCount,
+  netOpenResults,
+  openRiskPct,
+  riskBadge,
+  rolloutDemoNote,
+  rolloutStage,
+} from "@/lib/desk-ui";
+import type { ReactNode } from "react";
 
 const REFRESH_MS = 5_000;
 
 export default function Terminal() {
   const queryClient = useQueryClient();
+  const search = useSearch();
+  const [, setLocation] = useLocation();
+  const tab = deskTabFromSearch(search);
+
   const [symbol, setSymbol] = useState("");
   const [bridgeOpen, setBridgeOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  /** The LEARNING journal's kind filter — part of its query key. */
+  const [journalKind, setJournalKind] = useState<string | null>(null);
 
+  // ── the v4 desk's queries, keys and intervals, unchanged ─────────────────
   const state = useQuery({
     queryKey: ["desk-state"],
     queryFn: deskApi.state,
@@ -72,32 +116,30 @@ export default function Terminal() {
   const mode: TradeMode = state.data?.mode ?? "intraday";
   const selectedMarkets = state.data?.watchlist ?? [];
   const timeZone = state.data?.timezone ?? DEFAULT_DESK_TIMEZONE;
+  const hasTerminal = Boolean(terminal);
 
-  // ── Live price stream ────────────────────────────────────────────────────
   // Quotes, account, positions and plans are pushed on every terminal
-  // heartbeat. The polled `state` query is the fallback and the source of
-  // everything that does not change tick-by-tick.
-  const stream = useDeskStream(Boolean(terminal));
+  // heartbeat; the polled `state` query is the fallback.
+  const stream = useDeskStream(hasTerminal);
 
   const markets = useQuery({
     queryKey: ["desk-markets"],
     queryFn: deskApi.markets,
-    enabled: Boolean(terminal),
+    enabled: hasTerminal,
     refetchInterval: 30_000,
   });
   const instruments = useQuery({
     queryKey: ["desk-instruments"],
     queryFn: deskApi.instruments,
-    enabled: Boolean(terminal),
-    // While the stream is actually delivering prices, polling is just a slow
-    // fallback. The moment data stops flowing (socket open, no events) the
-    // poll drops to 3s so the board reflects reality instead of waiting 20s.
+    enabled: hasTerminal,
+    // While the stream delivers prices polling is a slow fallback; the moment
+    // data stops flowing the poll drops to 3s so the board reflects reality.
     refetchInterval: stream.flowing ? 20_000 : 3_000,
   });
   const performance = useQuery({
     queryKey: ["desk-performance"],
     queryFn: deskApi.performance,
-    enabled: Boolean(terminal),
+    enabled: hasTerminal,
     refetchInterval: 30_000,
   });
   const analysis = useQuery({
@@ -111,6 +153,52 @@ export default function Terminal() {
     queryFn: () => deskApi.scan(mode),
     enabled: terminalLive && selectedMarkets.length > 0,
     refetchInterval: 30_000,
+  });
+
+  // ── the learning surfaces (old /learning page: same keys, same intervals) ─
+  const governance = useQuery({
+    queryKey: ["desk-governance"],
+    queryFn: () => deskApi.governance(),
+    enabled: hasTerminal,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const weekly = useQuery({
+    queryKey: ["desk-weekly"],
+    queryFn: () => deskApi.weeklyReport(),
+    enabled: hasTerminal,
+    refetchInterval: 60_000,
+    retry: false,
+  });
+  const learningJournal = useQuery({
+    queryKey: ["desk-journal", journalKind],
+    queryFn: () => deskApi.journal({ kind: journalKind, limit: 100 }),
+    enabled: hasTerminal,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const regime = useQuery({
+    queryKey: ["desk-regime"],
+    queryFn: () => deskApi.regime(),
+    enabled: hasTerminal,
+    refetchInterval: 2_000,
+    retry: false,
+  });
+
+  // ── v5 additions: the execution ledger and the bridge's own status ────────
+  const execution = useQuery({
+    queryKey: ["desk-execution"],
+    queryFn: () => deskApi.execution(),
+    enabled: hasTerminal,
+    refetchInterval: 30_000,
+    retry: false,
+  });
+  const bridgeStatus = useQuery({
+    queryKey: ["desk-bridge-status"],
+    queryFn: () => deskApi.bridgeStatus(),
+    enabled: hasTerminal,
+    refetchInterval: 60_000,
+    retry: false,
   });
 
   // Select a real selected symbol as soon as the terminal coverage changes.
@@ -133,6 +221,7 @@ export default function Terminal() {
     queryClient.invalidateQueries({ queryKey: ["desk-performance"] });
   }, [queryClient]);
 
+  // ── mutations: the v4 desk's, plus the learning page's resume and run-now ─
   const settings = useMutation({
     mutationFn: (patch: Record<string, unknown>) => deskApi.settings(patch),
     onSuccess: () => {
@@ -167,8 +256,27 @@ export default function Terminal() {
     mutationFn: (id: string) => deskApi.cancelPlan(id),
     onSuccess: invalidateDesk,
   });
+  const resumeAgent = useMutation({
+    mutationFn: (input: { agentId: string; note: string }) => deskApi.resumeAgent(input.agentId, input.note),
+    onSuccess: (_data, variables) => {
+      toast.success(`${variables.agentId} resumed — the evidence is kept, so it can halt again at once.`);
+      void queryClient.invalidateQueries({ queryKey: ["desk-governance"] });
+      void queryClient.invalidateQueries({ queryKey: ["desk-journal"] });
+    },
+    onError: (error: unknown) => {
+      toast.error(error instanceof Error ? error.message : "The resume was refused.");
+    },
+  });
+  const runAutoSelect = useMutation({
+    mutationFn: () => deskApi.autoSelect(),
+    onSuccess: () => {
+      setActionError(null);
+      invalidateDesk();
+    },
+    onError: (error: Error) => setActionError(error.message),
+  });
 
-  // Live instruments win over polled ones; the stream is always fresher.
+  // ── live data: the stream always wins over the polls ──────────────────────
   const liveInstruments = stream.instruments ?? instruments.data?.instruments ?? [];
   const liveAccount = stream.account ?? account;
   const livePositions = stream.positions ?? state.data?.positions ?? [];
@@ -178,8 +286,10 @@ export default function Terminal() {
     () => liveInstruments.find((instrument) => instrument.symbol === symbol) ?? null,
     [liveInstruments, symbol],
   );
-
-  const mismatched = liveInstruments.filter((instrument) => instrument.dataStatus === "mismatch");
+  const mismatchedSymbols = useMemo(
+    () => liveInstruments.filter((instrument) => instrument.dataStatus === "mismatch").map((instrument) => instrument.symbol),
+    [liveInstruments],
+  );
 
   const toggleMarket = (marketSymbol: string, enabled: boolean) => {
     const next = enabled
@@ -188,252 +298,418 @@ export default function Terminal() {
     settings.mutate({ watchlist: next });
   };
 
+  const onTab = useCallback(
+    (next: DeskTab) => setLocation(`/terminal${deskSearchForTab(next)}`, { replace: true }),
+    [setLocation],
+  );
+
+  // ── derived screen state (all pure, all tested in desk-ui.test.ts) ────────
+  const decision = analysis.data?.decision ?? null;
+  const regimeStates = regime.data?.available ? regime.data.states : [];
+  const selectedRegime = useMemo(
+    () => regimeStates.find((read) => read.symbol === symbol) ?? null,
+    [regimeStates, symbol],
+  );
+  const dayPct = dayChangePct(liveAccount?.equity ?? null, liveAccount?.dayStartEquity ?? null);
+  const openRiskValue = openRiskPct(state.data?.risk.exposure ?? null);
+  const committed = committedRisk(state.data ?? null);
+  const netOpen = netOpenResults(livePositions);
+  const halted = Boolean(state.data?.risk.state.haltedUntilNextSession);
+  const policy = state.data?.policy ?? null;
+
+  const gateRows = useMemo(
+    () =>
+      buildGateRows({
+        decision,
+        thresholds: analysis.data?.thresholds ?? null,
+        regime: selectedRegime,
+        openRiskPctValue: account ? openRiskValue : null,
+        exposureCapPct: policy?.maxCurrencyExposurePct ?? null,
+        dailyLossUsedPct: state.data?.risk.budget?.usedPct ?? null,
+        halted,
+      }),
+    [decision, analysis.data?.thresholds, selectedRegime, account, openRiskValue, policy, state.data?.risk.budget?.usedPct, halted],
+  );
+
+  const pipelineNodes = useMemo(
+    () =>
+      buildPipeline({
+        liveSymbols: state.data?.market.liveSymbols ?? 0,
+        selectedCount: state.data?.market.selectedCount ?? 0,
+        mismatchSymbols: state.data?.market.mismatchSymbols ?? mismatchedSymbols.length,
+        regime: selectedRegime,
+        decision,
+        gateRows,
+        openPositions: livePositions.length,
+      }),
+    [state.data?.market, mismatchedSymbols.length, selectedRegime, decision, gateRows, livePositions.length],
+  );
+
+  const opportunityRows = useMemo(
+    () =>
+      buildOpportunityRows({
+        instruments: liveInstruments,
+        scans: scan.data?.results ?? [],
+        regimes: regimeStates,
+        selected: symbol,
+      }),
+    [liveInstruments, scan.data?.results, regimeStates, symbol],
+  );
+
+  const slippageEwmaR = execution.data?.execution?.slippage?.ewmaR ?? null;
+  const riskRows = useMemo(
+    () => buildRiskRows({ state: state.data ?? null, slippageEwmaR }),
+    [state.data, slippageEwmaR],
+  );
+  const riskVerdict = useMemo(() => riskBadge(riskRows, halted), [riskRows, halted]);
+
+  const alerts = useMemo(
+    () =>
+      buildAlerts({
+        state: state.data ?? null,
+        mismatchedSymbols,
+        actionError,
+        nowMs: Date.now(),
+      }),
+    // Date.now() advances on every state poll — the stale banner's seconds stay honest.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.data, mismatchedSymbols, actionError],
+  );
+
+  const agents = governance.data?.available ? governance.data.agents : [];
+  const report = weekly.data?.available ? weekly.data.report : null;
+
+  // ── title bar / tabs / status bar content ─────────────────────────────────
   const sourceLabel = !terminal ? "MT5 REQUIRED" : terminal.stale ? "MT5 STALE" : !account ? "MT5 WARMING" : "MT5 LIVE";
-  const sourceClass = !terminal || !account
-    ? "border-amber-500/40 bg-amber-500/10 text-amber-300"
-    : terminal.stale
-      ? "border-red-500/40 bg-red-500/10 text-red-300"
-      : "border-emerald-500/40 bg-emerald-500/10 text-emerald-300";
+  const sourceTone = !terminal || !account ? ("am" as const) : terminal.stale ? ("dn" as const) : ("up" as const);
+  const modeLabel = TRADE_MODES.find((entry) => entry.id === mode)?.label ?? mode;
+
+  const stage = rolloutStage({
+    v4: state.data?.v4 ?? null,
+    accountIsLive: Boolean(liveAccount?.isLive),
+    liveTradingEnabled: Boolean(policy?.liveTradingEnabled),
+    baseRiskPct: policy?.baseRiskPct ?? null,
+  });
+
+  const titleBar = (
+    <TitleBar
+      sourceLabel={sourceLabel}
+      sourceTone={sourceTone}
+      streaming={stream.flowing}
+      v4={state.data?.v4 ?? null}
+      equity={liveAccount ? formatMoney(liveAccount.equity, liveAccount.currency) : "—"}
+      currency={liveAccount?.currency ?? ""}
+      dayPct={dayPct}
+      openRisk={account ? `${formatPct(openRiskValue)} of ${policy?.maxCurrencyExposurePct ?? "—"}% cap` : "—"}
+      mode={mode}
+      onMode={(next) => settings.mutate({ mode: next })}
+      controlsEnabled={terminalLive}
+      settingsBusy={settings.isPending}
+      autoTrade={Boolean(state.data?.autoTrade)}
+      onAutoTrade={() => settings.mutate({ autoTrade: !state.data?.autoTrade })}
+      timeZone={timeZone}
+      timezones={state.data?.timezones ?? []}
+      onTimeZone={(id) => settings.mutate({ timezone: id })}
+      bridgeLabel={terminal ? `MT5 ${terminal.login}` : "Link MT5"}
+      hasTerminal={hasTerminal}
+      onOpenBridge={() => setBridgeOpen(true)}
+      onFlatten={() => flatten.mutate()}
+      flattenBusy={flatten.isPending}
+    />
+  );
+
+  const tabs = (
+    <WorkspaceTabs
+      tab={tab}
+      onTab={onTab}
+      badges={{
+        markets: { count: selectedMarkets.length, tone: "mute", label: "selected markets" },
+        learning: { count: governedAgentAlertCount(agents), tone: "am", label: "agents halved or disabled" },
+      }}
+      context={`Selected ${symbol || "—"} · ${modeLabel}`}
+    />
+  );
+
+  const statTiles: StatTile[] = [
+    {
+      id: "equity",
+      label: "Equity",
+      value: liveAccount ? formatMoney(liveAccount.equity, liveAccount.currency) : "—",
+      sub: liveAccount ? `bal ${formatMoney(liveAccount.balance, liveAccount.currency)}` : null,
+    },
+    {
+      id: "day",
+      label: "Day",
+      value: formatSignedPct(dayPct),
+      tone: dayPct === null ? "mute" : dayPct > 0 ? "up" : dayPct < 0 ? "dn" : undefined,
+      sub: state.data ? formatMoney(state.data.risk.state.realisedPnlToday, liveAccount?.currency ?? "USD") : null,
+    },
+    {
+      id: "open-risk",
+      label: "Open risk",
+      value: account ? formatPct(openRiskValue) : "—",
+      meter: policy && account ? { fraction: openRiskValue / policy.maxCurrencyExposurePct, tone: "cy", tick: 0.8 } : undefined,
+      sub: policy ? `cap ${policy.maxCurrencyExposurePct}%` : null,
+    },
+    {
+      id: "daily-loss",
+      label: "Daily loss used",
+      value: state.data?.risk.budget ? `${Math.round(state.data.risk.budget.usedPct)}%` : "—",
+      tone: (state.data?.risk.budget?.usedPct ?? 0) >= 100 ? "dn" : (state.data?.risk.budget?.usedPct ?? 0) >= 80 ? "am" : undefined,
+      meter: state.data?.risk.budget ? { fraction: state.data.risk.budget.usedPct / 100, tone: "am", tick: 0.8 } : undefined,
+      sub: state.data?.risk.budget ? `${formatMoney(state.data.risk.budget.remainingMoney, liveAccount?.currency ?? "USD")} left` : null,
+    },
+    {
+      id: "positions",
+      label: "Positions",
+      value: hasTerminal ? `${livePositions.length} open` : "—",
+      tone: netOpen.money > 0 ? "up" : netOpen.money < 0 ? "dn" : undefined,
+      sub: livePositions.length > 0 ? `${formatMoney(netOpen.money, liveAccount?.currency ?? "USD")}${netOpen.r !== null ? ` (${formatSignedR(netOpen.r)})` : ""}` : null,
+    },
+    {
+      id: "plans",
+      label: "Armed plans",
+      value: hasTerminal ? `${livePlans.length}` : "—",
+      sub: committed.plansAddPct !== null ? `+${formatPct(committed.plansAddPct)} if all fill` : null,
+    },
+    {
+      id: "week",
+      label: "Week",
+      value: performance.data ? formatSignedR(performance.data.overall.totalR) : "—",
+      tone: (performance.data?.overall.totalR ?? 0) > 0 ? "up" : (performance.data?.overall.totalR ?? 0) < 0 ? "dn" : undefined,
+      sub: performance.data ? `${performance.data.overall.trades} trades · ${Math.round(performance.data.overall.winRate * 100)}% win` : null,
+    },
+    {
+      id: "rollout",
+      label: "Rollout",
+      value: ROLLOUT_STAGES[stage] ?? "—",
+      tone: stage <= 1 ? "am" : "up",
+      sub: stage === 1 ? rolloutDemoNote(report?.trades.closed ?? null) : policy ? `${policy.baseRiskPct}% per trade` : null,
+      title: stage === 0 ? "The v4 guard layers record but never place a live order" : undefined,
+    },
+  ];
+
+  const context: ReactNode = tab === "command" ? <PipelineStrip nodes={pipelineNodes} /> : <StatStrip tiles={statTiles} />;
+
+  const statusBar = (
+    <StatusBar
+      fresh={state.data?.market.liveSymbols ?? 0}
+      warming={state.data?.market.warmingSymbols ?? 0}
+      stale={state.data?.market.staleSymbols ?? 0}
+      mismatch={state.data?.market.mismatchSymbols ?? mismatchedSymbols.length}
+      lastEventAt={stream.lastEventAt}
+      eaVersion={bridgeStatus.data?.eaVersion ?? null}
+      serverTime={state.data?.serverTime ?? null}
+      stateFetchedAt={state.dataUpdatedAt ?? null}
+      timeZone={timeZone}
+      lastJournal={
+        state.data?.journal?.[0]
+          ? `${formatInZone(state.data.journal[0].ts, timeZone, { hour: "2-digit", minute: "2-digit", hour12: false })} ${state.data.journal[0].symbol ?? ""} ${state.data.journal[0].message}`.slice(0, 64)
+          : null
+      }
+    />
+  );
+
+  // ── the workspace panels (only the active tab is built) ──────────────────
+  const panels: Record<string, ReactNode> = {};
+  if (tab === "command") {
+    panels.opportunities = (
+      <OpportunitiesPanel rows={opportunityRows} onSelect={setSymbol} loading={instruments.isPending} />
+    );
+    panels.decision = (
+      <DecisionPanel
+        symbol={symbol}
+        mode={mode}
+        decision={decision}
+        gateRows={gateRows}
+        priceLabel={formatPrice(selectedInstrument?.bid ?? null, selectedInstrument?.digits ?? null)}
+        horizonMinutes={analysis.data?.horizonMinutes ?? null}
+        loading={analysis.isPending}
+        onArm={() => arm.mutate()}
+        arming={arm.isPending}
+        armError={actionError}
+      />
+    );
+    panels.risk = (
+      <RiskPanel
+        rows={riskRows}
+        badge={riskVerdict}
+        suspended={state.data?.risk.state.suspendedSymbols ?? []}
+        onResumeSymbol={(value) => resumeSymbol.mutate(value)}
+        loading={state.isPending}
+      />
+    );
+    panels.positions = (
+      <PositionsPanel
+        positions={livePositions}
+        plans={livePlans}
+        currency={liveAccount?.currency ?? "USD"}
+        onClosePosition={(ticket) => closePosition.mutate(ticket)}
+        onCancelPlan={(id) => cancelPlan.mutate(id)}
+        loading={state.isPending}
+      />
+    );
+    panels.calendar = (
+      <CalendarPanel
+        news={state.data?.news ?? null}
+        upcoming={state.data?.newsUpcoming ?? []}
+        gate={decision?.news ?? null}
+        timeZone={timeZone}
+      />
+    );
+  } else if (tab === "markets") {
+    panels.universe = (
+      <UniversePanel
+        markets={markets.data?.markets ?? []}
+        selected={selectedMarkets}
+        updating={settings.isPending}
+        onToggle={toggleMarket}
+        onFocus={setSymbol}
+        loading={markets.isPending}
+      />
+    );
+    panels.scanner = (
+      <ScannerPanel
+        rows={scan.data?.results ?? []}
+        coverage={scan.data?.coverage ?? null}
+        selected={symbol}
+        onSelect={setSymbol}
+        onRescan={() => scan.refetch()}
+        scanning={scan.isFetching}
+        enabled={terminalLive}
+        loading={scan.isPending}
+      />
+    );
+    panels.autoselect = (
+      <AutoSelectPanel
+        autoSelect={state.data?.autoSelect ?? null}
+        onRunNow={() => runAutoSelect.mutate()}
+        running={runAutoSelect.isPending}
+        enabled={terminalLive}
+      />
+    );
+    panels.health = (
+      <HealthPanel
+        state={state.data ?? null}
+        execution={execution.data ?? null}
+        bridge={bridgeStatus.data ?? null}
+        selected={symbol}
+      />
+    );
+  } else if (tab === "learning") {
+    const refreshLearning = () => {
+      void governance.refetch();
+      void weekly.refetch();
+      void learningJournal.refetch();
+    };
+    panels.governance = (
+      <GovernancePanel
+        available={governance.data?.available ?? false}
+        agents={agents}
+        loading={governance.isPending}
+        onRefresh={refreshLearning}
+        refreshing={governance.isFetching || weekly.isFetching || learningJournal.isFetching}
+      />
+    );
+    panels.calibration = <CalibrationPanel available={weekly.data?.available ?? false} report={report} />;
+    panels.week = <WeekPanel available={weekly.data?.available ?? false} report={report} />;
+    panels.regime = (
+      <RegimePanel
+        available={regime.data?.available ?? false}
+        states={regimeStates}
+        ttlMs={regime.data?.ttlMs}
+        loading={regime.isPending}
+      />
+    );
+    panels.refused = <RefusedPanel available={weekly.data?.available ?? false} report={report} />;
+    panels.safety = (
+      <SafetyPanel
+        agents={agents}
+        report={report}
+        onResumeAgent={(agentId, note) => resumeAgent.mutate({ agentId, note })}
+        resumePending={resumeAgent.isPending}
+      />
+    );
+    panels["learning-journal"] = (
+      <LearningJournalPanel
+        available={learningJournal.data?.available ?? false}
+        entries={learningJournal.data?.available ? learningJournal.data.entries : []}
+        kind={journalKind}
+        onKind={setJournalKind}
+        timeZone={timeZone}
+        loading={learningJournal.isPending}
+      />
+    );
+  } else {
+    panels.closed = (
+      <ClosedTradesPanel performance={performance.data ?? null} timeZone={timeZone} loading={performance.isPending} />
+    );
+    panels["by-symbol"] = <BySymbolPanel performance={performance.data ?? null} loading={performance.isPending} />;
+    panels["decision-journal"] = <DecisionJournalPanel entries={state.data?.journal ?? []} timeZone={timeZone} />;
+  }
+
+  // ── unlinked: the title bar (controls disabled, testids present) and the
+  //    connection card — no tabs, no workspaces, no status bar, no numbers. ──
+  if (!terminal) {
+    return (
+      <div className="desk-root h-full min-h-0">
+        <div className="desk-frame" data-desk-size="unlinked">
+          {titleBar}
+          <div className="desk-work desk-scroll" style={{ overflowY: "auto" }}>
+            <div className="m-auto w-full max-w-3xl">
+              <section className="rounded-[6px] border border-[var(--desk-line)] bg-[var(--desk-s1)] p-5 sm:p-8" data-testid="connect-card">
+                <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
+                  <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[6px] border border-[color-mix(in_srgb,var(--desk-up)_35%,transparent)] bg-[color-mix(in_srgb,var(--desk-up)_10%,transparent)]">
+                    <Link2 className="h-6 w-6 d-up" aria-hidden="true" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <h2 className="t-tile d-tx">Connect MT5 to start the Desk</h2>
+                    <p className="t-body d-tx2 mt-1 max-w-xl leading-relaxed">
+                      No balance, price, position, scanner result or agent decision is shown until your MetaTrader 5
+                      terminal provides it. The Desk only works with your broker's live terminal data.
+                    </p>
+                  </div>
+                  <button type="button" className="desk-btn desk-btn-primary w-full shrink-0 sm:w-auto" style={{ height: 34 }} onClick={() => setBridgeOpen(true)}>
+                    Set up MT5 bridge
+                  </button>
+                </div>
+                <div className="mt-6 grid gap-3 border-t border-[var(--desk-line)] pt-5 sm:grid-cols-3">
+                  <InfoStep number="1" title="Download & attach">
+                    Attach the resilient Neurotrade MT5 EA (v3 or later) to any chart. It stays attached and retries
+                    pairing instead of failing initialization.
+                  </InfoStep>
+                  <InfoStep number="2" title="Pair securely">
+                    Add this platform origin to MT5's WebRequest allowlist and paste the one-time pairing code. No MT5
+                    password leaves your terminal.
+                  </InfoStep>
+                  <InfoStep number="3" title="Select broker markets">
+                    The EA discovers the complete broker catalogue. Choose any number of forex, crypto, indices,
+                    stocks, metals, futures or other supported symbols.
+                  </InfoStep>
+                </div>
+              </section>
+            </div>
+          </div>
+        </div>
+        <BridgeDialog open={bridgeOpen} onClose={() => setBridgeOpen(false)} linked={hasTerminal} onChanged={invalidateDesk} />
+      </div>
+    );
+  }
 
   return (
-    <div className="min-h-full bg-zinc-950 p-3 text-zinc-200 sm:p-4 lg:p-5">
-      <div className="mx-auto max-w-[1800px] space-y-3">
-        <header className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/80 px-3 py-2.5 shadow-sm sm:px-4">
-          <div className="flex min-w-0 items-center gap-2">
-            <Activity className="h-4 w-4 shrink-0 text-emerald-400" />
-            <div className="min-w-0">
-              <h1 className="truncate text-[13px] font-semibold tracking-wide text-zinc-100">MULTI-ASSET DESK</h1>
-              <p className="hidden text-[10px] text-zinc-600 sm:block">Live MT5 data, broker market universe and guarded execution</p>
-            </div>
-          </div>
-          <span className={`rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${sourceClass}`} data-testid="data-source">
-            {sourceLabel}
-          </span>
-          {terminal && (
-            <span
-              className={`flex items-center gap-1 rounded border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider ${stream.flowing ? "border-sky-500/40 bg-sky-500/10 text-sky-300" : "border-zinc-700 text-zinc-500"}`}
-              title={stream.flowing ? "Prices are pushed the instant the terminal heartbeats" : "No fresh prices are arriving — falling back to fast polling"}
-              data-testid="stream-status"
-            >
-              <span className={`h-1.5 w-1.5 rounded-full ${stream.flowing ? "bg-sky-400" : "bg-zinc-600"}`} />
-              {stream.flowing ? "STREAM" : "POLL"}
-            </span>
-          )}
+    <>
+      <DeskShell tab={tab} titleBar={titleBar} tabs={tabs} context={context} alerts={alerts} panels={panels} status={statusBar} />
+      <BridgeDialog open={bridgeOpen} onClose={() => setBridgeOpen(false)} linked={hasTerminal} onChanged={invalidateDesk} />
+    </>
+  );
+}
 
-          {liveAccount && (
-            <div className="order-3 flex w-full items-center gap-x-3 gap-y-1 overflow-x-auto border-t border-zinc-900 pt-2 font-mono text-[11px] text-zinc-400 sm:order-none sm:ml-1 sm:w-auto sm:border-0 sm:pt-0">
-              <span>Eq <strong className="font-medium text-zinc-100">{formatMoney(liveAccount.equity, liveAccount.currency)}</strong></span>
-              <span>Bal <strong className="font-medium text-zinc-200">{formatMoney(liveAccount.balance, liveAccount.currency)}</strong></span>
-              <span>Free <strong className="font-medium text-zinc-200">{formatMoney(liveAccount.freeMargin, liveAccount.currency)}</strong></span>
-              {liveAccount.isLive && <span className="rounded bg-red-500/15 px-1 py-0.5 text-[9px] uppercase tracking-wider text-red-300">Real money</span>}
-            </div>
-          )}
-
-          <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
-            <div className="flex overflow-hidden rounded border border-zinc-800">
-              {TRADE_MODES.map((entry) => (
-                <button
-                  key={entry.id}
-                  type="button"
-                  disabled={!terminalLive || settings.isPending}
-                  onClick={() => settings.mutate({ mode: entry.id })}
-                  title={`${entry.label} — monitors ${entry.blurb}, and looks for the best of your selected markets in that band`}
-                  className={`px-2 py-1 text-[10px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${mode === entry.id ? "bg-emerald-600 text-white" : "text-zinc-400 hover:bg-zinc-900"}`}
-                  data-testid={`mode-${entry.id}`}
-                >
-                  {entry.label}
-                  <span className={`ml-1 font-mono text-[9px] ${mode === entry.id ? "text-emerald-100/80" : "text-zinc-600"}`}>{MODE_ANALYSIS_LABEL[entry.id]}</span>
-                </button>
-              ))}
-            </div>
-
-            {/* Every timestamp on the desk is rendered in this zone. */}
-            <label className="flex items-center gap-1 rounded border border-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400" title="Timezone for prices, news and journal entries">
-              <Globe className="h-3 w-3 text-zinc-500" />
-              <select
-                value={timeZone}
-                disabled={settings.isPending}
-                onChange={(event) => settings.mutate({ timezone: event.target.value })}
-                className="max-w-[112px] bg-transparent text-[10px] text-zinc-300 outline-none"
-                data-testid="timezone-select"
-              >
-                {(state.data?.timezones ?? [{ id: DEFAULT_DESK_TIMEZONE, label: "Nairobi · EAT" }]).map((zone) => (
-                  <option key={zone.id} value={zone.id} className="bg-zinc-900">{zone.label}</option>
-                ))}
-              </select>
-            </label>
-
-            <button
-              type="button"
-              disabled={!terminalLive || settings.isPending}
-              onClick={() => settings.mutate({ autoTrade: !state.data?.autoTrade })}
-              className={`flex items-center gap-1 rounded border px-2 py-1 text-[10px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${state.data?.autoTrade ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-300" : "border-zinc-700 text-zinc-400 hover:bg-zinc-900"}`}
-              data-testid="auto-trade-toggle"
-            >
-              <Zap className="h-3 w-3" />Auto {state.data?.autoTrade ? "ON" : "OFF"}
-            </button>
-            <button type="button" onClick={() => setBridgeOpen(true)} className="flex items-center gap-1 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 transition-colors hover:bg-zinc-900" data-testid="open-bridge">
-              {terminal ? <Link2 className="h-3 w-3 text-emerald-400" /> : <Unplug className="h-3 w-3" />}
-              {terminal ? `MT5 ${terminal.login}` : "Link MT5"}
-            </button>
-            <button
-              type="button"
-              disabled={!terminal || flatten.isPending}
-              onClick={() => flatten.mutate()}
-              className="flex items-center gap-1 rounded border border-red-500/50 bg-red-500/10 px-2 py-1 text-[10px] font-semibold text-red-300 transition-colors hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-              title="Cancel every armed plan and request all MT5 positions be closed"
-              data-testid="kill-switch"
-            >
-              <Power className="h-3 w-3" />FLATTEN
-            </button>
-          </div>
-        </header>
-
-        {state.data?.risk.state.haltedUntilNextSession && (
-          <div className="flex gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-300"><ShieldAlert className="mt-px h-4 w-4 shrink-0" />{state.data.risk.state.haltReason}</div>
-        )}
-
-        {/* Feed integrity: say so when a price cannot be trusted. */}
-        {mismatched.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] leading-relaxed text-red-200">
-            <AlertTriangle className="mt-px h-4 w-4 shrink-0" />
-            <span>
-              <strong className="font-semibold">{mismatched.map((entry) => entry.symbol).join(", ")}</strong>
-              {" "}{mismatched.length === 1 ? "is" : "are"} reporting a price that disagrees with its own candles. Trading on {mismatched.length === 1 ? "it" : "them"} is blocked — check the broker symbol and that the EA is subscribed to it.
-            </span>
-          </div>
-        )}
-        {/*
-          Clock health is deliberately NOT a desk-wide alarm any more: the EA
-          (v3.04+) self-corrects its timestamps against the server's clock, so
-          a misclocked terminal machine no longer means wrong data. The
-          machine's own clock error is surfaced calmly in the bridge dialog
-          (Link MT5) with the one action that fixes it — sync NTP.
-        */}
-
-        {/*
-          Two states, deliberately distinct.
-
-          A late heartbeat used to flip the whole desk into "paused" — the
-          banner this replaces — for a single missed round trip, which is how a
-          39-second hiccup read to the user as a broken connection. It is not:
-          while the terminal is merely late, every symbol is still checked
-          against its own 8-second quote before anything is analysed or armed,
-          so the desk keeps working and says so. Only the hard state stops work,
-          and it now takes a genuinely dead terminal to reach it.
-        */}
-        {terminal?.degraded && (
-          <div className="flex gap-2 rounded-xl border border-sky-500/40 bg-sky-500/10 px-3 py-2 text-[11px] leading-relaxed text-sky-200"><RefreshCw className="mt-px h-4 w-4 shrink-0" /><span>Reconnecting to the MT5 terminal — last heartbeat {Math.max(0, Math.round((terminal.lastSyncAgeMs ?? Date.now() - terminal.lastSyncAt) / 1000))}s ago (it reports every {terminal.syncIntervalMs ? `${(terminal.syncIntervalMs / 1000).toFixed(1)}s` : "~1s"}). The link is saved on both sides, so a closed terminal, a restart or a redeploy reconnects by itself. The desk keeps analysing; every market is still gated on its own quote age, so nothing is traded on a stale price.</span></div>
-        )}
-        {terminal?.stale && (
-          <div className="flex gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200"><WifiOff className="mt-px h-4 w-4 shrink-0" /><span>The MT5 terminal has not synced for {Math.max(0, Math.round((terminal.lastSyncAgeMs ?? Date.now() - terminal.lastSyncAt) / 1000))}s (limit {Math.round((terminal.staleAfterMs ?? 120_000) / 1000)}s). Quotes and agent entries are paused until it resumes; any displayed account snapshot is explicitly the last terminal update.</span></div>
-        )}
-        {actionError && <div className="flex gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-200"><ShieldAlert className="mt-px h-4 w-4 shrink-0" /><span>{actionError}</span></div>}
-
-        {!terminal ? (
-          <EmptyDesk onConnect={() => setBridgeOpen(true)} />
-        ) : (
-          <div className="grid items-start gap-3 lg:grid-cols-12">
-            <div className="space-y-3 lg:col-span-4 xl:col-span-3">
-              <Pane title="Broker market universe" right={<span className="font-mono text-[10px] text-zinc-600">{state.data?.market.catalogCount ?? 0}</span>}>
-                <MarketUniversePane
-                  markets={markets.data?.markets ?? []}
-                  selected={selectedMarkets}
-                  updating={settings.isPending}
-                  onToggle={toggleMarket}
-                  onFocus={setSymbol}
-                />
-              </Pane>
-              <Pane title="Selected live coverage" right={<span className="font-mono text-[10px] text-zinc-600">{state.data?.market.liveSymbols ?? 0}/{state.data?.market.selectedCount ?? 0} fresh</span>}>
-                <WatchlistPane instruments={liveInstruments} selected={symbol} onSelect={setSymbol} />
-              </Pane>
-            </div>
-
-            <div className="space-y-3 lg:col-span-5 xl:col-span-5">
-              <Pane title="Live market pulse" right={selectedInstrument ? <span className="font-mono text-[10px] text-zinc-600">broker feed</span> : undefined}>
-                <LiveQuotePane instrument={selectedInstrument} />
-              </Pane>
-              <Pane title={symbol ? `Agent assessment · ${symbol}` : "Agent assessment"} right={<span className="text-[9px] uppercase tracking-wider text-zinc-600">{mode}</span>}>
-                <AgentPane
-                  decision={analysis.data?.decision ?? null}
-                  horizonMinutes={analysis.data?.horizonMinutes ?? 0}
-                  onArm={() => arm.mutate()}
-                  arming={arm.isPending}
-                  armError={actionError}
-                />
-              </Pane>
-              <Pane
-                title="Live scanner"
-                right={<button type="button" disabled={!terminalLive} onClick={() => scan.refetch()} className="text-zinc-500 transition-colors hover:text-zinc-200 disabled:opacity-40" aria-label="Rescan selected markets"><RefreshCw className={`h-3.5 w-3.5 ${scan.isFetching ? "animate-spin" : ""}`} /></button>}
-              >
-                {scan.data?.coverage && <p className="border-b border-zinc-900 px-3 py-2 text-[10px] text-zinc-600">{scan.data.coverage.live} fresh · {scan.data.coverage.warming} warming · {scan.data.coverage.stale} stale / {scan.data.coverage.selected} selected</p>}
-                <ScannerPane
-                  rows={scan.data?.results ?? []}
-                  onSelect={setSymbol}
-                  selected={symbol}
-                  autoSelect={state.data?.autoSelect ?? null}
-                />
-              </Pane>
-            </div>
-
-            <div className="space-y-3 lg:col-span-3 xl:col-span-4">
-              <Pane title="Open positions" right={<span className="font-mono text-[10px] text-zinc-600">{livePositions.length} open</span>}>
-                <PositionsPane positions={livePositions} currency={liveAccount?.currency ?? "USD"} onClose={(ticket) => closePosition.mutate(ticket)} />
-              </Pane>
-              <Pane title="Armed plans" right={<span className="font-mono text-[10px] text-zinc-600">{livePlans.length}</span>}>
-                <ArmedPlansPane plans={livePlans} onCancel={(id) => cancelPlan.mutate(id)} />
-              </Pane>
-              <Pane title="Risk controls"><RiskPane state={state.data!} onResume={(value) => resumeSymbol.mutate(value)} /></Pane>
-              <Pane
-                title="Red-folder calendar"
-                right={<span className={`rounded border px-1 py-px text-[8px] uppercase ${state.data?.news.available ? (state.data.news.rawCount === 0 ? "border-amber-500/40 text-amber-300" : "border-emerald-500/30 text-emerald-300") : "border-amber-500/40 text-amber-300"}`}>{state.data?.news.available ? (state.data.news.rawCount === 0 ? "unread" : "MT5 calendar") : "paused"}</span>}
-              >
-                <NewsPane
-                  feed={state.data?.news ?? { available: false, checkedAt: 0, events: [] }}
-                  upcoming={state.data?.newsUpcoming ?? []}
-                  timeZone={timeZone}
-                />
-              </Pane>
-              {/* Fills the column the calendar used to leave short on desktop
-                  with the two things a desk wants next to its risk numbers:
-                  the equity curve and where the P&L actually came from. */}
-              <Pane
-                title="Realised performance"
-                right={<span className="font-mono text-[10px] text-zinc-600">{performance.data?.overall.totalR !== undefined ? `${performance.data.overall.totalR >= 0 ? "+" : ""}${performance.data.overall.totalR.toFixed(1)}R` : "—"}</span>}
-              >
-                <PerformancePane
-                  performance={performance.data ?? null}
-                  currency={liveAccount?.currency ?? "USD"}
-                  timeZone={timeZone}
-                />
-              </Pane>
-              <Pane title="Decision journal"><JournalPane entries={state.data?.journal ?? []} timeZone={timeZone} /></Pane>
-            </div>
-          </div>
-        )}
-      </div>
-      <BridgeDialog open={bridgeOpen} onClose={() => setBridgeOpen(false)} linked={Boolean(terminal)} onChanged={invalidateDesk} />
+function InfoStep({ number, title, children }: { number: string; title: string; children: ReactNode }) {
+  return (
+    <div className="rounded-[6px] border border-[var(--desk-line)] bg-[var(--desk-s2)] p-3">
+      <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[var(--desk-s3)] t-cap d-up">{number}</span>
+      <h3 className="t-title d-tx mt-2">{title}</h3>
+      <p className="t-cap d-mute mt-1 leading-relaxed">{children}</p>
     </div>
   );
-}
-
-function EmptyDesk({ onConnect }: { onConnect: () => void }) {
-  return (
-    <section className="mx-auto max-w-3xl rounded-2xl border border-zinc-800 bg-zinc-950/80 p-5 shadow-sm sm:p-8">
-      <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
-        <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-emerald-500/30 bg-emerald-500/10"><Link2 className="h-6 w-6 text-emerald-400" /></div>
-        <div className="min-w-0 flex-1"><h2 className="text-lg font-semibold text-zinc-100">Connect MT5 to start the Desk</h2><p className="mt-1 max-w-xl text-sm leading-relaxed text-zinc-400">No balance, price, position, scanner result or agent decision is shown until your MetaTrader 5 terminal provides it. The Desk only works with your broker’s live terminal data.</p></div>
-        <button type="button" onClick={onConnect} className="w-full shrink-0 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-emerald-500 sm:w-auto">Set up MT5 bridge</button>
-      </div>
-      <div className="mt-6 grid gap-3 border-t border-zinc-800 pt-5 sm:grid-cols-3">
-        <InfoStep number="1" title="Download & attach">Attach the resilient Neurotrade MT5 EA (v3 or later) to any chart. It stays attached and retries pairing instead of failing initialization.</InfoStep>
-        <InfoStep number="2" title="Pair securely">Add this platform origin to MT5’s WebRequest allowlist and paste the one-time pairing code. No MT5 password leaves your terminal.</InfoStep>
-        <InfoStep number="3" title="Select broker markets">The EA discovers the complete broker catalogue. Choose any number of forex, crypto, indices, stocks, metals, futures or other supported symbols.</InfoStep>
-      </div>
-    </section>
-  );
-}
-
-function InfoStep({ number, title, children }: { number: string; title: string; children: React.ReactNode }) {
-  return <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3"><span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-[10px] font-semibold text-emerald-300">{number}</span><h3 className="mt-2 text-xs font-semibold text-zinc-200">{title}</h3><p className="mt-1 text-[11px] leading-relaxed text-zinc-500">{children}</p></div>;
 }

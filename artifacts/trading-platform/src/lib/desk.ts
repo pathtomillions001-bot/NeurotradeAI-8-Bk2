@@ -31,7 +31,9 @@ export const DEFAULT_DESK_TIMEZONE = "Africa/Nairobi";
 
 export const TRADE_MODES: { id: TradeMode; label: string; blurb: string }[] = [
   { id: "scalp", label: "Scalp", blurb: "10s–3min band · ~25 min horizon" },
-  { id: "intraday", label: "Day", blurb: "5–30min band · ~6 hour horizon" },
+  // v5 UI: the segmented control reads "Intraday", matching the workspace
+  // copy; the id (and every data-testid derived from it) is unchanged.
+  { id: "intraday", label: "Intraday", blurb: "5–30min band · ~6 hour horizon" },
   { id: "swing", label: "Swing", blurb: "1h–weekly band · multi-day horizon" },
 ];
 
@@ -136,6 +138,12 @@ export interface DeskPerformance {
     rMultiple: number | null;
     openedAt: number;
     closedAt: number;
+    /**
+     * v5 UI — the agents that proposed this trade's plan, via the server's
+     * fill→plan join. Null (or absent on an older server) when the attribution
+     * is unknown; the Desk prints an em dash — "unknown" is not "no agents".
+     */
+    agents?: string[] | null;
   }[];
   bySymbol: {
     symbol: string;
@@ -239,6 +247,13 @@ export interface Position {
   swap: number;
   commission: number;
   initialRiskMoney?: number;
+  /**
+   * v5 UI — the ONE management state the wire data can prove: the stop sits at
+   * or beyond the entry ("be"), or the position still carries its initial risk
+   * ("open"). Optional: a server that predates the field simply omits it and
+   * the Desk shows no state badge rather than guessing one.
+   */
+  managementState?: "open" | "be";
 }
 
 export interface ArmedPlan {
@@ -247,6 +262,11 @@ export interface ArmedPlan {
   side: "buy" | "sell";
   mode: TradeMode;
   trigger: number;
+  /**
+   * The order style the plan will rest as. Optional on the wire (older
+   * servers omit it); the Desk renders an em dash when absent.
+   */
+  triggerType?: "break" | "retest" | "market" | "confirm" | "limit" | "stop";
   invalidate: number;
   sl: number;
   tp: number[];
@@ -300,6 +320,7 @@ export interface AgentDecision {
     timeoutProbability: number;
     expectancyR: number;
     grossExpectancyR: number;
+    /** The reward:risk AT THE EXPECTED FILL (agent.ts §5a), not from the quote. */
     rewardRisk: number;
     meanBarsToResolve: number;
   } | null;
@@ -321,6 +342,22 @@ export interface AgentDecision {
   /** Blended confluence/evidence score that was actually gated on. */
   qualityScore: number;
   qualityThreshold: number;
+  /**
+   * v5 UI mirrors — the decision fields the server already computed and sent
+   * (the route spreads the whole decision). All optional so a response from an
+   * older server keeps type-checking; the Desk renders em dashes when absent.
+   */
+  /** Blended win probability the edge gate enforced. */
+  winProbability?: number | null;
+  /** Blended expectancy after costs, in R. */
+  expectancyR?: number | null;
+  /** The probability LOWER BOUND the sizing spent (WP5 model), or null. */
+  sizingProbabilityLowerBound?: number | null;
+  /** The WP6 gatekeeper's verdict when the subsystem decided this plan. */
+  gatekeeper?: GatekeeperDecisionWire | null;
+  /** The alpha agents that proposed this setup, after the governance overlay. */
+  alphaAgents?: string[];
+  evaluatedAt?: number;
   /** The frame the stop, the volatility and the horizon were measured on. */
   entryTimeframe: string | null;
   /** That frame's horizon, in minutes — the number the pane prints. */
@@ -333,6 +370,43 @@ export interface AgentDecision {
   /** Cautions recorded but not enforced. */
   warnings: string[];
   summary: string;
+}
+
+/** One gate of the WP6 gatekeeper, recorded whether it passed or failed. */
+export interface GatekeeperReasonWire {
+  code: string;
+  label: string;
+  pass: boolean;
+  /** What was measured (null when there was nothing to measure). */
+  value: number | null;
+  /** What it had to beat, where a threshold applies. */
+  threshold: number | null;
+  detail: string;
+}
+
+/**
+ * The WP6 gatekeeper's verdict, as the wire carries it. `reasons` is the
+ * per-gate pass/fail list the Decision panel's edge gate renders — thresholds
+ * included, so the UI never hard-codes a number the server owns.
+ */
+export interface GatekeeperDecisionWire {
+  armed: boolean;
+  code: string;
+  codes: string[];
+  reason: string;
+  reasons: GatekeeperReasonWire[];
+  /** EV at p_LCB, net of cost, in R — the "edge floor" reading. */
+  evLcbR: number | null;
+  requiredEvLcbR: number;
+  rrFill: number;
+  costR: number;
+  horizonSigma: number | null;
+  costOverSigma: number | null;
+  edgePValue: number | null;
+  bhThreshold: number | null;
+  mcP05MeanR: number | null;
+  mcTargetShare: number | null;
+  horizonBars: number;
 }
 
 export interface RiskPolicy {
@@ -460,6 +534,28 @@ export interface DeskStateResponse {
   };
   journal: JournalEntry[];
   serverTime: number;
+  /**
+   * v5 UI — which v4 layers are computing right now (the server's own flag
+   * summary). Optional: absent on a server that predates the field, and then
+   * the title bar simply shows no V4 chip.
+   */
+  v4?: DeskV4Summary | null;
+}
+
+/** The server's `DESK_V4_*` configuration, summarised for the Desk UI. */
+export interface DeskV4Summary {
+  enabled: boolean;
+  /** Global shadow: nothing v4 produces may arm an order. */
+  shadow: boolean;
+  layers: {
+    governance: boolean;
+    regimeHmm: boolean;
+    gatekeeper: boolean;
+    metaModel: boolean;
+    execution: boolean;
+    portfolio: boolean;
+    ui: boolean;
+  };
 }
 
 export interface UpcomingNewsEvent extends HighImpactNewsEvent {
@@ -504,6 +600,12 @@ export interface ScanRow {
   winProbability: number | null;
   lots: number | null;
   riskMoney: number | null;
+  /** v5 UI — reward:risk at the expected fill; null ⇒ em dash. */
+  rrFill?: number | null;
+  /** v5 UI — the gatekeeper's EV at p_LCB (the edge floor); null ⇒ em dash. */
+  edgeFloorR?: number | null;
+  /** v5 UI — the mode's EV floor the edge had to beat; null ⇒ em dash. */
+  edgeRequiredR?: number | null;
   rejections: string[];
   summary: string;
 }
@@ -572,6 +674,14 @@ export interface WeeklyReport {
     meanSlippageR: number | null;
     worstR: number | null;
     bestR: number | null;
+    /**
+     * v5 UI — realised hit rate per predicted-probability bucket, from stored
+     * rows only. Optional: an older server omits it and the calibration table
+     * shows its footer verdicts alone (derive nothing, per the brief).
+     */
+    calibrationBuckets?: CalibrationBucketRow[];
+    /** v5 UI — one-sided 80% lower confidence bound of the mean measured R. */
+    meanRLower80?: number | null;
   };
   decisions: {
     evaluated: number;
@@ -593,6 +703,17 @@ export interface JournalEntryRow {
   symbol: string | null;
   message: string;
   detail: unknown;
+}
+
+/** One calibration bucket of the weekly report (v5 UI mirror). */
+export interface CalibrationBucketRow {
+  label: string;
+  lower: number;
+  upper: number;
+  n: number;
+  meanPredicted: number | null;
+  realisedHitRate: number | null;
+  gapPoints: number | null;
 }
 
 export interface RegimeRead {
@@ -617,13 +738,38 @@ export interface RegimeRead {
   lastBarAtMs: number | null;
 }
 
+/** The WP7 execution/portfolio readout, as `GET /desk/execution` serves it. */
+export interface DeskExecutionReport {
+  execution: {
+    /** Per-symbol spread observations: how many, and the latest in points. */
+    spreadSamples: Record<string, { samples: number; last: number | null }>;
+    timingBuckets: number;
+    timingPooled: { wins: number; losses: number; rSum: number };
+    /** Every fill's slippage in R, EWMA'd — null before the first fill. */
+    slippage: { ewmaR: number | null; samples: number; observations: number };
+  } | null;
+  /** `[symbol, returnCount]` pairs the correlation layer could read. */
+  portfolio: [string, number][] | null;
+}
+
 export const deskApi = {
   state: () => request<DeskStateResponse>("/desk/state"),
   markets: () => request<{ source: "mt5" | "unlinked"; markets: Market[]; catalogCount: number }>("/desk/markets"),
   instruments: () => request<{ source: "mt5" | "unlinked"; instruments: Instrument[]; feed: FeedDiagnostics }>("/desk/instruments"),
   performance: () => request<DeskPerformance>("/desk/performance"),
   series: (symbol: string) => request<DeskSeries>(`/desk/series?symbol=${encodeURIComponent(symbol)}`),
-  analysis: (symbol: string, mode: TradeMode) => request<{ source: "mt5"; horizonMinutes: number; decision: AgentDecision }>(`/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`),
+  analysis: (symbol: string, mode: TradeMode) =>
+    request<{
+      source: "mt5";
+      horizonMinutes: number;
+      /**
+       * v5 UI — the server's gate constants (MIN_RR_FILL, MIN_COST_COVERAGE),
+       * so the legacy gate rows print thresholds the server owns. Optional:
+       * absent on an older server.
+       */
+      thresholds?: { minRrFill: number; minCostCoverage: number };
+      decision: AgentDecision;
+    }>(`/desk/analysis?symbol=${encodeURIComponent(symbol)}&mode=${mode}`),
   scan: (mode: TradeMode) => request<{ mode: TradeMode; source: "mt5"; results: ScanRow[]; coverage: { selected: number; live: number; warming: number; stale: number }; scannedAt: number }>(`/desk/scan?mode=${mode}`),
   /**
    * Run the automatic best-market pass immediately.
@@ -678,6 +824,17 @@ export const deskApi = {
       () => ({ available: false as const, mode: (mode ?? "intraday") as TradeMode, frame: "", ttlMs: 0, asOfMs: 0, states: [] as RegimeRead[] }),
     );
   },
+  /**
+   * v5 UI — the WP7 execution ledgers (slippage EWMA, spread samples, timing
+   * pool). The endpoint 404s while the execution AND portfolio layers are both
+   * off, which is the shipped state: `available: false` hides those rows, it is
+   * not an error.
+   */
+  execution: () =>
+    request<DeskExecutionReport>("/desk/execution").then(
+      (data) => ({ available: true as const, ...data }),
+      () => ({ available: false as const, execution: null, portfolio: null }),
+    ),
   /** An OPERATOR action: put an agent back to work. The note is required. */
   resumeAgent: (agentId: string, note: string) =>
     request<{ ok: true; agent: GovernanceAgent | null }>("/desk/governance/resume", {

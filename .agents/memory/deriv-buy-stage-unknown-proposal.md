@@ -29,3 +29,13 @@ The reactive replay (re-quote once, buy the fresh id) is kept as the last-resort
 - A skipped caller sees `LiveOrderInFlightError`. That is a **skip, not a broker refusal** — the autonomous engine must never count it as a strike (`cycle.ts` classifies it as `[NOT SENT]`).
 - The autonomous engine's 3-strike stop is unchanged on purpose: with the dead-quote case repaired it only fires on genuine, deterministic broker refusals, where stopping is the right answer. What changed is that a refusal can no longer be re-sent on the same coalesced tick (`liveAttemptHoldReason`: 5 s backoff + a NEW analysed tick), so "3 consecutive buys" can never again mean one trade machine-gunned three times inside a second.
 - Never re-introduce a caller that buys outside `executeLiveTrade` without the same three guarantees.
+
+## Correction
+
+The stage rule above is superseded for the proposal stage: a proposal-stage
+`InvalidContractProposal` also proves no contract exists, and is NOT treated
+as a deterministic capability verdict. `executeLiveTrade` now tags it
+`UnknownProposalError` and completes the single purchase once with a
+parameterised buy (`{buy: "1", price, parameters}` — the bot builder's form,
+no proposal id). Same remedy after a fresh re-quoted id is still unknown at
+the buy stage. The parameterised buy itself is never retried or replayed.

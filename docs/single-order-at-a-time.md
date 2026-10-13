@@ -86,3 +86,22 @@ and now runs through the same integrity check as the first attempt.
 - `src/lib/autonomous-hedge/cycle.test.ts` — the live attempt gate: first attempt passes,
   the refused tick is never re-sent, everything waits out the backoff, a new tick is allowed
   afterwards, and a purchase that went through releases the gate.
+
+## Correction (proposal-stage refusals)
+
+The "proposal-stage rule" above was wrong, and it was the surviving half of
+this bug: when Deriv answers `{proposal: 1}` itself with
+`InvalidContractProposal`, no proposal is created and no contract exists —
+yet the engine counted it as a strike, so three analysed decisions that never
+reached a buy stopped it with the same message. The identical contract buys
+fine from the bot builder, which can buy with full parameters and no proposal
+id at all (`tradeOptionToBuy`: `{buy: "1", price, parameters: {…}}`).
+
+`executeLiveTrade` now completes that one purchase, once, with a
+parameterised buy when (a) the proposal stage refuses with
+`InvalidContractProposal` (`UnknownProposalError`), or (b) a fresh re-quoted
+id is still unknown at the buy stage. The parameterised buy is never repeated:
+a refusal surfaces unchanged, and an unacknowledged one raises
+`TradeOutcomeUnknownError` as before. It carries the same analysed contract,
+stake and barrier, inside the same per-account single-flight slot — so it is
+still exactly one trade at a time, never a second contract.

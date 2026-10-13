@@ -3463,11 +3463,17 @@ async function runSingleLiveOrder(
     // reconnect while the quote is in flight can otherwise make an id from the
     // old session look like it belongs to the new one when the reply arrives.
     let quotedGeneration: number | null = null;
+    let quotedAtMs: number | null = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       proposalMsg = await connection.request(
         { proposal: 1, ...buildProposal() },
         ACCOUNT_REQUEST_TIMEOUT_MS,
-        { onSent: () => { quotedGeneration = connection.sessionGeneration(); } },
+        {
+          onSent: () => {
+            quotedGeneration = connection.sessionGeneration();
+            quotedAtMs = Date.now();
+          },
+        },
       );
       if (proposalMsg && !proposalMsg.error) break;
       if (proposalMsg && proposalMsg.error && !isRetryableDerivError(proposalMsg) ) break;
@@ -3496,7 +3502,9 @@ async function runSingleLiveOrder(
       // Use the send-time generation, never the generation observed after the
       // awaited response (the socket may have reconnected in between).
       generation: quotedGeneration ?? connection.sessionGeneration(),
-      quotedAtMs: Date.now(),
+      // Proposal lifetime starts when Deriv receives the request, not when a
+      // delayed quote reply finally reaches this process.
+      quotedAtMs: quotedAtMs ?? Date.now(),
     };
   };
 

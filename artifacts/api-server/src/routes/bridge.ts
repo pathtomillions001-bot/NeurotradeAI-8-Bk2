@@ -275,8 +275,15 @@ router.post("/pairing-code", async (req, res) => {
   // store that tracks live links is readable at this moment. Issuance below
   // still requires an acknowledged write; the report alone is not sufficient.
   const store = await bridgeStoreReport();
-  if (process.env.NODE_ENV === "production" && store.backend !== "postgres") {
-    return storeUnavailable(res, "unavailable", "MT5 pairing requires a shared PostgreSQL DATABASE_URL in production", "this pairing code");
+  // A pairing code is only as good as the store that keeps it. In production we
+  // still refuse a process-local (in-memory) store, because a code minted there
+  // dies on the next restart and can never be redeemed afterwards. A durable
+  // store — PostgreSQL, or the on-disk PGlite file used by single-container
+  // deployments — is enough to issue a code, so we no longer demand PostgreSQL
+  // specifically: that turned every deployment without a provisioned database
+  // into one that could not hand out a code at all.
+  if (process.env.NODE_ENV === "production" && !store.durable) {
+    return storeUnavailable(res, "unavailable", "MT5 pairing requires a durable (non in-memory) database in production", "this pairing code");
   }
 
   if (!rotate) {
@@ -1599,12 +1606,12 @@ router.post("/sync", async (req, res) => {
 /** Deployment readiness, unlike /healthz's backwards-compatible HTTP 200. */
 router.get("/ready", async (_req, res) => {
   const store = await bridgeStoreReport(true);
-  const sharedStore = process.env.NODE_ENV !== "production" || store.backend === "postgres";
+  const sharedStore = process.env.NODE_ENV !== "production" || store.durable;
   const ready = store.reachable && store.schemaApplied && sharedStore;
   return res.status(ready ? 200 : 503).json({
     ready,
     store,
-    ...(!sharedStore ? { error: "Configure a shared PostgreSQL DATABASE_URL on the API service before pairing MT5." } : {}),
+    ...(!sharedStore ? { error: "Configure a durable (non in-memory) database on the API service before pairing MT5." } : {}),
   });
 });
 

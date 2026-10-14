@@ -1110,17 +1110,8 @@ export interface BridgeStoreReport {
   durable: boolean;
   /** Human-readable description, including the PGlite path. */
   detail: string;
-  /** Whether the bootstrap DDL has been applied — i.e. a pass ran to the END. */
+  /** Whether the bootstrap DDL has been applied. */
   schemaApplied: boolean;
-  /**
-   * Bootstrap statements that did NOT apply, verbatim from the database.
-   *
-   * `schemaApplied: true` with a non-empty list is a degraded schema: every
-   * table that could be created was, and the ones a failed statement would have
-   * created are missing. Worth surfacing, because a missing bridge table is
-   * invisible from here until a terminal cannot re-attach.
-   */
-  schemaFailures?: { statement: string; message: string; code?: string }[];
   /** Whether the two bridge tables could actually be read just now. */
   reachable: boolean;
   tables?: string[];

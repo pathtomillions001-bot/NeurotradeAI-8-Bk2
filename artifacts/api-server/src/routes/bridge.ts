@@ -179,28 +179,19 @@ const SPENT_CODE_MESSAGE =
  * into a terminal that never came back on its own. 503 is retryable, revokes
  * nothing, and the EA keeps the token it holds and tries again.
  */
-interface StoreUnavailableOverrides {
-  error?: string;
-  code?: string;
-  retryAfterMs?: number | null;
-  storeBackend?: string;
-}
-
 function storeUnavailable(
   res: ExpressResponse,
   health: StoreHealth,
   detail: string | undefined,
   what: string,
-  overrides: StoreUnavailableOverrides = {},
 ): ExpressResponse {
-  logger.warn({ health, detail, what }, "MT5 bridge store could not be consulted — answering 503");
+  logger.warn({ health, detail, what }, "MT5 bridge store could not be consulted — answering 503, nothing revoked");
   return res.status(503).json({
-    error: overrides.error ?? `The bridge link store could not be reached, so ${what} could not be verified. Nothing was revoked — the terminal should retry.`,
-    code: overrides.code ?? "bridge_store_unavailable",
+    error: `The bridge link store could not be reached, so ${what} could not be verified. Nothing was revoked — the terminal should retry.`,
+    code: "bridge_store_unavailable",
     storeHealth: health,
     detail: detail ?? null,
-    retryAfterMs: overrides.retryAfterMs === undefined ? 5_000 : overrides.retryAfterMs,
-    ...(overrides.storeBackend ? { storeBackend: overrides.storeBackend } : {}),
+    retryAfterMs: 5_000,
   });
 }
 
@@ -285,14 +276,7 @@ router.post("/pairing-code", async (req, res) => {
   // still requires an acknowledged write; the report alone is not sufficient.
   const store = await bridgeStoreReport();
   if (process.env.NODE_ENV === "production" && store.backend !== "postgres") {
-    const detail = `Shared PostgreSQL is required in production; the API reports backend=${store.backend} (${store.detail}).`;
-    return storeUnavailable(res, "unavailable", detail, "a new pairing code", {
-      error:
-        "MT5 pairing is disabled because this production API is not connected to shared PostgreSQL. Configure DATABASE_URL on the API service, then verify GET /api/bridge/ready reports backend=postgres, reachable=true, and schemaApplied=true.",
-      code: "bridge_store_not_shared",
-      retryAfterMs: null,
-      storeBackend: store.backend,
-    });
+    return storeUnavailable(res, "unavailable", "MT5 pairing requires a shared PostgreSQL DATABASE_URL in production", "this pairing code");
   }
 
   if (!rotate) {
@@ -334,17 +318,7 @@ router.post("/pairing-code", async (req, res) => {
   try {
     await savePairingCode(record);
   } catch (err) {
-    return storeUnavailable(
-      res,
-      "error",
-      err instanceof Error ? err.message : String(err),
-      "a new pairing code",
-      {
-        error:
-          "No pairing code was issued because the API could not save it to the bridge link store. Check the API service's database connectivity and schema, then retry. Existing links were not changed.",
-        storeBackend: store.backend,
-      },
-    );
+    return storeUnavailable(res, "error", err instanceof Error ? err.message : String(err), "this pairing code");
   }
   rememberPendingPairing(record);
   return res.json({

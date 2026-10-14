@@ -229,21 +229,28 @@ async function pool(): Promise<DbHandle | null> {
 let forcedStoreFailure: Error | null = null;
 
 /**
- * Can a read be trusted right now?
+ * Can a read be attempted right now?
  *
- * `schemaApplied()` is checked rather than awaited: `schemaReady` resolves even
- * when the DDL FAILED on its first attempt (deliberately, so routes are not
- * blocked behind a dead database), and the HTTP server listens while that retry
- * loop is still running. A request that lands in that window would otherwise
- * read a table that does not exist yet and report a perfectly good token as
- * unknown.
+ * ONLY the pool is checked. It used to also refuse to read while
+ * `schemaApplied()` was false, on the theory that a read landing in the
+ * bootstrap window would mistake "the table does not exist yet" for "this token
+ * is not a link". The theory was right about the window and wrong about the
+ * cure: the flag it consulted stayed FALSE FOREVER on a deployment where one
+ * statement of the bootstrap script could not be applied (see
+ * `applyDdlStatements` in `@workspace/db`), so every heartbeat was answered
+ * `503 … the bridge link store could not be reached … schema bootstrap has not
+ * been applied yet` while the link row sat readable and un-revoked — a terminal
+ * that could never come back, for a reason that was never true.
+ *
+ * The read is the authority. A table that really is missing fails truthfully:
+ * the query throws, the lookup reports `checked: false` with the real error, and
+ * the route answers the same retryable 503 (nothing revoked) it uses for any
+ * store that cannot be consulted. A table that is there is read — which is the
+ * only answer a terminal whose row exists may receive.
  */
 async function storeConsultable(): Promise<{ ok: boolean; detail?: string }> {
   const mod = await dbModule();
   if (!mod?.pool) return { ok: false, detail: "no database pool" };
-  if (typeof mod.schemaApplied === "function" && !mod.schemaApplied()) {
-    return { ok: false, detail: "schema bootstrap has not been applied yet" };
-  }
   return { ok: true };
 }
 

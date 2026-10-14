@@ -6,15 +6,25 @@
  * A pairing code is active only while the MT5 terminal it paired is open.
  * Closing MT5 ends the link, the code that created it stops working with it,
  * and reconnecting is a deliberate act: the user generates a NEW code in the
- * Desk and pastes it into the EA again. EA reloads, API restarts and network
- * outages are not terminal closes: the saved credential resumes the same link.
- * See `docs/mt5-bridge-link-lifetime.md` and `docs/mt5-bridge-store-recovery.md`.
+ * Desk and pastes it into the EA again. Nothing is kept for next time — not in
+ * the terminal, not on the server.
+ *
+ * That is a reversal of the previous contract, which persisted both halves
+ * (`docs/mt5-bridge-session-link.md`) so that a restart of the browser
+ * or of the API silently reconnected the terminal. Two things came out of that:
+ *
+ *   • a credential that outlives the terminal's session, sitting in the MT5
+ *     common folder and in Postgres, which is a link nobody asked to keep;
+ *   • and a terminal that could not tell "the Desk refused me" apart from "the
+ *     Desk could not read its own store", so `/sync` answered `503 The bridge
+ *     link store could not be reached …` and the terminal sat there retrying a
+ *     key it had saved for a session that no longer existed.
  *
  * ── WHAT IS STILL PERSISTED, AND WHY ────────────────────────────────────────
  *
  * The rows below still live in Postgres, because a link must survive the
- * API's own restart while the terminal is still up: the EA saves its token per
- * account, and a redeploy that forgot the row would disconnect a terminal
+ * API's own restart while the terminal is still up: the EA holds its token in
+ * memory only, and a redeploy that forgot the row would disconnect a terminal
  * that never went away. What changed is the LIFETIME, not the storage:
  *
  *   • `mt5_pairing_codes` — a code is minted for one browser session, is single
@@ -99,7 +109,16 @@ export const CODE_TTL_BOUND_BY_LINK = 0;
  */
 export const SPENT_CODE_KEEP_MS = 30 * 60_000;
 
-/** Legacy silence/display interval only. Never a credential-expiry deadline. */
+/**
+ * How long a link survives without a heartbeat.
+ *
+ * The EA beats every 500 ms – 10 s depending on configuration, so this is many
+ * missed beats, deliberately: the lease exists to end a link whose terminal is
+ * GONE, not to punish a slow one. The desk's own staleness ceiling is the same
+ * order of magnitude (120 s, `live.ts`), so the two agree on when a terminal
+ * has stopped existing. A clean shutdown does not wait for this at all — the EA
+ * calls `/api/bridge/disconnect` from `OnDeinit`.
+ */
 export const BRIDGE_LINK_LEASE_MS = 120_000;
 
 export interface StoredPairingCode {
@@ -228,22 +247,6 @@ async function storeConsultable(): Promise<{ ok: boolean; detail?: string }> {
   return { ok: true };
 }
 
-/** Never acknowledge a credential that exists only in this process's memory. */
-async function writableStore(): Promise<DbHandle> {
-  if (forcedStoreFailure) throw forcedStoreFailure;
-  const ready = await storeConsultable();
-  if (!ready.ok) throw new Error(ready.detail ?? "bridge schema not ready");
-  const mod = await dbModule();
-  // Embedded container storage is useful locally, but is not shared or durable
-  // across production deploys/replicas. Do not promise a persistent MT5 link on it.
-  if (process.env.NODE_ENV === "production" && mod?.databaseBackend !== "postgres") {
-    throw new Error("MT5 pairing requires a shared PostgreSQL DATABASE_URL in production");
-  }
-  const db = mod?.pool;
-  if (!db) throw new Error("no database pool");
-  return db;
-}
-
 /**
  * Run a read, retrying a FEW times before declaring the store unreadable.
  *
@@ -322,7 +325,7 @@ function warnOnce(err: unknown): void {
   if (dbWarned) return;
   dbWarned = true;
   // eslint-disable-next-line no-console
-  console.warn("[mt5-bridge-links] store operation failed; new credentials require persistence, existing links are retained", err);
+  console.warn("[mt5-bridge-links] database unavailable; keeping the link in-process only", err);
 }
 
 function messageOf(err: unknown): string {
@@ -342,9 +345,11 @@ export function codeIsLive(record: StoredPairingCode, now = Date.now()): boolean
 
 /** Store (or refresh) a pairing code. Mirrored in-process for the retry loop. */
 export async function savePairingCode(record: StoredPairingCode): Promise<void> {
-  const db = await writableStore();
+  codes.set(record.code, record);
+  const db = await pool();
+  if (!db) return warnOnce(new Error("pool unavailable"));
   try {
-    await withStoreRetry(() => db.query(
+    await db.query(
       `INSERT INTO ${PAIRING_CODE_TABLE} (code, session_id, created_at_ms, expires_at_ms, redeemed_at_ms)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (code) DO UPDATE
@@ -352,11 +357,9 @@ export async function savePairingCode(record: StoredPairingCode): Promise<void> 
              expires_at_ms = EXCLUDED.expires_at_ms,
              redeemed_at_ms = EXCLUDED.redeemed_at_ms`,
       [record.code, record.sessionId, record.createdAt, record.expiresAt, record.redeemedAt],
-    ));
-    codes.set(record.code, record);
+    );
   } catch (err) {
     warnOnce(err);
-    throw err;
   }
 }
 
@@ -639,23 +642,16 @@ export async function saveBridgeLink(input: BridgeLinkInput): Promise<void> {
     lastSeenAt: now,
     revokedAt: null,
   };
-  const db = await writableStore();
+  linksByTokenHash.set(record.tokenHash, record);
+  unknownTokens.delete(record.tokenHash);
+
+  const db = await pool();
+  if (!db) return warnOnce(new Error("pool unavailable"));
   try {
-    // One statement: consuming the code and persisting its token either both
-    // commit or neither does. In particular a failed INSERT cannot leave a
-    // "spent" code with no link, and a redeploy cannot lose an acknowledged token.
-    const result = await withStoreRetry(() => db.query(
-      `WITH paired_code AS (
-         UPDATE ${PAIRING_CODE_TABLE}
-            SET redeemed_at_ms = COALESCE(redeemed_at_ms, $9), expires_at_ms = 0
-          WHERE code = $7 AND session_id = $2
-            AND (expires_at_ms = 0 OR expires_at_ms > $9)
-          RETURNING code
-       )
-       INSERT INTO ${BRIDGE_LINK_TABLE}
+    await db.query(
+      `INSERT INTO ${BRIDGE_LINK_TABLE}
          (token_hash, session_id, account_key, login, server, company, code, paired_at_ms, last_seen_at_ms, revoked_at_ms)
-       SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, NULL
-        WHERE $7::text IS NULL OR EXISTS (SELECT 1 FROM paired_code)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL)
        ON CONFLICT (token_hash) DO UPDATE
          SET session_id = EXCLUDED.session_id,
              account_key = EXCLUDED.account_key,
@@ -663,19 +659,22 @@ export async function saveBridgeLink(input: BridgeLinkInput): Promise<void> {
              server = EXCLUDED.server,
              company = EXCLUDED.company,
              code = EXCLUDED.code,
-             last_seen_at_ms = EXCLUDED.last_seen_at_ms
-       RETURNING token_hash`,
-      [record.tokenHash, record.sessionId, record.accountKey, record.login,
-        record.server, record.company, record.code, record.pairedAt, record.lastSeenAt],
-    ));
-    if (!result.rows.length) throw new Error("pairing code no longer usable; retry with the current Desk code");
-    linksByTokenHash.set(record.tokenHash, record);
-    unknownTokens.delete(record.tokenHash);
-    const code = record.code ? codes.get(record.code) : null;
-    if (code) codes.set(code.code, { ...code, redeemedAt: code.redeemedAt ?? now, expiresAt: 0 });
+             last_seen_at_ms = EXCLUDED.last_seen_at_ms,
+             revoked_at_ms = NULL`,
+      [
+        record.tokenHash,
+        record.sessionId,
+        record.accountKey,
+        record.login,
+        record.server,
+        record.company,
+        record.code,
+        record.pairedAt,
+        record.lastSeenAt,
+      ],
+    );
   } catch (err) {
     warnOnce(err);
-    throw err;
   }
 }
 

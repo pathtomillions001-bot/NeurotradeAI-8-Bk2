@@ -43,8 +43,6 @@ import {
 import {
   accountKeyFor,
   describeConflict,
-  claimsForSession,
-  releaseClaim,
   releaseClaimsForSession,
   touchClaim,
   tryClaimAccount,
@@ -69,6 +67,7 @@ import {
   sessionForToken,
   ticksFor,
   upsertCandles,
+  issueBridgeToken,
   type DeskState,
 } from "../lib/multiasset/store";
 import {
@@ -76,6 +75,7 @@ import {
   PAIRING_CODE_TTL_MS,
   bridgeStoreReport,
   deleteBridgeLink,
+  deleteBridgeLinkByHash,
   deleteBridgeLinksForSession,
   hashBridgeToken,
   linkByCode,
@@ -83,6 +83,7 @@ import {
   lookupPairingCode,
   lookupSpentPairingCode,
   retirePairingCode,
+  markPairingCodeRedeemed,
   pairingCodesForSession,
   prunePairingCodes,
   pruneRevokedLinks,
@@ -91,6 +92,7 @@ import {
   saveBridgeLink,
   savePairingCode,
   sessionHasLiveLink,
+  staleLinks,
   touchBridgeLink,
   type StoreHealth,
   type StoredBridgeLink,
@@ -272,12 +274,10 @@ router.post("/pairing-code", async (req, res) => {
   prunePairings(now);
 
   // Reported with the code, because the Desk must be able to say whether the
-  // store that tracks live links is readable at this moment. Issuance below
-  // still requires an acknowledged write; the report alone is not sufficient.
+  // store that tracks live links is readable at this moment: a code issued
+  // while it is not is still usable by this process, but a second replica will
+  // not see it.
   const store = await bridgeStoreReport();
-  if (process.env.NODE_ENV === "production" && store.backend !== "postgres") {
-    return storeUnavailable(res, "unavailable", "MT5 pairing requires a shared PostgreSQL DATABASE_URL in production", "this pairing code");
-  }
 
   if (!rotate) {
     const stored = await pairingCodesForSession(sessionId, now);
@@ -315,12 +315,8 @@ router.post("/pairing-code", async (req, res) => {
     expiresAt: now + PAIRING_CODE_TTL_MS,
     redeemedAt: null,
   };
-  try {
-    await savePairingCode(record);
-  } catch (err) {
-    return storeUnavailable(res, "error", err instanceof Error ? err.message : String(err), "this pairing code");
-  }
   rememberPendingPairing(record);
+  await savePairingCode(record);
   return res.json({
     pairingCode: code,
     expiresInMs: PAIRING_CODE_TTL_MS,
@@ -328,6 +324,15 @@ router.post("/pairing-code", async (req, res) => {
     reused: false,
     durable: store.durable,
     storeReachable: store.reachable,
+    ...(store.reachable
+      ? {}
+      : {
+          warning:
+            "The link store could not be read (" +
+            store.detail +
+            "). The EA can still pair through this process, but if the api restarts before its first " +
+            "heartbeat lands, the terminal will need a new code. Check the api service's database connection.",
+        }),
   });
 });
 
@@ -429,7 +434,6 @@ router.post("/pair", async (req, res) => {
     server,
     company: String(terminal.company ?? ""),
     sessionId: pairing.sessionId,
-    releasePrevious: false,
   });
   if (!claim.ok) {
     // The code deliberately survives a refusal. The EA retries every few
@@ -444,40 +448,16 @@ router.post("/pair", async (req, res) => {
   }
 
   const accountKey = accountKeyFor(login, server);
-  let sameLink = Boolean(
+  const sameLink = Boolean(
     desk.terminal &&
       desk.terminal.login === Math.trunc(login) &&
       accountKeyFor(desk.terminal.login, desk.terminal.server) === accountKey,
   );
 
-  const pairedAt = sameLink ? (desk.terminal?.pairedAt ?? Date.now()) : Date.now();
-  const bridgeToken = `nt_${randomUUID().replace(/-/g, "")}${randomUUID().replace(/-/g, "").slice(0, 16)}`;
-  try {
-    // Persist BEFORE publishing the token, consuming the code or changing the
-    // current Desk. A failed re-pair must leave its existing terminal untouched.
-    await saveBridgeLink({
-      token: bridgeToken,
-      sessionId: pairing.sessionId,
-      accountKey,
-      login,
-      server,
-      company: String(terminal.company ?? ""),
-      code,
-      pairedAt,
-    });
-  } catch (err) {
-    const currentOwnsClaim = desk.terminal && accountKeyFor(desk.terminal.login, desk.terminal.server) === accountKey;
-    if (!currentOwnsClaim) await releaseClaim(accountKey, pairing.sessionId);
-    return storeUnavailable(res, "error", err instanceof Error ? err.message : String(err), "this terminal's link");
-  }
-
-  // Another chart can finish pairing while the database write is in flight.
-  // Re-check before replacing anything, so same-account attaches never revoke
-  // one another merely because they started at the same time.
-  sameLink = Boolean(desk.terminal && accountKeyFor(desk.terminal.login, desk.terminal.server) === accountKey);
-  for (const previous of claimsForSession(pairing.sessionId)) {
-    if (previous.accountKey !== accountKey) await releaseClaim(previous.accountKey, pairing.sessionId);
-  }
+  // The code is marked as used and bound to the link it just created. It has no
+  // timer of its own from here (`expiresAt = 0`): it lives exactly as long as
+  // this link, and is deleted with it.
+  await markPairingCodeRedeemed(code);
 
   if (!sameLink) {
     // A different terminal (or the same Desk linking another account): the
@@ -501,7 +481,7 @@ router.post("/pair", async (req, res) => {
 
   desk.lastPairingError = null;
 
-  adoptBridgeToken(bridgeToken, pairing.sessionId);
+  const bridgeToken = issueBridgeToken(pairing.sessionId);
   desk.terminal = {
     accountId: `mt5:${login}@${server}`,
     login,
@@ -509,7 +489,7 @@ router.post("/pair", async (req, res) => {
     company: String(terminal.company ?? ""),
     bridgeToken,
     tokens: sameLink ? [...(desk.terminal?.tokens ?? []), bridgeToken] : [bridgeToken],
-    pairedAt,
+    pairedAt: sameLink ? (desk.terminal?.pairedAt ?? Date.now()) : Date.now(),
     lastSyncAt: Date.now(),
     lastSeq: 0,
     // Kept while the same link continues; the next beat re-reports it anyway.
@@ -519,6 +499,20 @@ router.post("/pair", async (req, res) => {
     // uses its fixed staleness window.
     syncIntervalMs: 0,
   };
+
+  await saveBridgeLink({
+    token: bridgeToken,
+    sessionId: pairing.sessionId,
+    accountKey,
+    login,
+    server,
+    company: String(terminal.company ?? ""),
+    // The link carries the code that created it, so ending the link can delete
+    // that code without touching one the user has just generated for another
+    // terminal.
+    code,
+    pairedAt: desk.terminal.pairedAt,
+  });
 
   const catalog = Array.isArray(req.body?.catalog) ? req.body.catalog : [];
   let catalogCount = 0;
@@ -645,13 +639,6 @@ router.post("/disconnect", async (req, res) => {
   }
 
   const desk = getDesk(sessionId);
-  const reason = String(req.body?.reason ?? "");
-  const terminalClosed = reason === "terminal closing" || reason === "terminal_close" ||
-    reason === "the terminal or chart was closed"; // v3.09 sends this ONLY for REASON_CLOSE
-  if (terminalClosed) {
-    await endSessionLink(sessionId, "MetaTrader 5 terminal closed. The link and pairing code were released.");
-    return res.json({ ok: true, ended: true });
-  }
   revokeBridgeToken(token);
   await deleteBridgeLink(token);
 
@@ -724,14 +711,24 @@ async function endSessionLink(sessionId: string, journalMessage: string): Promis
  *   • the only rows this prunes are those already REVOKED — the user pressed
  *     Unlink, the EA has had its spaced retries to read that final answer, and
  *     the row is then deleted rather than accumulated;
- *   • no unrevoked token is pruned, even if a sibling is still beating.
+ *   • revoked links whose lease-out period has passed are the only thing that
+ *     changes state here.
  *
  * It keeps returning `0` as "links ended", because nothing ends links any more;
  * the number is retained so the boot log and the tests read the same.
  */
 export async function sweepExpiredLinks(now = Date.now()): Promise<number> {
-  // No valid token is garbage-collected on silence, even when a sibling is
-  // beating. That chart can resume later (or after an API restart) on its token.
+  // ── Link rows the user never revoked are left exactly as they are ─────────
+  //
+  // `staleLinks()` is deliberately still consulted, because a link that has
+  // been silent for a very long time while ANOTHER token of the same session is
+  // still beating is a dead chart's leftover row: it is dropped so the Desk's
+  // token list cannot grow forever, and the link itself is untouched.
+  const stale = await staleLinks(now);
+  for (const link of stale) {
+    const siblingsLive = await sessionHasLiveLink(link.sessionId, link.tokenHash, now);
+    if (siblingsLive) await deleteBridgeLinkByHash(link.tokenHash);
+  }
   // Revoked rows are kept only long enough for the EA's spaced retries to see
   // the final answer; past that they are deleted rather than accumulated.
   await pruneRevokedLinks(now);
@@ -1594,18 +1591,6 @@ router.post("/sync", async (req, res) => {
     },
   };
   return res.json(response);
-});
-
-/** Deployment readiness, unlike /healthz's backwards-compatible HTTP 200. */
-router.get("/ready", async (_req, res) => {
-  const store = await bridgeStoreReport(true);
-  const sharedStore = process.env.NODE_ENV !== "production" || store.backend === "postgres";
-  const ready = store.reachable && store.schemaApplied && sharedStore;
-  return res.status(ready ? 200 : 503).json({
-    ready,
-    store,
-    ...(!sharedStore ? { error: "Configure a shared PostgreSQL DATABASE_URL on the API service before pairing MT5." } : {}),
-  });
 });
 
 /** Browser-facing liveness / diagnostic view. */

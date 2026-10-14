@@ -238,25 +238,28 @@ describe("MT5 bridge — one account, one Desk", () => {
     assert.equal(sync.status, 200);
   });
 
-  it("silence cannot supersede an open terminal or transfer its account", async () => {
+  it("a superseded terminal is disconnected instead of silently sharing the account", async () => {
     const tokenA = await connect(browser("a"), 5012);
     assert.equal((await as(browser("a"), () => post("/sync", { seq: 1 }, tokenA))).status, 200);
 
-    // An hour offline is not a user unlink. Another browser must still be refused.
+    // Simulate a Desk that stopped heartbeating long enough to go idle: another
+    // browser legitimately takes the account over.
     await claimTesting.ageClaim(
       accountKeyFor(5012, "BROKER-DEMO"),
       Date.now() - 60 * 60 * 1000,
     );
-    const codeB = await requestCode(browser("b"));
-    assert.equal((await pair(browser("b"), codeB, 5012)).status, 409);
+    await connect(browser("b"), 5012);
 
-    // Terminal A resumes on the very same credential without human action.
+    // Terminal A still holds a cryptographically valid token. It must be told
+    // to stop, or two Desks would stream and trade one balance.
     const late = await as(browser("a"), () => post("/sync", { seq: 2 }, tokenA));
-    assert.equal(late.status, 200);
+    assert.equal(late.status, 409);
+    const body = (await late.json()) as { code: string };
+    assert.equal(body.code, "account_claimed_elsewhere");
 
-    // Its Desk remains paired.
+    // And browser A is no longer shown as connected.
     const status = (await (await as(browser("a"), () => get("/status"))).json()) as { linked: boolean };
-    assert.equal(status.linked, true);
+    assert.equal(status.linked, false);
   });
 
   it("a heartbeat from an unpaired session is still a 401", async () => {

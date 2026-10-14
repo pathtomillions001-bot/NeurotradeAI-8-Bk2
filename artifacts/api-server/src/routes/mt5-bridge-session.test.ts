@@ -324,14 +324,85 @@ describe("MT5 bridge — the link ends when the user ends it", () => {
     assert.equal((await get("/ready")).status, 200);
   });
 
-  it("production refuses memory/container-only pairing storage", async () => {
+  it("production refuses a store that cannot keep a row past this process", async () => {
     const env = process.env.NODE_ENV;
     process.env.NODE_ENV = "production";
     try {
+      // The suite runs on `pglite:memory` — per-process by construction — so the
+      // real store under test IS the memory-only one: nothing extra to set up.
       assert.equal((await get("/ready")).status, 503);
-      assert.equal((await as(browser("a"), () => post("/pairing-code", {}))).status, 503);
+      const refused = await as(browser("a"), () => post("/pairing-code", {}));
+      assert.equal(refused.status, 503);
+      const body = (await refused.json()) as { code: string; storeHealth: string; detail: string | null };
+      assert.equal(body.code, "bridge_store_unavailable");
+      // The refusal must name the actual store, so the owner can tell a missing
+      // database from a database that is merely not shared.
+      assert.match(body.detail ?? "", /in-memory|restart/i);
       assert.equal(linkTesting.codeSnapshot().length, 0);
     } finally {
+      if (env === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = env;
+    }
+  });
+
+  /**
+   * The reported failure, pinned.
+   *
+   * A production deployment whose store is a durable embedded file (single
+   * container, no provisioned PostgreSQL) used to answer
+   * `503 The bridge link store could not be reached …` to every attempt to get a
+   * pairing code — about a store that was durable, schema-applied and readable —
+   * because issuance demanded `backend === "postgres"` by name in two places
+   * (this route AND the write gate in `bridge-links.ts`). Loosening only the
+   * route left the write gate refusing with the identical message, which is why
+   * the first attempt to fix this looked like it had changed nothing at all.
+   */
+  it("production issues AND redeems a pairing code on a durable embedded store", async () => {
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    linkTesting.setStoreShape({
+      backend: "pglite",
+      durable: true,
+      detail: "embedded PGlite at /data/.data/pglite",
+    });
+    try {
+      assert.equal((await get("/ready")).status, 200, "a durable embedded store is ready");
+      const session = browser("a");
+      const issued = await as(session, () => post("/pairing-code", {}));
+      assert.equal(issued.status, 200, "a durable embedded store must still hand out codes");
+      const code = (await issued.json()) as { pairingCode: string; durable: boolean; reused?: boolean };
+      assert.match(code.pairingCode, /^[A-Z2-9]{4}-[A-Z2-9]{4}$/);
+      assert.equal(code.durable, true);
+
+      // The second half of the old gate: the write path. A code that cannot be
+      // redeemed is not a fix, so the redemption is asserted here too.
+      const paired = await as(session, () => post("/pair", { pairingCode: code.pairingCode, terminal: { login: 6219, server: "BROKER-DEMO" } }));
+      assert.equal(paired.status, 201);
+      const token = ((await paired.json()) as { bridgeToken: string }).bridgeToken;
+      assert.ok(token);
+
+      // And the credential survives "a restart" of the process: the row is in
+      // the store, not only in this process's mirror.
+      linkTesting.forgetProcessMemory();
+      assert.equal((await as(session, () => post("/sync", { seq: 1 }, token))).status, 200);
+    } finally {
+      linkTesting.setStoreShape(null);
+      if (env === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = env;
+    }
+  });
+
+  it("shared PostgreSQL in production is ready and needs no caveat", async () => {
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    linkTesting.setStoreShape({ backend: "postgres", durable: true, detail: "external Postgres (DATABASE_URL)" });
+    try {
+      const ready = await get("/ready");
+      assert.equal(ready.status, 200);
+      assert.equal(((await ready.json()) as { note?: string }).note, undefined);
+      assert.equal((await as(browser("a"), () => post("/pairing-code", {}))).status, 200);
+    } finally {
+      linkTesting.setStoreShape(null);
       if (env === undefined) delete process.env.NODE_ENV;
       else process.env.NODE_ENV = env;
     }

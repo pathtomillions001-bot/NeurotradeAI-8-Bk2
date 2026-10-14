@@ -210,6 +210,20 @@ async function pool(): Promise<DbHandle | null> {
 let forcedStoreFailure: Error | null = null;
 
 /**
+ * Set by tests to say what kind of store this process is talking to.
+ *
+ * The suite runs on `pglite:memory` — fast and isolated, and deliberately NOT
+ * durable — so on its own it can only ever exercise the refusal path. The two
+ * worlds this module has to tell apart (a durable embedded file store on a
+ * single-container deployment, and shared PostgreSQL) are properties of how the
+ * process was started, and a unit test cannot re-create them without writing a
+ * database to disk. Tests therefore state the shape outright, and both the
+ * report and the write gate read it — so what a test asserts is exactly the
+ * input the production decision uses.
+ */
+let storeShapeOverride: { backend: string; durable: boolean; detail: string } | null = null;
+
+/**
  * Can a read be trusted right now?
  *
  * `schemaApplied()` is checked rather than awaited: `schemaReady` resolves even
@@ -228,16 +242,38 @@ async function storeConsultable(): Promise<{ ok: boolean; detail?: string }> {
   return { ok: true };
 }
 
-/** Never acknowledge a credential that exists only in this process's memory. */
+/**
+ * Never acknowledge a credential that exists only in this process's memory.
+ *
+ * DURABILITY is the property that matters, and it is the only one required here.
+ * A previous release demanded PostgreSQL *specifically* in production, which
+ * made a single-container deployment — the embedded on-disk PGlite file, no
+ * provisioned database — unable to issue or redeem a pairing code at all: every
+ * attempt was answered with `503 … the bridge link store could not be reached`
+ * about a store that was present, readable and durable (`/api/bridge/ready`
+ * reported `reachable: true, schemaApplied: true, durable: true` at the same
+ * moment). A gate that cannot be satisfied by a healthy deployment is not a
+ * safety check, it is an outage: it left the Desk unable to hand out the one
+ * credential the whole MT5 integration needs.
+ *
+ * So a store that can keep a row past the end of this process may hold a link,
+ * whether that is shared Postgres or the embedded file. What is still refused —
+ * loudly, before anything is promised — is a store that cannot, and only in
+ * production: `pglite:memory` is per-process by construction, so a code minted
+ * into it dies at the next restart. Outside production that store is exactly
+ * what the isolated test suite and a throwaway local run use, and refusing
+ * there would only make the tests unrepresentative of the code they cover.
+ */
 async function writableStore(): Promise<DbHandle> {
   if (forcedStoreFailure) throw forcedStoreFailure;
   const ready = await storeConsultable();
   if (!ready.ok) throw new Error(ready.detail ?? "bridge schema not ready");
   const mod = await dbModule();
-  // Embedded container storage is useful locally, but is not shared or durable
-  // across production deploys/replicas. Do not promise a persistent MT5 link on it.
-  if (process.env.NODE_ENV === "production" && mod?.databaseBackend !== "postgres") {
-    throw new Error("MT5 pairing requires a shared PostgreSQL DATABASE_URL in production");
+  const durable = storeShapeOverride ? storeShapeOverride.durable : mod?.databaseIsDurable === true;
+  if (process.env.NODE_ENV === "production" && !durable) {
+    throw new Error(
+      `the link store is ${storeShapeOverride?.detail ?? mod?.databaseDetail ?? "unavailable"}, which does not survive a restart`,
+    );
   }
   const db = mod?.pool;
   if (!db) throw new Error("no database pool");
@@ -305,9 +341,9 @@ export async function bridgeStoreReport(force = false): Promise<BridgeStoreRepor
     warnOnce(err);
   }
   const value: BridgeStoreReport = {
-    backend: mod?.databaseBackend ?? "unknown",
-    durable: Boolean(mod?.databaseIsDurable),
-    detail: mod?.databaseDetail ?? "database module unavailable",
+    backend: storeShapeOverride?.backend ?? mod?.databaseBackend ?? "unknown",
+    durable: storeShapeOverride ? storeShapeOverride.durable : Boolean(mod?.databaseIsDurable),
+    detail: storeShapeOverride?.detail ?? mod?.databaseDetail ?? "database module unavailable",
     schemaApplied: applied,
     reachable,
     tables,
@@ -1128,6 +1164,7 @@ export function resetBridgeLinks(): void {
   unknownTokens.clear();
   dbWarned = false;
   forcedStoreFailure = null;
+  storeShapeOverride = null;
   storeReportCache = null;
 }
 
@@ -1166,6 +1203,18 @@ export const __testing = {
   },
   healStore(): void {
     forcedStoreFailure = null;
+    storeReportCache = null;
+  },
+  /**
+   * Tell the bridge which store this process is running on.
+   *
+   * `null` returns it to the real answer from `@workspace/db`. Used to exercise
+   * a durable embedded file store (`{ backend: "pglite", durable: true }`) and
+   * shared PostgreSQL (`{ backend: "postgres", durable: true }`) without
+   * actually deploying one.
+   */
+  setStoreShape(shape: { backend: string; durable: boolean; detail: string } | null): void {
+    storeShapeOverride = shape;
     storeReportCache = null;
   },
 };

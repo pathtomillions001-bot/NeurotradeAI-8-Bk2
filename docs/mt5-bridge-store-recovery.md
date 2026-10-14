@@ -36,9 +36,11 @@ heartbeat warnings indicate latency, not revocation; freshness gates must stay.
    the whole session link. Generic legacy token goodbyes remain token-scoped.
 5. **False-positive deployment health.** `/api/healthz` deliberately always
    returns 200 for compatibility. Railway now probes `/api/bridge/ready`, which
-   requires readable bridge tables, completed schema bootstrap, and PostgreSQL
-   in production. Production issuance also rejects embedded container storage.
-   A deployment with broken persistence is no longer advertised as ready.
+   requires readable bridge tables, a completed schema bootstrap, and — in
+   production — a store that can keep a row past the end of the process (see the
+   correction below: **durability**, not a PostgreSQL backend by name). A
+   deployment whose store cannot persist a credential is no longer advertised as
+   ready.
 
 No EA binary/version, trading strategy, order execution, quote timestamps,
 freshness gates, risk limits or frontend bundle changes are required.
@@ -69,6 +71,43 @@ freshness gates, risk limits or frontend bundle changes are required.
   attach tokens. An initial token that was **never persisted by the old code**
   cannot be reconstructed securely: after restoring the database, unlink any
   leftover Desk link and pair once with a fresh code if necessary.
+
+## Correction (2026-10-14, later): durability, not a backend name
+
+The hardening pass above required `backend === "postgres"` in production in TWO
+places — the `POST /api/bridge/pairing-code` route and `writableStore()` in
+`bridge-links.ts`, which every credential write (code issuance, `/pair` link
+insert) goes through. On a single-container deployment with no provisioned
+`postgres://` DATABASE_URL the store is the embedded on-disk PGlite file: durable,
+readable, schema-applied — and refused by both gates. The Desk answered every
+attempt with
+
+    Could not issue a pairing code: The bridge link store could not be reached, so this
+    pairing code could not be verified. Nothing was revoked — the terminal should retry.
+
+while `/api/bridge/ready` reported `backend: pglite`, `reachable: true`,
+`schemaApplied: true`, `durable: true` in the same breath. A gate a healthy
+deployment cannot satisfy is not a safety check; it is an outage — the Desk could
+not hand out the one credential the MT5 integration needs. Relaxing only the route
+left `writableStore()` refusing with a byte-identical message (only `storeHealth`
+differed, which the Desk did not display), which is why that attempt looked like it
+had changed nothing at all and was reverted.
+
+The requirement is DURABILITY, stated once, in both places:
+
+| Store (production)                      | Issuance / pairing            | `/api/bridge/ready` |
+|-----------------------------------------|-------------------------------|---------------------|
+| `postgres://` DATABASE_URL (shared)     | allowed                       | 200                 |
+| embedded on-disk PGlite (durable)       | allowed, with the caveat below| 200 + `note`        |
+| `pglite:memory` (process-local)         | refused, 503                  | 503                 |
+
+An embedded store survives a restart of *this container*, which is the failure a
+link actually has to survive; it does not survive a redeploy, a cold start or a
+second replica. That limitation is stated where the code is handed over —the MT5
+dialog shows "Link store is not shared" with the DATABASE_URL fix — instead of
+being enforced by making pairing impossible. A PostgreSQL service with
+`DATABASE_URL` set on the API service remains the recommended deployment, and on
+one of those this caveat never appears.
 
 ## Honest availability boundary
 

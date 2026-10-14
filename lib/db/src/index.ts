@@ -557,14 +557,60 @@ if (useExternalPostgres) {
   dbInstance = drizzlePglite(pglite, { schema }) as unknown as NodePgDatabase<typeof schema>;
 }
 
+/**
+ * CREATE TABLE IF NOT EXISTS never alters an existing table. Older bridge
+ * tables can therefore block INIT_DDL's indexes on columns they do not have.
+ * Their rows are only dead-session links/codes: preserve them by renaming the
+ * incompatible tables aside, then let INIT_DDL create the current shape.
+ */
+export const BRIDGE_TABLE_REQUIRED_COLUMNS: Readonly<Record<string, readonly string[]>> = {
+  mt5_bridge_links: ["token_hash","session_id","account_key","login","server","paired_at_ms","last_seen_at_ms","revoked_at_ms"],
+  mt5_pairing_codes: ["code","session_id","created_at_ms","expires_at_ms","redeemed_at_ms"],
+};
+
+const BRIDGE_TABLE_INDEXES: Readonly<Record<string, readonly string[]>> = {
+  mt5_bridge_links: ["mt5_bridge_links_session_idx", "mt5_bridge_links_account_idx"],
+  mt5_pairing_codes: ["mt5_pairing_codes_session_idx"],
+};
+
+type SqlRunner = (text: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
+
+export async function reconcileLegacyBridgeTables(run: SqlRunner, now = Date.now()): Promise<string[]> {
+  const movedAside: string[] = [];
+  for (const [table, required] of Object.entries(BRIDGE_TABLE_REQUIRED_COLUMNS)) {
+    const found = await run(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = $1`,
+      [table],
+    );
+    const present = new Set(found.rows.map((row) => String((row as { column_name: string }).column_name)));
+    if (present.size === 0) continue;               // table absent: INIT_DDL creates it
+    const missing = required.filter((column) => !present.has(column));
+    if (missing.length === 0) continue;             // current shape: leave alone
+    const legacyName = `${table}_legacy_${now}`;
+    for (const index of BRIDGE_TABLE_INDEXES[table] ?? []) {
+      await run(`DROP INDEX IF EXISTS ${index}`);   // index names are schema-wide; free them
+    }
+    await run(`ALTER TABLE ${table} RENAME TO ${legacyName}`);
+    movedAside.push(table);
+    console.warn(`[db] ${table} has an outdated shape (missing: ${missing.join(", ")}); renamed it to ${legacyName} and recreating it.`);
+  }
+  return movedAside;
+}
+
 /** Applies the idempotent INIT_DDL. Safe to call repeatedly. */
 async function applySchemaDdl(): Promise<void> {
   if (useExternalPostgres) {
+    await reconcileLegacyBridgeTables((text, params) => poolInstance.query(text, params));
     await poolInstance.query(INIT_DDL);
   } else {
+    await reconcileLegacyBridgeTables((text, params) => pgliteInstance!.query(text, params as any[]));
     await pgliteInstance!.exec(INIT_DDL);
   }
 }
+
+/** The bootstrap DDL, exposed so tests can prove it applies on top of old databases. */
+export const SCHEMA_BOOTSTRAP_DDL: string = INIT_DDL;
 
 /**
  * Keep retrying the DDL until it succeeds, then resolve schemaReady.

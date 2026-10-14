@@ -275,18 +275,8 @@ router.post("/pairing-code", async (req, res) => {
   // store that tracks live links is readable at this moment. Issuance below
   // still requires an acknowledged write; the report alone is not sufficient.
   const store = await bridgeStoreReport();
-  // A pairing code is only as good as the store that keeps it, and the property
-  // that store needs is DURABILITY — not PostgreSQL specifically. Requiring
-  // Postgres by name turned every single-container deployment (embedded on-disk
-  // PGlite, no provisioned database) into one that could not hand out a code at
-  // all: the answer was `503 … the bridge link store could not be reached`
-  // about a store that was reachable, schema-applied and durable — the Desk's
-  // own diagnostics said so in the same response. A memory-only store
-  // (`pglite:memory`) is still refused, because a code minted there dies at the
-  // next restart and can never be redeemed afterwards; that refusal is honest,
-  // and the embedded file store is not that.
-  if (process.env.NODE_ENV === "production" && !store.durable) {
-    return storeUnavailable(res, "unavailable", `the link store is ${store.detail}, which does not survive a restart`, "this pairing code");
+  if (process.env.NODE_ENV === "production" && store.backend !== "postgres") {
+    return storeUnavailable(res, "unavailable", "MT5 pairing requires a shared PostgreSQL DATABASE_URL in production", "this pairing code");
   }
 
   if (!rotate) {
@@ -1606,33 +1596,15 @@ router.post("/sync", async (req, res) => {
   return res.json(response);
 });
 
-/**
- * Deployment readiness, unlike /healthz's backwards-compatible HTTP 200.
- *
- * Ready means: the bridge tables can be read, the bootstrap DDL has been
- * applied, and (in production) the store can keep a row past the end of this
- * process. It does NOT require PostgreSQL specifically any more: an embedded
- * on-disk store is ready in exactly the sense that matters here — it survives
- * the restart that a redeploy of this same container performs — and requiring
- * more made the probe unsatisfiable for a healthy single-container deployment,
- * which (with this path wired as Railway's healthcheck) blocked every deploy of
- * the API service instead of protecting anything.
- */
+/** Deployment readiness, unlike /healthz's backwards-compatible HTTP 200. */
 router.get("/ready", async (_req, res) => {
   const store = await bridgeStoreReport(true);
-  const durableStore = process.env.NODE_ENV !== "production" || store.durable;
-  const ready = store.reachable && store.schemaApplied && durableStore;
+  const sharedStore = process.env.NODE_ENV !== "production" || store.backend === "postgres";
+  const ready = store.reachable && store.schemaApplied && sharedStore;
   return res.status(ready ? 200 : 503).json({
     ready,
     store,
-    ...(!durableStore ? { error: "Configure a durable (non in-memory) database on the API service before pairing MT5." } : {}),
-    ...(ready && store.backend !== "postgres"
-      ? {
-          note:
-            `Links live in ${store.detail}, not a shared database. Pairing works; a redeploy or cold start ` +
-            "forgets paired terminals. Set DATABASE_URL to a PostgreSQL service to make links outlive deploys.",
-        }
-      : {}),
+    ...(!sharedStore ? { error: "Configure a shared PostgreSQL DATABASE_URL on the API service before pairing MT5." } : {}),
   });
 });
 

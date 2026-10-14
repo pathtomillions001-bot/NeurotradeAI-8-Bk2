@@ -557,217 +557,17 @@ if (useExternalPostgres) {
   dbInstance = drizzlePglite(pglite, { schema }) as unknown as NodePgDatabase<typeof schema>;
 }
 
-/**
- * Split a multi-statement script into individual statements.
- *
- * WHY THIS EXISTS — the difference between one bad statement and a broken
- * deployment. `pg` sends a parameterless query with the SIMPLE protocol
- * (`Query.prototype.requiresPreparation()` is false when there are no values),
- * and Postgres wraps a multi-statement simple query in ONE implicit
- * transaction: the first statement that fails rolls back everything before it
- * AND silently skips everything after it. So a single data-dependent failure —
- * a `CREATE UNIQUE INDEX` over legacy rows that duplicate each other — happens
- * on every boot, on the same database, forever, and **nothing after it is ever
- * created**. Every table and column below that point stays missing while the
- * rest of the app looks healthy, because the tables an earlier boot created are
- * still there.
- *
- * The scanner respects single-quoted literals (including '' escapes),
- * double-quoted identifiers, dollar-quoted bodies, `--` line comments and
- * (nestable) block comments, so a `;` inside any of those is not a statement
- * boundary. The INIT_DDL really does contain `;` inside comments, so a naive
- * `split(";")` would cut statements in half.
- */
-export function splitSqlStatements(sql: string): string[] {
-  const statements: string[] = [];
-  let current = "";
-  let hasSql = false;
-  let i = 0;
-  const n = sql.length;
-
-  const push = (): void => {
-    if (hasSql) statements.push(current.trim());
-    current = "";
-    hasSql = false;
-  };
-
-  while (i < n) {
-    const ch = sql[i];
-    const next = sql[i + 1];
-
-    // `-- line comment` — kept in the statement (comments carry the DDL's own
-    // explanation) but never scanned for a statement boundary.
-    if (ch === "-" && next === "-") {
-      const end = sql.indexOf("\n", i);
-      const stop = end === -1 ? n : end + 1;
-      current += sql.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    // `/* block comment */` — nestable, as Postgres allows.
-    if (ch === "/" && next === "*") {
-      let depth = 0;
-      let j = i;
-      while (j < n) {
-        if (sql[j] === "/" && sql[j + 1] === "*") { depth++; j += 2; continue; }
-        if (sql[j] === "*" && sql[j + 1] === "/") { depth--; j += 2; if (depth === 0) break; continue; }
-        j++;
-      }
-      current += sql.slice(i, j);
-      i = j;
-      continue;
-    }
-    // `'literal'` ('' is an escaped quote) and `"identifier"` ("" likewise).
-    if (ch === "'" || ch === '"') {
-      let j = i + 1;
-      while (j < n) {
-        if (sql[j] === ch) {
-          if (sql[j + 1] === ch) { j += 2; continue; }
-          j++;
-          break;
-        }
-        j++;
-      }
-      current += sql.slice(i, j);
-      hasSql = true;
-      i = j;
-      continue;
-    }
-    // `$tag$ … $tag$` dollar-quoted body.
-    if (ch === "$") {
-      const tag = /^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/.exec(sql.slice(i));
-      if (tag) {
-        const closing = sql.indexOf(tag[0], i + tag[0].length);
-        const stop = closing === -1 ? n : closing + tag[0].length;
-        current += sql.slice(i, stop);
-        hasSql = true;
-        i = stop;
-        continue;
-      }
-    }
-    if (ch === ";") {
-      push();
-      i++;
-      continue;
-    }
-    if (!/\s/.test(ch)) hasSql = true;
-    current += ch;
-    i++;
+/** Applies the idempotent INIT_DDL. Safe to call repeatedly. */
+async function applySchemaDdl(): Promise<void> {
+  if (useExternalPostgres) {
+    await poolInstance.query(INIT_DDL);
+  } else {
+    await pgliteInstance!.exec(INIT_DDL);
   }
-  push();
-  return statements;
-}
-
-/** The bootstrap script, one statement at a time. Safe to call repeatedly. */
-export function bootstrapDdlStatements(): string[] {
-  return splitSqlStatements(INIT_DDL);
 }
 
 /**
- * Is this a failure of the CONNECTION rather than of the statement?
- *
- * A dead database must keep the old behaviour: abort the attempt so
- * `ddlRetryLoop()` backs off and tries the whole script again (that loop is what
- * made a simultaneous redeploy on Railway self-heal). A statement that the data
- * will not accept must not: the rest of the schema still applies.
- */
-function isConnectionFailure(err: unknown): boolean {
-  const code = (err as { code?: unknown } | null)?.code;
-  if (typeof code === "string") {
-    // 08xxx connection exception, 57P0x admin shutdown / crash / cannot connect
-    // now, 53300/53400 exhausted resources, 40001/40P01 needs a retry.
-    if (code.startsWith("08")) return true;
-    if (["57P01", "57P02", "57P03", "53300", "53400", "40001", "40P01"].includes(code)) return true;
-    if (["ECONNREFUSED", "ECONNRESET", "ENOTFOUND", "ETIMEDOUT", "EHOSTUNREACH", "ENETUNREACH", "EPIPE"].includes(code)) return true;
-  }
-  const message = err instanceof Error ? err.message : String(err);
-  return /timeout exceeded when trying to connect|Connection terminated|connection error|terminating connection|ECONNREFUSED|ETIMEDOUT|ENOTFOUND/i.test(message);
-}
-
-/** Each failing statement is reported once per process, not once per retry. */
-const reportedStatementFailures = new Map<number, string>();
-
-/**
- * Apply a list of statements, one at a time, and NEVER let one bad statement
- * cost the rest of the schema.
- *
- * Exported for the regression test (`bridge-store-readiness.test.ts`), which
- * proves that a statement the data will not accept cannot hide the statements
- * after it — the exact failure this replaced.
- */
-export async function applyDdlStatements(
-  run: (statement: string) => Promise<unknown>,
-  statements: string[] = bootstrapDdlStatements(),
-): Promise<{ applied: number; failed: number }> {
-  let applied = 0;
-  let failed = 0;
-  for (const [index, statement] of statements.entries()) {
-    try {
-      await run(statement);
-      applied++;
-    } catch (err) {
-      // A connection-level failure aborts the pass (see isConnectionFailure);
-      // the retry loop above owns that path.
-      if (isConnectionFailure(err)) throw err;
-      failed++;
-      const message = err instanceof Error ? err.message : String(err);
-      if (reportedStatementFailures.get(index) !== message) {
-        reportedStatementFailures.set(index, message);
-        const firstLine = statement.split("\n").find((line) => line.trim() && !line.trim().startsWith("--")) ?? statement;
-        console.error(
-          `[db] DDL statement ${index + 1} failed — continuing with the rest of the schema: ${message}\n` +
-            `     ${firstLine.trim().slice(0, 160)}`,
-        );
-      }
-    }
-  }
-  return { applied, failed };
-}
-
-/** Applies the idempotent INIT_DDL, statement by statement. Safe to call repeatedly. */
-async function applySchemaDdl(): Promise<{ applied: number; failed: number }> {
-  // Both backends go through the pool wrapper: `pg` here, PGlite's own query
-  // path in the embedded case. PGlite runs a multi-statement `exec` in an
-  // implicit transaction too, so it gets the identical one-statement-at-a-time
-  // treatment — dev and production then fail in the same way, and heal the same
-  // way.
-  return applyDdlStatements((statement) => poolInstance.query(statement));
-}
-
-/**
- * The tables this API cannot work without.
- *
- * Readiness means "these exist", NOT "the script returned without throwing".
- * The old definition was the second one, which is how a deployment whose
- * duplicate rows refused one `CREATE UNIQUE INDEX` reported its whole schema as
- * unapplied while the tables were right there — and refused to read the MT5
- * bridge's link rows, ending in a 503 on every heartbeat (`storeConsultable()`
- * consulted this flag before answering).
- */
-export const REQUIRED_TABLES = [
-  "settings",
-  "accounts",
-  "trades",
-  "adaptive_thresholds",
-  "mt5_bridge_links",
-  "mt5_pairing_codes",
-] as const;
-
-/** Are all `REQUIRED_TABLES` present? The honest replacement for "the DDL did not throw". */
-export async function requiredTablesPresent(): Promise<boolean> {
-  const list = REQUIRED_TABLES.map((table) => `'${table}'`).join(", ");
-  const result = await poolInstance.query(
-    `SELECT COUNT(*)::int AS present
-       FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_name IN (${list})`,
-  );
-  const present = Number((result?.rows?.[0] as { present?: unknown } | undefined)?.present ?? 0);
-  return present === REQUIRED_TABLES.length;
-}
-
-/**
- * Keep retrying the DDL until the schema this API needs actually exists, then
- * resolve schemaReady.
+ * Keep retrying the DDL until it succeeds, then resolve schemaReady.
  *
  * WHY a retry loop: the first boot attempt can hit a transient Postgres outage
  * (on Railway a simultaneous redeploy produced `connect ETIMEDOUT …:5432` for
@@ -775,15 +575,6 @@ export async function requiredTablesPresent(): Promise<boolean> {
  * the network recovered, so settings/accounts/markets stayed broken until a
  * manual redeploy. Retrying in the background self-heals as soon as Postgres
  * answers.
- *
- * WHY the success test changed: a pass that THREW used to be the only failure.
- * A statement the data will not accept threw nothing of its own accord — it
- * poisoned the implicit transaction and the whole script with it. Now every
- * statement is applied on its own (see `applyDdlStatements`), so the loop's
- * question is the honest one: are the tables this API needs present? A
- * deployment can therefore be missing an index over legacy rows and still have
- * every table it needs, which is exactly the state that must not be reported as
- * "the schema was never applied".
  */
 let ddlSucceeded = false;
 async function ddlRetryLoop(): Promise<void> {
@@ -791,28 +582,14 @@ async function ddlRetryLoop(): Promise<void> {
   while (!ddlSucceeded) {
     attempt++;
     try {
-      const { applied, failed } = await applySchemaDdl();
-      ddlSucceeded = await requiredTablesPresent();
-      if (ddlSucceeded) {
-        console.log(
-          attempt === 1
-            ? "[db] Initial DDL applied"
-            : `[db] Initial DDL applied after ${attempt} attempts`,
-        );
-        if (failed > 0) {
-          console.warn(
-            `[db] ${failed} of ${applied + failed} DDL statement(s) could not be applied to the existing data — ` +
-              "every table this API needs is present anyway (see the statement lines above).",
-          );
-        }
-      } else {
-        console.error(
-          `[db] Schema bootstrap incomplete — ${failed} of ${applied + failed} statement(s) failed and the tables ` +
-            "this API needs are not all present yet; retrying",
-        );
-      }
+      await applySchemaDdl();
+      ddlSucceeded = true;
+      console.log(
+        attempt === 1
+          ? "[db] Initial DDL applied"
+          : `[db] Initial DDL applied after ${attempt} attempts`,
+      );
       resolveSchemaReady();
-      if (!ddlSucceeded) await new Promise((r) => setTimeout(r, Math.min(30_000, 5_000 * attempt)));
     } catch (err) {
       if (attempt === 1) resolveSchemaReady(); // don't block routes on a dead DB
       const waitMs = Math.min(30_000, 5_000 * attempt);
@@ -865,20 +642,13 @@ export const databaseDetail: string = useExternalPostgres
     : "embedded PGlite, in-memory (this process only)";
 
 /**
- * Whether the schema this API needs is actually in place.
+ * Whether the bootstrap DDL has actually been APPLIED.
  *
- * `schemaReady` deliberately resolves even when the first attempt failed, so
+ * `schemaReady` deliberately resolves even when the first DDL attempt failed, so
  * that routes are not blocked behind a dead database. That makes it the wrong
- * signal for "do the tables exist", and this is the replacement.
- *
- * WHAT IT MEANS NOW: the bootstrap pass ran and every table in
- * `REQUIRED_TABLES` is present — NOT "the script returned without throwing". The
- * old definition could be false forever because of one statement that the
- * existing data will not accept (a `CREATE UNIQUE INDEX` over duplicate legacy
- * rows), and callers that refused to read a perfectly readable row on the
- * strength of it turned a few duplicated rows into a terminal that could never
- * reconnect. A caller that must decide whether a stored credential exists should
- * consult the store itself; a missing table then fails truthfully.
+ * signal for "do the tables exist": a caller that must not answer
+ * "your credential is invalid" while the schema is still being created needs
+ * this instead.
  */
 export function schemaApplied(): boolean {
   return ddlSucceeded;

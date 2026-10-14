@@ -9,8 +9,9 @@ import {
   BRIDGE_LINK_LEASE_MS,
   __testing as linkTesting,
   resetBridgeLinks,
+  hashBridgeToken,
 } from "../lib/multiasset/bridge-links";
-import { claimHolder, resetClaims } from "../lib/multiasset/claims";
+import { __testing as claimTesting, CLAIM_IDLE_RELEASE_MS, claimHolder, resetClaims } from "../lib/multiasset/claims";
 import { accountKeyFor } from "../lib/multiasset/claims";
 import { getDesk, resetDesk } from "../lib/multiasset/store";
 import router, { EXPECTED_EA_VERSION, pendingPairings, sweepExpiredLinks } from "./bridge";
@@ -275,6 +276,140 @@ describe("MT5 bridge — the link ends when the user ends it", () => {
     assert.ok(claimHolder(accountKeyFor(6202, "BROKER-DEMO")));
   });
 
+  it("does not let another Desk steal an account after ten minutes of silence, even after restart", async () => {
+    const owner = browser("owner");
+    const token = await connect(owner, 6210);
+    await claimTesting.ageClaim(accountKeyFor(6210, "BROKER-DEMO"), Date.now() - CLAIM_IDLE_RELEASE_MS - 60_000);
+    resetClaims(); // force the database ownership check, not just the local mirror
+    const other = browser("other");
+    const { pairingCode } = await requestCode(other);
+    assert.equal((await pair(other, pairingCode, 6210)).status, 409);
+    assert.equal((await as(owner, () => post("/sync", { seq: 1 }, token))).status, 200);
+  });
+
+  it("concurrent same-account attaches do not revoke each other's token", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+    const responses = await Promise.all([pair(session, pairingCode, 6218), pair(session, pairingCode, 6218)]);
+    for (const response of responses) assert.equal(response.status, 201);
+    const tokens = await Promise.all(responses.map(async (response) => ((await response.json()) as { bridgeToken: string }).bridgeToken));
+    resetDesk(session);
+    resetClaims();
+    linkTesting.forgetProcessMemory();
+    for (const token of tokens) {
+      assert.equal((await as(session, () => post("/sync", { seq: 1 }, token))).status, 200);
+    }
+  });
+
+  it("does not delete a quiet chart's valid credential just because a sibling is beating", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+    const a = await pair(session, pairingCode, 6211);
+    const tokenA = ((await a.json()) as { bridgeToken: string }).bridgeToken;
+    const b = await pair(session, pairingCode, 6211);
+    assert.equal(b.status, 201);
+    const hashA = hashBridgeToken(tokenA);
+    linkTesting.linkSnapshot().find((link) => link.tokenHash === hashA)!.lastSeenAt = Date.now() - BRIDGE_LINK_LEASE_MS - 1_000;
+    await sweepExpiredLinks();
+    resetDesk(session);
+    linkTesting.forgetProcessMemory();
+    assert.equal((await as(session, () => post("/sync", { seq: 1 }, tokenA))).status, 200);
+  });
+
+  it("readiness fails during a store outage and recovers without redeploying", async () => {
+    assert.equal((await get("/ready")).status, 200);
+    linkTesting.failStore("simulated outage");
+    assert.equal((await get("/ready")).status, 503);
+    linkTesting.healStore();
+    assert.equal((await get("/ready")).status, 200);
+  });
+
+  it("production refuses memory/container-only pairing storage", async () => {
+    const env = process.env.NODE_ENV;
+    process.env.NODE_ENV = "production";
+    try {
+      assert.equal((await get("/ready")).status, 503);
+      assert.equal((await as(browser("a"), () => post("/pairing-code", {}))).status, 503);
+      assert.equal(linkTesting.codeSnapshot().length, 0);
+    } finally {
+      if (env === undefined) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = env;
+    }
+  });
+
+  it("does not issue a code when the durable write fails, then recovers without restarting", async () => {
+    const session = browser("a");
+    linkTesting.failStore("simulated write outage");
+    const failed = await as(session, () => post("/pairing-code", {}));
+    assert.equal(failed.status, 503);
+    assert.equal(((await failed.json()) as { code: string }).code, "bridge_store_unavailable");
+    assert.equal(linkTesting.codeSnapshot().length, 0, "no memory-only code may be advertised as saved");
+    linkTesting.healStore();
+    const { pairingCode } = await requestCode(session);
+    assert.equal((await pair(session, pairingCode, 6212)).status, 201);
+  });
+
+  it("does not acknowledge pairing or consume the code if saving the link fails", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+    linkTesting.failStore("simulated write outage");
+    const failed = await pair(session, pairingCode, 6213);
+    assert.equal(failed.status, 503);
+    assert.equal(linkTesting.linkSnapshot().length, 0);
+    assert.equal(linkTesting.codeSnapshot()[0].redeemedAt, null);
+    assert.equal(getDesk(session).terminal, null);
+    linkTesting.healStore();
+    const paired = await pair(session, pairingCode, 6213);
+    assert.equal(paired.status, 201);
+    const token = ((await paired.json()) as { bridgeToken: string }).bridgeToken;
+    resetDesk(session);
+    resetClaims();
+    linkTesting.forgetProcessMemory();
+    assert.equal((await as(session, () => post("/sync", { seq: 1 }, token))).status, 200);
+  });
+
+  it("rolls code redemption back when the database rejects the token INSERT", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+    const { pool } = await import("@workspace/db");
+    await pool.query("ALTER TABLE mt5_bridge_links ADD CONSTRAINT test_reject_login CHECK (login <> 6215)");
+    try {
+      assert.equal((await pair(session, pairingCode, 6215)).status, 503);
+      const result = await pool.query("SELECT redeemed_at_ms, expires_at_ms FROM mt5_pairing_codes WHERE code = $1", [pairingCode]);
+      assert.equal(result.rows[0].redeemed_at_ms, null);
+      assert.ok(Number(result.rows[0].expires_at_ms) > Date.now());
+      assert.equal(linkTesting.codeSnapshot()[0].redeemedAt, null);
+      assert.equal(getDesk(session).terminal, null);
+    } finally {
+      await pool.query("ALTER TABLE mt5_bridge_links DROP CONSTRAINT test_reject_login");
+    }
+    assert.equal((await pair(session, pairingCode, 6215)).status, 201);
+  });
+
+  it("a failed re-pair does not disturb the existing live link", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+    const token = await connect(session, 6214);
+    linkTesting.failStore("simulated write outage");
+    assert.equal((await pair(session, pairingCode, 6214)).status, 503);
+    assert.equal(getDesk(session).terminal?.bridgeToken, token);
+    assert.equal((await as(session, () => post("/sync", { seq: 1 }, token))).status, 200);
+    linkTesting.healStore();
+  });
+
+  it("a failed account replacement keeps the original terminal and its ownership intact", async () => {
+    const session = browser("a");
+    const token = await connect(session, 6216);
+    const { pairingCode } = await requestCode(session, { rotate: true });
+    linkTesting.failStore("simulated write outage");
+    assert.equal((await pair(session, pairingCode, 6217)).status, 503);
+    assert.equal(getDesk(session).terminal?.bridgeToken, token);
+    assert.equal(claimHolder(accountKeyFor(6216, "BROKER-DEMO"))?.sessionId, session);
+    assert.equal(claimHolder(accountKeyFor(6217, "BROKER-DEMO")), null);
+    assert.equal((await as(session, () => post("/sync", { seq: 1 }, token))).status, 200);
+    linkTesting.healStore();
+  });
+
   it("refuses a live code presented for a different account", async () => {
     const session = browser("a");
     const { pairingCode } = await requestCode(session);
@@ -307,6 +442,22 @@ describe("MT5 bridge — the link ends when the user ends it", () => {
     const fresh = await requestCode(session);
     const reconnected = await pair(session, fresh.pairingCode, 6301);
     assert.equal(reconnected.status, 201);
+  });
+
+  it("terminal close ends the whole link, including credentials left by previous attaches", async () => {
+    const session = browser("a");
+    const { pairingCode } = await requestCode(session);
+    const tokenA = await connect(session, 6310);
+    const paired = await pair(session, pairingCode, 6310);
+    const tokenB = ((await paired.json()) as { bridgeToken: string }).bridgeToken;
+    const closed = await as(session, () => post("/disconnect", { reason: "the terminal or chart was closed" }, tokenB));
+    assert.equal(((await closed.json()) as { ended: boolean }).ended, true);
+    assert.equal(getDesk(session).terminal, null);
+    resetDesk(session);
+    linkTesting.forgetProcessMemory();
+    assert.equal((await as(session, () => post("/sync", { seq: 1 }, tokenA))).status, 401);
+    assert.equal((await pair(session, pairingCode, 6310)).status, 401);
+    assert.equal(claimHolder(accountKeyFor(6310, "BROKER-DEMO")), null);
   });
 
   it("keeps the link alive when only ONE chart of the terminal disconnects", async () => {

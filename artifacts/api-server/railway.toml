@@ -22,8 +22,9 @@ watchPatterns = [
 
 [deploy]
 startCommand = "pnpm --filter @workspace/api-server start"
-# healthcheck hits Express after the /api mount
-healthcheckPath = "/api/healthz"
+# Do not route MT5 to a release that cannot verify its durable credentials.
+# /healthz remains diagnostic/HTTP 200 for existing generated clients.
+healthcheckPath = "/api/bridge/ready"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

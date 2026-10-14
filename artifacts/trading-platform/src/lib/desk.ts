@@ -757,6 +757,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await response.json();
       if (body?.error) message = body.error;
       if (Array.isArray(body?.rejections) && body.rejections.length > 0) message = `${message}: ${body.rejections[0]}`;
+      // A 503 from the bridge carries WHY in `detail` — which store the API is
+      // on, or the database error that stopped it. The generic sentence alone
+      // cannot tell a missing production database apart from a transient blip,
+      // and the two need different actions from whoever is reading it, so the
+      // diagnostic travels with the message instead of only into the server log.
+      if (path === "/bridge/pairing-code" && typeof body?.detail === "string") {
+        const detail = body.detail.trim().replace(/\s+/g, " ").slice(0, 200);
+        if (detail && !message.includes(detail)) message = `${message} (${detail})`;
+      }
     } catch {
       // non-JSON response
     }

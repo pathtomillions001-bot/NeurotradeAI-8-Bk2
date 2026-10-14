@@ -54,6 +54,7 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
 
   if (!open) return null;
   const code = rotate.data?.pairingCode ?? pairing.data?.pairingCode;
+  const pairingError = rotate.error ?? pairing.error;
 
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/75 p-0 sm:items-center sm:p-4">
@@ -158,10 +159,22 @@ export function BridgeDialog({ open, onClose, linked, onChanged }: BridgeDialogP
                 </Step>
               </ol>
               <StoreWarning store={status.data?.store} warning={pairing.data?.warning ?? rotate.data?.warning} />
-              {pairing.error instanceof Error && (
-                <p className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">
-                  Could not issue a pairing code: {pairing.error.message}
-                </p>
+              {pairingError instanceof Error && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-[11px] leading-relaxed text-red-200">
+                  <p>Could not issue a pairing code: {pairingError.message}</p>
+                  <button
+                    type="button"
+                    disabled={pairing.isPending || rotate.isPending}
+                    onClick={() => {
+                      pairing.reset();
+                      rotate.reset();
+                      pairing.mutate(false);
+                    }}
+                    className="mt-2 rounded-md border border-red-400/40 px-2.5 py-1.5 font-medium text-red-100 transition-colors hover:bg-red-500/10 disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {pairing.isPending || rotate.isPending ? "Retrying…" : "Retry without rotating the code"}
+                  </button>
+                </div>
               )}
               <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-3 text-[11px] leading-relaxed text-zinc-400"><p><span className="font-medium text-zinc-200">One account, one Desk.</span> An MT5 account can only be linked to a single Desk at a time. If it is already connected in another browser or device, pairing here is refused until that Desk unlinks it — two Desks on one account would trade the same balance against separate risk limits.</p><p className="mt-2"><span className="font-medium text-zinc-200">No password required.</span> The EA runs in your MT5 terminal, discovers the broker’s own market catalogue and places orders locally. It sends only terminal data needed for the Desk and a scoped pairing token.</p><p className="mt-2"><span className="font-medium text-red-300">Red-folder safety:</span> high-impact events from the MT5 economic calendar pause new entries before and after the release. If the calendar cannot be read, new entries stay paused.</p></div>
               {status.data?.lastPairingError ? (

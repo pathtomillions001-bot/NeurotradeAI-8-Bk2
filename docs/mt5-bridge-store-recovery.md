@@ -14,6 +14,29 @@ DDL retry logs. The HTTP body already contains `storeHealth` and `detail`.
 Do not infer "bad pairing code" or clear a token from a 503. The 1.5–3.4 second
 heartbeat warnings indicate latency, not revocation; freshness gates must stay.
 
+## Desk error while issuing an MT5 pairing code
+
+The Desk calls `POST /api/bridge/pairing-code`. Its old UI displayed only the
+API's generic 503 text and discarded the accompanying diagnostic, so that text
+alone could not distinguish an absent shared database from a transient query
+failure. The UI now includes the short `detail` diagnostic and offers a
+non-rotating retry.
+
+- `code: bridge_store_not_shared` means the production API is not using shared
+  PostgreSQL (most commonly a missing/invalid API-service `DATABASE_URL`). This
+  is a configuration problem, not a bad code. Configure the API's PostgreSQL
+  URL and require `/api/bridge/ready` to report `backend: postgres`,
+  `reachable: true`, and `schemaApplied: true`.
+- `code: bridge_store_unavailable` means the API could not write the code. Use
+  the returned `detail` plus API logs to diagnose connection, permissions or
+  schema bootstrap failures; retry after the store recovers.
+
+The code intentionally refuses to mint credentials in production on embedded
+PGlite. Removing that guard would appear to fix the button but create codes and
+MT5 links that disappear on a process restart or on another API instance. The
+EA source download is static and independent; a database failure blocks issuing
+a usable pairing code, not downloading the `.mq5` source.
+
 ## Reproduced application defects and fixes
 
 1. **Acknowledged but unsaved credentials.** Code/link writes swallowed database

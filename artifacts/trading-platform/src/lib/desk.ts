@@ -757,6 +757,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await response.json();
       if (body?.error) message = body.error;
       if (Array.isArray(body?.rejections) && body.rejections.length > 0) message = `${message}: ${body.rejections[0]}`;
+      // Pairing-code 503s include a diagnostic `detail` field (for example,
+      // "detected backend=pglite" or a schema/connection error). The generic
+      // error text hid it, leaving the owner unable to distinguish a missing
+      // production DATABASE_URL from a transient database outage.
+      if (path === "/bridge/pairing-code" && typeof body?.detail === "string") {
+        const detail = body.detail.trim().replace(/\s+/g, " ").slice(0, 240);
+        if (detail && !message.includes(detail)) message = `${message} Details: ${detail}`;
+      }
     } catch {
       // non-JSON response
     }

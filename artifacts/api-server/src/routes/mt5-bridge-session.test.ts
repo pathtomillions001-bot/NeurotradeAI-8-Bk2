@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { after, before, beforeEach, describe, it } from "node:test";
 import express from "express";
-import { schemaReady } from "@workspace/db";
+import { schemaReady, schemaTesting } from "@workspace/db";
 import { runWithSession } from "../lib/session";
 import {
   BRIDGE_LINK_LEASE_MS,
@@ -412,6 +412,53 @@ describe("MT5 bridge — the link ends when the user ends it", () => {
     linkTesting.healStore();
     const after = await as(session, () => post("/sync", { seq: 2, instanceId: "ea-a" }, token));
     assert.equal(after.status, 200, "a store outage must not cost the terminal its link");
+  });
+
+  /**
+   * ── A DEGRADED SCHEMA IS NOT AN UNREADABLE STORE ───────────────────────────
+   *
+   * This is the reported failure, at the route level. The bootstrap script is
+   * applied statement by statement, so a statement that cannot apply (a unique
+   * index over duplicate legacy rows) leaves the flag `schemaApplied()` false
+   * while every table that COULD be created — including the bridge's — exists
+   * and holds the terminal's link row.
+   *
+   * The read used to be gated on that flag, so the row was never even looked
+   * for: /sync answered `503 the bridge link store could not be reached`, the
+   * EA kept its token and retried forever (a 503 revokes nothing — that part of
+   * the contract is right), and the terminal could neither connect nor fall
+   * back to pairing. The store was fine. The gate was wrong.
+   */
+  it("serves a link from the store while the bootstrap flag says the schema is unfinished", async () => {
+    const session = browser("a");
+    const token = await connect(session, 6504);
+
+    // A restart: this process has never seen the token, so the store must answer.
+    for (const id of sessions.values()) resetDesk(id);
+    linkTesting.forgetProcessMemory();
+    pendingPairings.clear();
+    resetClaims();
+
+    // …and the schema is in the degraded state: the script ran to the end, but a
+    // statement in it did not apply, so the process-local flag is false.
+    schemaTesting.setSchemaApplied(false);
+    try {
+      const beat = await as(session, () => post("/sync", { seq: 1, instanceId: "ea-degraded" }, token));
+      assert.equal(
+        beat.status,
+        200,
+        "a readable row must be served even when the bootstrap flag is false — the flag is not the store",
+      );
+    } finally {
+      schemaTesting.setSchemaApplied(true);
+    }
+
+    // And the flag is not quietly ignored when the ROW really is absent: the
+    // same state answers "unknown", which is a verdict the EA can act on.
+    assert.equal(
+      (await as(session, () => post("/sync", { seq: 2, instanceId: "ea-degraded" }, "nt_not-a-real-token"))).status,
+      401,
+    );
   });
 
   it("does not condemn a live pairing code when the store cannot be read", async () => {

@@ -166,14 +166,9 @@ explaining rather than merely denying.
   `{ record, checked, health, detail }`, with `health` one of `ok`,
   `unavailable`, `error`, `not-ready`. `checked: true` means the store was
   actually consulted and its answer can be trusted.
-* `storeConsultable()` used to refuse to answer from a store whose bootstrap DDL
-  had not been applied, using `schemaApplied()` from `@workspace/db`. That gate
-  is **removed**: `schemaApplied()` was false forever on a deployment where one
-  statement of the bootstrap script could not be applied, so the honest-looking
-  refusal denied a terminal whose row was readable the whole time
-  (`docs/mt5-bridge-bootstrap-readiness.md`). The read is the authority now — a
-  table that really is missing fails truthfully — and `schemaApplied()` is only
-  *reported* (`/api/healthz`, the bridge dialog).
+* `storeConsultable()` refuses to answer from a store whose bootstrap DDL has
+  not been applied, using a new `schemaApplied()` from `@workspace/db` — the
+  honest signal, where `schemaReady` is deliberately optimistic.
 * The negative cache is **not** populated when a query threw (an error says
   nothing about whether the row exists), stale entries are dropped instead of
   being re-trusted, and the window is **10 s, not 60**, because with more than

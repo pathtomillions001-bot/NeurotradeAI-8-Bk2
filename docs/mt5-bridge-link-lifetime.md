@@ -37,9 +37,12 @@ deleted, the code is retired, the claim is released, the Desk is cleared, and
 the next MT5 session starts from a new code — which is what "the user closed
 MT5" means.
 
-`/disconnect` stays best-effort (MT5 does not wait for an expert's shutdown) and
-token-scoped: one chart of a two-chart terminal drops only its own token, and
-the link survives for the chart that is still streaming.
+`/disconnect` stays best-effort (MT5 does not wait for an expert's shutdown).
+An explicit terminal-close report ends the whole link, including credentials
+left behind by earlier attaches. A legacy token-scoped goodbye without a
+terminal-close reason still drops only that token. A hard kill or unreachable
+server cannot deliver a goodbye; silence alone is never proof of a close.
+See `mt5-bridge-store-recovery.md` for deployment requirements and limitations.
 
 ## 2. Silence is a display state, not an ending
 
@@ -51,8 +54,8 @@ nothing**:
   the two-stage window in `live.ts`), new entries pause, and the next beat
   clears it;
 * the only rows housekeeping deletes are already-REVOKED ones (after the EA has
-  had its spaced retries to read that final answer) and a dead chart's leftover
-  row when a sibling token of the same link is still beating.
+  had its spaced retries to read that final answer). Quiet charts' unrevoked
+  tokens are never pruned: they can resume after a reload or API restart.
 
 Because nothing is released, the **account claim survives silence too**: another
 Desk cannot take an account by waiting for it, which is the point. `linkIsValid`

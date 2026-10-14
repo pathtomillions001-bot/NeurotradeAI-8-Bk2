@@ -16,10 +16,9 @@
  *  2. **An in-process map** mirrors it so the hot path (`/sync`, which runs
  *     twice a second per terminal) never touches the database.
  *
- * A claim is released when the user unlinks, when that session pairs a
- * different account, or when the terminal stops heartbeating for
- * CLAIM_IDLE_RELEASE_MS — so a browser that is simply closed can never lock an
- * account out permanently.
+ * A claim is released explicitly (Desk unlink, terminal close, or replacing
+ * the account). Silence never transfers ownership: an open terminal may be
+ * offline for hours and must resume without another Desk taking its balance.
  *
  * The database is optional: when it is unavailable (unit tests, a cold start
  * before the pool exists) the in-process layer still enforces the rule for
@@ -28,13 +27,7 @@
 
 const CLAIM_TABLE = "mt5_account_claims";
 
-/**
- * How long a claim survives with no heartbeat.
- *
- * Long enough that a terminal reconnecting after a network blip or a broker
- * server switch keeps its slot; short enough that a user who walks away from
- * a browser can re-pair on another device without waiting hours.
- */
+/** Historical display/test interval only. Claims no longer expire on silence. */
 export const CLAIM_IDLE_RELEASE_MS = 10 * 60 * 1000;
 
 export interface AccountClaim {
@@ -68,32 +61,18 @@ export function accountKeyFor(login: number, server: string): string {
   return `${Math.trunc(login)}@${normalised}`;
 }
 
-/** True once a claim has gone quiet long enough to be considered abandoned. */
-function isIdle(claim: AccountClaim, now: number): boolean {
-  return now - claim.lastSeenAt > CLAIM_IDLE_RELEASE_MS;
-}
-
 // ── In-process mirror ────────────────────────────────────────────────────────
 
 const claims = new Map<string, AccountClaim>();
 
-/** Drop claims whose terminal has stopped heartbeating. */
-function prune(now = Date.now()): void {
-  for (const [key, claim] of claims) {
-    if (isIdle(claim, now)) claims.delete(key);
-  }
-}
-
 /** The session holding this key right now, if any. */
 export function claimHolder(accountKey: string): AccountClaim | null {
-  prune();
   const claim = claims.get(accountKey);
   return claim ?? null;
 }
 
 /** Every claim currently held by a session. */
 export function claimsForSession(sessionId: string): AccountClaim[] {
-  prune();
   return [...claims.values()].filter((claim) => claim.sessionId === sessionId);
 }
 
@@ -132,11 +111,11 @@ function warnOnce(err: unknown): void {
  * Atomically take the claim.
  *
  * The ON CONFLICT clause only overwrites an existing row when it belongs to
- * the same session (a re-pair after an EA restart) or when it has gone idle.
+ * the same session (a re-pair after an EA restart). Silence is not a release.
  * Otherwise the UPDATE matches nothing, no row comes back, and the caller is
  * told who holds the account.
  */
-async function insertClaim(claim: AccountClaim, cutoff: number): Promise<"taken" | "held" | "unavailable"> {
+async function insertClaim(claim: AccountClaim): Promise<"taken" | "held" | "unavailable"> {
   const db = await pool();
   if (!db) return "unavailable";
   try {
@@ -150,7 +129,6 @@ async function insertClaim(claim: AccountClaim, cutoff: number): Promise<"taken"
              paired_at_ms = EXCLUDED.paired_at_ms,
              last_seen_at_ms = EXCLUDED.last_seen_at_ms
          WHERE ${CLAIM_TABLE}.session_id = EXCLUDED.session_id
-            OR ${CLAIM_TABLE}.last_seen_at_ms < $8
        RETURNING session_id`,
       [
         claim.accountKey,
@@ -160,7 +138,6 @@ async function insertClaim(claim: AccountClaim, cutoff: number): Promise<"taken"
         claim.sessionId,
         claim.pairedAt,
         claim.lastSeenAt,
-        cutoff,
       ],
     );
     return (result?.rows?.length ?? 0) > 0 ? "taken" : "held";
@@ -241,6 +218,8 @@ export async function tryClaimAccount(input: {
   server: string;
   company?: string;
   sessionId: string;
+  /** Pairing defers releasing the old account until its new link is saved. */
+  releasePrevious?: boolean;
 }): Promise<ClaimResult> {
   const now = Date.now();
   const accountKey = accountKeyFor(input.login, input.server);
@@ -254,23 +233,13 @@ export async function tryClaimAccount(input: {
     lastSeenAt: now,
   };
 
-  prune(now);
-  const cutoff = now - CLAIM_IDLE_RELEASE_MS;
-
-  // Fast path: another session in THIS process is demonstrably live.
+  // Fast path: another session in THIS process still owns the account.
   const local = claims.get(accountKey);
-  if (local && local.sessionId !== input.sessionId && !isIdle(local, now)) {
+  if (local && local.sessionId !== input.sessionId) {
     return { ok: false, reason: "held", holder: local };
   }
 
-  // A Desk holds one terminal: pairing account B releases account A.
-  for (const previous of claimsForSession(input.sessionId)) {
-    if (previous.accountKey === accountKey) continue;
-    deleteLocal(previous.accountKey, input.sessionId);
-    void deleteRows(previous.accountKey, input.sessionId);
-  }
-
-  const outcome = await insertClaim(claim, cutoff);
+  const outcome = await insertClaim(claim);
 
   if (outcome === "held") {
     // Another process owns it. Trust the database row over our stale cache so
@@ -285,12 +254,20 @@ export async function tryClaimAccount(input: {
   if (outcome === "unavailable") {
     // No database. Fall back to the in-process registry and say so once.
     const cached = local;
-    if (cached && cached.sessionId !== input.sessionId && !isIdle(cached, now)) {
+    if (cached && cached.sessionId !== input.sessionId) {
       return { ok: false, reason: "held", holder: cached };
     }
     warnOnce(new Error("pool unavailable"));
   }
 
+  if (input.releasePrevious !== false) {
+    // Do not disturb the previous account when this claim was refused.
+    for (const previous of claimsForSession(input.sessionId)) {
+      if (previous.accountKey === accountKey) continue;
+      deleteLocal(previous.accountKey, input.sessionId);
+      await deleteRows(previous.accountKey, input.sessionId);
+    }
+  }
   setLocal(claim);
   return { ok: true, claim };
 }
@@ -303,7 +280,6 @@ export async function tryClaimAccount(input: {
  * stream and trade an account the Desk no longer owns.
  */
 export function touchClaim(sessionId: string, accountKey: string, now = Date.now()): boolean {
-  prune(now);
   const claim = claims.get(accountKey);
   if (!claim) return true; // nothing claimed (e.g. database-only deployment)
   if (claim.sessionId !== sessionId) return false;
@@ -341,8 +317,7 @@ export function describeConflict(login: number, server: string): string {
     `MT5 account ${Math.trunc(login)}@${server} is already connected in another browser. ` +
     `One account can only be linked to one Desk at a time, because two Desks would ` +
     `otherwise trade the same balance against separate risk limits. ` +
-    `Open the Desk that holds it and choose "Unlink terminal", or wait a few minutes ` +
-    `after that terminal stops syncing and try again.`
+    `Open the Desk that holds it and choose "Unlink terminal", or close that MT5 terminal, then try again.`
   );
 }
 

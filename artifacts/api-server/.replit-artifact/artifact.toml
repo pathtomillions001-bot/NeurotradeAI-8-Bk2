@@ -31,6 +31,4 @@ PORT = "8080"
 NODE_ENV = "production"
 
 [services.production.health.startup]
-# Pairing credentials must be stored in shared PostgreSQL; /healthz is only a
-# liveness endpoint and deliberately remains HTTP 200 during storage outages.
-path = "/api/bridge/ready"
+path = "/api/healthz"

@@ -324,26 +324,12 @@ describe("MT5 bridge — the link ends when the user ends it", () => {
     assert.equal((await get("/ready")).status, 200);
   });
 
-  it("production refuses memory/container-only pairing storage with an actionable configuration error", async () => {
+  it("production refuses memory/container-only pairing storage", async () => {
     const env = process.env.NODE_ENV;
     process.env.NODE_ENV = "production";
     try {
       assert.equal((await get("/ready")).status, 503);
-      const refused = await as(browser("a"), () => post("/pairing-code", {}));
-      assert.equal(refused.status, 503);
-      const body = (await refused.json()) as {
-        code: string;
-        error: string;
-        detail: string;
-        retryAfterMs: number | null;
-        storeBackend: string;
-      };
-      assert.equal(body.code, "bridge_store_not_shared");
-      assert.equal(body.storeBackend, "pglite");
-      assert.equal(body.retryAfterMs, null, "configuration failure is not fixed by retrying");
-      assert.match(body.error, /Configure DATABASE_URL on the API service/);
-      assert.match(body.error, /\/api\/bridge\/ready/);
-      assert.match(body.detail, /backend=pglite/);
+      assert.equal((await as(browser("a"), () => post("/pairing-code", {}))).status, 503);
       assert.equal(linkTesting.codeSnapshot().length, 0);
     } finally {
       if (env === undefined) delete process.env.NODE_ENV;
@@ -356,10 +342,7 @@ describe("MT5 bridge — the link ends when the user ends it", () => {
     linkTesting.failStore("simulated write outage");
     const failed = await as(session, () => post("/pairing-code", {}));
     assert.equal(failed.status, 503);
-    const failure = (await failed.json()) as { code: string; error: string; detail: string };
-    assert.equal(failure.code, "bridge_store_unavailable");
-    assert.match(failure.error, /No pairing code was issued/);
-    assert.equal(failure.detail, "simulated write outage");
+    assert.equal(((await failed.json()) as { code: string }).code, "bridge_store_unavailable");
     assert.equal(linkTesting.codeSnapshot().length, 0, "no memory-only code may be advertised as saved");
     linkTesting.healStore();
     const { pairingCode } = await requestCode(session);

@@ -104,7 +104,6 @@ CREATE TABLE IF NOT EXISTS settings (
   scan_all_markets BOOLEAN NOT NULL DEFAULT TRUE,
   trade_duration_sec INTEGER NOT NULL DEFAULT 5,
   max_trade_stake NUMERIC(20, 2) NOT NULL DEFAULT '500',
-  paper_trade_mode BOOLEAN NOT NULL DEFAULT FALSE,
   require_positive_ev BOOLEAN NOT NULL DEFAULT TRUE,
   cooldown_minutes INTEGER NOT NULL DEFAULT 1,
   cooldown_enabled BOOLEAN NOT NULL DEFAULT TRUE,

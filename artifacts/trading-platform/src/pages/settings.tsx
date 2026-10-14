@@ -215,7 +215,6 @@ export default function Settings() {
     recoveryMultiplier: 1.62,
     maxRecoverySteps: 3,
     scanAllMarkets: true,
-    paperTradeMode: false,
     requirePositiveEv: true,
     minConfidenceThreshold: 50,
     loopIntervalSec: 15,
@@ -247,7 +246,6 @@ export default function Settings() {
         recoveryMultiplier: (settings as any).recoveryMultiplier ?? 1.62,
         maxRecoverySteps: (settings as any).maxRecoverySteps ?? 3,
         scanAllMarkets: (settings as any).scanAllMarkets ?? true,
-        paperTradeMode: (settings as any).paperTradeMode ?? false,
         requirePositiveEv: (settings as any).requirePositiveEv ?? true,
         minConfidenceThreshold: (settings as any).minConfidenceThreshold ?? 50,
         loopIntervalSec: (settings as any).loopIntervalSec ?? 15,
@@ -441,12 +439,6 @@ export default function Settings() {
         <div className="grid gap-4 xl:grid-cols-2 xl:gap-5">
           <Panel label="Execution posture" accent="cyan">
             <SettingRow
-              label="Paper Trade Mode"
-              description="Log every trade to the journal without sending real orders to Deriv. Test a strategy with zero risk."
-            >
-              <Switch checked={form.paperTradeMode} onCheckedChange={(v) => set("paperTradeMode", v)} />
-            </SettingRow>
-            <SettingRow
               label="Require Positive EV"
               description="Only trade when the calculated expected value is positive. Off allows more attempts at a lower win rate."
             >
@@ -468,11 +460,6 @@ export default function Settings() {
             </SettingRow>
           </Panel>
         </div>
-        {form.paperTradeMode && (
-          <div className="mt-4 p-2.5 bg-amber-500/5 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
-            <strong>Paper Trade Mode is ON</strong> — no real orders will be sent to Deriv. All trades are simulated in the journal.
-          </div>
-        )}
       </SectionCard>
 
       {/* 03 — Recovery Mode */}

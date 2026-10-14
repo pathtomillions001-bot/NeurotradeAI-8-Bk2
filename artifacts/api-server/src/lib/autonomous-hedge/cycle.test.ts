@@ -35,14 +35,13 @@ function context(): HedgeContext {
       riskAmountType: "fixed", riskAmountValue: 1, maxRiskPerTrade: 2, minConfidenceThreshold: 38,
       riskProfile: "moderate", preferredContractTypes: ["CALL", "PUT"], tradeDurationSec: 5,
       maxTradeStake: 500, dailyLossLimit: 30, dailyTarget: 50, consecutiveLossLimit: 3,
-      maxDrawdown: 20, requirePositiveEv: true, paperTradeMode: true, normalOverDigit: 2,
+      maxDrawdown: 20, requirePositiveEv: true, normalOverDigit: 2,
       normalUnderDigit: 7, recoveryOverDigit: 4, recoveryUnderDigit: 5, recoveryMethod: "split",
       recoveryMultiplier: 1.5, recoveryAutoMode: true, maxRecoverySteps: 3,
     },
     consecutiveLossLimit: 3,
     cooldownMinutes: 30,
     allowedMarketSymbols: ["R_100"],
-    paperTradeMode: true,
     daily: { ...DAILY },
   };
 }

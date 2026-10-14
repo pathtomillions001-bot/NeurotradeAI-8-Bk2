@@ -1132,9 +1132,6 @@ components:
           description: Trade contract duration in ticks
         maxTradeStake:
           type: number
-        paperTradeMode:
-          type: boolean
-          description: Log trades without sending live orders to Deriv
         requirePositiveEv:
           type: boolean
           description: Only execute when expected value is positive
@@ -1234,8 +1231,6 @@ components:
           type: integer
         maxTradeStake:
           type: number
-        paperTradeMode:
-          type: boolean
         requirePositiveEv:
           type: boolean
         cooldownMinutes:

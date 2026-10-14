@@ -57,6 +57,12 @@ import type { AutonomousContractSets } from "./contract-sets";
 import { EvidenceTracker, type MarketTapeInput } from "./evidence";
 import { clearLadderOutcomeCache } from "./ladder-outcomes";
 import { buildV2RecoveryDecision, scoreV2Candidates, type V2LadderConfig, type V2ScoredCandidate } from "./score-v2";
+import {
+  describeExecutionTruth,
+  realisedMultiplier,
+  recordDispatchLatency,
+  recordQuoteOutcome,
+} from "./execution-truth";
 import { isDecisionStale, shouldSwitchCandidateBeforeBuy, TimingV2Controller } from "./timing-v2";
 import { livePayoutFor, stopQuotePrefetchTask, syncQuotePrefetchTask } from "./quote-prefetch";
 import { defaultShadowLedger, type LatestTickObservation } from "./shadow-ledger";
@@ -89,7 +95,6 @@ export interface HedgeContext {
   /** False = trade straight through a loss streak (no cooldown pause). */
   cooldownEnabled: boolean;
   allowedMarketSymbols: string[] | null;
-  paperTradeMode: boolean;
   daily: DailyStats;
   /**
    * The normal and recovery contract sets the user chose. Absent means the
@@ -526,7 +531,7 @@ export function emptyFeedDiagnosis(watched: number): FeedDiagnosis {
  * The exact user-facing reason no contest could run this cycle. Ordered from
  * most to least specific so the first matching cause is the one reported.
  */
-export function describeFeedHold(d: FeedDiagnosis, paperTradeMode: boolean): string {
+export function describeFeedHold(d: FeedDiagnosis): string {
   const n = d.watched;
   if (n === 0) {
     return "HOLD: no markets are enabled for the autonomous engine — check Settings → Allowed markets.";
@@ -534,7 +539,7 @@ export function describeFeedHold(d: FeedDiagnosis, paperTradeMode: boolean): str
   if (d.missing === n) {
     return `HOLD: waiting for market data — no ticks received yet on any of the ${n} watched markets. The tournament starts on the first tick.`;
   }
-  if (!paperTradeMode && d.live === 0 && d.simSkipped > 0) {
+  if (d.live === 0 && d.simSkipped > 0) {
     return `HOLD: live feed unavailable — ${d.simSkipped}/${n} watched markets are on simulated ticks, which live trading never uses. Turn on Paper Trade Mode in Settings to trade the simulated feed, or wait for the Deriv connection to recover.`;
   }
   if (d.fresh === 0 && d.stale > 0) {
@@ -655,7 +660,9 @@ function recomputeV2CandidatesOnFreshestTapes(
   for (const market of markets) {
     const tape = readHedgeTape(market.symbol, HEDGE_V2_MAX_WINDOW);
     if (!tape || tape.ageMs > STALE_TAPE_MS) continue;
-    if (!tape.live && !ctx.paperTradeMode) continue;
+    // Live only. Simulated prices can never back a real order, and there is no
+    // paper mode to back a simulated one (see the HOLD below).
+    if (!tape.live) continue;
     const specs = familySpecsFor({
       settings: ctx.settings,
       mode: "RECOVERY",
@@ -754,7 +761,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     if (!tape) { feed.missing += 1; continue; }
     if (tape.ageMs > STALE_TAPE_MS) { feed.stale += 1; continue; }
     // Live trades never rely on simulated prices. Paper mode may use either.
-    if (!tape.live && !ctx.paperTradeMode) { feed.simSkipped += 1; continue; }
+    if (!tape.live) { feed.simSkipped += 1; continue; }
     feed.fresh += 1;
     if (tape.live) feed.live += 1;
     else feed.simulated += 1;
@@ -870,6 +877,14 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
       for (const c of v2Ranked) {
         if (c.nullJ < baselineJ) baselineJ = c.nullJ;
       }
+      // Value-of-waiting is kept as TELEMETRY only.
+      //
+      // It used to gate dispatch, but it cannot improve a trade's realised
+      // expectancy: the outcome distribution does not change because we waited.
+      // It was also measured inert (median/p99 wait 0/0 ticks), so it bought
+      // nothing and cost decision->buy latency that the pre-buy revalidation
+      // below then had to re-check. Dispatch is now immediate on a gate pass;
+      // when the gate does not pass, the engine holds and re-scans next tick.
       const timing = s.timingV2.evaluate({
         bestJ: v2Best.J,
         baselineJ,
@@ -878,9 +893,8 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
       const v2Decision = buildV2RecoveryDecision({
         ranked: v2Ranked,
         escalation,
-        waitTicks: timing.waitTicks,
-        shouldFireNow: timing.shouldFire,
-        waitReason: timing.reason,
+        waitTicks: 0,
+        shouldFireNow: true,
       });
       const v2Telemetry: HedgeV2ScanTelemetry = {
         mode: v2Mode,
@@ -917,7 +931,7 @@ async function runCycle(host: HedgeHost, s: HedgeSession): Promise<void> {
     host.publish({ currentMarket: null, nextScanIn: null });
     // Ranked nothing this tick — HOLD with the feed cause, never silence.
     emitHoldScan(host, s, {
-      reason: describeFeedHold(feed, ctx.paperTradeMode),
+      reason: describeFeedHold(feed),
       mode,
       lossRun,
       consecutiveLossLimit: ctx.consecutiveLossLimit,
@@ -1096,6 +1110,8 @@ async function executeDecision(
   // AFTER the existing awaits (context refresh, quote) and BEFORE buy, recompute J
   // for the chosen candidate on the freshest tape; if another candidate now beats
   // it by more than 0.02 (or >1 tick elapsed and a better candidate exists), switch once.
+  // Runs whenever RECOVERY is deciding through v2 (shadow still lets v1 decide,
+  // so re-ranking there would be meaningless).
   if (mode === "RECOVERY" && getRecoveryV2Mode() === "on") {
     const { ranked: freshRanked, tapes: freshTapes } = recomputeV2CandidatesOnFreshestTapes(s, ctx, risk);
     if (freshRanked.length > 0) {
@@ -1134,6 +1150,32 @@ async function executeDecision(
     }
   }
 
+  // Pre-dispatch STALENESS REFUSAL (recovery, v2 deciding).
+  //
+  // The decision was formed before the awaits above (context refresh, payout
+  // quote). One tick later the evidence it was based on may no longer clear the
+  // gate. Sending the order anyway would be trading a signal the engine no longer
+  // believes — the exact failure mode that turned a 120-tick transient into a
+  // filled contract. Refuse, and let the next fresh tick re-decide.
+  if (mode === "RECOVERY" && getRecoveryV2Mode() === "on") {
+    const staleBest = activeDecision.best as V2ScoredCandidate;
+    if (typeof staleBest.gateEv === "number" && !activeDecision.best.eligible) {
+      host.publish({ nextScanIn: null });
+      logger.info(
+        { symbol: activeDecision.best.symbol, blocker: staleBest.gateBlocker },
+        "Autonomous 1-tick: recovery decision no longer clears the gate — holding",
+      );
+      emitHoldScan(host, s, {
+        reason: `RECOVERY HOLD · the entry no longer clears the admissibility gate (${staleBest.gateBlocker ?? "no edge"}) — re-deciding on the next tick`,
+        mode: "RECOVERY",
+        lossRun: runWithSession(sessionId, () => recoveryEngine.getState().streakLossCount),
+        consecutiveLossLimit: ctx.consecutiveLossLimit,
+        marketsScanned: 0,
+      });
+      return;
+    }
+  }
+
   const b = activeDecision.best;
   const reasoningBase = `${AUTONOMOUS_HEDGE_PREFIX}${activeDecision.reason}`;
   const stake = Math.round(rawStake * 100) / 100;
@@ -1147,50 +1189,32 @@ async function executeDecision(
   const direction = b.contract === "CALL" ? "up" : b.contract === "PUT" ? "down" : "neutral";
   const riskScore = Math.round(100 * (1 - risk.riskBudget));
 
-  // ── Paper trading: settle immediately, same ledger rules ──
-  if (ctx.paperTradeMode || !ctx.token) {
-    const won = Math.random() < b.probability;
-    const profit = won ? stake * payout - stake : -stake;
-    const actualPayout = won ? stake * payout : 0;
-    host.emit("trade_started", {
-      symbol: b.symbol, contract: b.contract, barrier, stake,
-      duration: HEDGE_DURATION_TICKS, paper: true, regime: null,
-      confidence: Math.round(b.probability * 100), ev: b.ev, mode: activeDecision.mode,
-    });
-    const [row] = await db.insert(tradesTable).values({
-      sessionId,
-      symbol: b.symbol,
-      displayName,
-      contractType: b.contract,
-      barrier,
-      stake: String(stake),
-      direction,
-      status: won ? "won" : "lost",
-      payout: String(actualPayout),
-      profit: String(profit),
-      entryPrice: String(activeLastPrice),
-      exitPrice: String(activeLastPrice),
-      aiConfidence: String(Math.round(b.probability * 10000) / 100),
-      aiRiskScore: String(riskScore),
-      isAutonomous: true,
-      agentReasoning: `${AUTONOMOUS_HEDGE_PREFIX}[PAPER] ${activeDecision.reason}`,
-      duration: HEDGE_DURATION_TICKS,
-      durationUnit: HEDGE_DURATION_UNIT,
-      closedAt: new Date(),
-    }).returning();
-    recordLedger(sessionId, { won, profit, cost: stake, contract: b.contract, payout, maxRecoverySteps: ctx.settings.maxRecoverySteps });
-    clearLadderOutcomeCache();
-    if (mode === "RECOVERY") {
-      s.calibrationGuard.recordRecoveryTrade({ won, pTilde: b.probability });
-    }
-    applySettlement(s.memory, {
-      won,
-      key: b.key,
+  // ── NO PAPER MODE ───────────────────────────────────────────────────────────
+  //
+  // This branch used to settle the trade with `Math.random() < b.probability`,
+  // i.e. from the engine's OWN belief rather than from the tape. That made the
+  // outcome a tautology: a phantom "+45% EV" produced a beautiful paper P&L, so
+  // every experiment run through it validated the engine against its own
+  // assumptions. It is gone.
+  //
+  // No live account means no trade. Nothing is journalled, nothing enters the
+  // recovery ledger, and no settlement is invented — the engine says why it is
+  // waiting and leaves the debt exactly where it is.
+  if (!ctx.token) {
+    host.publish({ nextScanIn: null });
+    logger.info(
+      { symbol: b.symbol, contract: b.contract },
+      "Autonomous 1-tick: no live Deriv connection — holding (paper mode removed)",
+    );
+    emitHoldScan(host, s, {
+      reason:
+        "HOLD · no live Deriv connection. This engine does not simulate trades: " +
+        "connect an account in Settings to trade, or leave it stopped.",
+      mode: activeDecision.mode,
       lossRun: runWithSession(sessionId, () => recoveryEngine.getState().streakLossCount),
-      decisionSequence: b.tickSequence,
+      consecutiveLossLimit: ctx.consecutiveLossLimit,
+      marketsScanned: 0,
     });
-    s.ctx = null;
-    finishTrade(host, s, { id: row?.id, symbol: b.symbol, won, profit, contract: b.contract, barrier, stake, paper: true, live: false, regime: null, reason: activeDecision.reason, ctx });
     return;
   }
 
@@ -1249,7 +1273,12 @@ async function executeDecision(
     aiConfidence: String(Math.round(b.probability * 10000) / 100),
     aiRiskScore: String(riskScore),
     isAutonomous: true,
-    agentReasoning: reasoningBase,
+    // Snapshot of execution truth so far (quote drift / dispatch latency). The
+    // settlement-time alarm below adds the CURRENT contract's observation.
+    agentReasoning: (() => {
+      const note = describeExecutionTruth();
+      return note ? `${reasoningBase} · [truth] ${note}` : reasoningBase;
+    })(),
     duration: HEDGE_DURATION_TICKS,
     durationUnit: HEDGE_DURATION_UNIT,
   }).returning();
@@ -1344,6 +1373,20 @@ async function executeDecision(
   }
 
   // Bought: the refusal gate starts clean, and the strike counter resets.
+  //
+  // EXECUTION TRUTH (before the outcome is known): how stale was the decision we
+  // actually sent? A 1-tick contract decided on tape N and bought on tape N+2 is
+  // not the trade that was analysed, and this is the only place that is visible.
+  try {
+    const nowSeq = readHedgeTape(b.symbol, 2)?.tickSequence ?? b.tickSequence;
+    recordDispatchLatency({
+      decisionTickSequence: b.tickSequence,
+      dispatchTickSequence: nowSeq,
+      elapsedMs: Date.now() - (s.exposureSince ?? Date.now()),
+    });
+  } catch {
+    // Telemetry must never block or fail an order.
+  }
   clearRefusedLiveAttempt(s.liveGate);
   s.execFailures = 0;
   s.exposure.contractId = contractId;
@@ -1364,6 +1407,31 @@ async function executeDecision(
     host.publish({ nextScanIn: null });
     return;
   }
+
+  // EXECUTION TRUTH: close the loop on pricing. The stake was sized from
+  // `payout` (captured before dispatch); this records what the broker actually
+  // returned, so a systematically optimistic quote cannot silently under-recover
+  // the ladder forever.
+  const quoteTruth = recordQuoteOutcome({
+    contract: b.contract,
+    barrier: barrier ?? null,
+    quotedMultiplier: payout,
+    realisedMultiplier: realisedMultiplier(buyPrice, result.profit, result.won),
+    won: result.won,
+  });
+  if (quoteTruth.alarm) {
+    logger.warn(
+      {
+        contract: b.contract,
+        barrier,
+        painted: payout,
+        realisedMean: quoteTruth.meanRealisedOnWin,
+        drift: quoteTruth.relativeDriftEwma,
+      },
+      "Autonomous 1-tick: the quote that sizes recovery is paying less than quoted — check live pricing",
+    );
+  }
+  const truthNote = describeExecutionTruth();
 
   const actualPayout = result.won ? buyPrice + result.profit : 0;
   const settlement = await settleAutonomousRow(

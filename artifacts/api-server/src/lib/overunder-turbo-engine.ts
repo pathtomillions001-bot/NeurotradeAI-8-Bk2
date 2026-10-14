@@ -556,12 +556,14 @@ async function runLoop(config: TurboConfig) {
     }
   }
 
-  const paperTradeMode =
-    settings.length > 0 ? ((settings[0] as any).paperTradeMode ?? false) : false;
+  // NO PAPER MODE. Simulated trading was removed from the product: it settled
+  // outcomes from the engine's own belief, so it could only ever confirm the
+  // engine's assumptions. With no live account this engine must HOLD, not
+  // simulate. The legacy paper branches below are unreachable.
   const token =
     accounts.length > 0 ? (accounts[0]!.bearerToken ?? accounts[0]!.token ?? null) : null;
   const currency = accounts.length > 0 ? accounts[0]!.currency : "USD";
-  const isLive = !paperTradeMode && !!token;
+  const isLive = !!token;
   const maxStake = settings.length > 0 ? Number(settings[0]!.maxTradeStake) : 500;
   let botRecoveryMarkup =
     settings.length > 0 ? Number((settings[0] as any).botRecoveryMarkup ?? 10) : 10;
@@ -837,7 +839,7 @@ async function runLoop(config: TurboConfig) {
           ),
           aiRiskScore: "55",
           isAutonomous: true,
-          agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${reason}`,
+          agentReasoning: `${reason}`,
           duration: DURATION,
           durationUnit: DURATION_UNIT,
         })

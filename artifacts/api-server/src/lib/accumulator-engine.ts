@@ -868,11 +868,14 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
   if (!accounts.length) accounts = await db.select().from(accountsTable).where(eq(accountsTable.sessionId, ownerSessionId)).limit(1);
   const settings = await db.select().from(settingsTable).where(eq(settingsTable.sessionId, ownerSessionId)).limit(1);
   recoveryEngine.setPersistenceSession(ownerSessionId);
-  const paperTradeMode = settings.length ? Boolean((settings[0] as any).paperTradeMode ?? false) : true;
+  // NO PAPER MODE. Simulated trading was removed from the product: it settled
+  // outcomes from the engine's own belief, so it could only ever confirm the
+  // engine's assumptions. With no live account this engine must HOLD, not
+  // simulate. The legacy paper branches below are unreachable.
   const token = accounts[0]?.bearerToken ?? accounts[0]?.token ?? null;
   const accountId = accounts[0]?.derivAccountId ?? accounts[0]?.loginId ?? "";
   const currency = accounts[0]?.currency ?? "USD";
-  const isLive = !paperTradeMode && Boolean(token) && Boolean(accountId);
+  const isLive = Boolean(token) && Boolean(accountId);
   const maxStake = numberOr(settings[0] ? (settings[0] as any).maxTradeStake : 500, 500);
   const markup = numberOr(settings[0] ? (settings[0] as any).botRecoveryMarkup : 10, 10);
   let availableBalance = numberOr(accounts[0]?.balance, Number.POSITIVE_INFINITY);
@@ -1002,7 +1005,7 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
         aiConfidence: String(Math.round(candidate.survivalLower * 100)),
         aiRiskScore: String(Math.round(candidate.knockoutProbability * 100)),
         isAutonomous: true,
-        agentReasoning: `${isLive ? "" : "[PAPER] "}[ACCUMULATOR] ${recovery ? "RECOVERY " : ""}${candidate.reason} · target ${candidate.targetTicks} ticks · duration ${buyParams.durationTicks} ticks @ ${(buyParams.growthRate * 100).toFixed(0)}% growth · compounded ${candidate.compoundedFactor.toFixed(3)}× · full-stake knockout risk ${Math.round(candidate.knockoutProbability * 100)}%`,
+        agentReasoning: `[ACCUMULATOR] ${recovery ? "RECOVERY " : ""}${candidate.reason} · target ${candidate.targetTicks} ticks · duration ${buyParams.durationTicks} ticks @ ${(buyParams.growthRate * 100).toFixed(0)}% growth · compounded ${candidate.compoundedFactor.toFixed(3)}× · full-stake knockout risk ${Math.round(candidate.knockoutProbability * 100)}%`,
         duration: buyParams.durationTicks,
         durationUnit: "t",
       }).returning();
@@ -1031,7 +1034,7 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
           profit: "0",
           payout: "0",
           closedAt: new Date(),
-          agentReasoning: `${isLive ? "" : "[PAPER] "}[ACCUMULATOR] execution failed safely: ${friendlyErrorMessage(err, { max: 220 })}`,
+          agentReasoning: `[ACCUMULATOR] execution failed safely: ${friendlyErrorMessage(err, { max: 220 })}`,
         }).where(eq(tradesTable.id, row!.id)).catch(() => {});
         executionErrors++;
         if (executionErrors >= 3) {
@@ -1096,7 +1099,7 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
         entryPrice: String(settlement.entryPrice),
         exitPrice: String(settlement.exitPrice),
         closedAt: new Date(),
-        agentReasoning: `${isLive ? "" : "[PAPER] "}[ACCUMULATOR] ${knockout ? "KNOCKOUT — full stake lost" : settlement.closedEarly ? "EARLY CLOSE — current compounded value locked" : "TARGET TICKS SETTLED"} · ${(candidate.growthRate * 100).toFixed(0)}% · ${settlement.ticks} ticks · net ${profit >= 0 ? "+" : ""}${profit.toFixed(2)}`,
+        agentReasoning: `[ACCUMULATOR] ${knockout ? "KNOCKOUT — full stake lost" : settlement.closedEarly ? "EARLY CLOSE — current compounded value locked" : "TARGET TICKS SETTLED"} · ${(candidate.growthRate * 100).toFixed(0)}% · ${settlement.ticks} ticks · net ${profit >= 0 ? "+" : ""}${profit.toFixed(2)}`,
       }).where(eq(tradesTable.id, row!.id)).catch(() => {});
 
       if (!isLive && Number.isFinite(availableBalance)) availableBalance = Math.max(0, availableBalance + profit);

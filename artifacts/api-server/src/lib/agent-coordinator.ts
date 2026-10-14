@@ -196,7 +196,7 @@ export async function runCoordinator(ctx: ScanContext): Promise<CoordinatorOutpu
   ];
 
   let livePayouts: Record<string, number> | null = null;
-  if (contractTypesToFetch.length > 0 && ctx.token && !ctx.settings.paperTradeMode) {
+  if (contractTypesToFetch.length > 0 && ctx.token) {
     try {
       livePayouts = await fetchLivePayouts(
         ctx.symbol, contractTypesToFetch, ctx.token, ctx.currency,

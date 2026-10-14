@@ -656,13 +656,9 @@ async function runLoop(config: NavigatorConfig) {
     try { recoveryEngine.hydrateStateIfNeeded(persistedRecovery); }
     catch { /* malformed row — this account's ledger starts fresh */ }
   }
-  const paper =
-    settings.length > 0
-      ? ((settings[0] as any).paperTradeMode ?? false)
-      : false;
   const token = accounts[0]?.bearerToken ?? accounts[0]?.token ?? null;
   const currency = accounts[0]?.currency ?? "USD";
-  const isLive = !paper && !!token;
+  const isLive = !!token;
   const maxStake =
     settings.length > 0 ? Number(settings[0]!.maxTradeStake) : 500;
   let markup =
@@ -1213,7 +1209,7 @@ async function runLoop(config: NavigatorConfig) {
           aiConfidence: String(Math.round(lastDecision.read!.p * 100)),
           aiRiskScore: "15",
           isAutonomous: true,
-          agentReasoning: `${paper ? "[PAPER] " : ""}${reason}`,
+          agentReasoning: `${reason}`,
           duration: DURATION,
           durationUnit: DURATION_UNIT,
         })

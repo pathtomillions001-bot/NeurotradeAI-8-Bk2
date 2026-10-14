@@ -62,7 +62,6 @@ function formatSettings(s: typeof settingsTable.$inferSelect) {
     scanAllMarkets: s.scanAllMarkets,
     tradeDurationSec: s.tradeDurationSec,
     maxTradeStake: Number(s.maxTradeStake),
-    paperTradeMode: s.paperTradeMode,
     requirePositiveEv: s.requirePositiveEv,
     cooldownMinutes: s.cooldownMinutes,
     cooldownEnabled: (s as any).cooldownEnabled ?? true,
@@ -137,7 +136,6 @@ router.put("/", async (req, res): Promise<void> => {
   if ((updates as any).scanAllMarkets !== undefined) updateData.scanAllMarkets = (updates as any).scanAllMarkets;
   if ((updates as any).tradeDurationSec !== undefined) updateData.tradeDurationSec = (updates as any).tradeDurationSec;
   if ((updates as any).maxTradeStake !== undefined) updateData.maxTradeStake = String((updates as any).maxTradeStake);
-  if ((updates as any).paperTradeMode !== undefined) updateData.paperTradeMode = (updates as any).paperTradeMode;
   if ((updates as any).requirePositiveEv !== undefined) updateData.requirePositiveEv = (updates as any).requirePositiveEv;
   if ((updates as any).cooldownMinutes !== undefined) updateData.cooldownMinutes = (updates as any).cooldownMinutes;
   if ((updates as any).cooldownEnabled !== undefined) (updateData as any).cooldownEnabled = (updates as any).cooldownEnabled;

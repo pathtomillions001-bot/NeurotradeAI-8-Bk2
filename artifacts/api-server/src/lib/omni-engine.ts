@@ -282,10 +282,6 @@ async function loadContext(config: OmniConfig): Promise<Context> {
     throw new Error(
       "Connect an active Deriv account before deploying in live mode",
     );
-  if (settings?.paperTradeMode)
-    throw new Error(
-      "Account paper-trade mode is enabled; disable it in Settings before trading on the connected account",
-    );
   const balance = Number(account.balance);
   if (!Number.isFinite(balance) || balance < 0)
     throw new Error("A valid account balance is required");

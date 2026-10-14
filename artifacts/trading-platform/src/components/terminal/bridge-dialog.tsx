@@ -201,18 +201,39 @@ function CopyValue({ value, copied, onCopy, disabled, large = false }: { value: 
  * of being discovered as a dropped connection.
  */
 function StoreWarning({ store, warning }: { store?: BridgeStoreReport | null; warning?: string | null }) {
-  const detail = warning ?? (store && !store.durable
-    ? `This Desk's link store is ${store.detail}, and it does not survive a restart. A link is meant to outlive the terminal that made it, so a deploy, a cold start or a second replica drops a RUNNING terminal and it needs a new code — the one thing this setting is supposed to prevent. Set a postgres:// DATABASE_URL on the api service. Until then, do not restart the api while the terminal is attached.`
-    : store && !store.reachable
-      ? "The link store could not be read just now. Nothing is revoked — a terminal that is already linked keeps streaming and retries on its own. If this persists, check the api service's database connection."
-      : null);
+  /**
+   * ── A DEGRADED SCHEMA, SAID OUT LOUD ──────────────────────────────────────
+   *
+   * The bootstrap script is applied statement by statement: one statement that
+   * cannot apply (a unique index over duplicate legacy rows, a privilege the
+   * deployment lacks) no longer takes the rest of the schema with it, but the
+   * table THAT statement would have created is missing until the next pass
+   * succeeds. That is the state that used to surface as
+   * `503 the bridge link store could not be reached` in the MT5 journal with
+   * nothing anywhere saying why, so the dialog names the statement here.
+   */
+  const degraded = store?.schemaFailures ?? [];
+  const detail = warning ?? (store && degraded.length > 0
+    ? `Part of this Desk's schema did not apply: ${degraded.map((failure) => `“${failure.message}”`).join(", ")}. ` +
+      `Everything else is created, so the Desk works — but a table that failing statement creates is missing until a later boot succeeds, and a terminal that needs it cannot re-attach. ` +
+      `The full statement is in /api/healthz under db.schemaFailures, or in the api service's log (look for “bootstrap statement NOT applied”).`
+    : store && !store.durable
+      ? `This Desk's link store is ${store.detail}, and it does not survive a restart. A link is meant to outlive the terminal that made it, so a deploy, a cold start or a second replica drops a RUNNING terminal and it needs a new code — the one thing this setting is supposed to prevent. Set a postgres:// DATABASE_URL on the api service. Until then, do not restart the api while the terminal is attached.`
+      : store && !store.reachable
+        ? "The link store could not be read just now. Nothing is revoked — a terminal that is already linked keeps streaming and retries on its own. If this persists, check the api service's database connection."
+        : null);
   if (!detail) return null;
   const unreachable = Boolean(store && !store.reachable);
+  const title = unreachable
+    ? "Link store unreachable"
+    : degraded.length > 0
+      ? "Part of the schema did not apply"
+      : "Restarts will drop a running terminal";
   return (
     <div className={`rounded-lg border p-3 text-[11px] leading-relaxed ${unreachable ? "border-sky-500/40 bg-sky-500/10 text-sky-200" : "border-amber-500/40 bg-amber-500/10 text-amber-200"}`}>
       <p className={`flex items-center gap-1.5 font-medium ${unreachable ? "text-sky-300" : "text-amber-300"}`}>
         <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-        {unreachable ? "Link store unreachable" : "Restarts will drop a running terminal"}
+        {title}
       </p>
       <p className="mt-1.5">{detail}</p>
     </div>

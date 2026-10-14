@@ -6,8 +6,6 @@ import {
   databaseIsDurable,
   pool,
   schemaApplied,
-  schemaFailures,
-  schemaPasses,
   schemaReady,
 } from "@workspace/db";
 import { accountConnectionCount, tickManager } from "../lib/deriv";
@@ -16,15 +14,6 @@ import { botConsoleIds } from "../lib/bot-catalog";
 import { API_RELEASE } from "../lib/release";
 
 const router: IRouter = Router();
-
-/** Bootstrap statements that did not apply, clipped for a JSON diagnostic. */
-function failureSummary(): { statement: string; message: string; code?: string }[] {
-  return schemaFailures().map((failure) => ({
-    statement: failure.statement.length > 160 ? `${failure.statement.slice(0, 159)}…` : failure.statement,
-    message: failure.message,
-    code: failure.code,
-  }));
-}
 
 // ── Deriv OAuth client probe (cached 5 minutes) ──────────────────────────────
 //
@@ -159,19 +148,6 @@ router.get("/healthz", async (req, res) => {
     durable: boolean;
     detail: string;
     schemaApplied: boolean;
-    /**
-     * Bootstrap statements that did NOT apply, with the database's own wording.
-     *
-     * A `db.ok: true` alongside a non-empty list is a degraded schema, not a
-     * healthy one: `ok` answers "are the six tables this endpoint checks
-     * there", while this answers "did the script that creates them run
-     * cleanly". They can disagree — that is exactly the state that produced
-     * `503 the bridge link store could not be reached` for a database that was
-     * up (see docs/mt5-bridge-schema-bootstrap.md).
-     */
-    schemaFailures: { statement: string; message: string; code?: string }[];
-    /** Bootstrap passes run so far; a short pass is retried on a back-off. */
-    schemaPasses: number;
     error?: string;
   } = {
     ok: false,
@@ -181,8 +157,6 @@ router.get("/healthz", async (req, res) => {
     durable: false,
     detail: "",
     schemaApplied: false,
-    schemaFailures: [],
-    schemaPasses: 0,
   };
   const withTimeout = <T>(p: Promise<T>, ms: number, label: string): Promise<T> =>
     Promise.race([
@@ -225,8 +199,6 @@ router.get("/healthz", async (req, res) => {
       durable: databaseIsDurable,
       detail: databaseDetail,
       schemaApplied: schemaApplied(),
-      schemaFailures: failureSummary(),
-      schemaPasses: schemaPasses(),
     };
   } catch (err) {
     dbDiag = {
@@ -237,8 +209,6 @@ router.get("/healthz", async (req, res) => {
       durable: databaseIsDurable,
       detail: databaseDetail,
       schemaApplied: schemaApplied(),
-      schemaFailures: failureSummary(),
-      schemaPasses: schemaPasses(),
       error: err instanceof Error ? err.message : String(err),
     };
   }
@@ -283,13 +253,6 @@ router.get("/healthz", async (req, res) => {
 
   if (!dbDiag.ok) {
     logger.warn({ db: dbDiag }, "Healthz reports missing DB tables — schema bootstrap did not complete");
-  }
-  if (dbDiag.schemaFailures.length > 0) {
-    logger.warn(
-      { failures: dbDiag.schemaFailures, tablesMissing: dbDiag.tablesMissing },
-      "Healthz: the bootstrap script ran to the end but some statements did not apply — a table those " +
-        "statements create will be missing until the next pass succeeds",
-    );
   }
   if (!dbDiag.durable) {
     logger.warn(

@@ -8,7 +8,7 @@ import * as schema from "./schema";
 
 const { Pool } = pg;
 
-export const INIT_DDL = `
+const INIT_DDL = `
 CREATE TABLE IF NOT EXISTS accounts (
   id SERIAL PRIMARY KEY,
   session_id TEXT NOT NULL DEFAULT 'legacy',
@@ -479,250 +479,6 @@ CREATE TABLE IF NOT EXISTS desk_settings (
 );
 `;
 
-// ── Applying the bootstrap script ONE STATEMENT AT A TIME ────────────────────
-//
-// ── WHY THIS IS NOT ONE QUERY ──────────────────────────────────────────────
-//
-// The script used to be handed to the driver whole (`pool.query(INIT_DDL)`).
-// `pg` sends a parameterless query over the SIMPLE protocol, and Postgres runs
-// a multi-statement simple query as ONE IMPLICIT TRANSACTION — so the first
-// statement that fails rolls back everything before it AND SKIPS EVERYTHING
-// AFTER IT. That is not a theoretical hazard here: several statements in this
-// script are data-dependent (`CREATE UNIQUE INDEX … ON accounts (session_id,
-// login_id)`, `… ON market_win_rates (…)`, `… ON deriv_journal (…)`), so a
-// database that already holds duplicate legacy rows fails them on EVERY boot,
-// with the same error, forever.
-//
-// The MT5 bridge's own tables (`mt5_account_claims`, `mt5_bridge_links`,
-// `mt5_pairing_codes`) sit near the END of the script. One failing index over
-// `accounts` therefore meant those tables were never created — while
-// `/api/bridge/pairing-code` still answered 200 (the code was kept in process
-// memory), the EA could still pair, and everything looked fine until the API
-// restarted and the terminal presented the token it had saved. Then the lookup
-// had nowhere to go, the link store was reported as unreachable, and the EA —
-// whose contract says a 503 is transient and nothing was revoked — retried the
-// same heartbeat forever. "MT5 cannot connect to the Desk" was, in the end, a
-// schema that had been silently one statement short since the failing index
-// entered the script.
-//
-// Running the script statement by statement makes that impossible: a statement
-// that cannot apply is reported, the rest of the script still applies, and the
-// next pass can finish whatever a transient failure (a lock timeout, a dropped
-// connection mid-pass) left behind. The script is idempotent, so re-running it
-// is free.
-//
-// A CONNECTION-level failure still aborts the pass: when the socket is gone
-// there is nothing to learn from the remaining statements, and the caller's
-// back-off/retry is the right answer.
-
-export interface SchemaStatementFailure {
-  /** The statement that did not apply (clipped; the SQL itself is in the repo). */
-  statement: string;
-  /** The database's own words, surfaced by `/api/healthz` and the bridge report. */
-  message: string;
-  /** Postgres SQLSTATE / driver code, when the driver reported one. */
-  code?: string;
-  at: number;
-}
-
-const STATEMENT_LOG_CLIP = 140;
-
-function statementLabel(sql: string): string {
-  const withoutComments = stripSqlComments(sql).replace(/\s+/g, " ").trim();
-  const label = withoutComments || sql.replace(/\s+/g, " ").trim();
-  return label.length > STATEMENT_LOG_CLIP ? `${label.slice(0, STATEMENT_LOG_CLIP - 1)}…` : label;
-}
-
-/**
- * Remove line comments and block comments, keeping string literals intact.
- *
- * Used to decide whether a chunk of the script contains anything to execute at
- * all (a chunk can be comments only) and to label a failing statement.
- */
-export function stripSqlComments(sql: string): string {
-  let out = "";
-  let i = 0;
-  while (i < sql.length) {
-    const ch = sql[i];
-    const next = sql[i + 1];
-    if (ch === "-" && next === "-") {
-      const end = sql.indexOf("\n", i);
-      i = end === -1 ? sql.length : end + 1;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      const end = sql.indexOf("*/", i + 2);
-      i = end === -1 ? sql.length : end + 2;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      const span = literalEnd(sql, i, ch);
-      out += sql.slice(i, span);
-      i = span;
-      continue;
-    }
-    out += ch;
-    i += 1;
-  }
-  return out;
-}
-
-/** End index (exclusive) of a quoted run starting at `start`, or `sql.length`. */
-function literalEnd(sql: string, start: number, quote: string): number {
-  let i = start + 1;
-  while (i < sql.length) {
-    if (sql[i] === quote) {
-      // A doubled quote is an escaped quote, not the end of the literal.
-      if (sql[i + 1] === quote) {
-        i += 2;
-        continue;
-      }
-      return i + 1;
-    }
-    i += 1;
-  }
-  return sql.length;
-}
-
-/**
- * Split a SQL script into individual statements.
- *
- * Semicolons inside string literals, quoted identifiers, dollar-quoted blocks
- * (`$$ … $$`, `$tag$ … $tag$`) and comments are not separators, so a script can
- * carry data as well as DDL. Comments stay attached to the statement that
- * follows them — Postgres is happy to receive them, and they are what makes a
- * failing statement readable in a log line.
- */
-export function splitSqlStatements(script: string): string[] {
-  const statements: string[] = [];
-  let current = "";
-  let i = 0;
-  while (i < script.length) {
-    const ch = script[i];
-    const next = script[i + 1];
-    if (ch === "-" && next === "-") {
-      const end = script.indexOf("\n", i);
-      const stop = end === -1 ? script.length : end + 1;
-      current += script.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "/" && next === "*") {
-      const end = script.indexOf("*/", i + 2);
-      const stop = end === -1 ? script.length : end + 2;
-      current += script.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      const stop = literalEnd(script, i, ch);
-      current += script.slice(i, stop);
-      i = stop;
-      continue;
-    }
-    if (ch === "$") {
-      const tag = /^\$[A-Za-z_0-9]*\$/.exec(script.slice(i));
-      if (tag) {
-        const end = script.indexOf(tag[0], i + tag[0].length);
-        const stop = end === -1 ? script.length : end + tag[0].length;
-        current += script.slice(i, stop);
-        i = stop;
-        continue;
-      }
-    }
-    if (ch === ";") {
-      statements.push(current);
-      current = "";
-      i += 1;
-      continue;
-    }
-    current += ch;
-    i += 1;
-  }
-  statements.push(current);
-  return statements.map((statement) => statement.trim()).filter((statement) => stripSqlComments(statement).trim().length > 0);
-}
-
-/**
- * Driver/SQLSTATE codes that mean "the connection is gone", not "this
- * statement is not applicable". A pass that hits one of these aborts, so the
- * caller's retry is what runs next instead of a long list of statements each
- * reporting a socket error.
- */
-const CONNECTION_FAILURE_CODES = new Set([
-  "ECONNREFUSED",
-  "ECONNRESET",
-  "ETIMEDOUT",
-  "EPIPE",
-  "ENOTFOUND",
-  "EHOSTUNREACH",
-  "ENETUNREACH",
-  "EAI_AGAIN",
-  "ENETDOWN",
-  "08000", // connection_exception
-  "08001", // sqlclient_unable_to_establish_sqlconnection
-  "08003", // connection_does_not_exist
-  "08004", // sqlserver_rejected_establishment_of_sqlconnection
-  "08006", // connection_failure
-  "08007", // transaction_resolution_unknown
-  "53300", // too_many_connections
-  "57P01", // admin_shutdown
-  "57P02", // crash_shutdown
-  "57P03", // cannot_connect_now
-]);
-
-export function isConnectionLevelFailure(err: unknown): boolean {
-  const code = String((err as { code?: unknown } | null)?.code ?? "");
-  if (CONNECTION_FAILURE_CODES.has(code)) return true;
-  const message = err instanceof Error ? err.message : String(err);
-  return /(connection terminated|connection error|server closed the connection|client has encountered a connection error|terminating connection|could not connect|connect (?:econnrefused|etimedout|reset)|network is unreachable|socket hang up)/i.test(
-    message,
-  );
-}
-
-const loggedSchemaFailures = new Set<string>();
-
-function noteSchemaFailure(failure: SchemaStatementFailure): void {
-  const signature = `${failure.code ?? ""}|${failure.message}|${failure.statement.slice(0, 80)}`;
-  if (loggedSchemaFailures.has(signature)) return;
-  loggedSchemaFailures.add(signature);
-  console.error(
-    `[db] bootstrap statement NOT applied (${failure.code ?? "no code"}): ${failure.message}\n` +
-      `[db]   in: ${failure.statement}\n` +
-      "[db]   carrying on with the rest of the script — the statements after this one are still applied.",
-  );
-}
-
-/**
- * Apply a script statement by statement.
- *
- * Returns the statements that could not be applied. Throws only when the
- * connection itself failed, because then the answer for every remaining
- * statement is the same and the caller must back off and retry.
- */
-export async function applySchemaStatements(
-  run: (sql: string) => Promise<void>,
-  script: string = INIT_DDL,
-): Promise<SchemaStatementFailure[]> {
-  const failures: SchemaStatementFailure[] = [];
-  for (const statement of splitSqlStatements(script)) {
-    try {
-      await run(statement);
-    } catch (err) {
-      if (isConnectionLevelFailure(err)) throw err;
-      const failure: SchemaStatementFailure = {
-        statement: statementLabel(statement),
-        message: err instanceof Error ? err.message : String(err),
-        code: (err as { code?: string } | null)?.code !== undefined ? String((err as { code?: string }).code) : undefined,
-        at: Date.now(),
-      };
-      failures.push(failure);
-      noteSchemaFailure(failure);
-    }
-  }
-  return failures;
-}
-
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 
 const useExternalPostgres = Boolean(
@@ -801,19 +557,17 @@ if (useExternalPostgres) {
   dbInstance = drizzlePglite(pglite, { schema }) as unknown as NodePgDatabase<typeof schema>;
 }
 
-/** Applies the idempotent INIT_DDL, one statement at a time. Safe to re-run. */
-async function applySchemaDdl(): Promise<SchemaStatementFailure[]> {
-  return applySchemaStatements(async (sql) => {
-    if (useExternalPostgres) {
-      await poolInstance.query(sql);
-    } else {
-      await pgliteInstance!.exec(sql);
-    }
-  });
+/** Applies the idempotent INIT_DDL. Safe to call repeatedly. */
+async function applySchemaDdl(): Promise<void> {
+  if (useExternalPostgres) {
+    await poolInstance.query(INIT_DDL);
+  } else {
+    await pgliteInstance!.exec(INIT_DDL);
+  }
 }
 
 /**
- * Run the bootstrap until it stops making progress, then keep it honest.
+ * Keep retrying the DDL until it succeeds, then resolve schemaReady.
  *
  * WHY a retry loop: the first boot attempt can hit a transient Postgres outage
  * (on Railway a simultaneous redeploy produced `connect ETIMEDOUT …:5432` for
@@ -821,74 +575,30 @@ async function applySchemaDdl(): Promise<SchemaStatementFailure[]> {
  * the network recovered, so settings/accounts/markets stayed broken until a
  * manual redeploy. Retrying in the background self-heals as soon as Postgres
  * answers.
- *
- * WHAT A PASS MEANS NOW: every statement is ATTEMPTED. A pass therefore ends in
- * one of three states —
- *
- *   1. clean:        nothing to retry, done;
- *   2. connection:   the socket went away mid-pass, so retry the whole pass;
- *   3. short:        the pass ran to the end but some statements did not apply
- *                    (a unique index over duplicate legacy rows, a lock that
- *                    timed out, a permission the deployment lacks).
- *
- * State 3 no longer means "the schema is missing": every statement that COULD
- * apply has. So the pass resolves `schemaReady`, records the failures for
- * `/api/healthz` and the bridge report, and keeps retrying on the same capped
- * back-off — a failure that was transient (a lock, a restart mid-pass) is gone
- * on the next pass, and one that is permanent is retried for the price of an
- * idempotent script instead of leaving the database permanently short.
  */
 let ddlSucceeded = false;
-let ddlFailures: SchemaStatementFailure[] = [];
-let ddlPasses = 0;
-
 async function ddlRetryLoop(): Promise<void> {
   let attempt = 0;
-  let readyResolved = false;
-  const resolveReadyOnce = () => {
-    if (readyResolved) return;
-    readyResolved = true;
-    resolveSchemaReady();
-  };
-
-  for (;;) {
+  while (!ddlSucceeded) {
     attempt++;
-    let failures: SchemaStatementFailure[] = [];
     try {
-      failures = await applySchemaDdl();
+      await applySchemaDdl();
       ddlSucceeded = true;
-      ddlPasses = attempt;
-      ddlFailures = failures;
-      resolveReadyOnce();
+      console.log(
+        attempt === 1
+          ? "[db] Initial DDL applied"
+          : `[db] Initial DDL applied after ${attempt} attempts`,
+      );
+      resolveSchemaReady();
     } catch (err) {
-      // A connection-level failure says nothing about the statements that were
-      // not reached; the pass is retried as a whole.
-      resolveReadyOnce();
+      if (attempt === 1) resolveSchemaReady(); // don't block routes on a dead DB
       const waitMs = Math.min(30_000, 5_000 * attempt);
       console.error(
-        `[db] DDL attempt ${attempt} could not reach the database — retrying in ${Math.round(waitMs / 1000)}s:`,
+        `[db] DDL attempt ${attempt} failed — retrying in ${Math.round(waitMs / 1000)}s:`,
         err instanceof Error ? err.message : err,
       );
       await new Promise((r) => setTimeout(r, waitMs));
-      continue;
     }
-
-    if (failures.length === 0) {
-      console.log(
-        attempt === 1
-          ? `[db] Initial DDL applied (${splitSqlStatements(INIT_DDL).length} statements)`
-          : `[db] Initial DDL applied after ${attempt} attempts`,
-      );
-      return;
-    }
-
-    const waitMs = Math.min(30_000, 5_000 * attempt);
-    console.error(
-      `[db] bootstrap pass ${attempt} ran to the end, but ${failures.length} statement(s) did not apply ` +
-        `(${failures.map((f) => f.message).join(" | ")}). Everything else is applied; retrying in ` +
-        `${Math.round(waitMs / 1000)}s. /api/healthz reports these as db.schemaFailures.`,
-    );
-    await new Promise((r) => setTimeout(r, waitMs));
   }
 }
 void ddlRetryLoop().catch((err) => {
@@ -932,56 +642,19 @@ export const databaseDetail: string = useExternalPostgres
     : "embedded PGlite, in-memory (this process only)";
 
 /**
- * Whether the bootstrap script has been applied — i.e. a pass ran to the END.
+ * Whether the bootstrap DDL has actually been APPLIED.
  *
- * READ THIS BEFORE USING IT AS A GATE. `true` means every statement in the
- * script was attempted, NOT that every statement succeeded: statements that
- * cannot apply (a unique index over duplicate legacy rows, a missing privilege)
- * are reported by `schemaFailures()` and do not stop the pass. `false` means the
- * database could not be reached at all, so nothing is known yet.
- *
- * It follows that this flag may not be used to decide whether a table can be
- * read. It briefly was — the MT5 bridge refused to look at a link while this
- * was false — and on a database where one unrelated statement failed forever,
- * that turned "your link row is right there" into a permanent
- * `503 The bridge link store could not be reached` on every heartbeat, which the
- * EA (correctly) retries forever. Reads attempt the read and report what the
- * store actually said; see `bridge-links.ts`.
+ * `schemaReady` deliberately resolves even when the first DDL attempt failed, so
+ * that routes are not blocked behind a dead database. That makes it the wrong
+ * signal for "do the tables exist": a caller that must not answer
+ * "your credential is invalid" while the schema is still being created needs
+ * this instead.
  */
 export function schemaApplied(): boolean {
   return ddlSucceeded;
 }
 
-/**
- * Statements from the most recent bootstrap pass that did NOT apply, exactly as
- * the database worded them. Empty is the normal, healthy answer.
- *
- * Exposed for `/api/healthz` (so a degraded schema is visible instead of being
- * discovered as a hung MT5 terminal) and for the bridge store report.
- */
-export function schemaFailures(): SchemaStatementFailure[] {
-  return [...ddlFailures];
-}
-
-/** How many bootstrap passes have run (a permanent failure is retried). */
-export function schemaPasses(): number {
-  return ddlPasses;
-}
-
 export const pool = poolInstance;
 export const db = dbInstance;
-
-/**
- * Test-only hooks — never called from a request path.
- *
- * `setSchemaApplied` exists so a test can prove a READ DOES NOT DEPEND ON THIS
- * FLAG (the defect that answered 503 for a row that was in the store). The
- * production flag is owned by the bootstrap loop above; nothing else may set it.
- */
-export const schemaTesting = {
-  setSchemaApplied(value: boolean): void {
-    ddlSucceeded = value;
-  },
-};
 
 export * from "./schema";

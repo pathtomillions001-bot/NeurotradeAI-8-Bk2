@@ -68,16 +68,6 @@
  * seen — a redeploy, or a second chart. Reads retry briefly before giving up,
  * so a single slow query during a failover no longer surfaces as a 503 on a
  * 500 ms heartbeat.
- *
- * ── AND WHAT MAKES `checked: false` ─────────────────────────────────────────
- *
- * Only two things, both about the STORE: there is no pool, or the query did not
- * run. NOT the process-local "was the bootstrap script applied" flag — that flag
- * is an opinion about a script, and using it here is how a database that was up
- * and holding the row answered `503 the link store could not be reached` on
- * every heartbeat of a terminal that could not connect or re-pair (see the note
- * on `storePool`). A table that genuinely does not exist is reported as
- * `not-ready` WITH ITS NAME, which is a different sentence and a different fix.
  */
 
 import { createHash } from "node:crypto";
@@ -211,7 +201,6 @@ interface DbHandle {
 interface DbModule {
   pool?: DbHandle;
   schemaApplied?: () => boolean;
-  schemaFailures?: () => { statement: string; message: string; code?: string }[];
   databaseBackend?: string;
   databaseIsDurable?: boolean;
   databaseDetail?: string;
@@ -240,62 +229,22 @@ async function pool(): Promise<DbHandle | null> {
 let forcedStoreFailure: Error | null = null;
 
 /**
- * ── WHY A READ IS NO LONGER GATED ON THE SCHEMA FLAG ────────────────────────
+ * Can a read be trusted right now?
  *
- * This used to ask `schemaApplied()` for permission before touching the
- * database. That flag is a process-local opinion about the WHOLE bootstrap
- * script, and it is true only when a pass ran to the end without a failure —
- * but a script is not all-or-nothing in the way that question implies. One
- * statement that cannot apply (a `CREATE UNIQUE INDEX` over duplicate legacy
- * rows, a privilege the deployment lacks) used to keep the flag false forever,
- * and the gate then answered
- *
- *   503 The bridge link store could not be reached …
- *
- * for a link row that was sitting in a perfectly readable table. The EA treats
- * 503 as transient and nothing-revoked, so it kept its token and retried — and
- * retried — while the terminal could never connect and never re-paired either.
- * The real fault was a *schema* statement, reported as an unreachable *store*.
- *
- * So: attempt the read, and let the store answer. `checked: false` is now
- * reserved for the two things that are actually true about a broken store — the
- * pool is missing, or the query itself did not run — and when the query fails
- * because a table does not exist, the detail SAYS SO (which table, and that the
- * bootstrap DDL creates it) instead of blaming the connection.
+ * `schemaApplied()` is checked rather than awaited: `schemaReady` resolves even
+ * when the DDL FAILED on its first attempt (deliberately, so routes are not
+ * blocked behind a dead database), and the HTTP server listens while that retry
+ * loop is still running. A request that lands in that window would otherwise
+ * read a table that does not exist yet and report a perfectly good token as
+ * unknown.
  */
-async function storePool(): Promise<DbHandle | null> {
+async function storeConsultable(): Promise<{ ok: boolean; detail?: string }> {
   const mod = await dbModule();
-  return mod?.pool ?? null;
-}
-
-/** Postgres: the table this query names is not there. */
-function isMissingTable(err: unknown): boolean {
-  const code = String((err as { code?: unknown } | null)?.code ?? "");
-  const message = messageOf(err);
-  return code === "42P01" || /relation "[^"]*" does not exist/i.test(message) || /no such table/i.test(message);
-}
-
-/**
- * The honest answer for a read whose query did not run.
- *
- * A missing table is a SCHEMA answer, not a store outage: it is reported as
- * `not-ready` with the table named, so the Desk and `/api/healthz` say "the
- * bridge tables have not been created yet" instead of "the store is
- * unreachable". Nothing is revoked either way — the EA keeps its credential and
- * retries, which is correct: the bootstrap loop creates these tables.
- */
-function readFailure(err: unknown, table: string): StoreLookup<never> {
-  if (isMissingTable(err)) {
-    return {
-      record: null,
-      checked: false,
-      health: "not-ready",
-      detail:
-        `${table} does not exist yet, so this read could not be attempted. It is created by the ` +
-        `bootstrap DDL (/api/healthz db.schemaFailures names any statement that did not apply).`,
-    };
+  if (!mod?.pool) return { ok: false, detail: "no database pool" };
+  if (typeof mod.schemaApplied === "function" && !mod.schemaApplied()) {
+    return { ok: false, detail: "schema bootstrap has not been applied yet" };
   }
-  return { record: null, checked: false, health: "error", detail: messageOf(err) };
+  return { ok: true };
 }
 
 /**
@@ -331,15 +280,6 @@ export interface BridgeStoreReport {
   durable: boolean;
   detail: string;
   schemaApplied: boolean;
-  /**
-   * Bootstrap statements that did not apply, verbatim from the database.
-   *
-   * A DEPLOYMENT WITH A NON-EMPTY LIST IS NOT HEALTHY even when `reachable` is
-   * true: the tables the MT5 bridge needs may be among the ones a failed
-   * statement never created. Reported rather than inferred, because the
-   * alternative is a hung terminal and a support ticket.
-   */
-  schemaFailures: { statement: string; message: string; code?: string }[];
   reachable: boolean;
   tables: string[];
 }
@@ -372,11 +312,6 @@ export async function bridgeStoreReport(force = false): Promise<BridgeStoreRepor
     durable: Boolean(mod?.databaseIsDurable),
     detail: mod?.databaseDetail ?? "database module unavailable",
     schemaApplied: applied,
-    schemaFailures: (mod?.schemaFailures?.() ?? []).map((failure) => ({
-      statement: failure.statement,
-      message: failure.message,
-      code: failure.code,
-    })),
     reachable,
     tables,
   };
@@ -453,9 +388,13 @@ export async function lookupPairingCode(code: string, now = Date.now()): Promise
       : { record: null, checked: true, health: "ok", detail: "expired" };
   }
 
+  const consultable = await storeConsultable();
+  if (!consultable.ok) {
+    return { record: null, checked: false, health: "not-ready", detail: consultable.detail };
+  }
   try {
     if (forcedStoreFailure) throw forcedStoreFailure;
-    const db = await storePool();
+    const db = await pool();
     if (!db) return { record: null, checked: false, health: "unavailable", detail: "no database pool" };
     const result = await withStoreRetry(() =>
       db.query(
@@ -472,7 +411,7 @@ export async function lookupPairingCode(code: string, now = Date.now()): Promise
       : { record: null, checked: true, health: "ok", detail: "expired" };
   } catch (err) {
     warnOnce(err);
-    return readFailure(err, PAIRING_CODE_TABLE);
+    return { record: null, checked: false, health: "error", detail: messageOf(err) };
   }
 }
 
@@ -630,9 +569,13 @@ export async function lookupSpentPairingCode(code: string): Promise<StoreLookup<
   const cached = codes.get(code);
   if (cached) return { record: cached, checked: true, health: "ok" };
 
+  const consultable = await storeConsultable();
+  if (!consultable.ok) {
+    return { record: null, checked: false, health: "not-ready", detail: consultable.detail };
+  }
   try {
     if (forcedStoreFailure) throw forcedStoreFailure;
-    const db = await storePool();
+    const db = await pool();
     if (!db) return { record: null, checked: false, health: "unavailable", detail: "no database pool" };
     const result = await withStoreRetry(() =>
       db.query(
@@ -647,7 +590,7 @@ export async function lookupSpentPairingCode(code: string): Promise<StoreLookup<
     return { record, checked: true, health: "ok" };
   } catch (err) {
     warnOnce(err);
-    return readFailure(err, PAIRING_CODE_TABLE);
+    return { record: null, checked: false, health: "error", detail: messageOf(err) };
   }
 }
 
@@ -757,9 +700,13 @@ export async function lookupBridgeLink(token: string): Promise<StoreLookup<Store
   // cache window.
   if (unknownUntil) unknownTokens.delete(tokenHash);
 
+  const consultable = await storeConsultable();
+  if (!consultable.ok) {
+    return { record: null, checked: false, health: "not-ready", detail: consultable.detail };
+  }
   try {
     if (forcedStoreFailure) throw forcedStoreFailure;
-    const db = await storePool();
+    const db = await pool();
     if (!db) return { record: null, checked: false, health: "unavailable", detail: "no database pool" };
     const result = await withStoreRetry(() =>
       db.query(
@@ -779,7 +726,7 @@ export async function lookupBridgeLink(token: string): Promise<StoreLookup<Store
     // Deliberately NOT negatively cached: an error says nothing about whether
     // the row exists, and caching it would keep refusing a valid token after
     // the store recovers.
-    return readFailure(err, BRIDGE_LINK_TABLE);
+    return { record: null, checked: false, health: "error", detail: messageOf(err) };
   }
 }
 
@@ -810,9 +757,13 @@ export async function linkByCode(code: string, now = Date.now()): Promise<StoreL
   // fetch from the browser.
   if (cached && linkIsValid(cached)) return { record: cached, checked: true, health: "ok" };
 
+  const consultable = await storeConsultable();
+  if (!consultable.ok) {
+    return { record: null, checked: false, health: "not-ready", detail: consultable.detail };
+  }
   try {
     if (forcedStoreFailure) throw forcedStoreFailure;
-    const db = await storePool();
+    const db = await pool();
     if (!db) return { record: null, checked: false, health: "unavailable", detail: "no database pool" };
     const result = await withStoreRetry(() =>
       db.query(
@@ -831,7 +782,7 @@ export async function linkByCode(code: string, now = Date.now()): Promise<StoreL
       : { record: null, checked: true, health: "ok", detail: "the code's link was revoked" };
   } catch (err) {
     warnOnce(err);
-    return readFailure(err, BRIDGE_LINK_TABLE);
+    return { record: null, checked: false, health: "error", detail: messageOf(err) };
   }
 }
 

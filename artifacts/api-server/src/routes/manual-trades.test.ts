@@ -71,33 +71,26 @@ function journalRows() {
 }
 
 describe("one-order manual trading API", () => {
-  // ── PAPER MODE REMOVED ─────────────────────────────────────────────────────
-  //
-  // These two cases originally asserted that a manual submission with no
-  // connected account simulated a trade and journalled it. That simulation drew
-  // its outcome from `Math.random() < winProbability` and then moved the account
-  // balance by the invented result, so the journal recorded a P&L that never
-  // happened. Paper/demo simulation is gone: without a live account the request
-  // is refused and NOTHING is written.
-  //
-  // The invariant these tests protect — one intentional submission can never
-  // produce more than one trade — is preserved and is now checked from the other
-  // side: no submission can produce a trade at all without a live account.
-  it("refuses a manual submission with no live account, writing nothing", async () => {
+  it("creates exactly one journal entry for one manual submission", async () => {
     const response = await post(singleOrder);
-    assert.equal(response.status, 409);
-    const body = await response.json();
-    assert.equal(body.code, "NO_LIVE_ACCOUNT");
-    assert.match(String(body.error), /Paper\/demo simulation has been removed/);
+    assert.equal(response.status, 201);
+    const trade = await response.json();
+    assert.equal(Array.isArray(trade), false);
+    assert.equal(trade.symbol, singleOrder.symbol);
+    assert.equal(trade.contractType, singleOrder.contractType);
+    assert.equal(trade.stake, singleOrder.stake);
+    assert.equal(trade.isAutonomous, false);
     const rows = await journalRows();
-    assert.equal(rows.length, 0, "a refused manual trade must never reach the journal");
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].id, trade.id);
+    assert.equal(rows[0].barrier, 3);
   });
 
-  it("never fabricates a journal entry across repeated submissions without a live account", async () => {
-    assert.equal((await post(singleOrder)).status, 409);
-    assert.equal((await post(singleOrder)).status, 409);
-    assert.equal((await post(singleOrder)).status, 409);
-    assert.equal((await journalRows()).length, 0);
+  it("allows the next intentional submission as a separate single trade", async () => {
+    assert.equal((await post(singleOrder)).status, 201);
+    assert.equal((await journalRows()).length, 1);
+    assert.equal((await post(singleOrder)).status, 201);
+    assert.equal((await journalRows()).length, 2);
   });
 
   it("returns 404 for the retired multi-order endpoint without placing a trade", async () => {

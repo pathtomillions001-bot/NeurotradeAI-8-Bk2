@@ -615,13 +615,10 @@ async function runLoop(config: ParityForgeConfig) {
     catch { /* malformed row — this account's ledger starts fresh */ }
   }
 
-  // NO PAPER MODE. Simulated trading was removed from the product: it settled
-  // outcomes from the engine's own belief, so it could only ever confirm the
-  // engine's assumptions. With no live account this engine must HOLD, not
-  // simulate. The legacy paper branches below are unreachable.
+  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency = accounts.length > 0 ? accounts[0].currency : "USD";
-  const isLive = !!token;
+  const isLive = !paperTradeMode && !!token;
   const maxStake = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
   let botRecoveryMarkup = settings.length > 0 ? Number((settings[0] as any).botRecoveryMarkup ?? 10) : 10;
   let availableBalance = accounts.length > 0 && Number(accounts[0].balance) > 0
@@ -966,20 +963,6 @@ async function runLoop(config: ParityForgeConfig) {
         `pair-risk ${((firedRead?.pairRisk ?? 0) * 100).toFixed(0)}% · qLL ${((firedRead?.qLL ?? 0) * 100).toFixed(0)}% · ` +
         `no-ratchet bar`;
 
-      // ── NO PAPER MODE ─────────────────────────────────────────────────────
-      // Reaching here without a live account used to simulate the outcome (settled
-      // against the market's next real tick) and then record that INVENTED result into
-      // the SHARED recovery ledger via `recoveryEngine.recordOutcome` below. A
-      // simulated outcome moves the debt the real ladder is later sized from, so it
-      // is not observation — it is contamination. With no live account this engine
-      // holds: no journal row, no ledger entry, no settlement.
-      if (!isLive) {
-        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
-        broadcast();
-        await sleep(2000);
-        continue;
-      }
-
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
         symbol: activeSymbol,
@@ -991,7 +974,7 @@ async function runLoop(config: ParityForgeConfig) {
         aiConfidence: String(Math.round((firedRead?.p ?? 0) * 100)),
         aiRiskScore: "15",
         isAutonomous: true,
-        agentReasoning: `${reason}`,
+        agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${reason}`,
         duration: PARITY_FORGE_DURATION,
         durationUnit: PARITY_FORGE_DURATION_UNIT,
       }).returning();
@@ -1035,15 +1018,18 @@ async function runLoop(config: ParityForgeConfig) {
           continue;
         }
       } else {
-        // Unreachable: the `!isLive` guard above holds before any row is written.
-        // Kept as a hard stop so a future edit cannot quietly restore simulation — if
-        // this ever runs it must NOT invent an outcome, because the result would be
-        // recorded into the shared recovery ledger below.
-        logger.error({ symbol: activeSymbol }, "Reached the simulation branch with no live account — refusing to fabricate an outcome");
-        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
-        broadcast();
-        await sleep(2000);
-        continue;
+        session.watch.phase = "settling";
+        const before = tickManager.getDigits(activeSymbol, 1)[0];
+        let digit = before;
+        for (let i = 0; i < 40; i++) {
+          await sleep(120);
+          const d = tickManager.getDigits(activeSymbol, 1)[0];
+          if (d !== undefined && d !== before) { digit = d; break; }
+          digit = d;
+        }
+        const isEven = (digit ?? 0) % 2 === 0;
+        won = (fireContract.id === "even" && isEven) || (fireContract.id === "odd" && !isEven);
+        profit = won ? stake * (payout - 1) : -stake;
       }
 
       session.tradeCount++;

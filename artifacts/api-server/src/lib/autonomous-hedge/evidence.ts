@@ -32,24 +32,6 @@ export interface EvidenceRow {
   q: number;
   depUsed: boolean;
   edgeIndex: number;
-  /**
-   * Soft-thresholded z at the LONGEST available window (see
-   * `longestWindowTicks`), computed with its own out-of-sample barrier choice.
-   *
-   * This exists so the admissibility gate can require MULTI-WINDOW
-   * CORROBORATION: a deviation that survives the multiplicity threshold only at
-   * the shortest window is a transient of that window, while a genuine bias
-   * survives at every horizon. Measured motivation: every residual error the
-   * gate admitted on edge-free tapes was a 120-tick transient
-   * (`z = 4.02 -> z~ = 0.52`, window 120) while the longest window showed
-   * nothing — see docs/autonomous-recovery-improvement-plan.md section 4.1.
-   *
-   * When the selected window IS the longest one, these equal `z` / `zTilde`.
-   */
-  longestZ: number;
-  longestZTilde: number;
-  /** Length of the longest window actually available on this tape (120/500/1500). */
-  longestWindowTicks: number;
 }
 
 export interface MarketTapeInput {
@@ -458,9 +440,6 @@ export class EvidenceTracker {
       q: number;
       depUsed: boolean;
       longestWindowZ2: number;
-      longestZ: number;
-      longestZTilde: number;
-      longestWindowTicks: number;
     }
 
     const pending: PendingRow[] = [];
@@ -503,9 +482,6 @@ export class EvidenceTracker {
         let bestNEff = bestWindow;
         let bestBarrier = spec.barrier;
         let longestZ2 = 0;
-        let longestZ = 0;
-        let longestZTilde = 0;
-        let longestWindowTicks = windows[windows.length - 1]!;
 
         for (let wi = 0; wi < windows.length; wi++) {
           const nw = windows[wi]!;
@@ -539,9 +515,6 @@ export class EvidenceTracker {
 
           if (wi === windows.length - 1) {
             longestZ2 = z * z;
-            longestZ = z;
-            longestZTilde = zTilde;
-            longestWindowTicks = nw;
           }
 
           // Use the window with the largest |z~|; ties -> longest window (windows is ascending).
@@ -639,9 +612,6 @@ export class EvidenceTracker {
           q,
           depUsed,
           longestWindowZ2: longestZ2,
-          longestZ,
-          longestZTilde,
-          longestWindowTicks,
         });
       }
     }
@@ -672,9 +642,6 @@ export class EvidenceTracker {
       q: r.q,
       depUsed: r.depUsed,
       edgeIndex,
-      longestZ: r.longestZ,
-      longestZTilde: r.longestZTilde,
-      longestWindowTicks: r.longestWindowTicks,
     }));
   }
 }

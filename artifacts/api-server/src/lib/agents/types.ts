@@ -82,12 +82,7 @@ export interface TradingSettings {
   consecutiveLossLimit: number;
   maxDrawdown: number;
   requirePositiveEv: boolean;
-  /**
-   * REMOVED: `paperTradeMode`. Simulated trading is gone from the product.
-   * Outcomes drawn from the engine's own belief (`Math.random() < p`) validated
-   * the engine against its own assumptions, so every experiment run through it
-   * was circular. With no live token the engines now HOLD and say why.
-   */
+  paperTradeMode: boolean;
   normalOverDigit: number;
   normalUnderDigit: number;
   recoveryOverDigit: number;

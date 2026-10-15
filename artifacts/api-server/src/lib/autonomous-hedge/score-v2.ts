@@ -13,17 +13,7 @@
  */
 
 import { applyRecoveryStakeLimits, calculateRecoveryStakeRequest } from "../recovery-math";
-import {
-  HEDGE_GATE_CORROBORATION,
-  HEDGE_GATE_KAPPA,
-  HEDGE_GATE_KAPPA_MAX,
-  HEDGE_GATE_SCALE_KAPPA_BY_STAKE,
-  HEDGE_GROUP_NAMES,
-  hedgeGroupIndex,
-  LAMBDA_STOP,
-  LAMBDA_TAIL,
-  mulberry32,
-} from "./constants";
+import { HEDGE_GROUP_NAMES, hedgeGroupIndex, LAMBDA_STOP, LAMBDA_TAIL, mulberry32 } from "./constants";
 import type { GroupWinner, HedgeDecision } from "./contest";
 import type { EvidenceRow } from "./evidence";
 import { candidateKey, type HedgeCandidate } from "./hedge-analysis";
@@ -47,9 +37,6 @@ export interface V2LadderConfig {
   lambdaTail?: number;
   lambdaStop?: number;
   seed?: number;
-  /** Gate tuning (defaults from constants.ts). */
-  gateKappa?: number;
-  gateCorroboration?: boolean;
 }
 
 export interface V2ScoredCandidate extends HedgeCandidate {
@@ -72,14 +59,6 @@ export interface V2ScoredCandidate extends HedgeCandidate {
   payoutSource: "live" | "table";
   payoutFlag: string | null;
   tieHash: number;
-  /** EV on the shrunk estimate: pTilde * payout - 1. What the gate tests. */
-  gateEv: number;
-  /** Minimum edge the gate required for this candidate (kappa, stake-scaled). */
-  gateThreshold: number;
-  /** Why the gate refused this candidate, when it did. */
-  gateBlocker: string | null;
-  /** Did it survive the multi-window corroboration check? */
-  gateCorroborated: boolean;
 }
 
 /** Compute the v2 soft cost J(c) in units of base stakes (lower is better). */
@@ -127,85 +106,6 @@ export function deterministicTieHash(tickSequence: number, key: string): number 
   t = Math.imul(t ^ (t >>> 15), t | 1);
   t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-}
-
-/**
- * Does this candidate demonstrate an edge strong enough to be TRADED?
- *
- * Split out from `isRecoveryStakeEligible` (which answers the different question
- * "is the stake this ladder wants actually placeable?") because conflating the
- * two is precisely the defect that made v2 fire on 100% of ticks: its only test
- * was stake validity, so a perfectly calibrated −2.5% bet was always "eligible".
- *
- * Rules (see constants.ts for the calibrated thresholds):
- *   (a) zTilde > 0                 survives the multiplicity threshold
- *   (b) pTilde*P - 1 > 0           positive on the SHRUNK estimate
- *   (c) pTilde*P - 1 >= kappa      a real edge worth the exposure
- *   (d) corroboration              same-signed survival at the longest window
- *
- * Pure. Reads no clock, touches no stake.
- */
-export function gateAdmitsCandidate(input: {
-  row: Pick<EvidenceRow, "pTilde" | "zTilde" | "longestZTilde" | "window" | "longestWindowTicks">;
-  payout: number;
-  /** Stake the recovery LADDER has already decided on (read-only, for exposure scaling). */
-  ladderStake?: number | null;
-  baseStake?: number | null;
-  kappa?: number;
-  corroboration?: boolean;
-}): { admits: boolean; ev: number; threshold: number; corroborated: boolean; blocker: string | null } {
-  const { row, payout } = input;
-  const kappa = input.kappa ?? HEDGE_GATE_KAPPA;
-  const corroboration = input.corroboration ?? HEDGE_GATE_CORROBORATION;
-
-  // Exposure scaling: a recovery attempt risks more than a base stake, so the same
-  // estimated edge is worth less. Threshold scales with stake/base, capped.
-  const baseStake = Number.isFinite(input.baseStake) && (input.baseStake as number) > 0
-    ? (input.baseStake as number)
-    : null;
-  const ladderStake = Number.isFinite(input.ladderStake) && (input.ladderStake as number) > 0
-    ? (input.ladderStake as number)
-    : null;
-  const threshold =
-    HEDGE_GATE_SCALE_KAPPA_BY_STAKE && baseStake && ladderStake
-      ? Math.min(HEDGE_GATE_KAPPA_MAX, kappa * (ladderStake / baseStake))
-      : kappa;
-
-  // (a) The deviation must survive the universal threshold for the search it came from.
-  // When the selected window is already the longest available, the candidate IS
-  // the long-horizon evidence and corroboration is satisfied by construction.
-  // A row that carries no longest-window data at all cannot be corroborated; such
-  // rows are REFUSED rather than trusted (`longestWindowTicks` is always set by
-  // EvidenceTracker, so this only affects hand-built fixtures).
-  const hasLongest = typeof row.longestWindowTicks === "number" && Number.isFinite(row.longestWindowTicks);
-  const corroborated = hasLongest && (row.window >= row.longestWindowTicks || row.longestZTilde > 0);
-
-  // EV is computed BEFORE any rule runs and is returned on EVERY path, admitted or
-  // refused. Ranking sorts by this number, so an early return that reported a
-  // placeholder (0) instead of the true EV would silently mis-order candidates
-  // across the admit/refuse boundary.
-  const ev = row.pTilde * payout - 1;
-
-  if (!(row.zTilde > 0)) {
-    return { admits: false, ev, threshold, corroborated, blocker: "no evidence past the multiplicity threshold" };
-  }
-
-  // (b)/(c) Positive expectancy on the SHRUNK estimate, and large enough to matter.
-  if (!(ev > 0)) {
-    return { admits: false, ev, threshold, corroborated, blocker: `EV ${(ev * 100).toFixed(2)}% not positive on the shrunk estimate` };
-  }
-  if (ev < threshold) {
-    return { admits: false, ev, threshold, corroborated, blocker: `EV ${(ev * 100).toFixed(2)}% below the ${(threshold * 100).toFixed(2)}% minimum edge` };
-  }
-
-  // (d) Multi-window corroboration: a deviation that survives only at the shortest
-  // window is a transient of that window, not a bias. When the selected window IS
-  // the longest available one the candidate is already the strongest evidence.
-  if (corroboration && !corroborated) {
-    return { admits: false, ev, threshold, corroborated, blocker: `uncorroborated at the ${row.longestWindowTicks}-tick window` };
-  }
-
-  return { admits: true, ev, threshold, corroborated, blocker: null };
 }
 
 export function isRecoveryStakeEligible(
@@ -328,19 +228,6 @@ export function scoreV2Candidates(input: {
     }
     const breakEven = payout > 0 ? 1 / payout : 1;
     const ev = evRow.pTilde * payout - 1;
-
-    // Admissibility gate: an edge must be demonstrated before the trade is taken.
-    // Measured effect (probe-policy.ts, 19 markets x 3 seeds x 4000 ticks, ladder
-    // frozen): edge-free worlds bleed 98% less, edge-bearing worlds keep 97% of
-    // the capture with 5.4x fewer trades and 5.2x better EV per trade.
-    const gate = gateAdmitsCandidate({
-      row: evRow,
-      payout,
-      ladderStake: elig.stake,
-      baseStake: base,
-      kappa: ladder.gateKappa,
-      corroboration: ladder.gateCorroboration,
-    });
     const sigmaP = Math.sqrt((evRow.pTilde * (1 - evRow.pTilde)) / Math.max(1, evRow.nEff));
     const lowerBound = Math.max(0, evRow.pTilde - 1.282 * sigmaP);
     const losses = Math.max(0, Math.round(evRow.nEff * (1 - evRow.pTilde)));
@@ -372,7 +259,7 @@ export function scoreV2Candidates(input: {
       clustering: 1,
       instability: 0,
       score,
-      eligible: elig.eligible && gate.admits,
+      eligible: elig.eligible,
       J,
       nullJ,
       p0: evRow.p0,
@@ -392,10 +279,6 @@ export function scoreV2Candidates(input: {
       payoutSource: pInfo.source,
       payoutFlag: pInfo.flagText,
       tieHash,
-      gateEv: gate.ev,
-      gateThreshold: gate.threshold,
-      gateCorroborated: gate.corroborated,
-      gateBlocker: gate.blocker ?? elig.blocker,
     });
   }
 
@@ -403,56 +286,26 @@ export function scoreV2Candidates(input: {
 }
 
 /**
- * Rank v2 candidates. Order adopted after measuring the alternatives in
- * scripts/recovery-lab/probe-policy.ts, then corrected against the calibration
- * recorder (T1) — see the note on refused candidates below.
- *
- * 1. ADMISSIBLE FIRST (gate rules a-d). Nothing refused is ever traded, so the
- *    gate is the primary key.
- * 2. Within the admissible set, highest EV on the SHRUNK estimate. This is the
- *    only ordering whose top pick is the candidate with the most real edge;
- *    ranking by J(c) alone optimises the shape of the episode for a bet that may
- *    not be worth taking at all.
- * 3. Lower J(c) breaks EV ties, then the deterministic tick hash, then the key.
- *
- * REFUSED CANDIDATES KEEP THE ORIGINAL J-BUCKET ORDER (with its tick-hash tie
- * rotation). This is not cosmetic. The shadow ledger records the top 10 of this
- * ordering every tick to measure predictive skill (T1 asserts the null-stream
- * calibration slope stays within +-0.03). On an edge-free tape almost every
- * candidate is refused, so ordering the REFUSED set by EV would make that
- * recorder measure the counterfactual "trade the best-EV candidates anyway" —
- * and sorting a null tape by EV selects on the very noise whose outcomes are then
- * regressed against it. Measured cost of getting this wrong (null tape, 19
- * markets, 4 seeds): beta rose to +0.074 / +0.031 / +0.012 against the baseline's
- * +0.028 / +0.020 / +0.003, i.e. the recorder reported manufactured skill that
- * does not exist. Ordering refused candidates the way v1 ordered them keeps the
- * instrument comparable to its validated baseline, and the ordering that decides
- * TRADES (admissible, EV first) is unaffected.
+ * Rank v2 candidates:
+ * 1. Eligible first.
+ * 2. Lower J (with exact ties |dJ| < 0.001 grouped into 0.001 buckets from minJ).
+ * 3. Within a 0.001 J-tie, candidates with positive soft-thresholded evidence (zTilde > 0) precede zero evidence.
+ * 4. Deterministic hash of tickSequence breaks ties fairly across markets and contracts.
  */
 export function rankV2Candidates(rows: V2ScoredCandidate[]): V2ScoredCandidate[] {
   if (rows.length === 0) return [];
-  const EV_TIE = 1e-9;
   let minJ = Number.POSITIVE_INFINITY;
   for (const r of rows) {
     if (r.J < minJ) minJ = r.J;
   }
   return [...rows].sort((a, b) => {
     if (a.eligible !== b.eligible) return Number(b.eligible) - Number(a.eligible);
-    if (a.eligible) {
-      // Traded candidates: the one with the most real edge first.
-      const evA = a.gateEv;
-      const evB = b.gateEv;
-      if (Math.abs(evA - evB) > EV_TIE) return evB - evA;
-      if (Math.abs(a.J - b.J) > 1e-9) return a.J - b.J;
-    } else {
-      // Refused candidates: original v1 J-bucket ordering (bucketed from minJ).
-      const bucketA = Math.floor((a.J - minJ + 1e-12) / 0.001);
-      const bucketB = Math.floor((b.J - minJ + 1e-12) / 0.001);
-      if (bucketA !== bucketB) return bucketA - bucketB;
-      const posEvA = a.zTilde > 1e-9 ? 1 : 0;
-      const posEvB = b.zTilde > 1e-9 ? 1 : 0;
-      if (posEvA !== posEvB) return posEvB - posEvA;
-    }
+    const bucketA = Math.floor((a.J - minJ + 1e-12) / 0.001);
+    const bucketB = Math.floor((b.J - minJ + 1e-12) / 0.001);
+    if (bucketA !== bucketB) return bucketA - bucketB;
+    const posEvA = a.zTilde > 1e-9 ? 1 : 0;
+    const posEvB = b.zTilde > 1e-9 ? 1 : 0;
+    if (posEvA !== posEvB) return posEvB - posEvA;
     if (a.tieHash !== b.tieHash) return a.tieHash - b.tieHash;
     return a.key.localeCompare(b.key);
   });
@@ -491,18 +344,14 @@ export function buildV2RecoveryDecision(input: {
 
   const blockers: string[] = [];
   if (!best.eligible) {
-    // Say WHY. A refusal to trade is the engine working correctly on a tape with
-    // no demonstrable edge, and the operator must be able to see that — otherwise
-    // a quiet engine is indistinguishable from a broken one.
-    blockers.push(best.gateBlocker ?? "stake outside limits");
+    blockers.push("stake outside limits");
   } else if (!shouldFireNow) {
-    blockers.push(input.waitReason ?? "patience wait");
+    blockers.push(input.waitReason ?? `patience wait (${waitTicks}/3 ticks)`);
   }
 
-  const gateNote = `EV(p~) ${(best.gateEv * 100).toFixed(2)}% (min ${(best.gateThreshold * 100).toFixed(2)}%)`;
   const reason = eligible
-    ? `READY [v2] ${best.contract}${barrierText} on ${best.symbol} · ${gateNote} · ${metricsNote}`
-    : `HOLD [v2]: ${blockers.join(", ")} · ${gateNote} · ${metricsNote}`;
+    ? `READY [v2] ${best.contract}${barrierText} on ${best.symbol} · ${metricsNote}`
+    : `HOLD [v2]: ${blockers.join(", ")} · ${metricsNote}`;
 
   return {
     mode: "RECOVERY",

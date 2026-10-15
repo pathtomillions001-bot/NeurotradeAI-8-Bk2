@@ -56,14 +56,14 @@ import { familySpecsFor } from "./families";
 import type { AutonomousContractSets } from "./contract-sets";
 import { EvidenceTracker, type MarketTapeInput } from "./evidence";
 import { clearLadderOutcomeCache } from "./ladder-outcomes";
-import { buildV2RecoveryDecision, selectFreshV2RecoveryDecision, revalidateV2RecoveryCandidate, scoreV2Candidates, type V2LadderConfig, type V2ScoredCandidate } from "./score-v2";
+import { buildV2RecoveryDecision, scoreV2Candidates, type V2LadderConfig, type V2ScoredCandidate } from "./score-v2";
 import {
   describeExecutionTruth,
   realisedMultiplier,
   recordDispatchLatency,
   recordQuoteOutcome,
 } from "./execution-truth";
-import { TimingV2Controller } from "./timing-v2";
+import { isDecisionStale, shouldSwitchCandidateBeforeBuy, TimingV2Controller } from "./timing-v2";
 import { livePayoutFor, stopQuotePrefetchTask, syncQuotePrefetchTask } from "./quote-prefetch";
 import { defaultShadowLedger, type LatestTickObservation } from "./shadow-ledger";
 import { CalibrationGuard } from "./calibration-guard";
@@ -1120,56 +1120,71 @@ async function executeDecision(
   const sessionId = host.sessionId;
   let { stake: rawStake, payout } = await resolveStake(activeDecision, ctx, mode, risk);
 
-  // Re-rank with the SAME eligibility-first / EV-first policy as the scan.
-  // The old J-only switch threshold could keep a now-refused original and HOLD
-  // even when the fresh tournament had an admissible recovery alternative.
+  // M8 / M4 pre-dispatch freshness re-evaluation (when RECOVERY_V2_MODE === "on"):
+  // AFTER the existing awaits (context refresh, quote) and BEFORE buy, recompute J
+  // for the chosen candidate on the freshest tape; if another candidate now beats
+  // it by more than 0.02 (or >1 tick elapsed and a better candidate exists), switch once.
+  // Runs whenever RECOVERY is deciding through v2 (shadow still lets v1 decide,
+  // so re-ranking there would be meaningless).
   if (mode === "RECOVERY" && getRecoveryV2Mode() === "on") {
-    let fresh = recomputeV2CandidatesOnFreshestTapes(s, ctx, risk);
-    const freshDecision = selectFreshV2RecoveryDecision(fresh.ranked, decision.escalation);
-    let holdReason: string | null = null;
-    if (!freshDecision?.eligible) {
-      holdReason = freshDecision?.reason ?? "no fresh live recovery candidates";
-    } else {
-      const switched = freshDecision.best.key !== activeDecision.best.key;
-      activeDecision = freshDecision;
-      if (switched) {
-        const resolved = await resolveStake(activeDecision, ctx, mode, risk);
-        rawStake = resolved.stake;
-        payout = resolved.payout;
-        // The replacement quote is another await. Never dispatch using evidence
-        // from before it, and never switch recursively into an unbounded loop.
-        fresh = recomputeV2CandidatesOnFreshestTapes(s, ctx, risk);
-      }
-      const chosen = fresh.ranked.find((r) => r.key === activeDecision.best.key);
-      if (!chosen) {
-        holdReason = "selected contract no longer has a fresh live tape";
-      } else {
-        const checked = revalidateV2RecoveryCandidate(chosen, {
-          payout, stake: rawStake,
-          base: buildV2LadderConfig(ctx, recoveryEngine.getState(), risk).base,
-          balance: ctx.balance, maxTradeStake: ctx.settings.maxTradeStake,
+    const { ranked: freshRanked, tapes: freshTapes } = recomputeV2CandidatesOnFreshestTapes(s, ctx, risk);
+    if (freshRanked.length > 0) {
+      const chosenFresh = freshRanked.find((r) => r.key === activeDecision.best.key);
+      const bestFresh = freshRanked[0]!;
+      const chosenJ = chosenFresh ? chosenFresh.J : -activeDecision.best.score;
+      const stale =
+        chosenFresh !== undefined && isDecisionStale(activeDecision.best.tickSequence, chosenFresh.tickSequence);
+      const shouldSwitch =
+        bestFresh.eligible &&
+        bestFresh.key !== activeDecision.best.key &&
+        (shouldSwitchCandidateBeforeBuy(chosenJ, bestFresh.J) || (stale && bestFresh.J < chosenJ));
+      if (shouldSwitch) {
+        const switchedDecision = buildV2RecoveryDecision({
+          ranked: freshRanked,
+          escalation: activeDecision.escalation,
+          waitTicks: activeDecision.v2?.waitTicks ?? 0,
+          shouldFireNow: true,
         });
-        if (!checked.eligible) {
-          holdReason = checked.gateBlocker ?? "selected recovery entry no longer eligible";
-        } else {
-          // Rebuild the reason with the revalidated probability, EV and edge threshold.
-          activeDecision = buildV2RecoveryDecision({
-            ranked: [checked], escalation: decision.escalation, waitTicks: 0, shouldFireNow: true,
-          })!;
-          activeLastPrice = fresh.tapes.get(checked.symbol)?.prices.at(-1) ?? activeLastPrice;
-          if (switched) activeDecision.reason += ` [switched pre-buy from ${decision.best.key}]`;
+        if (switchedDecision) {
+          switchedDecision.reason = `${switchedDecision.reason} [switched pre-buy from ${activeDecision.best.symbol} ${activeDecision.best.contract} dJ=${(chosenJ - bestFresh.J).toFixed(3)}]`;
+          activeDecision = switchedDecision;
+          activeLastPrice = freshTapes.get(bestFresh.symbol)?.prices.at(-1) ?? activeLastPrice;
+          const resolved = await resolveStake(activeDecision, ctx, mode, risk);
+          rawStake = resolved.stake;
+          payout = resolved.payout;
         }
+      } else if (chosenFresh) {
+        // Keep chosen candidate on freshest probability/sequence
+        activeDecision = {
+          ...activeDecision,
+          best: chosenFresh,
+        };
+        activeLastPrice = freshTapes.get(chosenFresh.symbol)?.prices.at(-1) ?? activeLastPrice;
       }
     }
-    if (holdReason) {
+  }
+
+  // Pre-dispatch STALENESS REFUSAL (recovery, v2 deciding).
+  //
+  // The decision was formed before the awaits above (context refresh, payout
+  // quote). One tick later the evidence it was based on may no longer clear the
+  // gate. Sending the order anyway would be trading a signal the engine no longer
+  // believes — the exact failure mode that turned a 120-tick transient into a
+  // filled contract. Refuse, and let the next fresh tick re-decide.
+  if (mode === "RECOVERY" && getRecoveryV2Mode() === "on") {
+    const staleBest = activeDecision.best as V2ScoredCandidate;
+    if (typeof staleBest.gateEv === "number" && !activeDecision.best.eligible) {
       host.publish({ nextScanIn: null });
-      logger.info({ reason: holdReason }, "Autonomous 1-tick: recovery revalidation HOLD");
+      logger.info(
+        { symbol: activeDecision.best.symbol, blocker: staleBest.gateBlocker },
+        "Autonomous 1-tick: recovery decision no longer clears the gate — holding",
+      );
       emitHoldScan(host, s, {
-        reason: `RECOVERY HOLD · ${holdReason} — re-deciding on the next tick`,
+        reason: `RECOVERY HOLD · the entry no longer clears the admissibility gate (${staleBest.gateBlocker ?? "no edge"}) — re-deciding on the next tick`,
         mode: "RECOVERY",
         lossRun: runWithSession(sessionId, () => recoveryEngine.getState().streakLossCount),
         consecutiveLossLimit: ctx.consecutiveLossLimit,
-        marketsScanned: fresh.tapes.size,
+        marketsScanned: 0,
       });
       return;
     }

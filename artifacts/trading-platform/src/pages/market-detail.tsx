@@ -484,6 +484,7 @@ export default function MarketDetail() {
   const { data: market, isLoading, refetch } = useGetMarketDetail(symbol || "", { query: { refetchInterval: 8000, enabled: !!symbol } } as { query: any });
   const { data: rec, refetch: refetchRec } = useGetAiRecommendationForMarket(symbol || "", { query: { refetchInterval: 3000, enabled: !!symbol } } as { query: any });
   const { data: engineStatus } = useGetAiEngineStatus({ query: { refetchInterval: 5000 } } as { query: any });
+  const isPaperMode = (engineStatus as any)?.paperTradeMode ?? false;
   const executeTrade = useExecuteTrade({ mutation: { retry: false } });
 
   // ── SSE: live ticks + live market analysis ───────────────────────────────────
@@ -1090,6 +1091,12 @@ export default function MarketDetail() {
             </DialogTitle>
             <DialogDescription>One confirmation places one trade at the stake below.</DialogDescription>
           </DialogHeader>
+          {isPaperMode && (
+            <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-400 text-xs font-medium">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+              <span><span className="font-bold">PAPER TRADE MODE</span> — trades are simulated, not sent to Deriv. Turn off in Settings to trade live.</span>
+            </div>
+          )}
           <div className="space-y-4 py-2">
             {/* Market + Counter Row */}
             <div className="p-3 bg-secondary/30 rounded-lg flex justify-between items-start gap-3">

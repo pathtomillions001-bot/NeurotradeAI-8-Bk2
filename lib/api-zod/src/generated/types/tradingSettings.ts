@@ -41,6 +41,8 @@ export interface TradingSettings {
   /** Trade contract duration in ticks */
   tradeDurationSec: number;
   maxTradeStake: number;
+  /** Log trades without sending live orders to Deriv */
+  paperTradeMode?: boolean;
   /** Only execute when expected value is positive */
   requirePositiveEv?: boolean;
   /** Minutes to wait before auto-resuming after consecutive loss stop */

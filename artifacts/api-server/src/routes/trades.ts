@@ -49,6 +49,7 @@ function buildTradingSettingsForManual(s: any, preferredContractTypes: string[])
     consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
+    paperTradeMode:         s?.paperTradeMode ?? false,
     normalOverDigit:        s?.normalOverDigit ?? 2,
     normalUnderDigit:       s?.normalUnderDigit ?? 7,
     recoveryOverDigit:      s?.recoveryOverDigit ?? 4,
@@ -322,6 +323,7 @@ router.post("/", async (req, res): Promise<void> => {
     .where(eq(settingsTable.sessionId, req.sessionId)).limit(1);
   const balance = account ? Number(account.balance) : DEMO_BALANCE;
   const maxRisk = settings.length > 0 ? Number(settings[0].maxRiskPerTrade) : 2;
+  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
 
   if (stake > balance * (maxRisk / 100) * 5) {
     res.status(400).json({ error: `Stake ${stake.toFixed(2)} exceeds risk limit. Max: ${(balance * maxRisk / 100 * 5).toFixed(2)}` });
@@ -342,7 +344,7 @@ router.post("/", async (req, res): Promise<void> => {
 
   const token = account?.bearerToken ?? account?.token ?? null;
   const currency = account?.currency ?? "USD";
-  const isLiveTrade = !!token;
+  const isLiveTrade = !paperTradeMode && !!token;
 
   // ── Run coordinator for rich AI context ──────────────────────────────────
   const preferredContractTypes = [contractType];
@@ -418,7 +420,7 @@ router.post("/", async (req, res): Promise<void> => {
 
   logger.info({
     symbol, contractType, stake, barrier, duration: tradeDuration,
-    isLiveTrade, token: token ? "present" : "absent",
+    isLiveTrade, paperTradeMode, token: token ? "present" : "absent",
   }, "Manual trade request");
 
   let won: boolean, profit: number, entryPrice: number, exitPrice: number;
@@ -555,25 +557,85 @@ router.post("/", async (req, res): Promise<void> => {
     return;
   }
 
-  // ── NO PAPER MODE ───────────────────────────────────────────────────────────
-  //
-  // This block used to simulate a manual trade with `Math.random() < winProb` and
-  // then move the account balance by the invented result. That is fabricated P&L:
-  // the outcome comes from the engine's own probability, not from Deriv, so a
-  // systematic over-confidence shows up as a profitable paper account.
-  //
-  // Without a live connection a manual trade cannot be placed, so it is refused
-  // with a reason instead of being invented. Nothing enters the journal and the
-  // balance is never touched.
-  res.status(409).json({
-    error:
-      "No live Deriv account is connected, so this trade cannot be placed. " +
-      "Paper/demo simulation has been removed — connect an account in Settings to trade.",
-    code: "NO_LIVE_ACCOUNT",
-  });
-  return;
-});
+  // ── Paper / demo trade simulation ─────────────────────────────────────────
+  const winProb = winProbability / 100;
+  won = Math.random() < winProb;
+  profit = won ? payout - stake : -stake;
 
+  entryPrice = prices[prices.length - 1] ?? 100;
+  exitPrice = won
+    ? direction === "up" ? entryPrice * 1.001 : entryPrice * 0.999
+    : direction === "up" ? entryPrice * 0.999 : entryPrice * 1.001;
+
+  recordTradeOutcome(symbol, contractType, barrier ?? null, won, profit, stake);
+
+  // Update recovery engine for paper/demo manual trades too (global state)
+  {
+    const maxSteps = settings.length > 0 ? (settings[0] as any).maxRecoverySteps ?? 3 : 3;
+    recoveryEngine.setPersistenceSession(req.sessionId);
+    if (recoveryEngine.isTrackedContract(contractType)) recoveryEngine.recordOutcome(won, profit, stake, maxSteps, contractType, payoutMultiplier);
+  }
+
+  const [trade] = await db.insert(tradesTable).values({
+    sessionId: req.sessionId,
+    symbol,
+    displayName,
+    contractType,
+    barrier: barrier ?? null,
+    stake: String(stake),
+    direction,
+    status: won ? "won" : "lost",
+    payout: String(payout),
+    profit: String(profit),
+    entryPrice: String(entryPrice),
+    exitPrice: String(exitPrice),
+    aiConfidence: String(winProbability),
+    aiRiskScore: String((analysis as any).riskScore ?? 50),
+    isAutonomous: isAutonomous ?? false,
+    agentReasoning: `[${token ? "PAPER" : "DEMO"}] ${(analysis as any).reasoning ?? "Manual trade"}`,
+    duration: tradeDuration,
+    durationUnit: durationUnit ?? "t",
+    closedAt: new Date(),
+  }).returning();
+
+  // Update simulated balance for paper/demo trades
+  try {
+    if (accounts.length > 0) {
+      const newBalance = Math.max(0, balance + profit);
+      await db.update(accountsTable)
+        .set({ balance: String(newBalance.toFixed(2)), updatedAt: new Date() })
+        .where(eq(accountsTable.id, accounts[0].id));
+    }
+  } catch { /* ignore */ }
+
+  broadcastSSE("trade_completed", {
+    trade: {
+      id: trade.id, symbol, displayName, contractType: normalizeDerivContractType(contractType),
+      barrier: barrier ?? null, stake, payout: Number(payout.toFixed(2)),
+      profit: Math.round(profit * 100) / 100, won,
+      status: won ? "won" : "lost", duration: tradeDuration,
+      durationUnit: durationUnit ?? "t",
+      createdAt: new Date().toISOString(), closedAt: new Date().toISOString(),
+      aiConfidence: winProbability, isAutonomous: isAutonomous ?? false, source: "paper",
+    }
+  }, req.sessionId);
+
+  // Fire-and-forget: Trade Intelligence analysis — stores why this trade won/lost in DB
+  if (savedCoordinatorOutput) {
+    analyzeCompletedTrade({
+      tradeId:      trade.id,
+      symbol,
+      contractType,
+      barrier:      barrier ?? null,
+      stake,
+      won,
+      profit,
+      output:       savedCoordinatorOutput,
+    }).catch(() => {});
+  }
+
+  res.status(201).json(formatTrade(trade));
+});
 
 // ── Shared: compute the core stat shape from a trade list ───────────────────────
 // NOTE: trades should be sorted newest-first (Deriv profit_table default: sort:"DESC")

@@ -1,4 +1,4 @@
-import { describe, it, before, mock } from "node:test";
+import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { db, schemaReady, tradesTable } from "@workspace/db";
@@ -18,9 +18,6 @@ import {
 } from "./cycle";
 import { AUTONOMOUS_HEDGE_PREFIX } from "./constants";
 import { runWithSession } from "../session";
-import { tickManager } from "../deriv";
-import { DigitTape } from "../digit-tape";
-import * as recoveryEngine from "../agents/recovery-engine";
 
 before(async () => {
   await schemaReady;
@@ -38,13 +35,14 @@ function context(): HedgeContext {
       riskAmountType: "fixed", riskAmountValue: 1, maxRiskPerTrade: 2, minConfidenceThreshold: 38,
       riskProfile: "moderate", preferredContractTypes: ["CALL", "PUT"], tradeDurationSec: 5,
       maxTradeStake: 500, dailyLossLimit: 30, dailyTarget: 50, consecutiveLossLimit: 3,
-      maxDrawdown: 20, requirePositiveEv: true, normalOverDigit: 2,
+      maxDrawdown: 20, requirePositiveEv: true, paperTradeMode: true, normalOverDigit: 2,
       normalUnderDigit: 7, recoveryOverDigit: 4, recoveryUnderDigit: 5, recoveryMethod: "split",
       recoveryMultiplier: 1.5, recoveryAutoMode: true, maxRecoverySteps: 3,
     },
     consecutiveLossLimit: 3,
     cooldownMinutes: 30,
     allowedMarketSymbols: ["R_100"],
+    paperTradeMode: true,
     daily: { ...DAILY },
   };
 }
@@ -114,7 +112,7 @@ describe("autonomous 1-tick cycle (tick-driven, coalesced)", () => {
 
   it("never goes silent without a usable feed: HOLD scan_complete names the feed cause", async () => {
     const sessionId = randomUUID();
-    const { host, emitted, published } = fakeHost(sessionId);
+    const { host, emitted } = fakeHost(sessionId);
     runWithSession(sessionId, () => requestHedgeCycle(host));
     await settle(() => emitted.some((e) => e.event === "scan_complete"), 5000);
     // The scanning pulse the dashboard's tournament view runs on.
@@ -294,81 +292,5 @@ describe("describeFeedHold", () => {
       describeFeedHold({ ...emptyFeedDiagnosis(19), fresh: 5, live: 5, noSpecs: 5 }, true),
       /no tradeable contracts/,
     );
-  });
-});
-
-// ── G9: paper mode is gone, and cannot come back ──────────────────────────────
-describe("G9 — no simulated trade without a live account", () => {
-  it("a full cycle with a usable live feed but no connected account journals nothing", async () => {
-    const sessionId = randomUUID();
-    const { host, emitted, published } = fakeHost(sessionId);
-
-    // A real, usable LIVE feed: the tape checks pass, so the cycle runs all the way
-    // to the money path. This is what makes the assertion meaningful — the engine
-    // is not stopped early by a missing-feed HOLD.
-    const tape = new DigitTape();
-    for (let i = 0; i < 1600; i++) {
-      tape.push({
-        symbol: "R_100",
-        digit: i % 10,
-        price: 1000 + (i % 7) * 0.01,
-        source: "live",
-        epoch: 1_700_000_000 + i * 2,
-        receivedAt: Date.now(),
-      });
-    }
-    mock.method(tickManager, "getDigitSnapshot", (symbol: string, count?: number) =>
-      tape.snapshot(symbol, count),
-    );
-
-    try {
-      const ledgerBefore = runWithSession(sessionId, () => JSON.stringify(recoveryEngine.getState()));
-
-      runWithSession(sessionId, () => requestHedgeCycle(host));
-      await settle(() => emitted.some((e) => e.event === "scan_complete"), 5000);
-
-      const rows = await db.select().from(tradesTable).where(eq(tradesTable.sessionId, sessionId));
-      assert.equal(
-        rows.length,
-        0,
-        "a cycle without a connected account must not create ANY trade row — the row used " +
-          "to be the paper trade, settled from the engine's own belief or the next real tick",
-      );
-
-      const ledgerAfter = runWithSession(sessionId, () => JSON.stringify(recoveryEngine.getState()));
-      assert.equal(
-        ledgerAfter,
-        ledgerBefore,
-        "the shared recovery ledger must not move: a simulated outcome would corrupt the " +
-          "debt the real ladder is later sized from",
-      );
-
-      // And it must say why it is waiting rather than going silent.
-      const holds = emitted.filter((e) => e.event === "scan_complete");
-      assert.ok(holds.length >= 1, "the cycle still reports a HOLD");
-      assert.equal(
-        emitted.some((e) => e.event === "trade_started" || e.event === "trade_completed"),
-        false,
-        "no trade events may be emitted without a live account",
-      );
-
-      // This deterministic tape is genuinely structured, so the analysis often DOES
-      // say "should trade" — which is exactly the case that used to become a paper
-      // trade. When it does, the no-live-account HOLD must be the thing that stops
-      // it, and the loop must be parked rather than re-fired.
-      const decisionWasEligible = holds.some((hold) => hold.data["shouldTrade"] === true);
-      if (decisionWasEligible) {
-        assert.ok(
-          holds.some((hold) => /no live Deriv connection/i.test(String(hold.data["rejectReason"]))),
-          "an eligible decision with no connected account must publish the no-live-account HOLD",
-        );
-        assert.ok(
-          published.some((patch) => patch.nextScanIn === null),
-          "the engine parks the scan instead of re-firing into a wall",
-        );
-      }
-    } finally {
-      mock.restoreAll();
-    }
   });
 });

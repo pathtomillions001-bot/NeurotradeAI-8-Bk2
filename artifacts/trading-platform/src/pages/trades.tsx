@@ -81,7 +81,7 @@ function contractBadgeClass(contractType: string): string {
 async function fetchDerivJournal() {
   const res = await fetch("/api/trades/deriv-journal");
   if (!res.ok) throw new Error("Failed to fetch journal");
-  return res.json() as Promise<{ source: "deriv" | "local"; trades: JournalTrade[]; stats: JournalStats }>;
+  return res.json() as Promise<{ source: "deriv" | "local" | "paper"; trades: JournalTrade[]; stats: JournalStats }>;
 }
 
 export default function Trades() {
@@ -336,9 +336,10 @@ export default function Trades() {
                       <div className="col-span-1">
                         <Badge variant="outline" className={`text-[9px] px-1 py-0 ${
                           trade.source === "live" ? "border-green-500/30 text-green-400"
+                          : trade.source === "paper" ? "border-amber-500/30 text-amber-400"
                           : "border-border text-muted-foreground"
                         }`}>
-                          {trade.source === "live" ? "LIVE" : "—"}
+                          {trade.source === "live" ? "LIVE" : trade.source === "paper" ? "PAPER" : "—"}
                         </Badge>
                       </div>
 

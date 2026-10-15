@@ -86,7 +86,7 @@ export type RecoveryV2Mode = "off" | "shadow" | "on";
  * - "shadow": v1 decides and trades; v2 is computed alongside and logged.
  * - "on":     v2 decides and executes through the same executeDecision / ladder path.
  */
-export const RECOVERY_V2_MODE: RecoveryV2Mode = "on";
+export const RECOVERY_V2_MODE: RecoveryV2Mode = "shadow";
 
 let recoveryV2ModeOverride: RecoveryV2Mode | null = null;
 
@@ -100,77 +100,6 @@ export function getRecoveryV2Mode(): RecoveryV2Mode {
   if (envMode === "off" || envMode === "shadow" || envMode === "on") return envMode;
   return RECOVERY_V2_MODE;
 }
-
-// ── Admissibility gate (Recovery Quality Pipeline v3) ─────────────────────────
-//
-// THE PROBLEM THIS SOLVES (measured, docs/autonomous-recovery-audit.md section 3):
-// v2's estimator is superbly calibrated (|pred - real| = 0.15pp) but its only
-// eligibility test was "is the stake valid", so it fired on 100% of ticks and
-// destroyed 1.7x more capital than v1 in the NULL world. Calibrating a belief is
-// not the same as declining to bet on it.
-//
-// The gate admits a candidate only when ALL of the following hold:
-//
-//   (a) zTilde > 0                  the deviation survives the multiplicity
-//                                   threshold lambda = sqrt(2 ln M_eff), i.e. the
-//                                   search it came from has been paid for;
-//   (b) pTilde * payout - 1 > 0     positive expectancy on the SHRUNK estimate,
-//                                   not on the raw in-sample proportion;
-//   (c) pTilde * payout - 1 >= kappa        a minimum real edge worth the exposure
-//                                   (default 0.005 = 0.5%);
-//   (d) multi-window corroboration  when enabled, the deviation must also survive
-//                                   the threshold at the LONGEST available window.
-//
-// This changes ELIGIBILITY only. It never computes, scales or caps a stake:
-// `computeDynamicStake` receives the win probability as the unused parameter
-// `_blendedWinP`, so no change here can move a stake. Pinned by
-// recovery-staking-invariant.test.ts and recovery-v2.test.ts.
-
-/**
- * Minimum real edge, as a fraction of stake, a recovery entry must demonstrate on
- * the shrunk estimate before it may be traded (gate rule c).
- *
- * Calibrated in scripts/recovery-lab/probe-policy.ts (case 1: layout pinned):
- *   kappa   NULL capital   PLANTED capital   PLANTED realEV
- *   0.002        -12.7            +169.8            7.05%
- *   0.005         -4.3            +147.3            6.88%   <-- shipped default
- *   0.010         -3.3            +121.7            7.57%
- *   0.020         -3.3             +19.0            3.38%
- * 0.005 removes 98% of the edge-free bleed while keeping 97% of the edge
- * capture; 0.02 starts eating the capture. 0.01 is the conservative fallback.
- */
-export const HEDGE_GATE_KAPPA = 0.005;
-
-/**
- * Recovery exposure scaling of `kappa`.
- *
- * A recovery attempt stakes more than a base stake, so the same estimated edge
- * represents a larger absolute risk. The required edge therefore scales with the
- * stake the RECOVERY LADDER has already decided on. This is an eligibility
- * threshold only — the ladder's number is read, never written.
- *
- * Enabled only when a ladder stake is supplied. With no stake the plain `kappa`
- * applies.
- */
-export const HEDGE_GATE_SCALE_KAPPA_BY_STAKE = true;
-
-/** Hard ceiling on the stake-scaled threshold, so a deep ladder cannot lock the engine out entirely. */
-export const HEDGE_GATE_KAPPA_MAX = 0.03;
-
-/**
- * Multi-window corroboration (gate rule d).
- *
- * When true, a candidate whose selected window is NOT the longest available one
- * must additionally show a same-signed deviation at the longest window that
- * survives its own threshold. A genuine bias survives every horizon; a 120-tick
- * transient does not.
- *
- * Default is decided by measurement, not by preference — see
- * docs/autonomous-recovery-improvement-plan.md section 4.1 and the
- * HEDGE_GATE_CORROBORATION evidence table.
- */
-export const HEDGE_GATE_CORROBORATION = true;
-
 
 /** Multi-horizon windows evaluated by M1 (ticks). */
 export const HEDGE_V2_WINDOWS = [120, 500, 1500] as const;

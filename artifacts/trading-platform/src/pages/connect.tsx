@@ -516,7 +516,7 @@ export default function Connect() {
           <CardContent className="text-sm text-muted-foreground space-y-2">
             <p>• Live trading is paused until you re-link a Deriv account</p>
             <p>• Your trade history and settings are fully preserved</p>
-            <p>• The AI engine holds — it never simulates trades without a live account</p>
+            <p>• The AI engine continues scanning markets in paper trade mode</p>
             <p>• You can re-link your Deriv account at any time</p>
           </CardContent>
         </Card>

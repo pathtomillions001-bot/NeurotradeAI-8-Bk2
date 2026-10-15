@@ -228,6 +228,7 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
+    paperTradeMode:         s?.paperTradeMode ?? false,
     // Clamp digit barriers to valid Deriv ranges.
     // OVER 0–8 are valid (OVER 9 is impossible — no digit > 9 exists).
     // UNDER 1–9 are valid (UNDER 0 is impossible — no digit < 0 exists).
@@ -529,7 +530,7 @@ function hedgeHostFor(engine: EngineInstance): HedgeHost {
     },
     loadContext: () => loadHedgeContext(engine),
     afterSettlement: (ctx: HedgeContext) => {
-      if (!ctx.token || !ctx.derivAccountId) return;
+      if (ctx.paperTradeMode || !ctx.token || !ctx.derivAccountId) return;
       getJournalManager(engine.sessionId).forceRefresh();
       void syncLiveBalance(engine.sessionId, ctx.token, ctx.derivAccountId);
     },
@@ -604,6 +605,7 @@ async function loadHedgeContext(engine: EngineInstance): Promise<HedgeContext> {
     cooldownMinutes: settings?.cooldownMinutes ?? 30,
     cooldownEnabled: (settings as any)?.cooldownEnabled ?? true,
     allowedMarketSymbols,
+    paperTradeMode: tradingSettings.paperTradeMode,
     daily,
     contractSets,
   };
@@ -857,6 +859,7 @@ router.get("/engine/status", async (req, res): Promise<void> => {
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
+    paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: engine.cooldownUntil?.toISOString() ?? null,
     sessionLossCount: engine.sessionLossCount,
@@ -923,6 +926,7 @@ router.post("/engine/toggle", async (req, res): Promise<void> => {
     wsConnected: tickManager.getConnectionStatus(),
     liveTickCount: tickManager.getLiveTickCount(),
     tickHealth: tickManager.getTickHealth(),
+    paperTradeMode: settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false,
     requirePositiveEv: settings.length > 0 ? (settings[0] as any).requirePositiveEv ?? true : true,
     cooldownUntil: engine.cooldownUntil?.toISOString() ?? null,
     sessionLossCount: engine.sessionLossCount,

@@ -770,14 +770,10 @@ async function runLoop(config: BotConfig) {
     try { recoveryEngine.hydrateStateIfNeeded(persistedRecovery); }
     catch { /* malformed row — this account's ledger starts fresh */ }
   }
-  // NO PAPER MODE. Simulated trading was removed from the product: it settled
-  // outcomes from the engine's own belief, so it could only ever confirm the
-  // engine's assumptions. With no live account this engine must HOLD, not
-  // simulate — enforced by the `!isLive` guard at the top of the trade loop
-  // (and a second hard stop where the simulation used to run).
+  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
-  const isLive         = !!token;
+  const isLive         = !paperTradeMode && !!token;
   const maxStake       = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
   // Profit markup (%) on debt used ONLY by this bot's recovery stake sizing.
   // User-adjustable from the AI Bot deploy console only (it is deliberately
@@ -1101,21 +1097,6 @@ async function runLoop(config: BotConfig) {
         : `⚡ ${botName} trading ${best.contractType}${best.barrier !== undefined ? ` ${best.barrier}` : ""} on ${best.displayName}`;
       broadcast();
 
-      // ── NO PAPER MODE ───────────────────────────────────────────────────────
-      // Reaching here without a live account used to simulate the outcome
-      // (`won = Math.random() < best.winProbability`) and then feed that INVENTED
-      // result into the SHARED recovery ledger via `recordOutcome` below. A
-      // simulated outcome is drawn from this engine's own belief, so it can only
-      // ever confirm that belief — and it corrupts the debt that the real ladder
-      // will later be sized from. With no live account this engine holds: no
-      // journal row, no ledger entry, no settlement.
-      if (!isLive) {
-        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
-        broadcast();
-        await sleep(2000);
-        continue;
-      }
-
       // ── Journal the trade up front (same as the FAB) ───────────────────────
       const botReason = `${inRecovery ? `[${botName} RECOVERY] Sniper` : `[${botName}]`} ${best.reason}`;
       const botDirection = best.contractType === "CALL" ? "up" : best.contractType === "PUT" ? "down" : "hold";
@@ -1131,7 +1112,7 @@ async function runLoop(config: BotConfig) {
         aiConfidence: String(Math.round(best.winProbability * 100)),
         aiRiskScore:  "60",
         isAutonomous: true,
-        agentReasoning: `${botReason}`,
+        agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${botReason}`,
         duration:     1,
         durationUnit: "t",
       }).returning();
@@ -1189,18 +1170,8 @@ async function runLoop(config: BotConfig) {
           continue;
         }
       } else {
-        // Unreachable: the `!isLive` guard above holds before any row is written.
-        // Kept as a hard stop so a future edit cannot quietly restore simulation —
-        // if this ever runs, it must NOT invent a win/loss, because that outcome
-        // would be recorded into the shared recovery ledger below.
-        logger.error(
-          { botId: config.botId, symbol: best.symbol },
-          "Specialist bot reached the simulation branch with no live account — refusing to fabricate an outcome",
-        );
-        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
-        broadcast();
-        await sleep(2000);
-        continue;
+        won    = Math.random() < best.winProbability;
+        profit = won ? stake * (best.payout - 1) : -stake;
       }
 
       // ── Record outcome & settle the SHARED recovery ledger ─────────────────

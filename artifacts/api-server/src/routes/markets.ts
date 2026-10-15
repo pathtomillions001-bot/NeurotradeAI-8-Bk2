@@ -73,6 +73,7 @@ function buildTradingSettings(s: any, preferredContractTypes: string[]): Trading
     consecutiveLossLimit:   s?.consecutiveLossLimit ?? 3,
     maxDrawdown:            s ? Number(s.maxDrawdown ?? 20) : 20,
     requirePositiveEv:      s?.requirePositiveEv ?? true,
+    paperTradeMode:         s?.paperTradeMode ?? false,
     normalOverDigit:        s?.normalOverDigit ?? 2,
     normalUnderDigit:       s?.normalUnderDigit ?? 7,
     recoveryOverDigit:      s?.recoveryOverDigit ?? 4,

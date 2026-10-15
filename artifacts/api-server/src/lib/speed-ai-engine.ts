@@ -1631,10 +1631,10 @@ async function runLoop(config: SpeedAIConfig) {
     try { recoveryEngine.hydrateStateIfNeeded(persistedRecovery); }
     catch { /* malformed row — this account's ledger starts fresh */ }
   }
-  // NO PAPER MODE — see the note in apex-engine.ts.
+  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
   const token = accounts.length > 0 ? (accounts[0].bearerToken ?? accounts[0].token ?? null) : null;
   const currency       = accounts.length > 0 ? accounts[0].currency : "USD";
-  const isLive         = !!token;
+  const isLive         = !paperTradeMode && !!token;
   const maxStake       = settings.length > 0 ? Number(settings[0].maxTradeStake) : 500;
   let availableBalance = accounts.length > 0 && Number(accounts[0].balance) > 0
     ? Number(accounts[0].balance)
@@ -1954,20 +1954,6 @@ async function runLoop(config: SpeedAIConfig) {
     const fabReason = `${inRecovery ? "[NEUROAI FAB RECOVERY] Sniper" : "[NEUROAI FAB]"} ${best.reason}`;
     const fabDirection = best.contractType === "CALL" ? "up" : best.contractType === "PUT" ? "down" : "hold";
     const actualPayoutForWin = stake * best.payout;
-    // ── NO PAPER MODE ───────────────────────────────────────────────────────
-    // Reaching here without a live account used to simulate the outcome and feed
-    // that INVENTED result into the SHARED recovery ledger via `recordOutcome`.
-    // A simulated outcome is drawn from this engine's own belief, so it can only
-    // confirm that belief — and it corrupts the debt the real ladder is sized
-    // from. With no live account this engine holds: no journal row, no ledger
-    // entry, no settlement.
-    if (!isLive) {
-      session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
-      broadcast();
-      await sleep(2000);
-      continue;
-    }
-
     const [fabTrade] = await db.insert(tradesTable).values({
       sessionId:    ownerSessionId,
       symbol:       best.symbol,
@@ -1980,7 +1966,7 @@ async function runLoop(config: SpeedAIConfig) {
       aiConfidence: String(Math.round(best.winProbability * 100)),
       aiRiskScore:  "60",
       isAutonomous: true,
-      agentReasoning: `${fabReason}`,
+      agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${fabReason}`,
       duration:     1,
       durationUnit: "t",
     }).returning();
@@ -2045,19 +2031,8 @@ async function runLoop(config: SpeedAIConfig) {
         continue;
       }
     } else {
-      // ── NO PAPER MODE ─────────────────────────────────────────────────────
-      // Unreachable: the `!isLive` guard above holds before any row is written.
-      // Kept as a hard stop so a future edit cannot quietly restore simulation —
-      // if this ever runs, it must NOT invent a win/loss, because that outcome
-      // would be recorded into the shared recovery ledger below.
-      logger.error(
-        { symbol: best.symbol },
-        "NeuroAI reached the simulation branch with no live account — refusing to fabricate an outcome",
-      );
-      session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
-      broadcast();
-      await sleep(2000);
-      continue;
+      won    = Math.random() < best.winProbability;
+      profit = won ? stake * (best.payout - 1) : -stake;
     }
 
     const execLatencyMs = Date.now() - execStart;

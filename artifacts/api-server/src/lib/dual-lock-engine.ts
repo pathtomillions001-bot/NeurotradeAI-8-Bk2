@@ -511,10 +511,13 @@ async function runLoop(config: DualLockConfig) {
     catch { /* malformed row — this account's ledger starts fresh */ }
   }
 
-  const paperTradeMode = settings.length > 0 ? (settings[0] as any).paperTradeMode ?? false : false;
+  // NO PAPER MODE. Simulated trading was removed from the product: it settled
+  // outcomes from the engine's own belief, so it could only ever confirm the
+  // engine's assumptions. With no live account this engine must HOLD, not
+  // simulate. The legacy paper branches below are unreachable.
   const token = accounts.length > 0 ? (accounts[0]!.bearerToken ?? accounts[0]!.token ?? null) : null;
   const currency = accounts.length > 0 ? accounts[0]!.currency : "USD";
-  const isLive = !paperTradeMode && !!token;
+  const isLive = !!token;
   const maxStake = settings.length > 0 ? Number(settings[0]!.maxTradeStake) : 500;
   let botRecoveryMarkup = settings.length > 0 ? Number((settings[0] as any).botRecoveryMarkup ?? 10) : 10;
   let availableBalance = accounts.length > 0 && Number(accounts[0]!.balance) > 0
@@ -612,6 +615,20 @@ async function runLoop(config: DualLockConfig) {
       // ── Journal ────────────────────────────────────────────────────────────
       const reason = `[${BOT_NAME}${inRecovery ? " RECOVERY" : ""}] locked ${contractLabel(contract)} · ` +
         `survival ${(((config.lockedAnalysis?.survival ?? 0)) * 100).toFixed(0)}% · ξ ${(config.lockedAnalysis?.clusterRatio ?? 1).toFixed(2)}`;
+      // ── NO PAPER MODE ─────────────────────────────────────────────────────
+      // Reaching here without a live account used to simulate the outcome (settled
+      // against the market's next real tick) and then record that INVENTED result into
+      // the SHARED recovery ledger via `recoveryEngine.recordOutcome` below. A
+      // simulated outcome moves the debt the real ladder is later sized from, so it
+      // is not observation — it is contamination. With no live account this engine
+      // holds: no journal row, no ledger entry, no settlement.
+      if (!isLive) {
+        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+        broadcast();
+        await sleep(2000);
+        continue;
+      }
+
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
         symbol: config.symbol,
@@ -626,7 +643,7 @@ async function runLoop(config: DualLockConfig) {
           : (config.lockedAnalysis?.normalLcb ?? 0.7)) * 100)),
         aiRiskScore: "55",
         isAutonomous: true,
-        agentReasoning: `${paperTradeMode ? "[PAPER] " : ""}${reason}`,
+        agentReasoning: `${reason}`,
         duration: 1,
         durationUnit: "t",
       }).returning();
@@ -671,20 +688,15 @@ async function runLoop(config: DualLockConfig) {
           continue;
         }
       } else {
-        // Paper mode: settle against the market's REAL next digit, not a
-        // synthetic coin flip — this bot's whole thesis is the digit stream, so
-        // paper results must be driven by it.
-        const before = tickManager.getDigits(config.symbol, 1)[0];
-        let digit = before;
-        for (let i = 0; i < 30; i++) {
-          await sleep(120);
-          const d = tickManager.getDigits(config.symbol, 1)[0];
-          if (d !== undefined && d !== before) { digit = d; break; }
-          digit = d;
-        }
-        const d = digit ?? 0;
-        won = contract.side === "DIGITOVER" ? d > contract.barrier : d < contract.barrier;
-        profit = won ? stake * (payout - 1) : -stake;
+        // Unreachable: the `!isLive` guard above holds before any row is written.
+        // Kept as a hard stop so a future edit cannot quietly restore simulation — if
+        // this ever runs it must NOT invent an outcome, because the result would be
+        // recorded into the shared recovery ledger below.
+        logger.error({ symbol: config.symbol }, "Reached the simulation branch with no live account — refusing to fabricate an outcome");
+        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+        broadcast();
+        await sleep(2000);
+        continue;
       }
 
       // ── Bookkeeping ────────────────────────────────────────────────────────

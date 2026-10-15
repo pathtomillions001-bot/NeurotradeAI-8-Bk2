@@ -374,7 +374,6 @@ export default function Dashboard() {
             <div className={`w-1.5 h-1.5 shrink-0 rounded-full ${engine?.isRunning ? "bg-green-500 animate-pulse" : cooldownSecs ? "bg-amber-500 animate-pulse" : "bg-zinc-600"}`} />
             <p className="text-muted-foreground font-mono text-xs truncate">
               {engine?.isRunning ? "ENGINE ONLINE" : cooldownSecs ? "COOLDOWN" : "ENGINE STANDBY"} &bull; {engine?.mode?.toUpperCase() ?? "MANUAL"} MODE
-              {(engine as any)?.paperTradeMode && " · PAPER"}
               {(engine as any)?.tickHealth?.usingSimulated && " · SIM DATA"}
               {/* The removed status strip carried the stop reason; it lives here now
                   so a paused engine still says WHY, without a second bar. The

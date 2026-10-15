@@ -1954,6 +1954,20 @@ async function runLoop(config: SpeedAIConfig) {
     const fabReason = `${inRecovery ? "[NEUROAI FAB RECOVERY] Sniper" : "[NEUROAI FAB]"} ${best.reason}`;
     const fabDirection = best.contractType === "CALL" ? "up" : best.contractType === "PUT" ? "down" : "hold";
     const actualPayoutForWin = stake * best.payout;
+    // ── NO PAPER MODE ───────────────────────────────────────────────────────
+    // Reaching here without a live account used to simulate the outcome and feed
+    // that INVENTED result into the SHARED recovery ledger via `recordOutcome`.
+    // A simulated outcome is drawn from this engine's own belief, so it can only
+    // confirm that belief — and it corrupts the debt the real ladder is sized
+    // from. With no live account this engine holds: no journal row, no ledger
+    // entry, no settlement.
+    if (!isLive) {
+      session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+      broadcast();
+      await sleep(2000);
+      continue;
+    }
+
     const [fabTrade] = await db.insert(tradesTable).values({
       sessionId:    ownerSessionId,
       symbol:       best.symbol,
@@ -2031,8 +2045,19 @@ async function runLoop(config: SpeedAIConfig) {
         continue;
       }
     } else {
-      won    = Math.random() < best.winProbability;
-      profit = won ? stake * (best.payout - 1) : -stake;
+      // ── NO PAPER MODE ─────────────────────────────────────────────────────
+      // Unreachable: the `!isLive` guard above holds before any row is written.
+      // Kept as a hard stop so a future edit cannot quietly restore simulation —
+      // if this ever runs, it must NOT invent a win/loss, because that outcome
+      // would be recorded into the shared recovery ledger below.
+      logger.error(
+        { symbol: best.symbol },
+        "NeuroAI reached the simulation branch with no live account — refusing to fabricate an outcome",
+      );
+      session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+      broadcast();
+      await sleep(2000);
+      continue;
     }
 
     const execLatencyMs = Date.now() - execStart;

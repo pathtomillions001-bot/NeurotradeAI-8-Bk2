@@ -1281,6 +1281,20 @@ async function runLoop(config: KillShotConfig) {
         `entry ${timing.score}/100 (${timing.components.preferredState === "none" ? "state neutral" : timing.components.preferredState}, renewal ${timing.components.gapRatio.toFixed(2)}×) · ` +
         `watched ${session.watch.ticksWatched} ticks, declined ${session.watch.setupsRejected} setups`;
 
+      // ── NO PAPER MODE ─────────────────────────────────────────────────────
+      // Reaching here without a live account used to simulate the outcome (settled
+      // against the market's next real tick) and then record that INVENTED result into
+      // the SHARED recovery ledger via `recoveryEngine.recordOutcome` below. A
+      // simulated outcome moves the debt the real ladder is later sized from, so it
+      // is not observation — it is contamination. With no live account this engine
+      // holds: no journal row, no ledger entry, no settlement.
+      if (!isLive) {
+        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+        broadcast();
+        await sleep(2000);
+        continue;
+      }
+
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
         symbol: activeSymbol,
@@ -1339,20 +1353,15 @@ async function runLoop(config: KillShotConfig) {
           continue;
         }
       } else {
-        // Paper mode settles against the market's REAL next digit — the digit
-        // stream is this bot's entire thesis, so a coin flip would be meaningless.
-        session.watch.phase = "settling";
-        const before = tickManager.getDigits(activeSymbol, 1)[0];
-        let digit = before;
-        for (let i = 0; i < 40; i++) {
-          await sleep(120);
-          const d = tickManager.getDigits(activeSymbol, 1)[0];
-          if (d !== undefined && d !== before) { digit = d; break; }
-          digit = d;
-        }
-        const d = digit ?? 0;
-        won = FIRE_WINSET.has(d);
-        profit = won ? stake * (payout - 1) : -stake;
+        // Unreachable: the `!isLive` guard above holds before any row is written.
+        // Kept as a hard stop so a future edit cannot quietly restore simulation — if
+        // this ever runs it must NOT invent an outcome, because the result would be
+        // recorded into the shared recovery ledger below.
+        logger.error({ symbol: activeSymbol }, "Reached the simulation branch with no live account — refusing to fabricate an outcome");
+        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+        broadcast();
+        await sleep(2000);
+        continue;
       }
 
       // ── Bookkeeping ────────────────────────────────────────────────────────

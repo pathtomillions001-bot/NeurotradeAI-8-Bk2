@@ -680,6 +680,20 @@ async function runLoop(config: SurgeConfig) {
 
       const reason = `[Vector Surge${inRecovery ? " RECOVERY" : ""}] ${fireContract.label} on ${activeName} · P(${(entry.read!.p * 100).toFixed(1)}%) vs bar(${(entry.bar * 100).toFixed(1)}%) · pair-risk ${(entry.read!.pairRisk * 100).toFixed(0)}% · qLL ${(entry.read!.qLL * 100).toFixed(0)}% · no-ratchet bar`;
 
+      // ── NO PAPER MODE ─────────────────────────────────────────────────────
+      // Reaching here without a live account used to simulate the outcome (settled
+      // against the market's next real tick) and then record that INVENTED result into
+      // the SHARED recovery ledger via `recoveryEngine.recordOutcome` below. A
+      // simulated outcome moves the debt the real ladder is later sized from, so it
+      // is not observation — it is contamination. With no live account this engine
+      // holds: no journal row, no ledger entry, no settlement.
+      if (!isLive) {
+        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+        broadcast();
+        await sleep(2000);
+        continue;
+      }
+
       const [journaled] = await db.insert(tradesTable).values({
         sessionId: ownerSessionId, symbol: activeSymbol, displayName: activeName, contractType: fireContract.contractType,
         stake: String(Math.round(stake * 100) / 100), direction: "hold", status: "open",
@@ -702,22 +716,15 @@ async function runLoop(config: SurgeConfig) {
           session.watch.phase = "watching"; session.message = `🔁 Shot aborted — ${friendlyErrorMessage(err)}. Back to watching.`; broadcast(); await sleep(2000); continue;
         }
       } else {
-        session.watch.phase = "settling";
-        const beforePrice = tickManager.getLatestPrice(activeSymbol) ?? entryPrice;
-        let lastPrice = beforePrice;
-        for (let i = 0; i < 40; i++) {
-          await sleep(120);
-          const cur = tickManager.getLatestPrice(activeSymbol);
-          if (cur !== null && cur !== beforePrice) { lastPrice = cur; break; }
-          if (cur !== null) lastPrice = cur;
-        }
-        exitPrice = lastPrice;
-        if (fireContract.id === "rise") won = exitPrice > beforePrice;
-        else won = exitPrice < beforePrice;
-        // flat is a loss for both: won stays false when equal
-        if (exitPrice === beforePrice) won = false;
-        profit = won ? stake * (payout - 1) : -stake;
-        entryPrice = beforePrice;
+        // Unreachable: the `!isLive` guard above holds before any row is written.
+        // Kept as a hard stop so a future edit cannot quietly restore simulation — if
+        // this ever runs it must NOT invent an outcome, because the result would be
+        // recorded into the shared recovery ledger below.
+        logger.error({ symbol: activeSymbol }, "Reached the simulation branch with no live account — refusing to fabricate an outcome");
+        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+        broadcast();
+        await sleep(2000);
+        continue;
       }
 
       session.tradeCount++; session.totalProfit = Math.round((session.totalProfit + profit) * 100) / 100;

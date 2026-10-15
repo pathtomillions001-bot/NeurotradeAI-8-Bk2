@@ -154,8 +154,23 @@ interface PolicyResult {
 
 const empty = (): PolicyResult => ({ trades: 0, wins: 0, predEv: 0, realEv: 0 });
 
-const TICKS = 4000;
-const SEEDS = [1, 2, 3];
+/** P4 = the SHIPPED scorer (`scoreV2Candidates` + `rankV2Candidates`), i.e. the code
+ * that actually decides a trade in production. P0-P3 exist to compare policies; P4
+ * is what the acceptance criteria G1-G4 must be measured against. */
+
+/** Scale is overridable so acceptance can be measured wider than the default run,
+ * e.g. PROBE_TICKS=6000 PROBE_SEEDS=1,2,3,4,5,6,7,8 npx tsx scripts/recovery-lab/probe-policy.ts */
+const TICKS = Number(process.env.PROBE_TICKS ?? 4000);
+const SEEDS = (process.env.PROBE_SEEDS ?? "1,2,3")
+  .split(",")
+  .map((v) => Number(v.trim()))
+  .filter((v) => Number.isFinite(v));
+/** Restrict worlds, e.g. PROBE_WORLDS=NULL,REGIME — the others are skipped. */
+const WORLDS = (process.env.PROBE_WORLDS ?? "NULL,PLANTED,MARKOV,REGIME")
+  .split(",")
+  .map((v) => v.trim().toUpperCase())
+  .filter(Boolean);
+const SKIP_SWEEP = process.env.PROBE_SKIP_SWEEP === "1";
 const WARMUP = 40;
 
 // Same ladder shape the lab uses (frozen — only eligibility strips trades out).
@@ -181,8 +196,8 @@ function gateAdmits(row: EvidenceRow, kappa: number): boolean {
 
 const REFIRE_COOLDOWN_TICKS = 60;
 
-function runWorld(world: WorldId, kappa: number): { p0: PolicyResult; p1: PolicyResult; p2: PolicyResult; p3: PolicyResult } {
-  const p0 = empty(), p1 = empty(), p2 = empty(), p3 = empty();
+function runWorld(world: WorldId, kappa: number): { p0: PolicyResult; p1: PolicyResult; p2: PolicyResult; p3: PolicyResult; p4: PolicyResult } {
+  const p0 = empty(), p1 = empty(), p2 = empty(), p3 = empty(), p4 = empty();
   let p0Mem: HedgeMemory = {};
   let p0LossRun = 0;
 
@@ -238,6 +253,17 @@ function runWorld(world: WorldId, kappa: number): { p0: PolicyResult; p1: Policy
         p2.realEv += (won ? bestP2.payout : 0) - 1;
       }
 
+      // ── P4: SHIPPED scorer (acceptance measurement) ──
+      // Exactly what the engine does: rank with the shipped code, take the top
+      // candidate, and trade it only if the shipped gate marked it admissible.
+      const bestP4 = v2Ranked[0];
+      if (bestP4 && bestP4.eligible) {
+        const won = realised(bestP4.contract, bestP4.barrier, tapes, marketIndex(bestP4.symbol), t);
+        p4.trades += 1; p4.wins += won ? 1 : 0;
+        p4.predEv += bestP4.gateEv;
+        p4.realEv += (won ? bestP4.payout : 0) - 1;
+      }
+
       // ── P3: PROPOSED gate + per-key re-fire suppression (same excursion guard) ──
       if (bestP2) {
         const key = `${bestP2.row.symbol}:${bestP2.row.spec.type}:${bestP2.row.resolvedBarrier}`;
@@ -277,7 +303,7 @@ function runWorld(world: WorldId, kappa: number): { p0: PolicyResult; p1: Policy
       }
     }
   }
-  return { p0, p1, p2, p3 };
+  return { p0, p1, p2, p3, p4 };
 }
 
 let lastFiredAt = new Map<string, number>();
@@ -293,12 +319,14 @@ console.log(`\n=== Decision-rule comparison | ${MARKETS.length} markets | ${SEED
 console.log(`User contract set: CALL, PUT, Over 4, Under 5, Even, Odd, Matches(auto), Differs(auto)\n`);
 
 for (const world of ["NULL", "PLANTED", "MARKOV", "REGIME"] as const) {
-  const { p0, p1, p2, p3 } = runWorld(world, 0.005);
+  if (!WORLDS.includes(world)) continue;
+  const { p0, p1, p2, p3, p4 } = runWorld(world, 0.005);
   console.log(`── ${world} ${"─".repeat(60)}`);
   console.log(line("P0 v1 (shipped)", p0));
   console.log(line("P1 v2 (shipped)", p1));
   console.log(line("P2 PROPOSED gate", p2));
   console.log(line("P3 gate + re-fire guard", p3));
+  console.log(line("P4 SHIPPED scorer  ★", p4) + "   ← G1-G4 measured here");
   console.log("");
 }
 
@@ -331,11 +359,17 @@ if (process.env.SHOW_RESIDUAL === "1") for (const world of ["NULL"] as const) {
   }
 }
 
-console.log(`\n=== KAPPA sensitivity (capital in base-stake units; NULL should trend to 0, PLANTED must stay positive) ===`);
-for (const kappa of [0.002, 0.005, 0.01, 0.02]) {
-  const nul = runWorld("NULL", kappa);
-  const planted = runWorld("PLANTED", kappa);
-  console.log(
-    `kappa=${kappa.toFixed(3)}  NULL: trades=${String(nul.p2.trades).padStart(5)} capital=${nul.p2.realEv.toFixed(1).padStart(8)}   |   PLANTED: trades=${String(planted.p2.trades).padStart(5)} capital=${planted.p2.realEv.toFixed(1).padStart(8)}  realEV=${planted.p2.trades ? ((planted.p2.realEv / planted.p2.trades) * 100).toFixed(2) : "0"}%`,
-  );
+if (!SKIP_SWEEP) {
+  console.log(`\n=== KAPPA sensitivity — the PROPOSED gate's kappa (P2), NOT the shipped constant ===`);
+  console.log(`The shipped scorer reads HEDGE_GATE_KAPPA from constants.ts, so its column is`);
+  console.log(`constant by construction; it is printed to show what that constant actually yields.`);
+  for (const kappa of [0.002, 0.005, 0.01, 0.02]) {
+    const nulRun = runWorld("NULL", kappa);
+    const plantedRun = runWorld("PLANTED", kappa);
+    const p2n = nulRun.p2, p2p = plantedRun.p2;
+    const p4n = nulRun.p4, p4p = plantedRun.p4;
+    console.log(
+      `  kappa=${kappa.toFixed(3)} | P2 NULL ${String(p2n.trades).padStart(5)} tr ${p2n.realEv.toFixed(1).padStart(7)} cap | P2 PLANTED ${String(p2p.trades).padStart(5)} tr ${p2p.realEv.toFixed(1).padStart(7)} cap ${p2p.trades ? ((p2p.realEv / p2p.trades) * 100).toFixed(2).padStart(6) : "  0.00"}%  ||  P4 SHIPPED NULL ${String(p4n.trades).padStart(5)} tr ${p4n.realEv.toFixed(1).padStart(7)} cap | PLANTED ${String(p4p.trades).padStart(5)} tr ${p4p.realEv.toFixed(1).padStart(7)} cap`,
+    );
+  }
 }

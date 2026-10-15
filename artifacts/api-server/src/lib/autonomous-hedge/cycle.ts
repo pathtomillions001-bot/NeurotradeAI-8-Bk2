@@ -160,6 +160,15 @@ interface HedgeSession {
   exposureSince: number;
   lastReconcileAt: number;
   lastEmitAt: number;
+  /**
+   * Whether the most recent scan event was a HOLD. Used so the FIRST explanation
+   * after a decision escapes the emit throttle: the operator used to see
+   * "shouldTrade: true" followed by silence (the HOLD reason was throttled away
+   * because the decision pulse had just been emitted), which makes a correctly
+   * refusing engine indistinguishable from a broken one. Repeated holds stay
+   * throttled, so this cannot become a flood.
+   */
+  lastEmitWasHold: boolean;
   execFailures: number;
   /** One analysed-and-tuned live attempt at a time — see liveAttemptHoldReason. */
   liveGate: LiveAttemptGate;
@@ -285,6 +294,7 @@ function newSession(): HedgeSession {
     exposureSince: 0,
     lastReconcileAt: 0,
     lastEmitAt: 0,
+    lastEmitWasHold: false,
     execFailures: 0,
     liveGate: newLiveAttemptGate(),
     ctx: null,
@@ -599,8 +609,11 @@ function emitHoldScan(
   },
 ): void {
   const now = Date.now();
-  if (now - s.lastEmitAt < EMIT_THROTTLE_MS) return;
+  // A hold that explains why an apparently-eligible decision did not fire must not
+  // be throttled away by the decision pulse that preceded it. Repeats still are.
+  if (now - s.lastEmitAt < EMIT_THROTTLE_MS && s.lastEmitWasHold) return;
   s.lastEmitAt = now;
+  s.lastEmitWasHold = true;
   if (input.started) host.emit("scan_started", { markets: input.started.markets, mode: input.started.mode });
   host.emit("scan_complete", {
     symbol: null,
@@ -981,6 +994,7 @@ function publishScan(
   const now = Date.now();
   if (now - s.lastEmitAt < EMIT_THROTTLE_MS) return;
   s.lastEmitAt = now;
+  s.lastEmitWasHold = false;
   // The dashboard's scanning pulse. This event never existed after the 1-tick
   // rewrite, so the UI's "running tournament" state was unreachable until now.
   host.emit("scan_started", { markets: rankedTapes, mode: decision.mode });

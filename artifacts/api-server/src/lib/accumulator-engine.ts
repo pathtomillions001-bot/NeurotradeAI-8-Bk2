@@ -566,79 +566,6 @@ interface Settlement {
   contractId?: number;
 }
 
-function paperSettlement(
-  symbol: string,
-  stake: number,
-  candidate: AccumulatorCandidate,
-): Promise<Settlement> {
-  return new Promise(async (resolve) => {
-    const entry = tickManager.getLatestPrice(symbol) ?? 0;
-    let previous = entry;
-    let ticks = 0;
-    let closedEarly = false;
-    const barrier = Math.max(1e-9, Math.abs(Math.log1p(candidate.barrierPct)));
-    while (session.running && !session.stopRequested && ticks < candidate.durationTicks) {
-      const price = await nextPriceFor(symbol, 12_000);
-      if (price === null) continue;
-      const move = Math.abs(Math.log(Math.max(1e-12, price) / Math.max(1e-12, previous)));
-      previous = price;
-      ticks++;
-      if (move >= barrier) {
-        resolve({
-          profit: -stake,
-          won: false,
-          ticks,
-          closedEarly: false,
-          knockedOut: true,
-          entryPrice: entry,
-          exitPrice: price,
-        });
-        return;
-      }
-      const livePrices = tickManager.getTicks(symbol, 120);
-      const gate = accumulatorEntryGate(livePrices, candidate);
-      if (!gate.ready && (gate.shockRatio > 1.75 || gate.recentMove >= barrier * 0.65) && ticks >= 2) {
-        closedEarly = true;
-        const value = stake * Math.pow(1 + candidate.growthRate, ticks);
-        resolve({
-          profit: value - stake,
-          won: value > stake,
-          ticks,
-          closedEarly,
-          knockedOut: false,
-          entryPrice: entry,
-          exitPrice: price,
-        });
-        return;
-      }
-      if (ticks >= candidate.targetTicks) {
-        const value = stake * Math.pow(1 + candidate.growthRate, ticks);
-        resolve({
-          profit: value - stake,
-          won: value > stake,
-          ticks,
-          closedEarly: false,
-          knockedOut: false,
-          entryPrice: entry,
-          exitPrice: price,
-        });
-        return;
-      }
-    }
-    // A stop request cannot leave a paper trade hanging; settle at the last
-    // observed compounded value, as a local early close would.
-    const value = stake * Math.pow(1 + candidate.growthRate, ticks);
-    resolve({
-      profit: value - stake,
-      won: value > stake,
-      ticks,
-      closedEarly: true,
-      knockedOut: false,
-      entryPrice: entry,
-      exitPrice: previous,
-    });
-  });
-}
 
 function numberOr(value: unknown, fallback: number): number {
   const n = Number(value);
@@ -994,6 +921,20 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
       session.message = `${recovery ? "🎯 Recovery" : "⚡ Entry"} ${displayName} · ${(buyParams.growthRate * 100).toFixed(0)}% growth · $${stake.toFixed(2)} · survival floor ${Math.round(candidate.survivalLower * 100)}%`;
       broadcast();
 
+      // ── NO PAPER MODE ───────────────────────────────────────────────────────
+      // Reaching here without a live account used to settle the trade with
+      // `paperSettlement(...)` — a simulation driven by the market's next ticks — and
+      // then record that INVENTED result into the SHARED recovery ledger. A simulated
+      // outcome moves the debt the real ladder is later sized from, so it is not
+      // observation, it is contamination. With no live account this engine holds: no
+      // journal row, no ledger entry, no settlement.
+      if (!isLive) {
+        session.message = "⏸️ No live Deriv connection — holding (this engine does not simulate trades)";
+        broadcast();
+        await sleep(2000);
+        continue;
+      }
+
       const journal = await db.insert(tradesTable).values({
         sessionId: ownerSessionId,
         symbol,
@@ -1013,9 +954,14 @@ async function runLoop(config: AccumulatorConfig): Promise<void> {
 
       let settlement: Settlement;
       try {
-        settlement = isLive
-          ? await liveSettlement(token!, accountId, currency, symbol, stake, candidate, buyParams)
-          : await paperSettlement(symbol, stake, candidate);
+        // Unreachable: the `!isLive` guard above holds before any row is written.
+        // Kept as a hard stop so a future edit cannot quietly restore simulation.
+        if (!isLive) {
+          throw new Error(
+            "ACCUMULATOR reached settlement with no live account — refusing to simulate an outcome",
+          );
+        }
+        settlement = await liveSettlement(token!, accountId, currency, symbol, stake, candidate, buyParams);
       } catch (err) {
         const rawErrText = err instanceof Error ? err.message : String(err);
         // "Invalid input (duration or date_expiry) for this contract type

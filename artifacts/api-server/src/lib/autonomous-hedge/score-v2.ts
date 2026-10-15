@@ -9,7 +9,7 @@
  * - No tuple penalty, no rematch penalty, no confirmation wait.
  * - Exact ties (|dJ| < 0.001) are broken by a deterministic hash of tickSequence
  *   so markets rotate fairly.
- * - Eligibility = admissibility gate passes, stake is valid and hard safety stops pass.
+ * - Eligibility = the stake is valid under existing limits and hard safety stops pass.
  */
 
 import { applyRecoveryStakeLimits, calculateRecoveryStakeRequest } from "../recovery-math";
@@ -61,8 +61,6 @@ export interface V2ScoredCandidate extends HedgeCandidate {
   zTilde: number;
   window: number;
   nEff: number;
-  longestZTilde: number;
-  longestWindowTicks: number;
   q: number;
   depUsed: boolean;
   edgeIndex: number;
@@ -383,8 +381,6 @@ export function scoreV2Candidates(input: {
       zTilde: evRow.zTilde,
       window: evRow.window,
       nEff: evRow.nEff,
-      longestZTilde: evRow.longestZTilde,
-      longestWindowTicks: evRow.longestWindowTicks,
       q: evRow.q,
       depUsed: evRow.depUsed,
       edgeIndex: evRow.edgeIndex,
@@ -520,45 +516,5 @@ export function buildV2RecoveryDecision(input: {
     reason,
     groupWinners,
     rowsRanked: ranked.length,
-  };
-}
-
-/** Use the shipped eligibility/EV ordering at pre-buy too, not the old J-only
- * switch rule. A refused or disappeared original must never veto a valid entry. */
-export function selectFreshV2RecoveryDecision(
-  ranked: V2ScoredCandidate[],
-  escalation: number,
-): HedgeDecision | null {
-  return buildV2RecoveryDecision({
-    ranked: rankV2Candidates(ranked), escalation, waitTicks: 0, shouldFireNow: true,
-  });
-}
-
-/** Recheck the gate against the payout/stake actually resolved for this order.
- * Does not size a stake or relax the scorer's safety/eligibility decision. */
-export function revalidateV2RecoveryCandidate(
-  candidate: V2ScoredCandidate,
-  input: { payout: number; stake: number; base: number; balance: number; maxTradeStake: number },
-): V2ScoredCandidate {
-  if (!Number.isFinite(input.payout) || input.payout <= 1) {
-    return { ...candidate, eligible: false, gateBlocker: "invalid resolved payout" };
-  }
-  const gate = gateAdmitsCandidate({
-    row: candidate, payout: input.payout, ladderStake: input.stake, baseStake: input.base,
-  });
-  const stakeValid = Number.isFinite(input.stake) && input.stake >= 0.35 &&
-    input.stake <= input.balance &&
-    (!(input.maxTradeStake > 0) || input.stake <= input.maxTradeStake);
-  return {
-    ...candidate,
-    payout: input.payout,
-    breakEven: 1 / input.payout,
-    ev: gate.ev,
-    gateEv: gate.ev,
-    gateThreshold: gate.threshold,
-    gateCorroborated: gate.corroborated,
-    eligible: candidate.eligible && stakeValid && gate.admits,
-    gateBlocker: !stakeValid ? "resolved stake outside limits" :
-      gate.blocker ?? candidate.gateBlocker,
   };
 }

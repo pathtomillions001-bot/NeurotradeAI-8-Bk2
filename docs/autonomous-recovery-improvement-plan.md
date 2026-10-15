@@ -323,3 +323,35 @@ from real settlements only:
 10 unit tests pin the properties that matter: a faithful broker never alarms, a
 consistently short-paying broker does, one unlucky payout does not, losses carry no
 signal, and a backwards tape cannot produce negative latency.
+
+---
+
+# 9. Acceptance status — G1–G9 measured
+
+**All nine criteria pass on the shipped code.** The full measurement, the exact
+commands, the per-world capital tables and the honest residual are in
+**`docs/autonomous-recovery-acceptance.md`**. Summary:
+
+| # | Criterion | Measured | Verdict |
+| :-: | :--- | :--- | :---: |
+| G1 | NULL capital ≥ −20 units | 0.0 (12k ticks) · −2.1 (24k) — was −188.4 | PASS |
+| G2 | REGIME capital ≥ −20 units | 0.0 (12k) · −7.3 (24k) — was −164.6 | PASS |
+| G3 | PLANTED > 0 and EV ≥ +4 % | +134.0 / +8.68 % (12k) · +327.8 / +6.24 % (24k) | PASS |
+| G4 | MARKOV > 0 | +123.9 (12k) · +291.7 (24k) | PASS |
+| G5 | ES5 unchanged, Instant + Split | byte-identical over 6 144 cells, both trees | PASS |
+| G6 | Stakes identical off/shadow/on | sha256 identical, 12 000 numbers, both trees | PASS |
+| G7 | ≤ 20 uniform-tape trades / 12k ticks | 0 · 0 — was 4 407 / 11 634 | PASS |
+| G8 | Suites, typechecks, first-paint | 1322 + 97 tests, 4/4 typecheck, 8/8 render | PASS |
+| G9 | No simulated trade row possible | static guard (4) + behavioural cycle test + 409 tests | PASS |
+
+G1–G4 are measured against a new **P4 column of `probe-policy.ts` that runs the
+shipped scorer**, so the acceptance figure is the code that decides trades rather
+than a probe-local re-implementation. G5 and G6 are new harnesses run against a
+clean worktree of the pre-change commit `eb5234e` and compared byte-for-byte.
+
+**The most important finding of this stage — deleting the flag did not delete
+simulation.** Eleven further engines could still fabricate an outcome, and every
+one of them fed it into the shared recovery ledger. See the acceptance report's
+G9 section; this is also why §8.1's missing pin suite mattered so much.
+
+**Nothing has been enabled live.**

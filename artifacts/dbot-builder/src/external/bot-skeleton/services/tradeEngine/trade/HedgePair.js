@@ -322,23 +322,6 @@ export default Engine =>
             }
         }
 
-        ntPairLogAnalysis({ analysis, symbol, mode, epoch, confirmationCount, confirmationRequired }) {
-            if (!analysis) return;
-            const decision = analysis.eligible ? 'QUALIFIED' : 'HOLD';
-            const signature = [symbol, mode, decision, analysis.reason].join('|');
-            if (signature === this.nt_pair_last_analysis_signature) return;
-            this.nt_pair_last_analysis_signature = signature;
-            const lower = Number(analysis.lowerBound);
-            const mean = Number(analysis.expectedEdge);
-            log(analysis.eligible ? 'success' : 'info',
-                `Hedge Pair Forge ANALYSIS ${decision} · ${symbol} · ${mode} · ${analysis.family || this.nt_pair_config?.family || 'pair'} · ` +
-                `${analysis.samples ?? 0} paired samples (${analysis.contextSamples ?? 0} current-context) · ` +
-                `joint EV ${Number.isFinite(mean) ? `${(mean * 100).toFixed(2)}%` : 'n/a'} · ` +
-                `95% LCB ${Number.isFinite(lower) ? `${(lower * 100).toFixed(2)}%` : 'n/a'} · ` +
-                `timing ${analysis.timingScore ?? 'n/a'}/100 · confirmations ${confirmationCount ?? 0}/${confirmationRequired ?? 0} · ` +
-                `reason: ${analysis.reason || 'not provided'}`);
-        }
-
         async ntHedgePairCycle(
             family,
             requestedDuration,
@@ -515,7 +498,6 @@ export default Engine =>
                     mode,
                 });
                 if (!analysis.eligible) {
-                    this.ntPairLogAnalysis({ analysis, symbol, mode, epoch: latestEpoch });
                     this.nt_pair_confirmation = null;
                     this.ntPairLogHold(analysis.reason, latestEpoch);
                     return false;
@@ -541,11 +523,6 @@ export default Engine =>
                 if (!prior || prior.key !== confirmationKey || latestEpoch > Number(prior.epoch)) {
                     this.nt_pair_confirmation = { key: confirmationKey, epoch: latestEpoch, count: confirmations };
                 }
-                this.ntPairLogAnalysis({
-                    analysis, symbol, mode, epoch: latestEpoch,
-                    confirmationCount: confirmations,
-                    confirmationRequired: requiredConfirmations,
-                });
                 if (confirmations < requiredConfirmations) {
                     this.ntPairLogHold(`${mode} timing confirmation ${confirmations}/${requiredConfirmations}`, latestEpoch);
                     return false;
@@ -642,20 +619,6 @@ export default Engine =>
                     return false;
                 }
 
-                if (isRecovery) {
-                    const target = Number(state.debt || 0) * (1 + Number(config.markupPercent || 0) / 100);
-                    const modelledNetAtFinalStake = Number.isFinite(Number(analysis.lowerBound))
-                        ? 2 * stakePerLeg * Number(analysis.lowerBound)
-                        : NaN;
-                    const requiredMultiplier = baseStake > 0
-                        ? Math.pow(stakePerLeg / baseStake, 1 / Math.max(1, Number(state.recoveryStep || 1)))
-                        : NaN;
-                    log('warn',
-                        `Hedge Pair Forge RECOVERY SIZE · debt ${Number(state.debt).toFixed(2)} · target debt+markup ${target.toFixed(2)} · ` +
-                        `joint 95% LCB ${(Number(analysis.lowerBound) * 100).toFixed(2)}% · required step multiplier ${Number.isFinite(requiredMultiplier) ? `${requiredMultiplier.toFixed(2)}x` : 'n/a'} · ` +
-                        `stake ${stakePerLeg.toFixed(2)} each (${(2 * stakePerLeg).toFixed(2)} pair exposure) · modelled LCB net ${Number.isFinite(modelledNetAtFinalStake) ? modelledNetAtFinalStake.toFixed(2) : 'n/a'} · ` +
-                        `recovery profit is not guaranteed`);
-                }
                 this.nt_pair_confirmation = null;
                 const pairId = `hp-${Date.now()}-${++this.nt_pair_pair_serial}`;
                 const pair = {

@@ -409,15 +409,10 @@ export default Engine =>
                 const ticks = extractTicks(rawTicks).slice(-HEDGE_PAIR_ANALYSIS_LIMITS.maxTicks);
                 const latestTick = ticks.at(-1);
                 const latestEpoch = latestTick?.epoch;
-                const tickSeconds = medianTickSeconds(ticks);
+                const tickSeconds = medianTickSeconds(ticks) || 1;
                 const analysisTicks = ticks.slice(-config.analysisWindow);
-                const maxTickAgeSeconds = Math.max(15, Number(tickSeconds) * 5);
-                const tickAgeSeconds = Number.isFinite(latestEpoch) ? Date.now() / 1000 - latestEpoch : Infinity;
-                if (
-                    analysisTicks.length < Math.min(config.analysisWindow, HEDGE_PAIR_ANALYSIS_LIMITS.minSamples) ||
-                    !tickSeconds || !Number.isFinite(tickAgeSeconds) || tickAgeSeconds > maxTickAgeSeconds || tickAgeSeconds < -60
-                ) {
-                    this.ntPairLogHold('insufficient, stale, or irregular live tick history/cadence', latestEpoch);
+                if (analysisTicks.length < 20) {
+                    this.ntPairLogHold('collecting market ticks history', latestEpoch);
                     return false;
                 }
                 const prices = analysisTicks.map(tick => tick.quote);
@@ -500,6 +495,7 @@ export default Engine =>
                     ...analysisArgs,
                     multiplierA: analysisMultipliers[0],
                     multiplierB: analysisMultipliers[1],
+                    mode,
                 });
                 if (!analysis.eligible) {
                     this.nt_pair_confirmation = null;
@@ -507,7 +503,7 @@ export default Engine =>
                     return false;
                 }
 
-                const confirmationKey = `${symbol}:${config.family}:${duration.amount}${duration.unit}:${analysis.context}`;
+                const confirmationKey = `${symbol}:${config.family}:${duration.amount}${duration.unit}`;
                 const requiredConfirmations = isRecovery
                     ? config.recoveryConfirmations
                     : config.entryConfirmations;
@@ -528,7 +524,7 @@ export default Engine =>
                     this.nt_pair_confirmation = { key: confirmationKey, epoch: latestEpoch, count: confirmations };
                 }
                 if (confirmations < requiredConfirmations) {
-                    this.ntPairLogHold(`${mode} joint edge confirmation ${confirmations}/${requiredConfirmations}`, latestEpoch);
+                    this.ntPairLogHold(`${mode} timing confirmation ${confirmations}/${requiredConfirmations}`, latestEpoch);
                     return false;
                 }
 
@@ -581,6 +577,7 @@ export default Engine =>
                         ...analysisArgs,
                         multiplierA: quotes[0].multiplier,
                         multiplierB: quotes[1].multiplier,
+                        mode,
                     });
                     if (!analysis.eligible) {
                         this.nt_pair_confirmation = null;
@@ -616,13 +613,6 @@ export default Engine =>
                     recoveryQuoteAdjustments += 1;
                 }
 
-                const freshTicks = extractTicks(await this.$scope.ticksService.request({ symbol, retry_limit: 1 }));
-                const currentEpoch = freshTicks.at(-1)?.epoch;
-                if (!Number.isFinite(currentEpoch) || currentEpoch !== latestEpoch) {
-                    this.nt_pair_confirmation = null;
-                    this.ntPairLogHold('market tick advanced while quotes were being validated; rescan on the new tick', currentEpoch);
-                    return false;
-                }
                 if (api_base.is_stopping || this.$scope?.stopped || this.store?.getState?.().scope !== BEFORE_PURCHASE) return false;
                 if (quotes.some(quote => Date.now() - quote.quotedAt > QUOTE_TTL_MS)) {
                     this.ntPairLogHold('final live proposal expired; requesting a fresh pair next tick', latestEpoch);

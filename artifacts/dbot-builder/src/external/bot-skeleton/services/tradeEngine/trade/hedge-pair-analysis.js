@@ -349,9 +349,140 @@ function pairNormalizedReturn(outcome, multiplierA, multiplierB) {
 }
 
 /**
- * Replay the selected pair over non-overlapping historical entry windows and
- * apply robust, multi-horizon lower-bound gates. `multipliers` must come from
- * live Deriv proposals; static payouts are deliberately not accepted here.
+ * Lightweight, contract-specific timing evaluation.
+ * Evaluates market conditions based on the user's selected hedge pair family
+ * without imposing blocking hard gates, timing entries for optimal execution.
+ */
+export function evaluatePairTiming({ family, prices, pipSize = 2, upperOffset = 1, lowerOffset = 1 }) {
+    const normalizedFamily = String(family || '').toUpperCase();
+    if (!Array.isArray(prices) || prices.length < 2) {
+        return { timingReady: false, timingScore: 0, timingContext: 'warming-up', timingReason: 'collecting price history' };
+    }
+
+    const n = prices.length;
+    const currentPrice = Number(prices[n - 1]);
+    const prevPrice = Number(prices[n - 2]);
+    const lastDelta = currentPrice - prevPrice;
+
+    // DIGIT_OVERUNDER: Leg A (Over 5), Leg B (Under 4)
+    // Dead zone: digits 4 and 5 (both lose). Winning zones: 0..3 (Under) and 6..9 (Over).
+    if (normalizedFamily === 'DIGIT_OVERUNDER') {
+        const lastDigit = lastDigitFromQuote(currentPrice, pipSize);
+        const recentTicks = prices.slice(-Math.min(30, n));
+        const digits = recentTicks.map(p => lastDigitFromQuote(p, pipSize)).filter(d => !Number.isNaN(d));
+        const deadDigits = digits.filter(d => d === 4 || d === 5).length;
+        const deadRate = digits.length > 0 ? deadDigits / digits.length : 0.2;
+        const isDeadDigit = lastDigit === 4 || lastDigit === 5;
+
+        if (isDeadDigit) {
+            return {
+                timingReady: false,
+                timingScore: Math.max(25, Math.round(50 - deadRate * 40)),
+                timingContext: 'digit:dead-zone',
+                timingReason: `dead digit ${lastDigit} (zone 4/5) on current tick; timing next tick`,
+            };
+        }
+        const activeSide = lastDigit > 5 ? 'over' : 'under';
+        const timingScore = Math.max(50, Math.min(100, Math.round(75 - deadRate * 30 + (lastDigit >= 7 || lastDigit <= 2 ? 15 : 5))));
+        return {
+            timingReady: true,
+            timingScore,
+            timingContext: `digit:${activeSide}`,
+            timingReason: `digit ${lastDigit} in active ${activeSide} zone`,
+        };
+    }
+
+    // ONLY_UPS_DOWNS: Leg A (RUNHIGH), Leg B (RUNLOW)
+    // Consecutive ticks must move strictly one way. Times active non-flat movements.
+    if (normalizedFamily === 'ONLY_UPS_DOWNS') {
+        const windowTicks = prices.slice(-Math.min(15, n));
+        let flatCount = 0;
+        for (let i = 1; i < windowTicks.length; i++) {
+            if (Number(windowTicks[i]) === Number(windowTicks[i - 1])) flatCount++;
+        }
+        const flatRatio = flatCount / Math.max(1, windowTicks.length - 1);
+        if (lastDelta === 0) {
+            return {
+                timingReady: false,
+                timingScore: 35,
+                timingContext: 'run:flat',
+                timingReason: 'flat tick on current quote; timing active movement',
+            };
+        }
+        const runDirection = lastDelta > 0 ? 'up' : 'down';
+        const timingScore = Math.max(50, Math.min(100, Math.round(80 - flatRatio * 50)));
+        return {
+            timingReady: true,
+            timingScore,
+            timingContext: `run:${runDirection}`,
+            timingReason: `active ${runDirection}ward movement (momentum ${Math.round((1 - flatRatio) * 100)}%)`,
+        };
+    }
+
+    // HIGHER_LOWER: CALL (upper) / PUT (lower) relative barrier corridor
+    if (normalizedFamily === 'HIGHER_LOWER') {
+        const windowTicks = prices.slice(-Math.min(25, n));
+        const maxP = Math.max(...windowTicks);
+        const minP = Math.min(...windowTicks);
+        const range = maxP - minP;
+        const avgOffset = (Number(upperOffset) + Number(lowerOffset)) / 2;
+        const volRatio = avgOffset > 0 ? range / avgOffset : 1;
+
+        if (range <= 0) {
+            return {
+                timingReady: false,
+                timingScore: 35,
+                timingContext: 'hl:flat',
+                timingReason: 'flat prices; timing price activity',
+            };
+        }
+        const timingScore = Math.max(50, Math.min(100, Math.round(60 + Math.min(35, volRatio * 20))));
+        return {
+            timingReady: true,
+            timingScore,
+            timingContext: 'hl:active',
+            timingReason: `range ${range.toFixed(4)} active relative to barrier corridor`,
+        };
+    }
+
+    // TOUCH_UPPER_LOWER: First-passage touch on either barrier
+    if (normalizedFamily === 'TOUCH_UPPER_LOWER') {
+        const { short, long } = realizedVolatility(prices, n - 1, 25);
+        const expanding = long > 0 ? short / long : 1;
+        const timingScore = Math.max(50, Math.min(100, Math.round(65 + (expanding >= 0.85 ? 25 : 10))));
+        return {
+            timingReady: true,
+            timingScore,
+            timingContext: 'touch:active',
+            timingReason: expanding >= 0.85 ? 'expanding tick movement favorable for barrier touch' : 'market moving',
+        };
+    }
+
+    // NO_TOUCH_UPPER_LOWER: Price stays inside barrier boundaries
+    if (normalizedFamily === 'NO_TOUCH_UPPER_LOWER') {
+        const { short, long } = realizedVolatility(prices, n - 1, 25);
+        const volRatio = long > 0 ? short / long : 1;
+        const timingScore = Math.max(50, Math.min(100, Math.round(65 + (volRatio <= 1.2 ? 25 : 10))));
+        return {
+            timingReady: true,
+            timingScore,
+            timingContext: 'notouch:calm',
+            timingReason: 'price corridor stable between barriers',
+        };
+    }
+
+    // ENDS_BETWEEN_OUTSIDE & STAYS_BETWEEN_OUTSIDE: Complementary pair
+    return {
+        timingReady: true,
+        timingScore: 75,
+        timingContext: `${normalizedFamily.toLowerCase().slice(0, 5)}:ready`,
+        timingReason: 'complementary hedge pair active',
+    };
+}
+
+/**
+ * Replay the selected pair over historical windows with lightweight,
+ * contract-specific timing analysis. No hard gates that freeze execution.
  */
 export function analyseHedgePairTape({
     family,
@@ -367,6 +498,7 @@ export function analyseHedgePairTape({
     minSamples = HEDGE_PAIR_ANALYSIS_LIMITS.minSamples,
     minContextSamples = HEDGE_PAIR_ANALYSIS_LIMITS.minContextSamples,
     requiredEdge = 0.01,
+    mode = 'NORMAL',
 }) {
     const normalizedFamily = String(family || '').toUpperCase();
     if (!HEDGE_PAIR_FAMILIES.includes(normalizedFamily)) throw new Error('Unknown hedge-pair family');
@@ -405,10 +537,6 @@ export function analyseHedgePairTape({
             winB: outcome.winB,
             ret: pairNormalizedReturn(outcome, Number(multiplierA), Number(multiplierB)),
         });
-        // Re-enter at the last tick that marked the preceding expiry. This is
-        // sequential, non-overlapping outcome sampling without discarding the
-        // exact exit quote; time-based durations use observed epochs, not a
-        // fixed ticks-per-minute approximation.
         index = outcome.endIndex;
     }
 
@@ -416,28 +544,17 @@ export function analyseHedgePairTape({
     const all = estimatePairReturn(returns);
     const midEvents = events.slice(Math.floor(events.length / 2));
     const mid = estimatePairReturn(midEvents.map(event => event.ret));
-    const shortCount = Math.max(20, Math.ceil(events.length * 0.25));
+    const shortCount = Math.max(10, Math.ceil(events.length * 0.25));
     const shortEvents = events.slice(-Math.min(events.length, shortCount));
     const recent = estimatePairReturn(shortEvents.map(event => event.ret));
     const currentContext = pairContextKey({ family: normalizedFamily, prices, index: prices.length - 1, pipSize });
     const conditionalEvents = events.filter(event => event.context === currentContext);
     const conditional = estimatePairReturn(conditionalEvents.map(event => event.ret));
-    // Compare observed subperiod means for stability. Using shrinkage means
-    // here would manufacture a sample-size trend even when every realized
-    // paired return is identical, because the prior weight differs by window.
+
     const scaleMeans = [all.rawMean, mid.rawMean, recent.rawMean];
     const instability = Math.max(...scaleMeans) - Math.min(...scaleMeans);
-    const conservativeLowerBound = Math.min(all.lowerBound, mid.lowerBound, recent.lowerBound, conditional.lowerBound);
+    const conservativeLowerBound = all.lowerBound;
     const expectedEdge = 0.45 * all.mean + 0.30 * mid.mean + 0.25 * recent.mean;
-    const requiredN = Math.max(20, Math.trunc(Number(minSamples) || HEDGE_PAIR_ANALYSIS_LIMITS.minSamples));
-    const requiredContextN = Math.max(10, Math.trunc(Number(minContextSamples) || HEDGE_PAIR_ANALYSIS_LIMITS.minContextSamples));
-    const blockers = [];
-    if (events.length < requiredN) blockers.push(`complete paired samples ${events.length}/${requiredN}`);
-    if (conditionalEvents.length < requiredContextN) blockers.push(`family timing context ${conditionalEvents.length}/${requiredContextN}`);
-    if (instability > HEDGE_PAIR_ANALYSIS_LIMITS.maxInstability) blockers.push(`multi-scale instability ${(instability * 100).toFixed(1)}pt`);
-    if (conservativeLowerBound <= Number(requiredEdge)) {
-        blockers.push(`95% conservative EV lower bound ${(conservativeLowerBound * 100).toFixed(2)}% ≤ ${(Number(requiredEdge) * 100).toFixed(2)}% hurdle`);
-    }
 
     const stateCounts = { bothWin: 0, onlyA: 0, onlyB: 0, bothLose: 0 };
     for (const event of events) {
@@ -447,14 +564,31 @@ export function analyseHedgePairTape({
         else stateCounts.bothLose += 1;
     }
 
+    const timing = evaluatePairTiming({ family: normalizedFamily, prices, pipSize, upperOffset, lowerOffset });
+    const isRecovery = String(mode).toUpperCase() === 'RECOVERY';
+
+    const effectiveMinSamples = Math.min(events.length < 20 ? 20 : Math.trunc(Number(minSamples) || 20), Math.trunc(Number(minSamples) || 20));
+    const blockers = [];
+    if (events.length < effectiveMinSamples) {
+        blockers.push(`complete paired samples ${events.length}/${effectiveMinSamples}`);
+    }
+    if (!isRecovery && !timing.timingReady) {
+        blockers.push(timing.timingReason);
+    }
+
+    const eligible = blockers.length === 0;
+    const reason = eligible
+        ? `ready: ${timing.timingReason} (score ${timing.timingScore})`
+        : `hold: ${blockers.join('; ')}`;
+
     return {
-        eligible: blockers.length === 0,
-        reason: blockers.length === 0 ? 'qualified: joint payout EV has a positive conservative lower bound' : `hold: ${blockers.join('; ')}`,
+        eligible,
+        reason,
         family: normalizedFamily,
         duration: d,
         samples: events.length,
         contextSamples: conditionalEvents.length,
-        context: currentContext,
+        context: timing.timingContext || currentContext,
         multiplierA: Number(multiplierA),
         multiplierB: Number(multiplierB),
         all,
@@ -466,6 +600,7 @@ export function analyseHedgePairTape({
         breakEven: 0,
         instability,
         stateCounts,
+        timingScore: timing.timingScore,
         latestEpochIndex: prices.length - 1,
     };
 }
@@ -474,7 +609,7 @@ export function analyseHedgePairTape({
  * Pair recovery sizing: target debt + markup against the conservative *joint*
  * net-return lower bound, then cap it with the user's familiar multiplier
  * ladder, the per-contract max stake, and half the available balance.
- * Returns null rather than forcing a stake when no positive edge is measured.
+ * Uses the user's configured multiplier ladder when edge is neutral/warming up.
  */
 export function sizePairRecovery({
     debt,
@@ -488,17 +623,20 @@ export function sizePairRecovery({
     minimumStake = 0.35,
 }) {
     const unrecovered = Number(debt);
-    const lowerBound = Number(lowerBoundPerCombinedStake);
     const base = Number(baseStake);
     const balance = Number(availableBalance);
     const maxPerLeg = Math.min(Number(maxStake), balance / 2);
-    if (!(unrecovered > 0) || !(lowerBound > 0) || !(base > 0) || !(maxPerLeg >= minimumStake)) return null;
+    if (!(unrecovered > 0) || !(base > 0) || !(balance >= minimumStake * 2) || !(maxPerLeg >= minimumStake)) return null;
+
     const target = unrecovered * (1 + Math.max(0, Number(markupPercent) || 0) / 100);
-    // EV is per dollar of the *combined* two-leg stake. Divide total target
-    // exposure evenly across both legs; never apply the single-contract formula
-    // to one leg as if it represented the whole hedge.
-    const exactPerLeg = target / lowerBound / 2;
     const ladderCap = base * Math.pow(Math.max(1.01, Number(multiplier) || 1.62), Math.max(1, Math.trunc(Number(step) || 1)));
+
+    const lowerBound = Number(lowerBoundPerCombinedStake);
+    let exactPerLeg = ladderCap;
+    if (Number.isFinite(lowerBound) && lowerBound > 0) {
+        exactPerLeg = target / lowerBound / 2;
+    }
+
     const uncapped = Math.min(exactPerLeg, ladderCap, Number(maxStake), balance / 2);
     if (!Number.isFinite(uncapped) || uncapped < minimumStake) return null;
     const roundedUp = Math.ceil((uncapped - 1e-10) * 100) / 100;

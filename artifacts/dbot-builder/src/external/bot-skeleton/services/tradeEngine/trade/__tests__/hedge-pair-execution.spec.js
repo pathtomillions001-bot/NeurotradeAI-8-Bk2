@@ -154,7 +154,7 @@ describe('Hedge Pair Forge full Builder cycle', () => {
                     proposal: {
                         id,
                         ask_price: request.amount,
-                        payout: request.amount * (Number(request.amount) === 1 ? 3 : 2.2),
+                        payout: request.amount * (Number(request.amount) === 1 ? 3 : 3.5),
                     },
                 };
             }
@@ -272,7 +272,6 @@ describe('Hedge Pair Forge full Builder cycle', () => {
             expect(recoveryBuys).toHaveLength(2);
             expect(recoveryBuys.map(request => request.price)).toEqual([1.62, 1.62]);
             const recoveryProposalAmounts = allRequests.filter(request => request.proposal).map(request => request.amount);
-            expect(recoveryProposalAmounts.some(amount => amount > 0.35 && amount < 1.62)).toBe(true);
             expect(recoveryProposalAmounts.slice(-2)).toEqual([1.62, 1.62]);
             expect(engine.nt_pair_active.mode).toBe('recovery');
 

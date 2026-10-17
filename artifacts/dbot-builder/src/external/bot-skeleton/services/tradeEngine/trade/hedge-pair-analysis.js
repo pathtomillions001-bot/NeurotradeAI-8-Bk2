@@ -575,6 +575,14 @@ export function analyseHedgePairTape({
     if (!isRecovery && !timing.timingReady) {
         blockers.push(timing.timingReason);
     }
+    // The UI and generator expose requiredEdge as a 95% joint EV lower-bound
+    // hurdle. Enforce it here (not just in the display/config) for BOTH modes;
+    // recovery never bypasses the evidence gate. A negative or uncertain LCB
+    // must not be presented as a qualified recovery opportunity.
+    const hurdle = Math.max(0, Number(requiredEdge) || 0);
+    if (!Number.isFinite(conservativeLowerBound) || conservativeLowerBound < hurdle) {
+        blockers.push(`joint EV 95% lower bound ${Number.isFinite(conservativeLowerBound) ? conservativeLowerBound.toFixed(4) : 'unavailable'} below ${hurdle.toFixed(4)}`);
+    }
 
     const eligible = blockers.length === 0;
     const reason = eligible
@@ -632,15 +640,21 @@ export function sizePairRecovery({
     const ladderCap = base * Math.pow(Math.max(1.01, Number(multiplier) || 1.62), Math.max(1, Math.trunc(Number(step) || 1)));
 
     const lowerBound = Number(lowerBoundPerCombinedStake);
-    let exactPerLeg = ladderCap;
-    if (Number.isFinite(lowerBound) && lowerBound > 0) {
-        exactPerLeg = target / lowerBound / 2;
-    }
-
-    const uncapped = Math.min(exactPerLeg, ladderCap, Number(maxStake), balance / 2);
+    if (!Number.isFinite(lowerBound) || lowerBound <= 0) return null;
+    const targetPerLeg = target / lowerBound / 2;
+    // Use the configured compounded ladder as a floor, but dynamically raise
+    // it whenever the quoted joint-return LCB requires more stake to target
+    // debt + markup. Hard account/max-stake limits remain absolute; if they
+    // cannot fund the full target, return null instead of silently undersizing.
+    const exactPerLeg = Math.max(targetPerLeg, ladderCap);
+    const requiredMultiplier = Number.isFinite(exactPerLeg) && exactPerLeg > 0
+        ? Math.pow(exactPerLeg / base, 1 / Math.max(1, Math.trunc(Number(step) || 1)))
+        : Infinity;
+    const uncapped = Math.min(exactPerLeg, Number(maxStake), balance / 2);
+    if (!Number.isFinite(targetPerLeg) || uncapped + 1e-8 < targetPerLeg) return null;
     if (!Number.isFinite(uncapped) || uncapped < minimumStake) return null;
     const roundedUp = Math.ceil((uncapped - 1e-10) * 100) / 100;
-    const roundedDownCap = Math.floor((Math.min(ladderCap, Number(maxStake), balance / 2) + 1e-10) * 100) / 100;
+    const roundedDownCap = Math.floor((Math.min(Number(maxStake), balance / 2) + 1e-10) * 100) / 100;
     const stakePerLeg = Math.min(roundedUp, roundedDownCap);
     if (stakePerLeg < minimumStake) return null;
     return {
@@ -648,6 +662,7 @@ export function sizePairRecovery({
         pairStake: Math.round(stakePerLeg * 200) / 100,
         exactPerLeg,
         ladderCap,
+        requiredMultiplier,
         targetDebt: target,
         edgeLowerBound: lowerBound,
     };

@@ -17,6 +17,7 @@ import { BastionConsole } from "@/components/bastion-console";
 import { OverUnderNavigatorConsole } from "@/components/overunder-navigator-console";
 import { OverUnderTurboConsole } from "@/components/overunder-turbo-console";
 import { DigitForgeConsole } from "@/components/digit-forge-console";
+import { HedgePairForgeConsole } from "@/components/hedge-pair-forge-console";
 import { OmniForgeConsole } from "@/components/omni-forge-console";
 import { NexusHedgeConsole } from "@/components/nexus-hedge-console";
 import { ParityForgeConsole } from "@/components/parity-forge-console";
@@ -44,6 +45,7 @@ export const CONSOLE_REGISTRY: Record<WebConsoleId, ComponentType<BotConsoleProp
   "overunder-navigator@1": OverUnderNavigatorConsole,
   "overunder-turbo@2": OverUnderTurboConsole,
   "digit-forge@1": DigitForgeConsole,
+  "hedge-pair-forge@1": HedgePairForgeConsole,
   "omni-forge@1": OmniForgeConsole,
   "nexus-hedge@1": NexusHedgeConsole,
   "parity-forge@1": ParityForgeConsole,
@@ -96,6 +98,7 @@ export function consoleHasScanner(bot: Pick<BotCardData, "console">): boolean {
  */
 export const FORGE_CONSOLE_IDS: ReadonlySet<string> = new Set<WebConsoleId>([
   "digit-forge@1",
+  "hedge-pair-forge@1",
 ]);
 
 /** True when the bot's console forges a DBot rather than trading in-app. */

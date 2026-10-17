@@ -33,6 +33,8 @@ const getTicksInterface = tradeEngine => {
         ntAnalyseBastionEntry: (...args) => tradeEngine.ntAnalyseBastionEntry(...args),
         ntBastionEntryDecision: (...args) => tradeEngine.ntBastionEntryDecision(...args),
         ntSwitchMarket: (...args) => tradeEngine.ntSwitchMarket(...args),
+        ntHedgePairCycle: (...args) => tradeEngine.ntHedgePairCycle(...args),
+        ntHedgePairStatus: (...args) => tradeEngine.ntHedgePairStatus(...args),
     };
 };
 

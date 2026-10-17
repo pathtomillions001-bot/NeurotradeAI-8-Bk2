@@ -89,6 +89,8 @@ describe('TicksInterface ↔ nbsp engine parity (the "undefined is not a functio
             'ntAnalyseBastionEntry',
             'ntBastionEntryDecision',
             'ntSwitchMarket',
+            'ntHedgePairCycle',
+            'ntHedgePairStatus',
         ];
         const ticks_interface = getTicksInterface(makeEngine());
         for (const name of EXPECTED_BRIDGES) {

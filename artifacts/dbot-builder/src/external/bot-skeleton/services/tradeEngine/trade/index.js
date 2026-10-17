@@ -15,6 +15,7 @@ import OpenContract from './OpenContract';
 import Proposal from './Proposal';
 import Purchase from './Purchase';
 import DigitForge from './DigitForge';
+import HedgePair from './HedgePair';
 import Sell from './Sell';
 import Ticks from './Ticks';
 import Total from './Total';
@@ -64,7 +65,7 @@ const watchScope = ({ store, stopScope, passScope, passFlag }) => {
     });
 };
 
-export default class TradeEngine extends Balance(DigitForge(Purchase(Sell(OpenContract(Proposal(Ticks(Total(class {})))))))) {
+export default class TradeEngine extends Balance(DigitForge(HedgePair(Purchase(Sell(OpenContract(Proposal(Ticks(Total(class {}))))))))) {
     constructor($scope) {
         super();
         this.observer = $scope.observer;

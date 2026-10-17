@@ -11,6 +11,7 @@ import './lastDigitList';
 import './neurotrade_digit_rotator';
 import './neurotrade_contract_forge';
 import './neurotrade_nexus_hedge';
+import './neurotrade_hedge_pair';
 import './neurotrade_surge_forge';
 import './neurotrade_turbo_recovery';
 import './neurotrade_turbo_markets';

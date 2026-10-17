@@ -185,7 +185,24 @@ describe('Hedge Pair Forge joint payout inference', () => {
         expect(result.contextSamples).toBe(20);
     });
 
-    it('sizes a pair using conservative edge per combined stake, then applies the per-leg ladder cap', () => {
+    it('rejects samples whose 95% joint EV lower bound does not clear the configured hurdle', () => {
+        const prices = Array.from({ length: 500 }, (_, index) => 100 + (index % 2 ? 0.05 : 0.04));
+        const result = analyseHedgePairTape({
+            family: 'DIGIT_OVERUNDER',
+            prices,
+            duration: 1,
+            pipSize: 2,
+            multiplierA: 2.4,
+            multiplierB: 2.4,
+            minSamples: 80,
+            requiredEdge: 0.01,
+        });
+        expect(result.samples).toBeGreaterThan(80);
+        expect(result.eligible).toBe(false);
+        expect(result.reason).toMatch(/joint EV 95% lower bound/);
+    });
+
+    it('sizes recovery to debt plus markup using live joint return and reports the implied ladder multiplier', () => {
         const recovery = sizePairRecovery({
             debt: 2,
             lowerBoundPerCombinedStake: 0.8,
@@ -196,8 +213,17 @@ describe('Hedge Pair Forge joint payout inference', () => {
             maxStake: 10,
             availableBalance: 100,
         });
-        expect(recovery.stakePerLeg).toBe(1.38);
-        expect(recovery.pairStake).toBe(2.76);
+        expect(recovery.stakePerLeg).toBe(2);
+        expect(recovery.pairStake).toBe(4);
+        expect(recovery.requiredMultiplier).toBe(2);
+        expect(sizePairRecovery({
+            debt: 2,
+            lowerBoundPerCombinedStake: 0.2,
+            baseStake: 1,
+            markupPercent: 10,
+            maxStake: 5,
+            availableBalance: 100,
+        })).toBeNull();
         expect(sizePairRecovery({ debt: 2, lowerBoundPerCombinedStake: 0, baseStake: 1 })).toBeNull();
     });
 

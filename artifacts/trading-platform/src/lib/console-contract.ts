@@ -30,6 +30,8 @@ export const WEB_CONSOLE_IDS = [
   /** Over/Under Turbo — continuous-fire over/under: scan once, lock, trade non-stop. */
   "overunder-turbo@2",
   "digit-forge@1",
+  /** Hedge Pair Forge — fixed two-leg families, paired execution inside the generated DBot. */
+  "hedge-pair-forge@1",
   /** Omni Forge — user-chosen contract mixes for normal AND recovery, forged into a DBot. */
   "omni-forge@1",
   /** Nexus Hedge Forge — universal mix including Rise/Fall, hedge-aware. */

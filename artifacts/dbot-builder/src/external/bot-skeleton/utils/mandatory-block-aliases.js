@@ -23,7 +23,7 @@
  * button) and utils/workspace.js (`hasAllRequiredBlocks`).
  */
 export const MANDATORY_BLOCK_ALIASES = Object.freeze({
-    purchase: ['purchase', 'nt_purchase_contract', 'nt_purchase_digit_trade', 'nt_purchase_hedge'],
+    purchase: ['purchase', 'nt_purchase_contract', 'nt_purchase_digit_trade', 'nt_purchase_hedge', 'nt_hedge_pair_cycle'],
 });
 
 /** The block types that can satisfy a given required block type. */

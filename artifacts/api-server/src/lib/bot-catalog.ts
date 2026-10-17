@@ -119,6 +119,12 @@ export interface BotDefinition {
    * conditional, phi/rho hedge score, ladder utility, elastic stake cap.
    */
   nexusHedge?: boolean;
+  /**
+   * Hedge Pair Forge: fixed two-leg Deriv contract families. Creates a DBot
+   * with joint path replay, family-specific timing and concurrent pair buys;
+   * this console never places trades itself.
+   */
+  hedgePairForge?: boolean;
   /** Omni Sentinel: allowlisted multi-contract, cross-market recovery. */
   omni?: boolean;
   icon: string;
@@ -163,6 +169,33 @@ export const BOT_CATALOG: BotDefinition[] = [
     sides: [],
     nominalWinRate: "gated by measurement",
     nominalPayout: "contract quote (live)",
+  },
+  {
+    id: "hedge-pair-forge",
+    name: "Hedge Pair Forge",
+    code: "BOT-HP-FORGE",
+    family: "multi",
+    hedgePairForge: true,
+    contractLabel: "Paired: Over/Under · Ups/Downs · Higher/Lower · Touch · Range",
+    tagline: "Two-leg contracts, one joint analysis. Build here; run in Deriv Builder.",
+    description:
+      "A separate Bot Arena DBot factory for seven fixed paired families. Hedge Pair Forge replays each family using its actual path semantics, scores both legs together using live proposal returns, applies family-specific timing context and a conservative autocorrelation-aware lower confidence bound, then places both contracts concurrently only after Builder Run. Paired buys are not atomic: partial fills are recorded and halted safely. Recovery triggers only when both contracts lose; split outcomes are recorded but never trigger recovery, even when their aggregate payout P&L is negative. No edge or recovery is guaranteed.",
+    edge: [
+      "Seven fixed pair families: Over 5 / Under 4; Only Ups / Only Downs; Higher / Lower; Touch / Touch; No Touch / No Touch; Ends Between / Ends Outside; Stays Between / Goes Outside",
+      "Family-specific path replay and causal timing context: terminal digit, strict monotone runs, live barriers, first-passage touches, endpoint range, or full-path range survival",
+      "Joint gross-return arithmetic from both live proposals; HAC-adjusted, zero-edge-shrunk lower bounds across all-history, half-history, recent and current-context samples",
+      "Both purchases are sent concurrently from the embedded Builder; partial-fill compensation is attempted where the live API supports it, then remaining exposure is monitored and the bot halts",
+      "One-tick target when supported; actual per-symbol contracts_for metadata selects the minimum common duration and live proposals validate it before purchase",
+      "Only double-loss pairs add both lost stakes to recovery debt. Split results never arm or advance recovery; aggregate realized P&L is still recorded",
+      "Create DBot only loads the strategy. Deriv Builder's Run button is the sole trade-start control",
+    ],
+    accent: "lime",
+    icon: "git-merge",
+    hasSides: false,
+    hasDigitLock: false,
+    sides: [],
+    nominalWinRate: "gated by live quotes",
+    nominalPayout: "joint live returns",
   },
   {
     id: "omni",
@@ -746,6 +779,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
   if (bot.nexusHedge) return "nexus-hedge@1";
+  if (bot.hedgePairForge) return "hedge-pair-forge@1";
   if (bot.omniForge) return "omni-forge@1";
   if (bot.forge) return "digit-forge@1";
   if (bot.preLocked) return "dual-lock@1";

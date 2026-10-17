@@ -222,7 +222,25 @@ const Interpreter = () => {
             // `contract.sold` below, which simply never arrives if the user
             // stopped before entry or the socket dropped mid-contract.
             const STOP_WATCHDOG_MS = 10000;
-            const watchdog = setTimeout(() => settle(), STOP_WATCHDOG_MS);
+            let watchdog;
+            const armWatchdog = () => {
+                watchdog = setTimeout(() => {
+                    // A paired order owns TWO independent contracts. Never let
+                    // the generic stop watchdog clear their subscriptions while
+                    // either leg is still open: keep Stop pending, retain the
+                    // settlement monitor, and report the wait periodically.
+                    if (bot?.tradeEngine?.nt_pair_active) {
+                        globalObserver.emit(
+                            'ui.log.warn',
+                            'Hedge Pair Forge is still monitoring open leg(s); Stop will finish after both are reconciled.'
+                        );
+                        armWatchdog();
+                        return;
+                    }
+                    settle();
+                }, STOP_WATCHDOG_MS);
+            };
+            armWatchdog();
 
             const on_contract_sold = async contractStatus => {
                 if (contractStatus?.id !== 'contract.sold') return;
@@ -239,7 +257,16 @@ const Interpreter = () => {
                     timeout => timeout?.is_cancellable
                 );
 
-                if (!bot.tradeEngine.contractId && is_timeouts_cancellable) {
+                if (bot.tradeEngine.nt_pair_active) {
+                    // A Hedge Pair Forge entry can own two non-atomic positions
+                    // which settle independently. Keep the Builder API/tick
+                    // listeners alive until the pair monitor confirms both
+                    // terminal states; its single `contract.sold` event then
+                    // enters terminateSession().
+                    api_base.is_stopping = true;
+                    globalObserver.register('contract.status', on_contract_sold);
+                    did_register_contract_listener = true;
+                } else if (!bot.tradeEngine.contractId && is_timeouts_cancellable) {
                     api_base.is_stopping = true;
                     // When user is rate limited, allow them to stop the bot immediately
                     // granted there is no active contract.

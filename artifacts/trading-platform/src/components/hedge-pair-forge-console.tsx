@@ -466,14 +466,14 @@ export function HedgePairForgeConsole({
                       hint="Measured per combined pair stake using both live proposal total-return multipliers. HAC uncertainty, a zero-edge prior, sample minimums, recent-vs-old instability and current family context must all pass."
                     />
                     <NumInput
-                      label="Fallback ladder multiplier"
+                      label="Recovery multiplier cap"
                       value={config.recoveryMultiplier}
                       onChange={recoveryMultiplier => setConfig(current => ({ ...current, recoveryMultiplier }))}
                       min={1.01}
                       max={5}
                       step={0.01}
                       accent={accent}
-                      hint="Used as the baseline ladder; recovery sizes to debt + markup from the live joint 95% EV lower bound and may require a higher multiplier. Max-stake and balance caps remain absolute; if they prevent the target, the bot holds."
+                      hint="Caps each recovery leg’s stake ladder; it does not create a win probability or guarantee debt recovery."
                     />
                     <NumInput
                       label="Maximum recovery steps"

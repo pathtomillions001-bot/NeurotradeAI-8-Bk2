@@ -677,7 +677,7 @@ export function HedgePairForgeConsole({
                   </div>
                   {(projection?.ladder ?? []).length > 0 && (
                     <div className="pt-1 border-t border-white/5">
-                      <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">If another double loss lands mid-recovery</p>
+                      <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">Ladder rungs · rung 1 is this pair's debt; later rungs assume another double loss lands</p>
                       <div className="grid grid-cols-3 gap-x-2 text-[9px] font-mono text-muted-foreground/80 pt-0.5">
                         <span>step</span><span className="text-right">debt</span><span className="text-right">per leg</span>
                         {(projection?.ladder ?? []).map(rung => (

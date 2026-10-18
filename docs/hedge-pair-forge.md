@@ -205,7 +205,8 @@ PAIR DOUBLE LOSS · 3.92 total stake added to recovery debt · debt 5.08 · reco
 And at build time, in the XML's INITIALIZATION statement (3 `notify` blocks) —
 the strategy announces what it will measure, which markets it watches, and the
 recovery arithmetic including the **projected ladder** (§4.5). The generator also
-returns 11 warnings in the summary (rendered in the console): expiry families
+returns 10 warnings in the summary (rendered in the console; two of them branch on
+your configuration — the watch list and the patience valve): expiry families
 that will be low-confidence, a watch list that cannot switch, offsets below the
 representable floor, a ladder ceiling too weak to repay a split, and so on.
 
@@ -395,7 +396,12 @@ netOnPairWin, residualAfterWin, pairsToClear, ladder[], capBinding, caveat }`.
 
 For stake $1, markup 40 %, multiplier 2.43: debt 2.00 → target 2.80 → **1.96 a
 leg** (3.92 at risk) → a split nets **0.84** → 1.16 remains → **6** split wins to
-clear → `capBinding 'none'`.
+clear → `capBinding 'none'`. `ladder[]` is the *escalation* chain, not the paydown
+chain: rung 1 is this pair's debt, and each later rung (up to `maxRecoverySteps`)
+shows the debt and the size **if another double loss lands** — 2.00 → $1.96,
+3.92 → $3.84, 11.60 → $11.36. `pairsToClear` comes from the separate split-win
+decay chain and is 0 when that chain cannot finish (negative split net, or more
+than 40 pairs).
 
 For the weak case (multiplier 1.62): `netOnPairWin` is **negative** (−0.61),
 `pairsToClear` is 0, `capBinding` is `'ladder ceiling / max stake'`, the sized

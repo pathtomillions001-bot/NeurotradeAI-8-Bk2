@@ -38,7 +38,7 @@ const API_CONSOLE_IDS = [
   "overunder-turbo@2",
   "parity-forge@1",
   "digit-forge@1",
-  "hedge-pair-forge@1",
+  "hedge-pair-forge@2",
   "omni-forge@1",
   "nexus-hedge@1",
   "specialist@1",
@@ -118,7 +118,7 @@ describe("consoleSkew", () => {
       skew.bots.map(entry => entry.name),
       ["Echo Apex", "Dual-Lock Range Sentinel"],
     );
-    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "digit-forge@1", "dual-lock@1", "hedge-pair-forge@1", "nexus-hedge@1", "omni-forge@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
+    assert.deepEqual(skew.missing, ["apex@1", "bastion@1", "digit-forge@1", "dual-lock@1", "hedge-pair-forge@2", "nexus-hedge@1", "omni-forge@1", "omni@2", "overunder-navigator@1", "overunder-turbo@2", "parity-forge@1", "surge@1"]);
   });
 
   it("detects a contract-only mismatch (no bot of that console in the catalogue yet)", () => {
@@ -153,7 +153,7 @@ describe("scanner badge contract", () => {
     for (const id of WEB_CONSOLE_IDS) {
       assert.equal(
         consoleIsForge({ console: id }),
-        id === "digit-forge@1" || id === "hedge-pair-forge@1",
+        id === "digit-forge@1" || id === "hedge-pair-forge@2",
         `forge mismatch for "${id}" — is the badge contract drift-free with the console's primary action?`,
       );
     }

@@ -179,14 +179,19 @@ export const BOT_CATALOG: BotDefinition[] = [
     contractLabel: "Paired: Over/Under · Ups/Downs · Higher/Lower · Touch · Range",
     tagline: "Two-leg contracts, one joint analysis. Build here; run in Deriv Builder.",
     description:
-      "A separate Bot Arena DBot factory for seven fixed paired families. Hedge Pair Forge replays each family using its actual path semantics, scores both legs together using live proposal returns, applies family-specific timing context and a conservative autocorrelation-aware lower confidence bound, then places both contracts concurrently only after Builder Run. Paired buys are not atomic: partial fills are recorded and halted safely. Recovery triggers only when both contracts lose; split outcomes are recorded but never trigger recovery, even when their aggregate payout P&L is negative. No edge or recovery is guaranteed.",
+      "A separate Bot Arena DBot factory for seven fixed paired families. Hedge Pair Forge requests up to 4,999 ticks of Deriv deep history per watched market, replays each family over that tape using its actual path semantics as non-overlapping events, scores both legs together from the two live proposals, and only buys when the measured joint edge clears the required threshold and no family blocker fires. It ranks the watched markets every 15 evaluations and switches to a stronger one when the evidence gap justifies it. Paired buys are not atomic: partial fills are recorded and the bot halts. Recovery arms only when both contracts lose, adding both actual lost premiums to debt; split outcomes never arm recovery and no longer clear it either. No edge or recovery is guaranteed.",
     edge: [
       "Seven fixed pair families: Over 5 / Under 4; Only Ups / Only Downs; Higher / Lower; Touch / Touch; No Touch / No Touch; Ends Between / Ends Outside; Stays Between / Goes Outside",
       "Family-specific path replay and causal timing context: terminal digit, strict monotone runs, live barriers, first-passage touches, endpoint range, or full-path range survival",
-      "Joint gross-return arithmetic from both live proposals; HAC-adjusted, zero-edge-shrunk lower bounds across all-history, half-history, recent and current-context samples",
+      "Deep analysis tape (default 4,999 ticks, configurable to 5,000) with duration-aware sample requirements, so expiry pairs are measured instead of silently starving",
+      "Joint EV is measured net per combined stake from BOTH live multipliers ((winA x payoutA + winB x payoutB - 2) / 2), so break-even is 0.00% by construction; the gate blends all-history, half-history and recent means and reports an autocorrelation-adjusted, prior-shrunk one-sided 95% lower bound",
+      "Hard blockers stop untradeable pairs outright (too few complete pairs, every replayed pair losing both legs, an estimate unstable across windows, timing not ready); a joint EV below the hurdle is a soft blocker the patience valve may override, and offsets below 1e-8 are refused at build time",
+      "Multi-market ranking and switching: up to 8 watched markets, a 1.00-point evidence gap (2.00 in recovery), 60 evaluations of dwell on the current market and a 120-evaluation cooldown; only the winner is quoted live, then re-gated before purchase",
       "Both purchases are sent concurrently from the embedded Builder; partial-fill compensation is attempted where the live API supports it, then remaining exposure is monitored and the bot halts",
       "One-tick target when supported; actual per-symbol contracts_for metadata selects the minimum common duration and live proposals validate it before purchase",
-      "Only double-loss pairs add both lost stakes to recovery debt. Split results never arm or advance recovery; aggregate realized P&L is still recorded",
+      "Pair-local recovery: debt is BOTH lost premiums, per-leg stake = debt x (1 + 40%) / (winning-leg payout - 1) from the poorer live leg, capped by base x 2.43^step, the per-leg max stake and half the balance, floored at the broker minimum, and refused outright below a 2.00x winning leg",
+      "Recovery survives a split: the residual debt is carried and re-armed every pair until it reaches zero, and the Builder journal prints the arithmetic instead of silently resizing",
+      "Analysis flow is visible: the journal prints tape sourcing, per-family replay counts, ranking and switch decisions, and the build emits initialization notes, warnings and a projected recovery ladder",
       "Create DBot only loads the strategy. Deriv Builder's Run button is the sole trade-start control",
     ],
     accent: "lime",
@@ -779,7 +784,7 @@ export function botConsoleId(bot: BotDefinition): string {
   if (bot.navigator) return "overunder-navigator@1";
   if (bot.turbo) return "overunder-turbo@2";
   if (bot.nexusHedge) return "nexus-hedge@1";
-  if (bot.hedgePairForge) return "hedge-pair-forge@1";
+  if (bot.hedgePairForge) return "hedge-pair-forge@2";
   if (bot.omniForge) return "omni-forge@1";
   if (bot.forge) return "digit-forge@1";
   if (bot.preLocked) return "dual-lock@1";

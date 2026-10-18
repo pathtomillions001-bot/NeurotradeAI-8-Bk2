@@ -1142,8 +1142,10 @@ export default Engine =>
         }
 
         /** Safe between-contract retarget: remove the old listener, clear stale
-         * proposals and make the next Trade Definition cycle quote the new symbol. */
-        async ntSwitchMarket(nextSymbol) {
+         * proposals and make the next Trade Definition cycle quote the new symbol.
+         * `botLabel` only names the caller in the journal line: Hedge Pair Forge
+         * reuses this handshake and must not be reported as "Digit Forge switched". */
+        async ntSwitchMarket(nextSymbol, botLabel = 'Digit Forge') {
             const next = String(nextSymbol || '');
             if (!next || next === this.symbol) return false;
             if (this.is_purchasing || this.nt_digit_preparing || this.nt_digit_purchase_pending ||
@@ -1183,7 +1185,7 @@ export default Engine =>
             // cache here can purchase a stale quote from the previous market.
             this.trade_option = null;
             this.proposal_templates = [];
-            globalObserver.emit('ui.log.info', `Digit Forge switched ${old} → ${next}; stale proposals cleared`);
+            globalObserver.emit('ui.log.info', `${botLabel} switched ${old} → ${next}; stale proposals cleared`);
             return true;
         }
 

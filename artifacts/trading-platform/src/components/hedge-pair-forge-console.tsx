@@ -6,7 +6,7 @@
  * Run shortcut: trades can begin only after the user presses Builder Run.
  */
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
@@ -22,9 +22,32 @@ import { loadStrategyIntoBotBuilder } from "@/lib/bot-builder-frame";
 
 interface HedgePairOptions {
   markets: Array<{ symbol: string; displayName: string; pipSize: number; digitEnabled: boolean }>;
+  /** Shared single-contract recovery markup, shown for comparison only. */
   markupPercent: number;
+  /** What this bot ships: a pair risks two premiums at once. */
+  pairMarkupPercent: number;
+  pairRecoveryMultiplier: number;
+  analysisWindow: number;
+  maxAnalysisWindow: number;
+  maxWatchMarkets: number;
+  minRepresentableOffset: number;
   maxStake: number;
   currency: string;
+}
+
+interface RecoveryProjection {
+  debt: number;
+  markupPercent: number;
+  target: number;
+  assumedWinMultiplier: number;
+  stakePerLeg: number;
+  pairStake: number;
+  netOnPairWin: number;
+  residualAfterWin: number;
+  pairsToClear: number;
+  ladder: Array<{ step: number; debt: number; stakePerLeg: number; pairStake: number }>;
+  capBinding: string;
+  caveat: string;
 }
 
 interface HedgePairSummary {
@@ -49,6 +72,9 @@ interface HedgePairSummary {
   maxConsecutiveDoubleLosses: number;
   entryConfirmations: number;
   recoveryConfirmations: number;
+  watchMarkets: string[];
+  forceEntryAfter: number;
+  recoveryProjection: RecoveryProjection;
   currency: string;
 }
 
@@ -138,20 +164,28 @@ export function HedgePairForgeConsole({
   const [symbol, setSymbol] = useState("R_50");
   const [family, setFamily] = useState<(typeof FAMILIES)[number]["id"]>("DIGIT_OVERUNDER");
   const [barrierOffsetsCustomized, setBarrierOffsetsCustomized] = useState(false);
+  const [watchMarkets, setWatchMarkets] = useState<string[]>(["R_50"]);
   const [config, setConfig] = useState({
     stake: 1,
     upperOffset: 0.0001,
     lowerOffset: 0.0001,
-    analysisWindow: 500,
+    // Deriv's deep history, not the Builder's 1 000-tick ring: a one-minute pair
+    // yields 8 non-overlapping samples from 500 ticks and can never be measured.
+    analysisWindow: 4999,
     minSamples: 80,
-    requiredEdgePct: 1,
-    recoveryMultiplier: 1.62,
+    // 0% = break-even. The runtime enforces this hurdle, so it must not start at
+    // a number nobody chose.
+    requiredEdgePct: 0,
+    // Ceiling on the per-leg ladder. 1.62 would clamp a $2 debt's $1.96 size.
+    recoveryMultiplier: 2.43,
     maxRecoverySteps: 3,
     takeProfit: 10,
     stopLoss: 5,
     maxConsecutiveDoubleLosses: 6,
     entryConfirmations: 2,
     recoveryConfirmations: 3,
+    /** Patience valve, seconds. 0 = never force a negative-EV entry. */
+    forceEntryAfter: 0,
   });
 
   useEffect(() => {
@@ -176,9 +210,19 @@ export function HedgePairForgeConsole({
     const selected = options?.markets.find(market => market.symbol === symbol);
     if (!selected) return;
     const precision = Math.max(0, Math.min(8, Math.trunc(Number(selected.pipSize) || 0)));
-    const onePip = Number((10 ** -precision).toPrecision(8));
+    // One quote pip, and never below what the Builder's number field can store:
+    // the field carries 8 decimals now, so 0.0001 survives the round trip. It
+    // used to declare 0.01 precision, Blockly rounded 0.0001 to 0, and all five
+    // price-barrier families held forever on "offsets must both be positive".
+    const floor = Number(options?.minRepresentableOffset ?? 1e-8);
+    const onePip = Math.max(floor, Number((10 ** -precision).toPrecision(8)));
     setConfig(current => ({ ...current, upperOffset: onePip, lowerOffset: onePip }));
   }, [barrierOffsetsCustomized, options, symbol]);
+
+  /** The seed market is always watched; the rest are the ranking candidates. */
+  useEffect(() => {
+    setWatchMarkets(current => (current.includes(symbol) ? current : [symbol, ...current]));
+  }, [symbol]);
 
   if (!bot) return null;
   const accent = bot.accent;
@@ -197,11 +241,56 @@ export function HedgePairForgeConsole({
   const usesPriceBarriers = PRICE_BARRIER_FAMILIES.has(family);
   const currency = options?.currency ?? "USD";
   const maxStake = options?.maxStake ?? 500;
-  const markupPercent = options?.markupPercent ?? 10;
+  const sharedMarkupPercent = options?.markupPercent ?? 10;
+  const pairMarkupPercent = options?.pairMarkupPercent ?? 40;
+  const maxWatchMarkets = options?.maxWatchMarkets ?? 8;
+  const maxAnalysisWindow = options?.maxAnalysisWindow ?? 5000;
+
+  /**
+   * Same arithmetic the runtime uses, projected at the configured ladder ceiling
+   * because no live payout exists in this panel. The server returns the
+   * authoritative projection with the build; this is only the pre-build preview.
+   */
+  const previewProjection = (() => {
+    const debt = Number((Math.max(0.35, config.stake) * 2).toFixed(2));
+    const target = debt * (1 + pairMarkupPercent / 100);
+    const m = Math.max(1.01, config.recoveryMultiplier);
+    const cap = Math.max(0.35, config.stake) * m;
+    const exact = m > 1 ? target / (m - 1) : Infinity;
+    const stakePerLeg = Math.max(0.35, Math.ceil((Math.min(exact, cap, maxStake) - 1e-10) * 100) / 100);
+    const netOnPairWin = Number((stakePerLeg * (m - 2)).toFixed(2));
+    let remaining = debt;
+    let pairsToClear = 0;
+    while (remaining > 0.005 && pairsToClear < 40 && netOnPairWin > 0) {
+      const owed = remaining;
+      const sized = Math.max(0.35, Math.ceil((Math.min(owed * (1 + pairMarkupPercent / 100) / (m - 1), cap, maxStake) - 1e-10) * 100) / 100);
+      const net = sized * (m - 2);
+      if (net <= 0) break;
+      remaining = Math.max(0, remaining - net);
+      pairsToClear += 1;
+    }
+    return {
+      debt, target, assumedWinMultiplier: m, stakePerLeg,
+      pairStake: Number((stakePerLeg * 2).toFixed(2)),
+      netOnPairWin,
+      residualAfterWin: Number(Math.max(0, debt - netOnPairWin).toFixed(2)),
+      pairsToClear: remaining > 0.005 ? 0 : pairsToClear,
+      capBinding: exact > cap + 1e-9 ? "ladder ceiling" : "none",
+    };
+  })();
+  const projection: RecoveryProjection | null = lastBuild?.summary?.recoveryProjection ?? null;
 
   const createDbot = async () => {
     if (config.stake < 0.35 || config.stake > maxStake) {
       toast.error(`Each leg must be at least 0.35 and cannot exceed your ${currency} ${maxStake} max-stake setting.`);
+      return;
+    }
+    if (watchMarkets.length > maxWatchMarkets) {
+      toast.error(`Watch at most ${maxWatchMarkets} markets — Deriv's request budget, not a preference.`);
+      return;
+    }
+    if (usesPriceBarriers && (config.upperOffset < 1e-8 || config.lowerOffset < 1e-8)) {
+      toast.error("Both barrier offsets must be positive and at least 0.00000001 price units.");
       return;
     }
     setBuilding(true);
@@ -214,6 +303,7 @@ export function HedgePairForgeConsole({
           family,
           ...config,
           requiredEdge: config.requiredEdgePct / 100,
+          watchMarkets: watchMarkets.join(","),
         }),
       });
       const data = await response.json() as HedgePairBuild & { error?: string };
@@ -319,6 +409,52 @@ export function HedgePairForgeConsole({
                   {FAMILIES.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
                 </select>
                 <p className="text-[9px] text-muted-foreground/65 leading-snug">{selectedFamily.note}</p>
+
+                <div className="rounded-lg border border-white/5 bg-black/25 px-2.5 py-2 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">
+                      Markets to watch &amp; rank ({watchMarkets.length}/{maxWatchMarkets})
+                    </p>
+                    {watchMarkets.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setWatchMarkets([symbol])}
+                        className="text-[9px] text-muted-foreground/70 hover:text-white"
+                      >
+                        reset to {symbol}
+                      </button>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 gap-1 max-h-28 overflow-y-auto pr-1">
+                    {markets.map(market => {
+                      const isSeed = market.symbol === symbol;
+                      const checked = isSeed || watchMarkets.includes(market.symbol);
+                      const full = !checked && watchMarkets.length >= maxWatchMarkets;
+                      return (
+                        <label
+                          key={market.symbol}
+                          className={`flex items-center gap-1.5 text-[10px] font-mono ${isSeed ? "text-white/85" : full ? "text-muted-foreground/35" : "text-muted-foreground"} ${full ? "cursor-not-allowed" : "cursor-pointer"}`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            disabled={isSeed || full}
+                            onChange={event => setWatchMarkets(current => event.target.checked
+                              ? (current.includes(market.symbol) ? current : [...current, market.symbol])
+                              : current.filter(entry => entry !== market.symbol))}
+                            className="w-3 h-3 accent-current"
+                          />
+                          {market.symbol}
+                        </label>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[9px] text-muted-foreground/55 leading-snug">
+                    {watchMarkets.length > 1
+                      ? `The bot replays this pair on every market listed, ranks them on measured evidence — repayment rate, estimate stability, entry timing and sample confidence, never on assumed payouts — and switches between contracts when one leads by at least 1 point (2 in recovery), after 60 evaluations on the current market and 120 since the last switch. Only the winner is quoted live before a buy.`
+                      : `Only ${symbol} is watched, so no market-to-market switching can happen. Add markets to let the bot rotate to wherever this pair measures best.`}
+                  </p>
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -416,11 +552,11 @@ export function HedgePairForgeConsole({
                       value={config.analysisWindow}
                       onChange={analysisWindow => setConfig(current => ({ ...current, analysisWindow }))}
                       min={100}
-                      max={1000}
-                      step={25}
+                      max={maxAnalysisWindow}
+                      step={250}
                       suffix="ticks"
                       accent={accent}
-                      hint="At most 1,000 Builder ticks are cached. Longer pair durations yield fewer complete, non-overlapping historical outcomes."
+                      hint={`Deriv returns up to 4,999 ticks of deep history in one call (5,000 is rejected), cached per market for a minute. Replay is non-overlapping, so one observation costs the pair's whole duration: a 60-tick pair yields 16 samples from 500 ticks and 83 from 4,999. Below a hard floor of 20 the bot holds and names that arithmetic in the Journal instead of quietly lowering the bar.`}
                     />
                     <NumInput
                       label="Minimum complete pairs"
@@ -455,7 +591,7 @@ export function HedgePairForgeConsole({
                       hint={`Recovery floor is ${selectedFamily.recoveryConfirmations}; recovery scans wait longer than normal entries by family.`}
                     />
                     <NumInput
-                      label="Required 95% joint EV lower bound"
+                      label="Required joint EV (0 = break-even)"
                       value={config.requiredEdgePct}
                       onChange={requiredEdgePct => setConfig(current => ({ ...current, requiredEdgePct }))}
                       min={0}
@@ -463,17 +599,28 @@ export function HedgePairForgeConsole({
                       step={0.1}
                       suffix="%"
                       accent={accent}
-                      hint="Measured per combined pair stake using both live proposal total-return multipliers. HAC uncertainty, a zero-edge prior, sample minimums, recent-vs-old instability and current family context must all pass."
+                      hint="Measured per combined pair stake from both live proposal multipliers and the replayed joint win/loss states. The 95% lower bound, estimate instability across windows and the entry-timing score are reported alongside it in the Journal. Too few paired samples, a tape where every replayed pair lost both legs, an unstable estimate and entry timing are HARD blockers and are never overridden."
                     />
                     <NumInput
-                      label="Recovery multiplier cap"
+                      label="Force entry after (0 = never)"
+                      value={config.forceEntryAfter}
+                      onChange={forceEntryAfter => setConfig(current => ({ ...current, forceEntryAfter }))}
+                      min={0}
+                      max={3600}
+                      step={30}
+                      suffix="sec"
+                      accent={accent}
+                      hint="Patience valve. After this many seconds of holding against a NEGATIVE measured EV, the bot enters anyway and labels the entry in the Journal. It never overrides a hard blocker and recovery never uses it. Off by default: the bot would rather keep explaining itself than buy a losing pair on a timer."
+                    />
+                    <NumInput
+                      label="Recovery ladder ceiling"
                       value={config.recoveryMultiplier}
                       onChange={recoveryMultiplier => setConfig(current => ({ ...current, recoveryMultiplier }))}
                       min={1.01}
                       max={5}
                       step={0.01}
                       accent={accent}
-                      hint="Caps each recovery leg’s stake ladder; it does not create a win probability or guarantee debt recovery."
+                      hint="A CEILING on each recovery leg (base × ceiling^step), never the size — the size comes from the debt. At the old 1.62 the ceiling clamps a $2.00 debt's $1.96 leg to $1.62 and the Journal says so; 2.43 leaves the debt-driven size room. It creates no win probability and guarantees nothing."
                     />
                     <NumInput
                       label="Maximum recovery steps"
@@ -484,7 +631,8 @@ export function HedgePairForgeConsole({
                       step={1}
                       accent={accent}
                     />
-                    <Readout label="Risk Management markup" value={`${markupPercent}%`} accent={accent} />
+                    <Readout label="Pair recovery markup (this bot)" value={`${pairMarkupPercent}%`} accent={accent} />
+                    <Readout label="Shared single-contract markup" value={`${sharedMarkupPercent}% (not used here)`} accent={accent} />
                     <Readout label="Max stake / leg" value={`${currency} ${maxStake}`} accent={accent} />
                   </div>
                 )}
@@ -492,14 +640,63 @@ export function HedgePairForgeConsole({
 
               <div className="rounded-xl border border-amber-500/20 bg-amber-500/5 p-2.5 space-y-1.5">
                 <p className="text-[10px] uppercase tracking-widest font-semibold text-amber-300 flex items-center gap-1.5">
-                  <ShieldCheck className="w-3 h-3" /> Recovery & payout arithmetic
+                  <ShieldCheck className="w-3 h-3" /> Recovery &amp; payout arithmetic
                 </p>
                 <p className="text-[9px] text-muted-foreground leading-snug">
-                  Net pair P&amp;L is return₁ + return₂ − stake₁ − stake₂. A winning leg does not guarantee that the pair is profitable. Recovery arms only after <b className="text-white/80">both legs lose</b>, adding both actual lost stakes to debt. A split never arms or advances recovery—even with negative combined P&amp;L—though its actual aggregate result is recorded.
+                  Net pair P&amp;L is return₁ + return₂ − stake₁ − stake₂. A winning leg does not guarantee that the pair is profitable. Recovery arms only after <b className="text-white/80">both legs lose</b>, adding <b className="text-white/80">both</b> actual lost premiums to debt — {currency} {config.stake.toFixed(2)} a leg is {currency} {(config.stake * 2).toFixed(2)} of debt, not {currency} {config.stake.toFixed(2)}. A split never arms or advances recovery, but it no longer disarms an outstanding debt either: recovery stays armed and sizes the residual until the debt is actually zero.
                 </p>
                 <p className="text-[9px] text-muted-foreground leading-snug">
-                  Final sizing needs positive measured joint EV at live payouts and is capped by the configured ladder, per-leg max stake and half the current balance. It can still lose; there is no guaranteed edge or debt recovery.
+                  Per-leg stake = debt × (1 + {pairMarkupPercent}%) ÷ (winning-leg payout − 1), using the <b className="text-white/80">poorer</b> of the two live legs, then capped by base × {config.recoveryMultiplier.toFixed(2)}^step, {currency} {maxStake} max stake and half the balance, and floored at {currency} 0.35. The pair spends two premiums, so one split win nets stake × (payout − 2) and does <b className="text-white/80">not</b> clear the debt — the ledger carries the residual. Sizing refuses to trade when the live winning leg pays 2.00× or less, because no split could then shrink the debt. It can still lose; there is no guaranteed edge or debt recovery.
                 </p>
+                <div className="rounded-lg border border-white/5 bg-black/30 px-2 py-1.5 space-y-1">
+                  <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">
+                    Projected at a {(projection?.assumedWinMultiplier ?? previewProjection.assumedWinMultiplier).toFixed(2)}× winning leg
+                    {projection ? " (server, from your build)" : " (this bot's ladder ceiling — no live payout exists here)"}
+                  </p>
+                  <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] font-mono">
+                    <span className="text-muted-foreground/70">One pair's debt</span>
+                    <span className={`text-right ${a.text}`}>{currency} {(projection?.debt ?? previewProjection.debt).toFixed(2)}</span>
+                    <span className="text-muted-foreground/70">× (1 + markup)</span>
+                    <span className={`text-right ${a.text}`}>{currency} {(projection?.target ?? previewProjection.target).toFixed(2)} target</span>
+                    <span className="text-muted-foreground/70">÷ (payout − 1) → per leg</span>
+                    <span className={`text-right ${a.text}`}>{currency} {(projection?.stakePerLeg ?? previewProjection.stakePerLeg).toFixed(2)}</span>
+                    <span className="text-muted-foreground/70">At risk that pair</span>
+                    <span className={`text-right ${a.text}`}>{currency} ${(projection?.pairStake ?? previewProjection.pairStake).toFixed(2)}</span>
+                    <span className="text-muted-foreground/70">A split win nets</span>
+                    <span className={`text-right ${(projection?.netOnPairWin ?? previewProjection.netOnPairWin) > 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                      {(projection?.netOnPairWin ?? previewProjection.netOnPairWin) >= 0 ? "+" : "−"}{currency} {Math.abs(projection?.netOnPairWin ?? previewProjection.netOnPairWin).toFixed(2)}
+                    </span>
+                    <span className="text-muted-foreground/70">Still owed after it</span>
+                    <span className={`text-right ${a.text}`}>{currency} ${(projection?.residualAfterWin ?? previewProjection.residualAfterWin).toFixed(2)}</span>
+                    <span className="text-muted-foreground/70">Split wins to clear</span>
+                    <span className={`text-right ${a.text}`}>
+                      {(projection?.pairsToClear ?? previewProjection.pairsToClear) > 0
+                        ? `${projection?.pairsToClear ?? previewProjection.pairsToClear}`
+                        : "impossible at this payout"}
+                    </span>
+                  </div>
+                  {(projection?.ladder ?? []).length > 0 && (
+                    <div className="pt-1 border-t border-white/5">
+                      <p className="text-[8px] uppercase tracking-wider text-muted-foreground/60">Ladder rungs · rung 1 is this pair's debt; later rungs assume another double loss lands</p>
+                      <div className="grid grid-cols-3 gap-x-2 text-[9px] font-mono text-muted-foreground/80 pt-0.5">
+                        <span>step</span><span className="text-right">debt</span><span className="text-right">per leg</span>
+                        {(projection?.ladder ?? []).map(rung => (
+                          <Fragment key={rung.step}>
+                            <span>{rung.step}</span>
+                            <span className="text-right">{currency} {rung.debt.toFixed(2)}</span>
+                            <span className={`text-right ${a.text}`}>{currency} {rung.stakePerLeg.toFixed(2)}</span>
+                          </Fragment>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {(projection?.capBinding ?? previewProjection.capBinding) !== "none" && (
+                    <p className="text-[9px] text-amber-300/85 leading-snug">
+                      Clamped by the {(projection?.capBinding ?? previewProjection.capBinding)} — raise the ladder ceiling if you want the debt-driven size to stand.
+                    </p>
+                  )}
+                  {projection && <p className="text-[9px] text-muted-foreground/55 leading-snug">{projection.caveat}</p>}
+                </div>
               </div>
 
               <div className="rounded-xl border border-white/10 bg-black/20 p-2.5 space-y-1.5">
@@ -515,8 +712,16 @@ export function HedgePairForgeConsole({
                 <div className="grid grid-cols-2 gap-1.5">
                   <Readout label="Last pair exposure" value={`${lastBuild.summary.currency} ${lastBuild.summary.basePairExposure.toFixed(2)}`} accent={accent} />
                   <Readout label="Target duration" value={`${lastBuild.summary.targetDurationTicks} tick(s) before metadata fallback`} accent={accent} />
-                  <Readout label="Required joint EV LCB" value={`${(lastBuild.summary.requiredEdge * 100).toFixed(2)}%`} accent={accent} />
+                  <Readout label="Required joint EV" value={`${(lastBuild.summary.requiredEdge * 100).toFixed(2)}% per combined stake`} accent={accent} />
                   <Readout label="Family" value={lastBuild.summary.pair} accent={accent} />
+                  <Readout label="Analysis tape" value={`${lastBuild.summary.analysisWindow} ticks deep history`} accent={accent} />
+                  <Readout label="Markets watched" value={lastBuild.summary.watchMarkets.length > 1
+                    ? `${lastBuild.summary.watchMarkets.length} · ${lastBuild.summary.watchMarkets.join(", ")}`
+                    : `${lastBuild.summary.watchMarkets[0] ?? lastBuild.summary.symbol} only · no switching`} accent={accent} />
+                  <Readout label="Recovery markup" value={`${lastBuild.summary.markupPercent}% (pair-local)`} accent={accent} />
+                  <Readout label="Patience valve" value={lastBuild.summary.forceEntryAfter > 0
+                    ? `forces entry after ${lastBuild.summary.forceEntryAfter}s`
+                    : "off · never forces a negative-EV entry"} accent={accent} />
                 </div>
               )}
 

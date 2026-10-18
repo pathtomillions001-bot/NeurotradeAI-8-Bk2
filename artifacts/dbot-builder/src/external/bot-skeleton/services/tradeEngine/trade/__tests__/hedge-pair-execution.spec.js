@@ -251,9 +251,11 @@ describe('Hedge Pair Forge full Builder cycle', () => {
             expect(engine.nt_pair_state.sessionProfit).toBe(-2);
             expect(engine.nt_pair_active).toBeNull();
 
-            // Simulate a remaining debt small enough that the base quote sizes
-            // below the ladder cap, then return a weaker final-stake payout.
-            // The live cycle must re-size, re-quote both legs and only then buy.
+            // Simulate a remaining debt, then return a weaker final-stake payout
+            // than the cached analysis quote. The live cycle must size the debt
+            // from the FINAL quotes — 0.40 × 1.10 = 0.44 target ÷ (2.20 − 1) =
+            // 0.3666… → 0.37 a leg — and must NOT spend the 1.62 ladder ceiling,
+            // which is a cap on the ladder, never the size.
             engine.store.setScope(BEFORE_PURCHASE);
             engine.nt_pair_state.halted = false;
             engine.nt_pair_state.debt = 0.4;
@@ -270,11 +272,26 @@ describe('Hedge Pair Forge full Builder cycle', () => {
             const allRequests = api_base.api.send.mock.calls.map(([request]) => request);
             const recoveryBuys = allRequests.filter(request => request.buy).slice(recoveryStartBuyCount);
             expect(recoveryBuys).toHaveLength(2);
-            expect(recoveryBuys.map(request => request.price)).toEqual([1.62, 1.62]);
+            expect(recoveryBuys.map(request => request.price)).toEqual([0.37, 0.37]);
             const recoveryProposalAmounts = allRequests.filter(request => request.proposal).map(request => request.amount);
-            expect(recoveryProposalAmounts.some(amount => amount > 0.35 && amount < 1.62)).toBe(true);
-            expect(recoveryProposalAmounts.slice(-2)).toEqual([1.62, 1.62]);
+            // The first pass sized off the cached 3.00× quote (0.44 ÷ 2 = 0.22,
+            // below the broker minimum, so 0.35), then re-quoted at that stake,
+            // saw 2.20× and re-sized upward before buying.
+            expect(recoveryProposalAmounts).toContain(0.35);
+            expect(recoveryProposalAmounts.slice(-2)).toEqual([0.37, 0.37]);
             expect(engine.nt_pair_active.mode).toBe('recovery');
+            const plan = engine.nt_pair_active.recovery;
+            expect(plan.stakePerLeg).toBe(0.37);
+            expect(plan.pairStake).toBe(0.74);
+            expect(plan.winMultiplier).toBeCloseTo(2.2, 10);
+            expect(plan.targetDebt).toBeCloseTo(0.44, 10);
+            expect(plan.capBinding).toBe('none');
+            expect(plan.repayableByPairWin).toBe(true);
+            expect(plan.projectedNetOnPairWin).toBeCloseTo(0.37 * 0.2, 10);
+            expect(plan.residualDebtAfterWin).toBeCloseTo(0.4 - 0.37 * 0.2, 10);
+            expect(engine.nt_pair_active.forcedEntry).toBe(false);
+            expect(engine.nt_pair_active.rank).toBeNull();
+            expect(engine.nt_pair_state.recoveryReferenceMultiplier).toBeCloseTo(2.2, 10);
 
             const recoveryPair = engine.nt_pair_active;
             engine.ntPairHandleContract(recoveryPair, {

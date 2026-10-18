@@ -21,18 +21,35 @@ const BASE: Omit<HedgePairInput, "family"> = {
   requestedDuration: 1,
   upperOffset: 1,
   lowerOffset: 1,
-  analysisWindow: 500,
+  // Deep tape by default: a one-minute pair over a 500-tick window yields eight
+  // non-overlapping samples and can never clear the 20-sample hard floor.
+  analysisWindow: 4999,
   minSamples: 80,
-  requiredEdge: 0.01,
-  recoveryMultiplier: 1.62,
+  // 0 = break-even. The runtime enforces this hurdle now, so a fixture carrying
+  // the old 0.01 would pin a gate no generated bot actually ships with.
+  requiredEdge: 0,
+  recoveryMultiplier: 2.43,
   maxRecoverySteps: 3,
-  markupPercent: 10,
+  markupPercent: 40,
   maxStake: 500,
   takeProfit: 10,
   stopLoss: 5,
   maxConsecutiveDoubleLosses: 6,
+  watchMarkets: "",
+  forceEntryAfter: 0,
   currency: "USD",
 };
+
+/**
+ * The console's real defaults for a pipSize-4 index: one pip = 10^-4 = 0.0001.
+ * The Builder's offset field used to declare `precision 0.01`, and Blockly rounds
+ * every value — including one restored from XML — to that precision, so 0.0001
+ * became 0, `normalizePairConfig` threw, and all five price-barrier families held
+ * forever. This fixture is the regression guard: it is loaded into the real
+ * vendored Blockly by `hedge-pair-strategy.spec.js`, which asserts the field
+ * still reads 0.0001 after the round trip.
+ */
+const ONE_PIP_R50 = { upperOffset: 0.0001, lowerOffset: 0.0001 };
 
 export const HEDGE_PAIR_FIXTURES: Record<string, HedgePairInput> = {
   "hedge-pair-overunder-r50": { ...BASE, family: "DIGIT_OVERUNDER" },
@@ -42,6 +59,7 @@ export const HEDGE_PAIR_FIXTURES: Record<string, HedgePairInput> = {
   "hedge-pair-no-touch-upper-lower-r50": { ...BASE, family: "NO_TOUCH_UPPER_LOWER" },
   "hedge-pair-ends-between-outside-r50": { ...BASE, family: "ENDS_BETWEEN_OUTSIDE" },
   "hedge-pair-stays-between-outside-r50": { ...BASE, family: "STAYS_BETWEEN_OUTSIDE" },
+  "hedge-pair-higher-lower-r50-one-pip": { ...BASE, ...ONE_PIP_R50, family: "HIGHER_LOWER" },
 };
 
 export function fixturesDir(): string {
